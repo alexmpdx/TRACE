@@ -24,3 +24,88 @@ SPATIAL_PRIORS: dict[str, tuple[float, float]] = {
     "L4": (0.50, 0.70),
     "L5": (0.70, 0.90),
 }
+
+# Normalized Y centroid ranges (anterior=0.0, posterior=1.0)
+SPATIAL_PRIORS_Y: dict[str, tuple[float, float]] = {
+    "costa": (0.00, 0.15),
+    "L1": (0.02, 0.18),
+    "L2": (0.05, 0.30),
+    "L3": (0.10, 0.40),
+    "L4": (0.25, 0.60),
+    "L5": (0.40, 0.75),
+}
+
+# Crossvein connection topology
+CROSSVEIN_CONNECTIONS: dict[str, tuple[str, str]] = {
+    "ACV": ("L3", "L4"),
+    "PCV": ("L4", "L5"),
+}
+
+# All intervein space names ordered anterior to posterior (used internally)
+_ALL_INTERVEIN_SPACE_NAMES = [
+    "costal_cell",          # between costa and L1 (excluded from output)
+    "marginal_cell",        # between L1 and L2
+    "submarginal_cell",     # between L2 and L3
+    "1st_basal_cell",       # between L3 and L4, proximal to ACV
+    "1st_posterior_cell",   # between L3 and L4, distal to ACV
+    "discal_cell",          # between L4 and L5, proximal to PCV
+    "2nd_posterior_cell",   # between L4 and L5, distal to PCV
+    "3rd_posterior_cell",   # posterior to L5
+]
+
+# Intervein spaces included in measurements and overlays (costal cell excluded)
+INTERVEIN_SPACE_NAMES = [
+    "marginal_cell",
+    "submarginal_cell",
+    "1st_basal_cell",
+    "1st_posterior_cell",
+    "discal_cell",
+    "2nd_posterior_cell",
+    "3rd_posterior_cell",
+]
+
+# Colors for intervein spaces (BGR for OpenCV, matching reference overlay)
+INTERVEIN_COLORS: dict[str, tuple[int, int, int]] = {
+    "costal_cell":         (120, 210, 210),  # yellow-green
+    "marginal_cell":       (120, 120, 230),  # salmon/coral
+    "submarginal_cell":    (150, 180, 255),  # peach/orange
+    "1st_basal_cell":      (190, 140, 130),  # blue/indigo
+    "1st_posterior_cell":  (100, 200, 160),  # olive/light green
+    "discal_cell":         (120, 190, 120),  # green
+    "2nd_posterior_cell":  (230, 210, 130),  # cyan/sky blue
+    "3rd_posterior_cell":  (210, 130, 200),  # purple/lavender
+}
+
+# Colors for individual veins on skeleton overlay (BGR for OpenCV)
+VEIN_COLORS: dict[str, tuple[int, int, int]] = {
+    "costa":  (130, 100, 40),   # dark teal
+    "L1":     (60, 60, 200),    # red
+    "L2":     (30, 140, 210),   # orange
+    "L3":     (20, 170, 200),   # dark yellow/gold
+    "L4":     (40, 190, 190),   # yellow-green
+    "L5":     (160, 60, 180),   # pink/magenta
+    "ACV":    (180, 80, 120),   # purple
+    "PCV":    (180, 60, 60),    # blue-purple
+}
+
+# Vein boundary definitions: which intervein pair each vein separates
+# Each tuple is (anterior_region, posterior_region)
+VEIN_BOUNDARIES: dict[str, list[tuple[str, str]]] = {
+    "L1": [("costal_cell", "marginal_cell")],
+    "L2": [("marginal_cell", "submarginal_cell")],
+    "L3": [
+        ("submarginal_cell", "1st_basal_cell"),
+        ("submarginal_cell", "1st_posterior_cell"),
+    ],
+    "ACV": [("1st_basal_cell", "1st_posterior_cell")],
+    "L4": [
+        ("1st_basal_cell", "discal_cell"),
+        ("discal_cell", "1st_posterior_cell"),
+        ("1st_posterior_cell", "2nd_posterior_cell"),
+    ],
+    "PCV": [("discal_cell", "2nd_posterior_cell")],
+    "L5": [
+        ("discal_cell", "3rd_posterior_cell"),
+        ("2nd_posterior_cell", "3rd_posterior_cell"),
+    ],
+}

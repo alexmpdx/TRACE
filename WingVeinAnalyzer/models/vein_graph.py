@@ -1,64 +1,179 @@
-"""Skeletonization and graph construction from binary wing masks."""
+"""Graph construction from intervein polygon boundaries or vein LineStrings."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
-import cv2
 import networkx as nx
 import numpy as np
-from skan import Skeleton, summarize
-from skimage.morphology import skeletonize
+from shapely.geometry import LineString, Point, Polygon
 
 
-def skeletonize_mask(mask: np.ndarray, spur_threshold: int = 10) -> np.ndarray:
-    """Skeletonize a binary mask and prune short spurs."""
-    skeleton = skeletonize(mask > 0).astype(np.uint8)
-    if spur_threshold > 0 and skeleton.any():
-        skeleton = _prune_spurs(skeleton, spur_threshold)
-    return skeleton
+@dataclass
+class VeinNode:
+    """A junction or endpoint in the vein graph."""
+
+    node_id: int
+    x: float
+    y: float
+    degree: int = 0
 
 
-def build_graph(
-    skeleton: np.ndarray,
-    mask: Optional[np.ndarray] = None,
-    margin_tolerance_px: float = 5.0,
-) -> tuple[Optional[Skeleton], nx.Graph]:
-    """Convert a skeleton image to a skan Skeleton and networkx graph."""
-    if not skeleton.any():
-        return None, nx.Graph()
+@dataclass
+class VeinEdge:
+    """A vein segment between two nodes."""
 
-    skan_skeleton = Skeleton(skeleton)
-    summary = summarize(separator="-", skel=skan_skeleton)
+    edge_id: int
+    src: int
+    dst: int
+    line: LineString
+    length_px: float
+    poly_pair: Optional[tuple[int, int]] = None
+
+
+def build_graph_from_polygons(
+    polygons: list[Polygon],
+    max_gap: float = 80.0,
+    num_samples: int = 800,
+) -> tuple[nx.Graph, list[VeinEdge]]:
+    """Build a vein graph by extracting midlines between adjacent polygon pairs."""
+    n = len(polygons)
+    edges: list[VeinEdge] = []
+    all_midlines: list[tuple[int, int, LineString]] = []
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = polygons[i].distance(polygons[j])
+            if dist > max_gap:
+                continue
+            midline = _extract_midline(
+                polygons[i], polygons[j], max_gap=max_gap, num_samples=num_samples
+            )
+            if midline is not None and midline.length > 10:
+                all_midlines.append((i, j, midline))
+
     graph = nx.Graph()
+    node_coords: list[tuple[float, float]] = []
+    node_map: dict[tuple[float, float], int] = {}
+    snap_tol = 30.0
 
-    margin_contour = _find_wing_margin(mask) if mask is not None else None
+    def _get_or_create_node(x: float, y: float) -> int:
+        for (nx_, ny_), nid in node_map.items():
+            if (nx_ - x) ** 2 + (ny_ - y) ** 2 < snap_tol**2:
+                return nid
+        nid = len(node_coords)
+        node_coords.append((x, y))
+        node_map[(x, y)] = nid
+        graph.add_node(nid, x=x, y=y, degree=0)
+        return nid
 
-    # Collect unique node IDs
-    node_ids = set(summary["node-id-src"]).union(summary["node-id-dst"])
+    for idx, (pi, pj, midline) in enumerate(all_midlines):
+        coords = list(midline.coords)
+        if len(coords) < 2:
+            continue
+        src_xy = coords[0]
+        dst_xy = coords[-1]
+        src = _get_or_create_node(src_xy[0], src_xy[1])
+        dst = _get_or_create_node(dst_xy[0], dst_xy[1])
 
-    for node_id in node_ids:
-        row, col = skan_skeleton.coordinates[node_id]
-        on_margin = _is_on_margin(row, col, margin_contour, margin_tolerance_px)
-        graph.add_node(
-            node_id,
-            x=float(col),
-            y=float(row),
-            degree=int(skan_skeleton.degrees[node_id]),
-            on_margin=on_margin,
+        edge = VeinEdge(
+            edge_id=idx,
+            src=src,
+            dst=dst,
+            line=midline,
+            length_px=midline.length,
+            poly_pair=(pi, pj),
         )
-
-    for idx, row in summary.iterrows():
-        src = int(row["node-id-src"])
-        dst = int(row["node-id-dst"])
+        edges.append(edge)
         graph.add_edge(
             src,
             dst,
-            length_px=float(row["branch-distance"]),
-            branch_id=int(idx),
+            edge_id=idx,
+            length_px=midline.length,
+            line=midline,
+            poly_pair=(pi, pj),
         )
 
-    return skan_skeleton, graph
+    for nid in graph.nodes:
+        graph.nodes[nid]["degree"] = graph.degree(nid)
+
+    return graph, edges
+
+
+def build_graph_from_veins(
+    veins: list,
+    snap_tolerance: float = 50.0,
+) -> tuple[nx.Graph, dict[int, VeinNode]]:
+    """Build a vein graph from pre-traced vein LineStrings."""
+    graph = nx.Graph()
+    nodes: dict[int, VeinNode] = {}
+    junction_points: list[tuple[float, float]] = []
+    node_counter = 0
+
+    def _find_or_create_node(x: float, y: float) -> int:
+        nonlocal node_counter
+        for nid, node in nodes.items():
+            if (node.x - x) ** 2 + (node.y - y) ** 2 < snap_tolerance**2:
+                return nid
+        nid = node_counter
+        node_counter += 1
+        nodes[nid] = VeinNode(node_id=nid, x=x, y=y)
+        graph.add_node(nid, x=x, y=y, degree=0)
+        return nid
+
+    # Find all intersection points between vein pairs
+    for i, vi in enumerate(veins):
+        for j, vj in enumerate(veins):
+            if j <= i:
+                continue
+            intersection = vi.line.intersection(vj.line)
+            if intersection.is_empty:
+                for ep in [Point(vi.line.coords[0]), Point(vi.line.coords[-1])]:
+                    nearest = vj.line.interpolate(vj.line.project(ep))
+                    if ep.distance(nearest) < snap_tolerance:
+                        mid = ((ep.x + nearest.x) / 2, (ep.y + nearest.y) / 2)
+                        junction_points.append(mid)
+                for ep in [Point(vj.line.coords[0]), Point(vj.line.coords[-1])]:
+                    nearest = vi.line.interpolate(vi.line.project(ep))
+                    if ep.distance(nearest) < snap_tolerance:
+                        mid = ((ep.x + nearest.x) / 2, (ep.y + nearest.y) / 2)
+                        junction_points.append(mid)
+            elif intersection.geom_type == "Point":
+                junction_points.append((intersection.x, intersection.y))
+            elif intersection.geom_type == "MultiPoint":
+                for pt in intersection.geoms:
+                    junction_points.append((pt.x, pt.y))
+
+    for x, y in junction_points:
+        _find_or_create_node(x, y)
+
+    for v in veins:
+        coords = list(v.line.coords)
+        _find_or_create_node(coords[0][0], coords[0][1])
+        _find_or_create_node(coords[-1][0], coords[-1][1])
+
+    edge_counter = 0
+    for v in veins:
+        coords = list(v.line.coords)
+        start_node = _find_or_create_node(coords[0][0], coords[0][1])
+        end_node = _find_or_create_node(coords[-1][0], coords[-1][1])
+        graph.add_edge(
+            start_node,
+            end_node,
+            edge_id=edge_counter,
+            length_px=v.length_px,
+            line=v.line,
+            vein_feature_id=v.feature_id,
+        )
+        edge_counter += 1
+
+    for nid in graph.nodes:
+        graph.nodes[nid]["degree"] = graph.degree(nid)
+        if nid in nodes:
+            nodes[nid].degree = graph.degree(nid)
+
+    return graph, nodes
 
 
 # ---------------------------------------------------------------------------
@@ -66,44 +181,39 @@ def build_graph(
 # ---------------------------------------------------------------------------
 
 
-def _prune_spurs(skeleton: np.ndarray, spur_threshold: int) -> np.ndarray:
-    """Iteratively remove skeleton branches shorter than *spur_threshold* px."""
-    skel = skeleton.copy()
-    for _ in range(10):
-        if not skel.any():
-            break
-        tmp_skel = Skeleton(skel)
-        summary = summarize(separator="-", skel=tmp_skel)
+def _extract_midline(
+    poly_a: Polygon,
+    poly_b: Polygon,
+    max_gap: float = 80.0,
+    num_samples: int = 800,
+) -> Optional[LineString]:
+    """Extract the midline between facing boundary segments of two polygons."""
+    ring_a = poly_a.exterior
+    ring_b = poly_b.exterior
+    min_dist = poly_a.distance(poly_b)
+    threshold = min(max_gap, min_dist * 3 + 10)
 
-        # branch-type 0/1 = endpoint-to-endpoint / endpoint-to-junction
-        is_spur = summary["branch-type"].isin([0, 1])
-        is_short = summary["branch-distance"] < spur_threshold
-        to_remove = summary[is_spur & is_short]
+    midpoints: list[tuple[float, float]] = []
+    for t in np.linspace(0, 1, num_samples, endpoint=False):
+        pa = ring_a.interpolate(t, normalized=True)
+        proj = ring_b.project(pa)
+        pb = ring_b.interpolate(proj)
+        d = pa.distance(pb)
+        if d < threshold:
+            midpoints.append(((pa.x + pb.x) / 2, (pa.y + pb.y) / 2))
 
-        if to_remove.empty:
-            break
-
-        for idx in to_remove.index:
-            coords = tmp_skel.path_coordinates(idx).astype(int)
-            skel[coords[:, 0], coords[:, 1]] = 0
-
-    return skel
-
-
-def _find_wing_margin(mask: np.ndarray) -> Optional[np.ndarray]:
-    """Return the largest external contour of *mask*, or None."""
-    binary = (mask > 0).astype(np.uint8) * 255
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
+    if len(midpoints) < 2:
         return None
-    return max(contours, key=cv2.contourArea)
 
+    filtered = [midpoints[0]]
+    for mp in midpoints[1:]:
+        dx = mp[0] - filtered[-1][0]
+        dy = mp[1] - filtered[-1][1]
+        if dx * dx + dy * dy > 1.0:
+            filtered.append(mp)
 
-def _is_on_margin(
-    row: float, col: float, contour: Optional[np.ndarray], tolerance: float
-) -> bool:
-    """Return True if the point is within *tolerance* px of *contour*."""
-    if contour is None:
-        return False
-    dist = cv2.pointPolygonTest(contour, (float(col), float(row)), measureDist=True)
-    return abs(dist) <= tolerance
+    if len(filtered) < 2:
+        return None
+
+    line = LineString(filtered)
+    return line.simplify(3.0)

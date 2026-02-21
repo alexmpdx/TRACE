@@ -1,7 +1,7 @@
 # WingVeinAnalyzer — Claude Code Project Instructions
 
 ## Project Purpose
-A Python tool to identify and measure named veins (L1–L5, ACV, PCV) in *Drosophila* wing brightfield images using binary mask files produced by an existing pixel classifier (decision tree or ResNet50).
+A Python tool to identify and measure named veins (L1–L5, ACV, PCV) in *Drosophila* wing brightfield images using GeoJSON annotation files (intervein polygon or vein LineString annotations) produced by QuPath or similar tools.
 
 ## Architecture
 Strict MVC. No business logic in views. No I/O in models.
@@ -9,110 +9,119 @@ Strict MVC. No business logic in views. No I/O in models.
 ```
 WingVeinAnalyzer/
 ├── models/
-│   ├── vein_graph.py          # Skeletonization + graph construction (uses skan)
+│   ├── geojson_parser.py      # Parse GeoJSON → typed dataclasses
+│   ├── vein_graph.py          # Graph from polygon boundaries or LineString intersections
 │   ├── vein_labeler.py        # Topology-based vein identity assignment
-│   └── vein_map.py            # Static Drosophila vein topology rules
+│   ├── vein_map.py            # Static Drosophila vein topology rules + colors
+│   ├── vein_skeleton.py       # Voronoi-based centerline extraction from vein mask
+│   └── wing_geometry.py       # Outline, hinge, intervein partitioning, compartments
 ├── controllers/
-│   ├── analysis_controller.py # Orchestrates full pipeline per image
-│   └── measurement_controller.py
+│   ├── analysis_controller.py # Orchestrates full pipeline: TIFF + GeoJSON → overlays + CSV
+│   └── measurement_controller.py  # All measurement computations
 ├── views/
-│   ├── overlay_view.py        # Colored skeleton overlay for review
-│   └── results_view.py        # CSV export + summary table
+│   ├── overlay_view.py        # Skeleton overlay + rainbow intervein overlay
+│   └── results_view.py        # CSV export with all measurement columns
 ├── utils/
-│   └── skeleton_utils.py      # Skeletonize, spur pruning, flip detection
+│   └── skeleton_utils.py      # Flip detection helpers
 ├── tests/
 ├── CLAUDE.md
 └── requirements.txt
 ```
 
 ## Key Dependencies
-- `skan` — skeleton-to-graph conversion and branch length computation
-- `scikit-image` — skeletonization, morphology
+- `shapely` — vector geometry (LineStrings, Polygons, intersections)
 - `networkx` — graph operations
 - `numpy`, `pandas`
-- `matplotlib` — overlay view only
-- `opencv-python` — image I/O and flip operations
+- `matplotlib` — plotting (optional)
+- `opencv-python` — image I/O and overlay rendering
+
+## Input Formats
+The pipeline accepts GeoJSON annotation styles:
+
+1. **Intervein polygons + vein mask** (preferred): A `"intervein"` MultiPolygon (8 intervein spaces) plus a `"vein"` MultiPolygon (vein tissue mask). Veins are extracted via Voronoi partition of the vein mask seeded by intervein polygons (`vein_skeleton.py`). Eliminates triple-junction gaps.
+
+2. **Intervein polygons only** (fallback): Just the `"intervein"` MultiPolygon. Veins are extracted as midlines between adjacent polygon boundaries (`vein_graph.py`). May have gaps at triple junctions.
+
+3. **Vein LineStrings** (future): Individual LineString features with `classification.name = "vein"`, plus optional `"posterior outline"` and `"wing outline"` segments.
 
 ## Core Data Structures
 
+### ParsedAnnotations (models/geojson_parser.py)
+```python
+@dataclass
+class ParsedAnnotations:
+    veins: list[ParsedVein]           # from LineString "vein" features
+    posterior_segments: list[ParsedOutline]
+    wing_outline_segments: list[ParsedOutline]
+    intervein_polygons: list[Polygon]  # from (Multi)Polygon "intervein" features
+    vein_polygons: list[Polygon]      # from (Multi)Polygon "vein" features (tissue mask)
+```
+
 ### VeinAssignment (models/vein_labeler.py)
 ```python
-class VeinStatus(Enum):
-    COMPLETE    = "complete"      # single connected edge, both ends at margin or junction
-    FRAGMENTED  = "fragmented"    # 2+ disconnected edges share this vein ID; gap implies classifier error
-    TRUNCATED   = "truncated"     # single edge with a free endpoint not on margin; likely biological
-    ABSENT      = "absent"        # no edge assigned this vein ID
-
 @dataclass
 class VeinAssignment:
     vein_id: str                  # "L1"–"L5", "ACV", "PCV", "costa"
-    status: VeinStatus
-    edge_ids: list[int]           # skan edge indices; >1 only when FRAGMENTED
+    status: VeinStatus            # COMPLETE, FRAGMENTED, TRUNCATED, ABSENT
+    edge_ids: list[int]
     confidence: float             # 0.0–1.0
-    evidence: list[str]           # cues used, e.g. ["spatial_position", "acv_anchor"]
-    length_px: float              # sum of fragment lengths; for TRUNCATED this is a minimum
-    gap_px: float | None          # total gap distance for FRAGMENTED veins; None otherwise
-    length_um: float | None       # None if no scale provided
+    evidence: list[str]
+    length_px: float
+    gap_px: float | None
+    length_um: float | None
+    line: Optional[LineString]    # merged vein geometry
+    endpoints: Optional[list]
 ```
 
-### Distinguishing FRAGMENTED vs TRUNCATED (models/vein_labeler.py)
-- **FRAGMENTED:** `len(edge_ids) > 1` AND the gap between nearest endpoints of consecutive fragments
-  is less than a configurable `max_gap_px` threshold AND the fragments are spatially collinear
-  (angle deviation < threshold). Gap distance is recorded in `gap_px`.
-- **TRUNCATED:** single edge with a degree-1 endpoint that does not fall within `margin_tolerance_px`
-  of the detected wing margin.
-- If fragments are present but not collinear, treat as separate unassigned edges rather than
-  forcing a fragmented assignment.
+### WingMeasurements (controllers/measurement_controller.py)
+Per-vein lengths, crossvein distance, wing length/width, total area, intervein areas, compartment areas. All in pixels; microns if scale provided.
 
 ## Pipeline Order (analysis_controller.py)
-1. Load image + mask
-2. `skeleton_utils.detect_and_correct_flip()` — X-flip only, based on anterior vein density
-3. `vein_graph.skeletonize_mask()` — skeletonize + prune spurs < threshold
-4. `vein_graph.build_graph()` — returns skan Skeleton + networkx graph
-5. `vein_labeler.assign_veins()` — returns list[VeinAssignment]
-6. `measurement_controller.compile_results()` — aggregate lengths, apply scale
-7. `results_view.export_csv()` — one row per wing
 
-## Vein Identity Rules (vein_map.py)
-Rules are encoded as a priority-ordered list of cues, not a rigid graph isomorphism.  
-Cue types to implement:
-- `spatial_anterior_posterior` — normalized X position of edge midpoint
-- `margin_connectivity` — does edge terminate at wing margin?
-- `crossvein_anchor` — is edge connected to a node also connected to ACV/PCV?
-- `relative_length_rank` — rank among longitudinal edges (L3 = longest)
-- `entry_angle` — angle at which edge meets margin
+### Polygon mode (current):
+1. `geojson_parser.parse_geojson()` — extract intervein Polygons + vein mask Polygons
+2a. **If vein mask present**: `vein_skeleton.extract_veins_from_mask()` — Voronoi partition → centerlines
+2b. **Fallback**: `vein_graph.build_graph_from_polygons()` → `vein_labeler.assign_veins_from_polygons()`
+3. `measurement_controller.compile_results()` — apply scale calibration
+5. `wing_geometry.build_wing_outline()` — union of buffered polygons
+6. `wing_geometry.detect_hinge_landmarks()` — find subcostal break + alula notch
+7. `wing_geometry.remove_hinge()` — split along hinge line, keep distal blade
+8. `wing_geometry.partition_intervein_spaces()` — clip polygons to wing blade
+9. `wing_geometry.compute_compartments()` — split along L4 into anterior/posterior
+10. `measurement_controller.compute_measurements()` — all areas and distances
+11. `overlay_view.render_skeleton_overlay()` + `render_rainbow_overlay()` — output images
+12. `results_view.export_csv()` — one row per wing with all measurements
 
-Assignments are made with partial evidence — a missing vein should not block labeling of others.
+### LineString mode (future):
+1. Parse GeoJSON veins → `build_graph_from_veins()` → `assign_veins()` → overlays + CSV
 
-## Flip Detection Logic (skeleton_utils.py)
-- Binarize skeleton, split at X midpoint
-- Compare edge pixel count anterior half vs. posterior half
-- Costa (anterior) consistently denser; if posterior > anterior, flip is detected
-- Apply `np.fliplr()` to both image and mask
+## Intervein Space Naming (anterior → posterior)
+| Region | Bounded by | Color |
+|--------|-----------|-------|
+| costal_cell | costa – L1 | yellow-green |
+| marginal_cell | L1 – L2 | salmon |
+| submarginal_cell | L2 – L3 | peach |
+| 1st_basal_cell | L3 – L4 (proximal to ACV) | blue |
+| discal_cell | L3 – L4 (distal to ACV) | green |
+| 2nd_posterior_cell | L4 – L5 | cyan |
+| 3rd_posterior_cell | posterior to L5 | purple |
 
-## Confidence Thresholds
-- ≥ 0.75 → high confidence, include in default export
-- 0.4–0.75 → low confidence, flagged in CSV, shown in overlay
-- < 0.4 → unassigned, reported as null
-
-## CSV Output Flags (results_view.py)
-Each vein column gets a paired `_status` column: `complete`, `fragmented`, `truncated`, `absent`.
-For `fragmented` veins also export `_gap_px` (and `_gap_um` if scale provided).
-Overlay colors: green = complete, yellow = truncated, red = fragmented, grey = absent.
+## Vein Identification (polygon mode)
+Veins are identified by which intervein regions they separate (defined in `VEIN_BOUNDARIES` in vein_map.py). The costa is extracted as the anterior margin of the marginal cell polygon.
 
 ## Scale Calibration
-Optional. Passed as `microns_per_pixel: float | None` to `analysis_controller`.  
-If None, output length columns are pixels only.
+Optional. Passed as `microns_per_pixel: float | None` to `run_pipeline()`.
+If None, output columns are pixels only; `_um` columns are NaN.
 
-## Testing Priorities
-1. Flip detection on known-flipped vs. normal masks
-2. Graph construction on synthetic T-junction and crossvein skeletons
-3. Vein assignment on a manually labeled ground-truth set (build this early)
-4. Fragmented vein handling — mask with artificial gaps
+## CSV Output (results_view.py)
+Per-vein: `{vein}_length_px`, `{vein}_status`, optional `{vein}_length_um`, `{vein}_gap_px`.
+Wing-level: `crossvein_distance_px`, `wing_length_px`, `wing_width_px`, `total_wing_area_px2`.
+Compartments: `anterior_compartment_area_px2`, `posterior_compartment_area_px2`.
+Per-region: `{region}_area_px2` for all 7 intervein spaces.
 
 ## Conventions
-- All image arrays are numpy (H, W) uint8 for masks, (H, W, 3) uint8 for RGB
-- Graph node attributes: `{"x": float, "y": float, "degree": int, "on_margin": bool}`
-- Graph edge attributes: `{"length_px": float, "branch_id": int}`
+- All image arrays are numpy (H, W, 3) uint8 BGR for OpenCV
+- Graph node attributes: `{"x": float, "y": float, "degree": int}`
+- Graph edge attributes: `{"edge_id": int, "length_px": float, "line": LineString, "poly_pair": tuple}`
 - Do not hardcode file paths; use pathlib.Path throughout
 - All public functions have type hints and a one-line docstring

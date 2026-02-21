@@ -1,7 +1,6 @@
-skan
-scikit-image
 networkx
 numpy
 pandas
 matplotlib
 opencv-python
+shapely
