@@ -17,7 +17,6 @@ def extract_veins_from_mask(
     vein_polygons: list[Polygon],
     intervein_polygons: list[Polygon],
     image_shape: tuple[int, int],
-    poly_names: dict[int, str],
 ) -> dict[tuple[int, int], LineString]:
     """Extract vein centerlines using Voronoi partition of vein mask.
 
@@ -33,8 +32,6 @@ def extract_veins_from_mask(
         Intervein region polygons (seeds for Voronoi partition).
     image_shape : (height, width)
         Image dimensions for rasterization.
-    poly_names : dict[int, str]
-        Mapping of polygon index to intervein region name.
 
     Returns
     -------
@@ -83,9 +80,6 @@ def extract_veins_from_mask(
         idx_b = label_b - 1
         if idx_a < 0 or idx_b < 0:
             continue
-        # Only keep if both indices have names
-        if idx_a not in poly_names or idx_b not in poly_names:
-            continue
 
         line = _trace_pixels_to_line(pixels)
         if line is not None and line.length > 10:
@@ -94,6 +88,92 @@ def extract_veins_from_mask(
 
     logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
     return centerlines
+
+
+def extract_anterior_boundary(
+    vein_polygons: list[Polygon],
+    intervein_polygons: list[Polygon],
+    image_shape: tuple[int, int],
+) -> Optional[tuple[int, LineString]]:
+    """Extract the boundary between the most-anterior polygon and background.
+
+    When no costal cell polygon exists, L1 sits at the boundary between the
+    most-anterior intervein polygon (marginal cell) and the background (label=0)
+    within the vein mask.  This function specifically extracts that boundary.
+
+    Returns (polygon_index, LineString) or None if too short / not found.
+    """
+    if not vein_polygons or not intervein_polygons:
+        return None
+
+    h, w = image_shape
+
+    # 1. Build label map and vein mask (same as extract_veins_from_mask)
+    label_map = np.zeros((h, w), dtype=np.int32)
+    for i, poly in enumerate(intervein_polygons):
+        _fill_polygon(label_map, poly, i + 1)
+
+    vein_mask = np.zeros((h, w), dtype=np.uint8)
+    for poly in vein_polygons:
+        _fill_polygon(vein_mask, poly, 1)
+
+    # 2. Voronoi partition
+    background = (label_map == 0)
+    _, nearest_indices = ndimage.distance_transform_edt(
+        background, return_distances=True, return_indices=True
+    )
+    nearest_labels = label_map[nearest_indices[0], nearest_indices[1]]
+    nearest_labels[~background] = label_map[~background]
+
+    # 3. Find the most-anterior polygon (lowest Y centroid)
+    ant_idx = min(
+        range(len(intervein_polygons)),
+        key=lambda i: intervein_polygons[i].centroid.y,
+    )
+    ant_label = ant_idx + 1
+
+    # 4. Extract boundary pixels: ant_label pixels at the edge of the vein mask
+    #    (nearest_labels has no 0s after distance transform, so we detect the
+    #    boundary by checking which ant-polygon pixels neighbor outside the vein mask)
+    is_ant_in_vein = (nearest_labels == ant_label) & (vein_mask > 0)
+
+    padded_vm = np.pad(vein_mask, 1, mode='constant', constant_values=0)
+    shifts_vm = [
+        padded_vm[0:-2, 1:-1],  # up
+        padded_vm[2:,   1:-1],  # down
+        padded_vm[1:-1, 0:-2],  # left
+        padded_vm[1:-1, 2:],    # right
+    ]
+
+    at_vein_edge = np.zeros((h, w), dtype=bool)
+    for sv in shifts_vm:
+        at_vein_edge |= (sv == 0)
+
+    # All boundary pixels of the anterior polygon at the vein mask edge
+    has_bg_neighbor = is_ant_in_vein & at_vein_edge
+
+    # Filter to anterior-facing boundary only (Y < polygon centroid)
+    ant_centroid_y = intervein_polygons[ant_idx].centroid.y
+    ys_all, xs_all = np.where(has_bg_neighbor)
+    anterior_mask = ys_all < ant_centroid_y
+    has_bg_neighbor = np.zeros((h, w), dtype=bool)
+    has_bg_neighbor[ys_all[anterior_mask], xs_all[anterior_mask]] = True
+
+    ys, xs = np.where(has_bg_neighbor)
+    if len(ys) < 5:
+        return None
+
+    pixels = list(zip(ys.tolist(), xs.tolist()))
+    line = _trace_pixels_to_line(pixels)
+
+    if line is None or line.length < 50:
+        return None
+
+    logger.info(
+        "Anterior boundary: polygon %d, %d pixels, length=%.0f",
+        ant_idx, len(pixels), line.length,
+    )
+    return (ant_idx, line)
 
 
 def _fill_polygon(

@@ -109,3 +109,55 @@ VEIN_BOUNDARIES: dict[str, list[tuple[str, str]]] = {
         ("2nd_posterior_cell", "3rd_posterior_cell"),
     ],
 }
+
+# --- Geometric priors for independent vein/region identification ---
+
+# Orientation: (min_deg, max_deg) from horizontal
+VEIN_ORIENTATION_PRIORS: dict[str, tuple[float, float]] = {
+    "L1": (0, 25),
+    "L2": (0, 20),
+    "L3": (0, 25),
+    "L4": (0, 30),
+    "L5": (0, 30),
+    "ACV": (50, 90),
+    "PCV": (40, 90),
+}
+
+# Length as fraction of wing span (min, max) — wide enough for natural variation
+VEIN_LENGTH_PRIORS: dict[str, tuple[float, float]] = {
+    "L1": (0.05, 0.25),
+    "L2": (0.40, 0.90),
+    "L3": (0.50, 1.00),
+    "L4": (0.50, 1.00),
+    "L5": (0.25, 0.90),
+    "ACV": (0.01, 0.12),
+    "PCV": (0.03, 0.18),
+}
+
+# Region area as fraction of total intervein area (min, max)
+REGION_AREA_PRIORS: dict[str, tuple[float, float]] = {
+    "costal_cell": (0.002, 0.03),
+    "marginal_cell": (0.05, 0.18),
+    "submarginal_cell": (0.08, 0.25),
+    "1st_basal_cell": (0.01, 0.06),
+    "1st_posterior_cell": (0.10, 0.25),
+    "discal_cell": (0.03, 0.12),
+    "2nd_posterior_cell": (0.10, 0.25),
+    "3rd_posterior_cell": (0.12, 0.35),
+}
+
+# Reverse lookup: which veins bound each region
+REGION_EXPECTED_VEINS: dict[str, set[str]] = {
+    "costal_cell": {"L1"},
+    "marginal_cell": {"L1", "L2"},
+    "submarginal_cell": {"L2", "L3"},
+    "1st_basal_cell": {"L3", "L4", "ACV"},
+    "1st_posterior_cell": {"L3", "L4", "ACV"},
+    "discal_cell": {"L4", "L5", "PCV"},
+    "2nd_posterior_cell": {"L4", "L5", "PCV"},
+    "3rd_posterior_cell": {"L5"},
+}
+
+# Vein shape thresholds
+STRAIGHTNESS_THRESHOLD = 0.65
+MAX_ANGLE_CHANGE_DEG = 60.0

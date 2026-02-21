@@ -17,6 +17,7 @@ from WingVeinAnalyzer.controllers.measurement_controller import (
 )
 from WingVeinAnalyzer.models.geojson_parser import ParsedAnnotations, parse_geojson
 from WingVeinAnalyzer.models.vein_graph import (
+    VeinEdge,
     build_graph_from_polygons,
     build_graph_from_veins,
 )
@@ -24,13 +25,9 @@ from WingVeinAnalyzer.models.vein_labeler import (
     VeinAssignment,
     VeinStatus,
     assign_veins,
-    assign_veins_from_polygons,
-    _assign_intervein_names,
     _extract_costa,
-    _merge_vein_lines,
 )
-from WingVeinAnalyzer.models.vein_graph import VeinEdge
-from WingVeinAnalyzer.models.vein_map import VEIN_BOUNDARIES
+from WingVeinAnalyzer.models.vein_identifier import identify_veins_and_regions
 from WingVeinAnalyzer.models.vein_skeleton import extract_veins_from_mask
 from WingVeinAnalyzer.models.wing_geometry import (
     WingOutline,
@@ -113,49 +110,65 @@ def _run_polygon_pipeline(
     result = PipelineResult()
     polygons = annotations.intervein_polygons
 
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Compute wing bounding box
+    all_bounds = [p.bounds for p in polygons]
+    wing_bbox = (
+        min(b[0] for b in all_bounds),
+        min(b[1] for b in all_bounds),
+        max(b[2] for b in all_bounds),
+        max(b[3] for b in all_bounds),
+    )
+
     if annotations.vein_polygons:
         # --- Vein-mask-primary path ---
-        import logging
-        logger = logging.getLogger(__name__)
         logger.info("Using vein-mask-primary pipeline (%d vein polygons)", len(annotations.vein_polygons))
 
-        # Assign intervein region names
-        centroids = [(p.centroid.x, p.centroid.y) for p in polygons]
-        y_sorted = sorted(range(len(polygons)), key=lambda i: centroids[i][1])
-        all_bounds = [p.bounds for p in polygons]
-        wing_bbox = (
-            min(b[0] for b in all_bounds),
-            min(b[1] for b in all_bounds),
-            max(b[2] for b in all_bounds),
-            max(b[3] for b in all_bounds),
-        )
-        bbox_h = wing_bbox[3] - wing_bbox[1]
-        poly_names = _assign_intervein_names(polygons, centroids, y_sorted, bbox_h, wing_bbox)
-
-        # Extract centerlines from vein mask
+        # Extract centerlines from vein mask (no poly_names needed)
         centerlines = extract_veins_from_mask(
-            annotations.vein_polygons, polygons, image.shape[:2], poly_names
+            annotations.vein_polygons, polygons, image.shape[:2]
         )
 
-        # Build assignments from centerlines
-        assignments = _build_assignments_from_centerlines(centerlines, poly_names)
+        # Identify veins and regions independently via geometry
+        id_result = identify_veins_and_regions(
+            centerlines, polygons, annotations.vein_polygons,
+            image.shape[:2], wing_bbox,
+        )
+        assignments = id_result.assignments
+        poly_names = id_result.poly_names
+        for w in id_result.validation_report.warnings:
+            logger.warning("Validation: %s", w)
 
-        # Add costa (extracted from marginal cell margin, not Voronoi)
-        costa_line = _extract_costa(polygons, poly_names, wing_bbox)
-        if costa_line:
+        # Add costa only if costal region exists
+        has_costal = "costal_cell" in poly_names.values()
+        if has_costal:
+            costa_line = _extract_costa(polygons, poly_names, wing_bbox)
+            if costa_line:
+                assignments.append(
+                    VeinAssignment(
+                        vein_id="costa",
+                        status=VeinStatus.COMPLETE,
+                        edge_ids=[],
+                        confidence=0.9,
+                        evidence=["anterior_margin"],
+                        length_px=costa_line.length,
+                        line=costa_line,
+                        endpoints=[
+                            list(costa_line.coords)[0],
+                            list(costa_line.coords)[-1],
+                        ],
+                    )
+                )
+        else:
             assignments.append(
                 VeinAssignment(
                     vein_id="costa",
-                    status=VeinStatus.COMPLETE,
+                    status=VeinStatus.ABSENT,
                     edge_ids=[],
-                    confidence=0.9,
-                    evidence=["anterior_margin"],
-                    length_px=costa_line.length,
-                    line=costa_line,
-                    endpoints=[
-                        list(costa_line.coords)[0],
-                        list(costa_line.coords)[-1],
-                    ],
+                    confidence=0.0,
+                    evidence=["no_costal_region"],
                 )
             )
 
@@ -171,14 +184,54 @@ def _run_polygon_pipeline(
             poly_names, assignments, output_dir,
         )
     else:
-        # --- Fallback: midline-only path ---
-        # Build graph from polygon boundaries
-        graph, edges = build_graph_from_polygons(polygons, max_gap=max_gap)
+        # --- Fallback: midline-only path (also uses new identifier) ---
+        logger.info("Using midline-only fallback pipeline")
 
-        # Assign vein identities
-        assignments, poly_names = assign_veins_from_polygons(
-            polygons, edges, graph
+        graph, edges = build_graph_from_polygons(polygons, max_gap=max_gap)
+        centerlines = {
+            e.poly_pair: e.line for e in edges if e.poly_pair
+        }
+
+        id_result = identify_veins_and_regions(
+            centerlines, polygons, [],
+            image.shape[:2], wing_bbox,
         )
+        assignments = id_result.assignments
+        poly_names = id_result.poly_names
+        for w in id_result.validation_report.warnings:
+            logger.warning("Validation: %s", w)
+
+        # Add costa only if costal region exists
+        has_costal = "costal_cell" in poly_names.values()
+        if has_costal:
+            costa_line = _extract_costa(polygons, poly_names, wing_bbox)
+            if costa_line:
+                assignments.append(
+                    VeinAssignment(
+                        vein_id="costa",
+                        status=VeinStatus.COMPLETE,
+                        edge_ids=[],
+                        confidence=0.9,
+                        evidence=["anterior_margin"],
+                        length_px=costa_line.length,
+                        line=costa_line,
+                        endpoints=[
+                            list(costa_line.coords)[0],
+                            list(costa_line.coords)[-1],
+                        ],
+                    )
+                )
+        else:
+            assignments.append(
+                VeinAssignment(
+                    vein_id="costa",
+                    status=VeinStatus.ABSENT,
+                    edge_ids=[],
+                    confidence=0.0,
+                    evidence=["no_costal_region"],
+                )
+            )
+
         result.assignments = assignments
         result.poly_names = poly_names
 
@@ -457,90 +510,32 @@ def _save_diagnostics_voronoi(
             )
             cv2.imwrite(str(diag_dir / f"vein_{vein_id}_merged.jpg"), merge_img)
 
-    # 5. Vein assignments text log
+    # 5. All veins overview — all assignments on one image
+    all_veins_img = image.copy()
+    for assignment in assignments:
+        vein_id = assignment.vein_id
+        vein_color = VEIN_COLORS.get(vein_id, (40, 40, 40))
+        if assignment.line is not None:
+            pts = np.array(assignment.line.coords, dtype=np.int32)
+            cv2.polylines(all_veins_img, [pts], isClosed=False, color=vein_color, thickness=4)
+            mid_pt = pts[len(pts) // 2]
+            cv2.putText(
+                all_veins_img, vein_id,
+                (int(mid_pt[0]) - 20, int(mid_pt[1]) - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, vein_color, 2, cv2.LINE_AA,
+            )
+    cv2.imwrite(str(diag_dir / "all_veins_classified.jpg"), all_veins_img)
+
+    # 6. Vein assignments text log (with validation warnings)
     log_lines = ["vein_id\tstatus\tlength_px\tconfidence\tevidence\n"]
     for a in assignments:
         log_lines.append(
             f"{a.vein_id}\t{a.status.value}\t{a.length_px:.1f}\t{a.confidence:.2f}\t{','.join(a.evidence)}\n"
         )
+    log_lines.append("\n--- Region Assignments ---\n")
+    for idx in sorted(poly_names.keys()):
+        log_lines.append(f"P{idx}\t{poly_names[idx]}\n")
     (diag_dir / "vein_assignments.txt").write_text("".join(log_lines))
-
-
-def _build_assignments_from_centerlines(
-    centerlines: dict[tuple[int, int], "LineString"],
-    poly_names: dict[int, str],
-) -> list[VeinAssignment]:
-    """Convert Voronoi centerlines into VeinAssignment objects."""
-    from shapely.geometry import LineString as LS
-
-    # Group centerlines by vein_id using VEIN_BOUNDARIES
-    vein_segments: dict[str, list[LS]] = {}
-    vein_pairs: dict[str, list[tuple[int, int]]] = {}
-
-    for (idx_a, idx_b), line in centerlines.items():
-        name_a = poly_names.get(idx_a, "")
-        name_b = poly_names.get(idx_b, "")
-        pair = (name_a, name_b)
-        pair_rev = (name_b, name_a)
-
-        matched_vein = None
-        for vein_id, boundary_pairs in VEIN_BOUNDARIES.items():
-            for expected_pair in boundary_pairs:
-                if pair == expected_pair or pair_rev == expected_pair:
-                    matched_vein = vein_id
-                    break
-            if matched_vein:
-                break
-
-        if matched_vein is None:
-            continue
-
-        if matched_vein not in vein_segments:
-            vein_segments[matched_vein] = []
-            vein_pairs[matched_vein] = []
-        vein_segments[matched_vein].append(line)
-        vein_pairs[matched_vein].append((idx_a, idx_b))
-
-    # Build assignments
-    assignments: list[VeinAssignment] = []
-    for vein_id in VEIN_BOUNDARIES:
-        segments = vein_segments.get(vein_id, [])
-        if not segments:
-            assignments.append(
-                VeinAssignment(
-                    vein_id=vein_id,
-                    status=VeinStatus.ABSENT,
-                    edge_ids=[],
-                    confidence=0.0,
-                    evidence=["no_vein_mask_boundary"],
-                )
-            )
-            continue
-
-        combined_line = _merge_vein_lines(segments)
-        total_length = combined_line.length if combined_line else 0.0
-        endpoints = None
-        if combined_line:
-            coords = list(combined_line.coords)
-            endpoints = [coords[0], coords[-1]]
-
-        status = VeinStatus.COMPLETE if len(segments) == 1 else VeinStatus.FRAGMENTED
-        confidence = 0.9 if status == VeinStatus.COMPLETE else 0.8
-
-        assignments.append(
-            VeinAssignment(
-                vein_id=vein_id,
-                status=status,
-                edge_ids=[],
-                confidence=confidence,
-                evidence=["vein_mask_voronoi"],
-                length_px=total_length,
-                line=combined_line,
-                endpoints=endpoints,
-            )
-        )
-
-    return assignments
 
 
 def _run_vein_pipeline(
