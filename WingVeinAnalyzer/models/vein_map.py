@@ -158,6 +158,21 @@ REGION_EXPECTED_VEINS: dict[str, set[str]] = {
     "3rd_posterior_cell": {"L5"},
 }
 
+# Anterior-to-posterior ordering of all vein types (used for topology validation)
+VEIN_Y_ORDER = ["L1", "L2", "L3", "ACV", "L4", "PCV", "L5"]
+
+# Expected region centroid Y ordering (anterior=0.0, posterior=1.0)
+REGION_Y_ORDER = [
+    "costal_cell",
+    "marginal_cell",
+    "submarginal_cell",
+    "1st_basal_cell",
+    "1st_posterior_cell",
+    "discal_cell",
+    "2nd_posterior_cell",
+    "3rd_posterior_cell",
+]
+
 # Vein shape thresholds
 STRAIGHTNESS_THRESHOLD = 0.65
 MAX_ANGLE_CHANGE_DEG = 60.0

@@ -27,8 +27,15 @@ from WingVeinAnalyzer.models.vein_labeler import (
     assign_veins,
     _extract_costa,
 )
-from WingVeinAnalyzer.models.vein_identifier import identify_veins_and_regions
-from WingVeinAnalyzer.models.vein_skeleton import extract_veins_from_mask
+from WingVeinAnalyzer.models.vein_identifier import (
+    identify_veins_and_regions,
+    validate_regions_against_ground_truth,
+)
+from WingVeinAnalyzer.models.vein_skeleton import (
+    extract_anterior_boundary,
+    extract_edge_boundary_veins,
+    extract_veins_from_mask,
+)
 from WingVeinAnalyzer.models.wing_geometry import (
     WingOutline,
     build_wing_outline,
@@ -86,7 +93,8 @@ def run_pipeline(
     # Route based on annotation type
     if annotations.intervein_polygons:
         result = _run_polygon_pipeline(
-            image, annotations, output_dir, stem, microns_per_pixel, max_gap
+            image, annotations, output_dir, stem, microns_per_pixel, max_gap,
+            geojson_path,
         )
     elif annotations.veins:
         result = _run_vein_pipeline(
@@ -105,6 +113,7 @@ def _run_polygon_pipeline(
     stem: str,
     microns_per_pixel: Optional[float],
     max_gap: float,
+    geojson_path: Optional[Path] = None,
 ) -> PipelineResult:
     """Pipeline for intervein polygon annotations."""
     result = PipelineResult()
@@ -127,7 +136,7 @@ def _run_polygon_pipeline(
         logger.info("Using vein-mask-primary pipeline (%d vein polygons)", len(annotations.vein_polygons))
 
         # Extract centerlines from vein mask (no poly_names needed)
-        centerlines = extract_veins_from_mask(
+        centerlines, nearest_labels, vein_mask_arr = extract_veins_from_mask(
             annotations.vein_polygons, polygons, image.shape[:2]
         )
 
@@ -138,8 +147,16 @@ def _run_polygon_pipeline(
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
+        if id_result.polygons:
+            polygons = id_result.polygons  # may have been updated by splitting
         for w in id_result.validation_report.warnings:
             logger.warning("Validation: %s", w)
+
+        # Ground-truth validation (if expected overlay file exists)
+        _run_ground_truth_validation(
+            geojson_path, poly_names, polygons, logger,
+            image_shape=image.shape, output_dir=output_dir,
+        )
 
         # Add costa only if costal region exists
         has_costal = "costal_cell" in poly_names.values()
@@ -198,8 +215,16 @@ def _run_polygon_pipeline(
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
+        if id_result.polygons:
+            polygons = id_result.polygons  # may have been updated by splitting
         for w in id_result.validation_report.warnings:
             logger.warning("Validation: %s", w)
+
+        # Ground-truth validation (if expected overlay file exists)
+        _run_ground_truth_validation(
+            geojson_path, poly_names, polygons, logger,
+            image_shape=image.shape, output_dir=output_dir,
+        )
 
         # Add costa only if costal region exists
         has_costal = "costal_cell" in poly_names.values()
@@ -241,14 +266,16 @@ def _run_polygon_pipeline(
         # Save diagnostics (midline path)
         _save_diagnostics(image, polygons, edges, poly_names, assignments, output_dir)
 
-    # Build wing outline
-    outline = build_wing_outline(polygons)
+    # Build wing outline (include vein polygons for full wing tip coverage)
+    outline = build_wing_outline(
+        polygons, vein_polygons=annotations.vein_polygons or None,
+    )
     result.wing_outline = outline
 
     # Detect hinge and remove it
     landmarks = detect_hinge_landmarks(outline, polygons, poly_names)
     if landmarks:
-        wing_blade = remove_hinge(outline, landmarks)
+        wing_blade = remove_hinge(outline, landmarks, polygons, poly_names)
     else:
         wing_blade = outline.polygon
     result.wing_blade = wing_blade
@@ -296,6 +323,165 @@ def _run_polygon_pipeline(
     result.csv_path = csv_path
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Ground-truth validation helper
+# ---------------------------------------------------------------------------
+
+def _run_ground_truth_validation(
+    geojson_path: Optional[Path],
+    poly_names: dict[int, str],
+    polygons: list[Polygon],
+    logger,
+    image_shape: tuple[int, ...] = (),
+    output_dir: Optional[Path] = None,
+) -> None:
+    """Check for expected overlay file and run ground-truth validation."""
+    if geojson_path is None:
+        return
+
+    geojson_dir = geojson_path.parent
+    stem = geojson_path.stem
+    expected_path = geojson_dir / f"{stem}_expected_intervein_overlay.geojson"
+
+    if not expected_path.exists():
+        return
+
+    logger.info("Found ground-truth overlay: %s", expected_path.name)
+    report = validate_regions_against_ground_truth(
+        poly_names, polygons, expected_path,
+    )
+
+    accuracy = report.get("accuracy", 0.0)
+    correct = report.get("correct", 0)
+    validated = report.get("validated", 0)
+    total = report.get("total", 0)
+    logger.info(
+        "Ground-truth accuracy: %d/%d validated (%.0f%%), %d total polygons",
+        correct, validated, accuracy * 100, total,
+    )
+
+    for idx, info in sorted(report.get("per_polygon", {}).items()):
+        if info["match"] is None:
+            logger.info(
+                "  P%d: %s — no GT region found (not validated)",
+                idx, info["our_name"],
+            )
+        elif info["match"]:
+            logger.info(
+                "  P%d: %s ✓ (IoU=%.3f)",
+                idx, info["our_name"], info["iou"],
+            )
+        else:
+            logger.warning(
+                "  P%d: %s ✗ expected %s (IoU=%.3f)",
+                idx, info["our_name"], info["expected_name"], info["iou"],
+            )
+
+    # Save mask PNGs if we have image dimensions
+    if len(image_shape) >= 2 and output_dir is not None:
+        diag_dir = output_dir / "diagnostics"
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        h, w = image_shape[:2]
+        _save_region_mask(
+            poly_names, polygons, (h, w), diag_dir / "region_mask.png",
+        )
+        _save_ground_truth_mask(
+            expected_path, (h, w), diag_dir / "ground_truth_mask.png",
+        )
+
+
+def _save_region_mask(
+    poly_names: dict[int, str],
+    polygons: list[Polygon],
+    image_hw: tuple[int, int],
+    output_path: Path,
+) -> None:
+    """Render a solid-color mask PNG from pipeline polygon naming (no overlay)."""
+    from WingVeinAnalyzer.models.vein_map import INTERVEIN_COLORS
+    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
+
+    h, w = image_hw
+    mask = np.zeros((h, w, 3), dtype=np.uint8)
+
+    for idx, name in poly_names.items():
+        if idx >= len(polygons):
+            continue
+        color = INTERVEIN_COLORS.get(name, (180, 180, 180))
+        # Create a single-channel mask for this polygon, then apply color
+        poly_mask = np.zeros((h, w), dtype=np.uint8)
+        _fill_polygon(poly_mask, polygons[idx], 255)
+        mask[poly_mask > 0] = color
+
+    # Add region name labels
+    for idx, name in poly_names.items():
+        if idx >= len(polygons):
+            continue
+        cx = int(polygons[idx].centroid.x)
+        cy = int(polygons[idx].centroid.y)
+        label = f"P{idx}: {name}"
+        cv2.putText(
+            mask, label, (cx - 80, cy),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(output_path), mask)
+
+
+def _save_ground_truth_mask(
+    expected_geojson_path: Path,
+    image_hw: tuple[int, int],
+    output_path: Path,
+) -> None:
+    """Render a solid-color mask PNG from ground-truth expected overlay GeoJSON."""
+    import json
+    from WingVeinAnalyzer.models.vein_identifier import _normalize_region_name
+    from WingVeinAnalyzer.models.vein_map import INTERVEIN_COLORS
+    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
+
+    h, w = image_hw
+    mask = np.zeros((h, w, 3), dtype=np.uint8)
+
+    with open(expected_geojson_path) as f:
+        data = json.load(f)
+
+    for feature in data.get("features", []):
+        geom = feature.get("geometry", {})
+        props = feature.get("properties", {})
+        classification = props.get("classification", {})
+        raw_name = classification.get("name", "")
+
+        if geom.get("type") != "Polygon" or not raw_name:
+            continue
+
+        coords = geom.get("coordinates", [])
+        if not coords:
+            continue
+
+        try:
+            poly = Polygon(coords[0])
+            if not poly.is_valid or poly.is_empty:
+                continue
+        except Exception:
+            continue
+
+        norm_name = _normalize_region_name(raw_name)
+        color = INTERVEIN_COLORS.get(norm_name, (180, 180, 180))
+
+        poly_mask = np.zeros((h, w), dtype=np.uint8)
+        _fill_polygon(poly_mask, poly, 255)
+        mask[poly_mask > 0] = color
+
+        # Label
+        cx = int(poly.centroid.x)
+        cy = int(poly.centroid.y)
+        cv2.putText(
+            mask, norm_name, (cx - 80, cy),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(output_path), mask)
 
 
 # ---------------------------------------------------------------------------

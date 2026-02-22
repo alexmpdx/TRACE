@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 
 from WingVeinAnalyzer.models.vein_labeler import (
     VeinAssignment,
@@ -17,13 +19,16 @@ from WingVeinAnalyzer.models.vein_labeler import (
     _merge_vein_lines,
 )
 from WingVeinAnalyzer.models.vein_map import (
+    CROSSVEIN_CONNECTIONS,
     MAX_ANGLE_CHANGE_DEG,
     REGION_AREA_PRIORS,
     REGION_EXPECTED_VEINS,
+    REGION_Y_ORDER,
     STRAIGHTNESS_THRESHOLD,
     VEIN_BOUNDARIES,
     VEIN_LENGTH_PRIORS,
     VEIN_ORIENTATION_PRIORS,
+    VEIN_Y_ORDER,
     SPATIAL_PRIORS_Y,
 )
 
@@ -69,6 +74,7 @@ class IdentificationResult:
     """Complete output from identify_veins_and_regions()."""
     assignments: list[VeinAssignment] = field(default_factory=list)
     poly_names: dict[int, str] = field(default_factory=dict)
+    polygons: list[Polygon] = field(default_factory=list)  # possibly updated by splitting
     validation_report: ValidationReport = field(default_factory=ValidationReport)
 
 
@@ -161,6 +167,14 @@ def _angle_between_vectors(v1: np.ndarray, v2: np.ndarray) -> float:
     return math.degrees(math.acos(cos_angle))
 
 
+def _line_orientation(line: LineString) -> float:
+    """Compute overall orientation of a LineString in degrees from horizontal."""
+    coords = list(line.coords)
+    dx = coords[-1][0] - coords[0][0]
+    dy = coords[-1][1] - coords[0][1]
+    return math.degrees(math.atan2(abs(dy), abs(dx)))
+
+
 def merge_segments_at_junctions(
     centerlines: dict[tuple[int, int], LineString],
     junctions: list[JunctionPoint],
@@ -223,10 +237,21 @@ def merge_segments_at_junctions(
         best_score, bi, bj = pair_scores[0]
         second_score = pair_scores[1][0] if len(pair_scores) > 1 else 999.0
 
-        # Only merge if: (1) best is below threshold, (2) clear gap over 2nd
-        if best_score < collinearity_threshold_deg and (second_score - best_score) > min_gap_deg:
-            key_a = arrivals[bi][0]
-            key_b = arrivals[bj][0]
+        # Orientation guard: prevent merging a longitudinal (<30°) with
+        # a crossvein (>50°) regardless of collinearity score
+        key_a = arrivals[bi][0]
+        key_b = arrivals[bj][0]
+        ori_a = _line_orientation(centerlines[key_a])
+        ori_b = _line_orientation(centerlines[key_b])
+        orientation_mismatch = (
+            (ori_a < 25 and ori_b > 55) or (ori_b < 25 and ori_a > 55)
+        )
+
+        # Only merge if: (1) best is below threshold, (2) clear gap over 2nd,
+        # (3) no crossvein-longitudinal orientation mismatch
+        if (best_score < collinearity_threshold_deg
+                and (second_score - best_score) > min_gap_deg
+                and not orientation_mismatch):
             union(key_a, key_b)
             logger.debug(
                 "Merged %s + %s at junction (%.0f, %.0f), "
@@ -235,11 +260,12 @@ def merge_segments_at_junctions(
                 best_score, second_score - best_score,
             )
         else:
+            reason = "orientation mismatch" if orientation_mismatch else "gap too small"
             logger.debug(
                 "Skipped merge at junction (%.0f, %.0f): "
-                "best=%.1f°, gap=%.1f° (need >%.1f°)",
+                "best=%.1f°, gap=%.1f° (need >%.1f°), reason=%s",
                 junc.x, junc.y, best_score,
-                second_score - best_score, min_gap_deg,
+                second_score - best_score, min_gap_deg, reason,
             )
 
     # Collect connected components
@@ -490,7 +516,11 @@ def classify_merged_paths(
     paths: list[MergedPath],
     wing_bbox: tuple[float, float, float, float],
 ) -> dict[str, MergedPath]:
-    """Classify merged paths into named veins by geometry."""
+    """Classify merged paths into named veins by geometry.
+
+    Identifies crossveins FIRST (they're reliably identified by steep
+    orientation), then uses their positions to inform longitudinal scoring.
+    """
     min_x, min_y, max_x, max_y = wing_bbox
     bbox_w = max_x - min_x
 
@@ -502,11 +532,21 @@ def classify_merged_paths(
     longitudinals: list[MergedPath] = []
     crossveins: list[MergedPath] = []
 
+    # Max plausible crossvein length: ~15% of wing span
+    max_crossvein_len = bbox_w * 0.15 if bbox_w > 0 else 600.0
+    max_crossvein_len = max(max_crossvein_len, 400.0)  # floor of 400px
+
     for p in paths:
-        if p.orientation_deg > 60:
+        if p.orientation_deg > 60 and p.length_px < max_crossvein_len:
             crossveins.append(p)
         elif p.orientation_deg < 30:
             longitudinals.append(p)
+        elif p.orientation_deg >= 60 and p.length_px >= max_crossvein_len:
+            # Steep but too long for crossvein — likely an artifact, skip
+            logger.info(
+                "Skipping steep long path (%.0f°, %.0fpx) — too long for crossvein",
+                p.orientation_deg, p.length_px,
+            )
         else:
             # Ambiguous orientation — classify by length
             if p.length_px > 300:
@@ -514,27 +554,15 @@ def classify_merged_paths(
             else:
                 crossveins.append(p)
 
-    # Assign longitudinals using combined Y-position + length scoring
-    vein_map = _assign_longitudinals_scored(longitudinals, bbox_w)
+    # Assign crossveins FIRST (reliable identification by orientation + position)
+    vein_map: dict[str, MergedPath] = {}
+    _assign_crossveins(crossveins, vein_map)
 
-    # Crossvein assignment
-    if len(crossveins) >= 2:
-        # ACV is more proximal (lower X centroid), PCV is more distal
-        crossveins.sort(key=lambda p: p.x_centroid_norm)
-        vein_map["ACV"] = crossveins[0]
-        vein_map["PCV"] = crossveins[1]
-    elif len(crossveins) == 1:
-        cv = crossveins[0]
-        # Determine identity by which longitudinal pair it lies between
-        l3_y = vein_map["L3"].y_centroid_norm if "L3" in vein_map else 0.35
-        l4_y = vein_map["L4"].y_centroid_norm if "L4" in vein_map else 0.5
-        l5_y = vein_map["L5"].y_centroid_norm if "L5" in vein_map else 0.65
-        mid_acv = (l3_y + l4_y) / 2
-        mid_pcv = (l4_y + l5_y) / 2
-        if abs(cv.y_centroid_norm - mid_acv) < abs(cv.y_centroid_norm - mid_pcv):
-            vein_map["ACV"] = cv
-        else:
-            vein_map["PCV"] = cv
+    # Assign longitudinals using combined Y-position + length + crossvein scoring
+    acv_path = vein_map.get("ACV")
+    pcv_path = vein_map.get("PCV")
+    long_map = _assign_longitudinals_scored(longitudinals, bbox_w, acv_path, pcv_path)
+    vein_map.update(long_map)
 
     logger.info(
         "Classified veins: %s",
@@ -543,15 +571,40 @@ def classify_merged_paths(
     return vein_map
 
 
+def _assign_crossveins(
+    crossveins: list[MergedPath],
+    vein_map: dict[str, MergedPath],
+) -> None:
+    """Assign crossvein identities (ACV/PCV) by position."""
+    if len(crossveins) >= 2:
+        # ACV is more anterior (lower Y centroid), PCV is more posterior
+        crossveins.sort(key=lambda p: p.y_centroid_norm)
+        vein_map["ACV"] = crossveins[0]
+        vein_map["PCV"] = crossveins[1]
+    elif len(crossveins) == 1:
+        cv = crossveins[0]
+        # With only one crossvein, determine identity by Y-position
+        # ACV is more anterior (lower Y), PCV is more posterior (higher Y)
+        acv_mid = (SPATIAL_PRIORS_Y["L3"][1] + SPATIAL_PRIORS_Y["L4"][0]) / 2  # ~0.35
+        pcv_mid = (SPATIAL_PRIORS_Y["L4"][1] + SPATIAL_PRIORS_Y["L5"][0]) / 2  # ~0.50
+        if abs(cv.y_centroid_norm - acv_mid) <= abs(cv.y_centroid_norm - pcv_mid):
+            vein_map["ACV"] = cv
+        else:
+            vein_map["PCV"] = cv
+
+
 def _assign_longitudinals_scored(
     longitudinals: list[MergedPath],
     wing_span_px: float,
+    acv_path: Optional[MergedPath] = None,
+    pcv_path: Optional[MergedPath] = None,
 ) -> dict[str, MergedPath]:
     """Assign longitudinal veins using optimal combinatorial scoring.
 
     Tries all valid subsets of paths (k=1..min(n,5)) and vein names,
     respecting Y ordering, to find the globally optimal assignment.
     Allows fewer than 5 veins when some are absent.
+    Uses crossvein proximity to disambiguate L3/L4/L5.
     """
     from itertools import combinations
 
@@ -570,7 +623,7 @@ def _assign_longitudinals_scored(
     for pi, path in enumerate(sorted_paths):
         for name in long_names:
             score_matrix[(pi, name)] = _longitudinal_match_score(
-                path, name, wing_span_px,
+                path, name, wing_span_px, acv_path, pcv_path,
             )
 
     # Try all k from min(n,5) down to max(1, min(n,5)-2)
@@ -593,8 +646,8 @@ def _assign_longitudinals_scored(
                 if min(scores) < min_per_vein:
                     continue
                 total = sum(scores)
-                # Normalize: average score + small bonus for more veins
-                norm = total / k + 0.05 * k
+                # Normalize: average score + bonus for more veins
+                norm = total / k + 0.08 * k
                 if norm > best_norm_score:
                     best_norm_score = norm
                     best_assignment = [
@@ -621,11 +674,56 @@ def _assign_longitudinals_scored(
                 sorted_paths[i].length_px, sorted_paths[i].y_centroid_norm,
             )
 
+    # Post-processing: swap L4/L5 if crossvein proximity strongly favors it
+    # (Y centroids can overlap when paths have different extents)
+    _swap_l4_l5_if_needed(result, acv_path, pcv_path)
+
     return result
 
 
+def _swap_l4_l5_if_needed(
+    result: dict[str, MergedPath],
+    acv_path: Optional[MergedPath],
+    pcv_path: Optional[MergedPath],
+) -> None:
+    """Swap L4/L5 assignment if ACV proximity strongly favors it.
+
+    ACV connects L3–L4, so L4 should be close to ACV and L5 far from it.
+    PCV connects L4–L5, so both are always near PCV — not useful for swapping.
+    Only swaps when the distance difference exceeds 50px to avoid false
+    positives from tiny jitter at shared junction points.
+    """
+    if "L4" not in result or "L5" not in result:
+        return
+    if acv_path is None:
+        return
+
+    l4 = result["L4"]
+    l5 = result["L5"]
+
+    acv_to_l4 = l4.line.distance(acv_path.line)
+    acv_to_l5 = l5.line.distance(acv_path.line)
+
+    # L4 should be near ACV; L5 should be far from ACV.
+    # Swap only when: (1) L5 is notably closer, (2) the separation is meaningful,
+    # and (3) the closer vein is actually adjacent to ACV (< 50px).
+    # Without check (3), we'd swap when both veins are far from ACV (meaningless).
+    if (acv_to_l5 < acv_to_l4
+            and (acv_to_l4 - acv_to_l5) > 50
+            and min(acv_to_l5, acv_to_l4) < 50):
+        logger.info(
+            "Swapping L4/L5: ACV closer to L5 (%.0fpx) than L4 (%.0fpx)",
+            acv_to_l5, acv_to_l4,
+        )
+        result["L4"], result["L5"] = result["L5"], result["L4"]
+
+
 def _longitudinal_match_score(
-    path: MergedPath, vein_name: str, wing_span_px: float,
+    path: MergedPath,
+    vein_name: str,
+    wing_span_px: float,
+    acv_path: Optional[MergedPath] = None,
+    pcv_path: Optional[MergedPath] = None,
 ) -> float:
     """Score how well a path matches a specific longitudinal vein identity."""
     # Y-position score: closeness to expected Y centroid range
@@ -650,8 +748,66 @@ def _longitudinal_match_score(
         overshoot = max(len_lo - length_frac, length_frac - len_hi, 0)
         len_score = max(0.0, 0.3 - overshoot * 2)
 
-    # Combined score (weighted: Y position is primary, length is secondary)
-    return 0.6 * y_score + 0.4 * len_score
+    # Crossvein proximity score
+    cv_score = _compute_crossvein_score(path, vein_name, acv_path, pcv_path)
+
+    # Combined score with crossvein topology
+    if acv_path is not None or pcv_path is not None:
+        return 0.45 * y_score + 0.30 * len_score + 0.25 * cv_score
+    else:
+        # No crossvein info — fall back to original weights
+        return 0.6 * y_score + 0.4 * len_score
+
+
+def _compute_crossvein_score(
+    path: MergedPath,
+    vein_name: str,
+    acv_path: Optional[MergedPath],
+    pcv_path: Optional[MergedPath],
+) -> float:
+    """Score how well a longitudinal path relates to known crossvein positions.
+
+    L3: should be near ACV (anterior side)
+    L4: should be near both ACV and PCV (between them)
+    L5: should be posterior to PCV
+    L1, L2: neutral (far from crossveins, no strong signal)
+    """
+    if vein_name in ("L1", "L2"):
+        return 0.5  # neutral — crossveins don't help distinguish these
+
+    # Compute distances from the path to crossveins
+    acv_dist = path.line.distance(acv_path.line) if acv_path else None
+    pcv_dist = path.line.distance(pcv_path.line) if pcv_path else None
+
+    # Normalize distances by a reference scale (~200px = typical crossvein gap)
+    ref_dist = 200.0
+
+    if vein_name == "L3":
+        # L3 should be near ACV (it connects to ACV)
+        if acv_dist is not None:
+            proximity = max(0.0, 1.0 - acv_dist / ref_dist)
+            return proximity
+        return 0.5
+
+    elif vein_name == "L4":
+        # L4 should be near PCV (it connects to PCV) and near ACV
+        score = 0.5
+        if pcv_dist is not None:
+            score = max(0.0, 1.0 - pcv_dist / ref_dist) * 0.6
+        if acv_dist is not None:
+            score += max(0.0, 1.0 - acv_dist / ref_dist) * 0.4
+        return score
+
+    elif vein_name == "L5":
+        # L5 should be near PCV (it connects to PCV)
+        # Note: L5 centroid can be anterior to PCV because L5 is a long
+        # horizontal vein — use proximity only, not centroid comparison
+        if pcv_dist is not None:
+            proximity = max(0.0, 1.0 - pcv_dist / ref_dist)
+            return proximity
+        return 0.5
+
+    return 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +908,7 @@ def name_regions_from_veins(
                 poly_veins[idx_b].add(vein_id)
 
     poly_names: dict[int, str] = {}
+    total_area = sum(p.area for p in polygons)
 
     for idx, poly in enumerate(polygons):
         bounding = poly_veins[idx]
@@ -760,7 +917,7 @@ def name_regions_from_veins(
         y_norm = (cy - min_y) / bbox_h if bbox_h > 0 else 0.5
 
         name = _region_from_bounding_veins(
-            bounding, poly, vein_map, wing_bbox, bbox_h,
+            bounding, poly, vein_map, wing_bbox, bbox_h, total_area,
         )
         if name:
             poly_names[idx] = name
@@ -773,6 +930,9 @@ def name_regions_from_veins(
     # Resolve conflicts: if two polygons got the same name, use area/position
     _resolve_name_conflicts(poly_names, polygons, vein_map, wing_bbox)
 
+    # Validate and correct region positions
+    _validate_and_correct_region_positions(poly_names, polygons, wing_bbox)
+
     return poly_names
 
 
@@ -782,12 +942,16 @@ def _region_from_bounding_veins(
     vein_map: dict[str, MergedPath],
     wing_bbox: tuple[float, float, float, float],
     bbox_h: float,
+    total_area: float = 0.0,
 ) -> Optional[str]:
-    """Determine region name from its bounding veins and position."""
+    """Determine region name from its bounding veins, position, and area."""
     cx = poly.centroid.x
     cy = poly.centroid.y
     min_x, min_y, max_x, max_y = wing_bbox
     y_norm = (cy - min_y) / bbox_h if bbox_h > 0 else 0.5
+
+    # Area fraction for area-prior scoring
+    area_frac = poly.area / total_area if total_area > 0 else 0.0
 
     # Special case: costal_cell is anterior to L1, bounded only by L1
     if bounding_veins == {"L1"}:
@@ -796,6 +960,7 @@ def _region_from_bounding_veins(
             return "costal_cell"
 
     # Check each region's expected veins — best match wins
+    # Score = Jaccard overlap × area-prior multiplier
     best_name = None
     best_score = -1.0
 
@@ -806,10 +971,23 @@ def _region_from_bounding_veins(
         if not matched:
             continue
         # Score: Jaccard-like — reward overlap, penalize extra/missing
-        score = len(matched) / len(expected_veins | bounding_veins)
+        jaccard = len(matched) / len(expected_veins | bounding_veins)
         # Bonus only for exact match (bounding veins == expected veins)
         if bounding_veins == expected_veins:
-            score += 1.0
+            jaccard += 1.0
+
+        # Area-prior multiplier: penalize extreme area mismatches
+        # Within range → 1.0; outside → decays toward 0.1
+        area_mult = 1.0
+        if total_area > 0 and region_name in REGION_AREA_PRIORS:
+            lo, hi = REGION_AREA_PRIORS[region_name]
+            if lo <= area_frac <= hi:
+                area_mult = 1.0
+            else:
+                distance = max(lo - area_frac, area_frac - hi, 0)
+                area_mult = max(0.1, 1.0 - distance * 4.0)
+
+        score = jaccard * area_mult
 
         if score > best_score:
             best_score = score
@@ -818,28 +996,35 @@ def _region_from_bounding_veins(
     if best_name is None:
         return None
 
-    # Disambiguate regions that share the same expected veins using position
+    # Disambiguate regions that share the same expected veins using area
+    # Area-based disambiguation is orientation-independent, unlike X-position
     if best_name in ("1st_basal_cell", "1st_posterior_cell"):
-        acv_x = None
-        if "ACV" in vein_map:
-            acv_coords = np.array(vein_map["ACV"].line.coords)
-            acv_x = acv_coords[:, 0].mean()
-        if acv_x is not None:
-            best_name = "1st_basal_cell" if cx < acv_x else "1st_posterior_cell"
+        # 1st_basal_cell is always much smaller than 1st_posterior_cell
+        if total_area > 0:
+            lo_basal, hi_basal = REGION_AREA_PRIORS["1st_basal_cell"]
+            lo_post, hi_post = REGION_AREA_PRIORS["1st_posterior_cell"]
+            mid_basal = (lo_basal + hi_basal) / 2
+            mid_post = (lo_post + hi_post) / 2
+            dist_to_basal = abs(area_frac - mid_basal)
+            dist_to_post = abs(area_frac - mid_post)
+            best_name = "1st_basal_cell" if dist_to_basal < dist_to_post else "1st_posterior_cell"
         else:
-            bbox_mid_x = (min_x + max_x) / 2
-            best_name = "1st_basal_cell" if cx < bbox_mid_x else "1st_posterior_cell"
+            # Fallback: smaller polygon is basal
+            best_name = "1st_basal_cell"
 
     elif best_name in ("discal_cell", "2nd_posterior_cell"):
-        pcv_x = None
-        if "PCV" in vein_map:
-            pcv_coords = np.array(vein_map["PCV"].line.coords)
-            pcv_x = pcv_coords[:, 0].mean()
-        if pcv_x is not None:
-            best_name = "discal_cell" if cx < pcv_x else "2nd_posterior_cell"
+        # discal_cell is always smaller than 2nd_posterior_cell
+        if total_area > 0:
+            lo_disc, hi_disc = REGION_AREA_PRIORS["discal_cell"]
+            lo_post, hi_post = REGION_AREA_PRIORS["2nd_posterior_cell"]
+            mid_disc = (lo_disc + hi_disc) / 2
+            mid_post = (lo_post + hi_post) / 2
+            dist_to_disc = abs(area_frac - mid_disc)
+            dist_to_post = abs(area_frac - mid_post)
+            best_name = "discal_cell" if dist_to_disc < dist_to_post else "2nd_posterior_cell"
         else:
-            bbox_mid_x = (min_x + max_x) / 2
-            best_name = "discal_cell" if cx < bbox_mid_x else "2nd_posterior_cell"
+            # Fallback: smaller polygon is discal
+            best_name = "discal_cell"
 
     return best_name
 
@@ -893,6 +1078,7 @@ def _resolve_name_conflicts(
                 # Try second-best region name
                 alt_name = _region_from_bounding_veins(
                     poly_veins[idx], polygons[idx], vein_map, wing_bbox, bbox_h,
+                    total_area,
                 )
                 # Check the alt_name isn't already taken by exactly one polygon
                 already_used = alt_name in poly_names.values() if alt_name else True
@@ -918,6 +1104,273 @@ def _resolve_name_conflicts(
 
         if not had_conflict:
             break
+
+
+def _validate_and_correct_region_positions(
+    poly_names: dict[int, str],
+    polygons: list[Polygon],
+    wing_bbox: tuple[float, float, float, float],
+) -> None:
+    """Validate and correct region positions based on canonical Y/X ordering.
+
+    Checks that region centroids follow expected anterior-to-posterior ordering
+    and that proximal/distal pairs have correct X relationships.  Swaps names
+    when violations are found.
+    """
+    min_x, min_y, max_x, max_y = wing_bbox
+    bbox_h = max_y - min_y
+    bbox_w = max_x - min_x
+
+    if bbox_h == 0 or bbox_w == 0:
+        return
+
+    # Build reverse lookup: name → polygon index
+    name_to_idx: dict[str, int] = {}
+    for idx, name in poly_names.items():
+        name_to_idx[name] = idx
+
+    def _get_centroid(name: str) -> Optional[tuple[float, float]]:
+        idx = name_to_idx.get(name)
+        if idx is None or idx >= len(polygons):
+            return None
+        c = polygons[idx].centroid
+        y_norm = (c.y - min_y) / bbox_h
+        x_norm = (c.x - min_x) / bbox_w
+        return (y_norm, x_norm)
+
+    # Y-ordering checks: each group should have lower Y than the next
+    y_order_groups = [
+        ("marginal_cell", "submarginal_cell"),
+        ("submarginal_cell", "1st_basal_cell"),
+        ("submarginal_cell", "1st_posterior_cell"),
+        ("1st_posterior_cell", "2nd_posterior_cell"),
+        ("2nd_posterior_cell", "3rd_posterior_cell"),
+    ]
+
+    # Only swap when the violation is significant (>0.10 normalized units)
+    # to avoid overriding correct bounding-vein assignments due to centroid noise
+    y_threshold = 0.10
+
+    for name_a, name_b in y_order_groups:
+        ca = _get_centroid(name_a)
+        cb = _get_centroid(name_b)
+        if ca is None or cb is None:
+            continue
+        violation = ca[0] - cb[0]
+        if violation > y_threshold:  # name_a should be more anterior (lower Y)
+            idx_a = name_to_idx[name_a]
+            idx_b = name_to_idx[name_b]
+            logger.warning(
+                "Region Y-order violation: %s (Y=%.2f) > %s (Y=%.2f), swapping",
+                name_a, ca[0], name_b, cb[0],
+            )
+            poly_names[idx_a] = name_b
+            poly_names[idx_b] = name_a
+            name_to_idx[name_a] = idx_b
+            name_to_idx[name_b] = idx_a
+
+    # X-ordering checks removed: proximal/distal disambiguation is now
+    # handled by area-based logic in _region_from_bounding_veins(), which
+    # is orientation-independent. X-position checks were breaking for wings
+    # with hinge on the right (high X) side.
+
+
+# ---------------------------------------------------------------------------
+# 3e''. Merged Polygon Detection and Splitting
+# ---------------------------------------------------------------------------
+
+# Which vein separates each pair of adjacent regions
+_REGION_SPLIT_VEINS: dict[tuple[str, str], str] = {
+    ("2nd_posterior_cell", "3rd_posterior_cell"): "L5",
+    ("3rd_posterior_cell", "2nd_posterior_cell"): "L5",
+    ("discal_cell", "2nd_posterior_cell"): "PCV",
+    ("2nd_posterior_cell", "discal_cell"): "PCV",
+    ("1st_basal_cell", "1st_posterior_cell"): "ACV",
+    ("1st_posterior_cell", "1st_basal_cell"): "ACV",
+    ("discal_cell", "3rd_posterior_cell"): "L5",
+    ("3rd_posterior_cell", "discal_cell"): "L5",
+    ("1st_posterior_cell", "2nd_posterior_cell"): "L4",
+    ("2nd_posterior_cell", "1st_posterior_cell"): "L4",
+}
+
+
+def split_merged_polygons(
+    poly_names: dict[int, str],
+    polygons: list[Polygon],
+    vein_map: dict[str, MergedPath],
+    wing_bbox: tuple[float, float, float, float],
+) -> tuple[dict[int, str], list[Polygon]]:
+    """Detect and split input polygons that appear to cover two merged regions.
+
+    The pixel classifier may merge adjacent regions into a single polygon
+    when a vein is absent or poorly detected.  This function detects
+    oversized polygons and uses identified vein centerlines to split them.
+
+    Returns updated (poly_names, polygons) — polygons list may grow.
+    """
+    from shapely.ops import split as shapely_split
+
+    total_area = sum(p.area for p in polygons)
+    if total_area == 0:
+        return poly_names, polygons
+
+    # Find which expected regions have no assigned polygon
+    assigned_regions = set(poly_names.values())
+    all_regions = set(REGION_EXPECTED_VEINS.keys())
+    missing_regions = all_regions - assigned_regions - {"costal_cell"}
+
+    if not missing_regions:
+        return poly_names, polygons
+
+    # Check each named polygon for area overshoot
+    polygons = list(polygons)  # make mutable copy
+    splits_made = 0
+
+    for idx in list(poly_names.keys()):
+        name = poly_names[idx]
+        if idx >= len(polygons):
+            continue
+        poly = polygons[idx]
+        area_frac = poly.area / total_area
+
+        if name not in REGION_AREA_PRIORS:
+            continue
+        lo, hi = REGION_AREA_PRIORS[name]
+
+        # Is this polygon significantly oversized?
+        overshoot = area_frac - hi
+        if overshoot < hi * 0.5:
+            # Not oversized enough to suspect a merge
+            continue
+
+        logger.info(
+            "P%d (%s): area=%.1f%% exceeds expected max %.1f%% — "
+            "possible merged region",
+            idx, name, area_frac * 100, hi * 100,
+        )
+
+        # Find the best missing region to split off
+        best_missing = None
+        best_vein = None
+        for missing in missing_regions:
+            split_key = (name, missing)
+            vein_name = _REGION_SPLIT_VEINS.get(split_key)
+            if vein_name and vein_name in vein_map:
+                best_missing = missing
+                best_vein = vein_name
+                break
+
+        if best_missing is None or best_vein is None:
+            logger.info(
+                "  No suitable split vein found for %s → %s",
+                name, missing_regions,
+            )
+            continue
+
+        # Use the vein centerline to split the polygon
+        vein_line = vein_map[best_vein].line
+        pieces = _split_polygon_by_vein(poly, vein_line)
+        if pieces is None:
+            logger.info(
+                "  Could not split P%d along %s",
+                idx, best_vein,
+            )
+            continue
+
+        piece_a, piece_b = pieces
+
+        # Assign names: use area priors to decide which piece is which
+        lo_orig, hi_orig = REGION_AREA_PRIORS[name]
+        lo_miss, hi_miss = REGION_AREA_PRIORS[best_missing]
+        mid_orig = (lo_orig + hi_orig) / 2 * total_area
+        mid_miss = (lo_miss + hi_miss) / 2 * total_area
+
+        # Figure out which piece better fits which name
+        dist_a_orig = abs(piece_a.area - mid_orig)
+        dist_a_miss = abs(piece_a.area - mid_miss)
+
+        if dist_a_orig <= dist_a_miss:
+            orig_piece, new_piece = piece_a, piece_b
+        else:
+            orig_piece, new_piece = piece_b, piece_a
+
+        # Replace the original polygon with the correctly-sized piece
+        polygons[idx] = orig_piece
+        new_idx = len(polygons)
+        polygons.append(new_piece)
+        poly_names[new_idx] = best_missing
+        missing_regions.discard(best_missing)
+        splits_made += 1
+
+        logger.info(
+            "  Split P%d along %s: %s (%.0f px²) + P%d:%s (%.0f px²)",
+            idx, best_vein, name, orig_piece.area,
+            new_idx, best_missing, new_piece.area,
+        )
+
+    if splits_made:
+        logger.info("Split %d merged polygon(s)", splits_made)
+
+    return poly_names, polygons
+
+
+def _split_polygon_by_vein(
+    poly: Polygon,
+    vein_line: LineString,
+) -> Optional[tuple[Polygon, Polygon]]:
+    """Split a polygon using a vein centerline.
+
+    Extends the vein line to ensure it crosses the polygon boundary,
+    then performs the split.  Returns two pieces or None if split fails.
+    """
+    from shapely.ops import split as shapely_split
+
+    # Extend the vein line well beyond the polygon bounds
+    coords = np.array(vein_line.coords)
+    if len(coords) < 2:
+        return None
+
+    # Extend start
+    start_dir = coords[0] - coords[min(1, len(coords) - 1)]
+    start_len = np.linalg.norm(start_dir) + 1e-9
+    start_ext = coords[0] + (start_dir / start_len) * 500
+
+    # Extend end
+    end_dir = coords[-1] - coords[max(0, len(coords) - 2)]
+    end_len = np.linalg.norm(end_dir) + 1e-9
+    end_ext = coords[-1] + (end_dir / end_len) * 500
+
+    extended = LineString(
+        [start_ext.tolist()] + list(vein_line.coords) + [end_ext.tolist()]
+    )
+
+    # Try splitting
+    try:
+        result = shapely_split(poly, extended)
+        pieces = [g for g in result.geoms
+                  if isinstance(g, Polygon) and g.area > 100]
+    except Exception:
+        pieces = []
+
+    # Fallback: buffer-based split
+    if len(pieces) < 2:
+        try:
+            strip = extended.buffer(1.0)
+            remainder = poly.difference(strip)
+            if isinstance(remainder, MultiPolygon):
+                pieces = [g for g in remainder.geoms
+                          if isinstance(g, Polygon) and g.area > 100]
+            else:
+                return None
+        except Exception:
+            return None
+
+    if len(pieces) < 2:
+        return None
+
+    # Return the two largest pieces
+    pieces.sort(key=lambda p: p.area, reverse=True)
+    return pieces[0], pieces[1]
 
 
 # ---------------------------------------------------------------------------
@@ -967,16 +1420,37 @@ def cross_validate(
             report.boundary_mismatches.append(msg)
             report.warnings.append(msg)
 
-    # 2. Vein Y ordering: L1.y < L2.y < L3.y < L4.y < L5.y
-    long_names = ["L1", "L2", "L3", "L4", "L5"]
+    # 2. Full VEIN_Y_ORDER check (including crossveins)
     prev_y = -float("inf")
-    for name in long_names:
+    prev_name = None
+    for name in VEIN_Y_ORDER:
         if name in vein_map:
             y = vein_map[name].y_centroid_norm
             if y < prev_y:
-                msg = f"Vein ordering violation: {name} (Y={y:.2f}) is anterior to previous (Y={prev_y:.2f})"
+                msg = (
+                    f"Vein ordering violation: {name} (Y={y:.2f}) is anterior "
+                    f"to {prev_name} (Y={prev_y:.2f})"
+                )
                 report.warnings.append(msg)
             prev_y = y
+            prev_name = name
+
+    # 2b. Crossvein connectivity: verify crossveins are near their expected longitudinals
+    cv_proximity_threshold = 50.0  # pixels
+    for cv_name, (long_a, long_b) in CROSSVEIN_CONNECTIONS.items():
+        if cv_name not in vein_map:
+            continue
+        cv_line = vein_map[cv_name].line
+        for long_name in (long_a, long_b):
+            if long_name not in vein_map:
+                continue
+            dist = cv_line.distance(vein_map[long_name].line)
+            if dist > cv_proximity_threshold:
+                msg = (
+                    f"Crossvein connectivity: {cv_name} is {dist:.0f}px from "
+                    f"{long_name} (expected <{cv_proximity_threshold:.0f}px)"
+                )
+                report.warnings.append(msg)
 
     # 3. Region area check
     total_area = sum(polygons[i].area for i in poly_names)
@@ -1047,6 +1521,11 @@ def identify_veins_and_regions(
         intervein_polygons, vein_map, wing_bbox,
     )
 
+    # 3e''. Split merged polygons where pixel classifier merged regions
+    poly_names, intervein_polygons = split_merged_polygons(
+        poly_names, intervein_polygons, vein_map, wing_bbox,
+    )
+
     # 3f. Cross-validate
     validation = cross_validate(
         vein_map, poly_names, centerlines, intervein_polygons, wing_bbox,
@@ -1057,6 +1536,7 @@ def identify_veins_and_regions(
             validation.warnings.append(f"Shape/{vein_id}: {w}")
 
     result.poly_names = poly_names
+    result.polygons = intervein_polygons
     result.validation_report = validation
 
     # Build VeinAssignment objects from vein_map
@@ -1092,3 +1572,116 @@ def identify_veins_and_regions(
     result.assignments = assignments
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 3h. Ground-Truth Diagnostic Validation
+# ---------------------------------------------------------------------------
+
+def _normalize_region_name(name: str) -> str:
+    """Normalize a ground-truth region name to internal format."""
+    # Lowercase, replace spaces with underscores, ensure _cell suffix
+    normalized = name.strip().lower().replace(" ", "_")
+    if not normalized.endswith("_cell"):
+        normalized += "_cell"
+    return normalized
+
+
+def validate_regions_against_ground_truth(
+    poly_names: dict[int, str],
+    polygons: list[Polygon],
+    expected_geojson_path: Path,
+) -> dict:
+    """Compare named regions against ground-truth expected overlay.
+
+    Returns a dict with per-polygon results and overall accuracy.
+    """
+    # Load expected overlay GeoJSON
+    with open(expected_geojson_path) as f:
+        data = json.load(f)
+
+    # Parse expected regions: list of (name, Polygon)
+    expected_regions: list[tuple[str, Polygon]] = []
+    for feature in data.get("features", []):
+        geom = feature.get("geometry", {})
+        props = feature.get("properties", {})
+        classification = props.get("classification", {})
+        raw_name = classification.get("name", "")
+
+        if geom.get("type") != "Polygon":
+            continue
+        if not raw_name:
+            continue
+
+        coords = geom["coordinates"]
+        if not coords:
+            continue
+        try:
+            poly = Polygon(coords[0])
+            if poly.is_valid and not poly.is_empty:
+                norm_name = _normalize_region_name(raw_name)
+                expected_regions.append((norm_name, poly))
+        except Exception:
+            continue
+
+    if not expected_regions:
+        logger.warning("No valid expected regions found in %s", expected_geojson_path)
+        return {"accuracy": 0.0, "per_polygon": {}, "n_expected": 0}
+
+    # For each input polygon, find the best IoU match among expected regions
+    results: dict[int, dict] = {}
+    correct = 0
+    validated = 0  # polygons that have a GT match (IoU > threshold)
+    iou_threshold = 0.05  # minimum IoU to consider a GT match exists
+
+    for idx, our_name in poly_names.items():
+        if idx >= len(polygons):
+            continue
+        poly = polygons[idx]
+
+        best_iou = 0.0
+        best_expected_name = ""
+        for exp_name, exp_poly in expected_regions:
+            try:
+                intersection = poly.intersection(exp_poly).area
+                union = poly.union(exp_poly).area
+                iou = intersection / union if union > 0 else 0.0
+            except Exception:
+                iou = 0.0
+
+            if iou > best_iou:
+                best_iou = iou
+                best_expected_name = exp_name
+
+        if best_iou < iou_threshold:
+            # No GT region overlaps this polygon — can't validate it
+            results[idx] = {
+                "our_name": our_name,
+                "expected_name": "",
+                "iou": best_iou,
+                "match": None,  # not validatable
+                "area": poly.area,
+            }
+        else:
+            match = (our_name == best_expected_name)
+            validated += 1
+            if match:
+                correct += 1
+            results[idx] = {
+                "our_name": our_name,
+                "expected_name": best_expected_name,
+                "iou": best_iou,
+                "match": match,
+                "area": poly.area,
+            }
+
+    accuracy = correct / validated if validated > 0 else 0.0
+
+    return {
+        "accuracy": accuracy,
+        "correct": correct,
+        "validated": validated,
+        "total": len(poly_names),
+        "per_polygon": results,
+        "n_expected": len(expected_regions),
+    }

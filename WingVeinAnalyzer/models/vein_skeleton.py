@@ -17,7 +17,7 @@ def extract_veins_from_mask(
     vein_polygons: list[Polygon],
     intervein_polygons: list[Polygon],
     image_shape: tuple[int, int],
-) -> dict[tuple[int, int], LineString]:
+) -> tuple[dict[tuple[int, int], LineString], np.ndarray, np.ndarray]:
     """Extract vein centerlines using Voronoi partition of vein mask.
 
     Uses distance_transform_edt to assign every pixel to its nearest
@@ -35,9 +35,10 @@ def extract_veins_from_mask(
 
     Returns
     -------
-    dict[(poly_idx_a, poly_idx_b), LineString]
-        One centerline per adjacent polygon pair found in the vein mask.
-        Keys are sorted (a < b) polygon index pairs.
+    (centerlines, nearest_labels, vein_mask)
+        centerlines: dict[(poly_idx_a, poly_idx_b), LineString]
+        nearest_labels: Voronoi label array (for reuse by edge boundary extraction)
+        vein_mask: binary vein mask array
     """
     h, w = image_shape
 
@@ -87,7 +88,7 @@ def extract_veins_from_mask(
             centerlines[pair] = line
 
     logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
-    return centerlines
+    return centerlines, nearest_labels, vein_mask
 
 
 def extract_anterior_boundary(
@@ -174,6 +175,132 @@ def extract_anterior_boundary(
         ant_idx, len(pixels), line.length,
     )
     return (ant_idx, line)
+
+
+def extract_edge_boundary_veins(
+    vein_polygons: list[Polygon],
+    intervein_polygons: list[Polygon],
+    image_shape: tuple[int, int],
+    nearest_labels: np.ndarray,
+    vein_mask: np.ndarray,
+    existing_centerlines: dict[tuple[int, int], LineString],
+    min_length: float = 100.0,
+    max_length: float = 4000.0,
+) -> dict[tuple[int, int], LineString]:
+    """Extract vein segments at the edge of the vein mask.
+
+    Specifically targets vein-mask-edge regions that are NOT already
+    captured by inter-polygon boundaries: the Voronoi centerline between
+    a polygon's region and the background within the vein mask.
+
+    Only keeps segments that are plausibly veins (not the entire wing
+    perimeter): length between min_length and max_length, reasonably
+    narrow band width.
+
+    Parameters
+    ----------
+    nearest_labels, vein_mask : pre-computed from extract_veins_from_mask
+    existing_centerlines : already extracted inter-polygon boundaries
+
+    Returns dict keyed as (poly_idx, -1) where -1 = background.
+    """
+    if not vein_polygons or not intervein_polygons:
+        return {}
+
+    h, w = image_shape
+
+    # Find vein-mask edge pixels: vein_mask pixels whose neighbor is outside vein_mask
+    padded_vm = np.pad(vein_mask, 1, mode='constant', constant_values=0)
+    shifts_vm = [
+        padded_vm[0:-2, 1:-1],  # up
+        padded_vm[2:,   1:-1],  # down
+        padded_vm[1:-1, 0:-2],  # left
+        padded_vm[1:-1, 2:],    # right
+    ]
+    at_vein_edge = np.zeros((h, w), dtype=bool)
+    for sv in shifts_vm:
+        at_vein_edge |= (sv == 0)
+    at_vein_edge &= (vein_mask > 0)
+
+    # Exclude pixels that are at a boundary between two labeled regions
+    # (those are already captured by _extract_boundary_pixels)
+    padded_nl = np.pad(nearest_labels, 1, mode='constant', constant_values=0)
+    center_nl = padded_nl[1:-1, 1:-1]
+    has_diff_neighbor = np.zeros((h, w), dtype=bool)
+    for shift in [
+        padded_nl[0:-2, 1:-1], padded_nl[2:, 1:-1],
+        padded_nl[1:-1, 0:-2], padded_nl[1:-1, 2:],
+    ]:
+        has_diff_neighbor |= ((shift != center_nl) & (shift > 0) & (center_nl > 0))
+
+    # Edge-only boundary pixels: at vein mask edge AND NOT between two polygons
+    edge_boundary = at_vein_edge & ~has_diff_neighbor
+
+    # Use connected components to separate distinct segments (8-connectivity)
+    structure = ndimage.generate_binary_structure(2, 2)
+    labeled_cc, n_cc = ndimage.label(edge_boundary, structure=structure)
+
+    result: dict[tuple[int, int], LineString] = {}
+
+    for cc_id in range(1, n_cc + 1):
+        cc_ys, cc_xs = np.where(labeled_cc == cc_id)
+        if len(cc_ys) < 10:
+            continue
+
+        # Determine which polygon label dominates this component
+        labels_here = nearest_labels[cc_ys, cc_xs]
+        # Use the most common label
+        unique_labels, counts = np.unique(labels_here, return_counts=True)
+        dominant_label = int(unique_labels[counts.argmax()])
+        if dominant_label == 0:
+            continue
+
+        # Compute band width: if pixels span a wide area, it's the wing perimeter
+        y_span = float(cc_ys.max() - cc_ys.min())
+        x_span = float(cc_xs.max() - cc_xs.min())
+        n_pixels = len(cc_ys)
+
+        # Estimate band width as area / max_span
+        max_span = max(x_span, y_span, 1.0)
+        band_width = n_pixels / max_span
+
+        # Skip wide bands (these are wing perimeter, not veins)
+        # Vein edges are typically 2-10 pixels wide
+        if band_width > 30:
+            continue
+
+        pixels = list(zip(cc_ys.tolist(), cc_xs.tolist()))
+        line = _trace_pixels_to_line(pixels)
+        if line is None:
+            continue
+
+        if line.length < min_length or line.length > max_length:
+            continue
+
+        poly_idx = dominant_label - 1
+        key = (poly_idx, -1)
+
+        # Check if this segment is near an existing centerline endpoint
+        # (should be a continuation of an existing vein)
+        near_existing = False
+        for cl in existing_centerlines.values():
+            if line.distance(cl) < 50:
+                near_existing = True
+                break
+
+        if not near_existing:
+            continue
+
+        if key not in result or line.length > result[key].length:
+            result[key] = line
+            logger.info(
+                "Edge boundary vein: polygon %d, %d pixels, length=%.0f, "
+                "band_width=%.1f",
+                poly_idx, n_pixels, line.length, band_width,
+            )
+
+    logger.info("Extracted %d edge boundary vein segments", len(result))
+    return result
 
 
 def _fill_polygon(

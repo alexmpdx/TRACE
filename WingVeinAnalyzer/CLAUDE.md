@@ -11,8 +11,9 @@ WingVeinAnalyzer/
 ├── models/
 │   ├── geojson_parser.py      # Parse GeoJSON → typed dataclasses
 │   ├── vein_graph.py          # Graph from polygon boundaries or LineString intersections
-│   ├── vein_labeler.py        # Topology-based vein identity assignment
-│   ├── vein_map.py            # Static Drosophila vein topology rules + colors
+│   ├── vein_identifier.py     # Geometry-based vein classification + region naming + cross-validation
+│   ├── vein_labeler.py        # Topology-based vein identity assignment (used by fallback pipeline)
+│   ├── vein_map.py            # Static Drosophila vein topology rules, priors, colors
 │   ├── vein_skeleton.py       # Voronoi-based centerline extraction from vein mask
 │   └── wing_geometry.py       # Outline, hinge, intervein partitioning, compartments
 ├── controllers/
@@ -23,7 +24,7 @@ WingVeinAnalyzer/
 │   └── results_view.py        # CSV export with all measurement columns
 ├── utils/
 │   └── skeleton_utils.py      # Flip detection helpers
-├── tests/
+├── test_data/                 # Test wings (testwing1, testwing2, testwing3)
 ├── CLAUDE.md
 └── requirements.txt
 ```
@@ -80,17 +81,17 @@ Per-vein lengths, crossvein distance, wing length/width, total area, intervein a
 
 ### Polygon mode (current):
 1. `geojson_parser.parse_geojson()` — extract intervein Polygons + vein mask Polygons
-2a. **If vein mask present**: `vein_skeleton.extract_veins_from_mask()` — Voronoi partition → centerlines
+2a. **If vein mask present**: `vein_skeleton.extract_veins_from_mask()` — Voronoi partition → centerlines → `vein_identifier.identify_veins_and_regions()` — geometry-based classification
 2b. **Fallback**: `vein_graph.build_graph_from_polygons()` → `vein_labeler.assign_veins_from_polygons()`
 3. `measurement_controller.compile_results()` — apply scale calibration
-5. `wing_geometry.build_wing_outline()` — union of buffered polygons
-6. `wing_geometry.detect_hinge_landmarks()` — find subcostal break + alula notch
-7. `wing_geometry.remove_hinge()` — split along hinge line, keep distal blade
-8. `wing_geometry.partition_intervein_spaces()` — clip polygons to wing blade
-9. `wing_geometry.compute_compartments()` — split along L4 into anterior/posterior
-10. `measurement_controller.compute_measurements()` — all areas and distances
-11. `overlay_view.render_skeleton_overlay()` + `render_rainbow_overlay()` — output images
-12. `results_view.export_csv()` — one row per wing with all measurements
+4. `wing_geometry.build_wing_outline()` — union of buffered polygons (including vein polygons for full wing tip coverage)
+5. `wing_geometry.detect_hinge_landmarks()` — find subcostal break + alula notch
+6. `wing_geometry.remove_hinge()` — split along hinge line, keep distal blade
+7. `wing_geometry.partition_intervein_spaces()` — clip polygons to wing blade
+8. `wing_geometry.compute_compartments()` — split along L4 into anterior/posterior
+9. `measurement_controller.compute_measurements()` — all areas and distances
+10. `overlay_view.render_skeleton_overlay()` + `render_rainbow_overlay()` — output images
+11. `results_view.export_csv()` — one row per wing with all measurements
 
 ### LineString mode (future):
 1. Parse GeoJSON veins → `build_graph_from_veins()` → `assign_veins()` → overlays + CSV
@@ -102,12 +103,20 @@ Per-vein lengths, crossvein distance, wing length/width, total area, intervein a
 | marginal_cell | L1 – L2 | salmon |
 | submarginal_cell | L2 – L3 | peach |
 | 1st_basal_cell | L3 – L4 (proximal to ACV) | blue |
-| discal_cell | L3 – L4 (distal to ACV) | green |
-| 2nd_posterior_cell | L4 – L5 | cyan |
+| 1st_posterior_cell | L3 – L4 (distal to ACV) | olive/light green |
+| discal_cell | L4 – L5 (proximal to PCV) | green |
+| 2nd_posterior_cell | L4 – L5 (distal to PCV) | cyan |
 | 3rd_posterior_cell | posterior to L5 | purple |
 
-## Vein Identification (polygon mode)
-Veins are identified by which intervein regions they separate (defined in `VEIN_BOUNDARIES` in vein_map.py). The costa is extracted as the anterior margin of the marginal cell polygon.
+## Vein Identification (vein_identifier.py)
+The vein-mask-primary pipeline uses geometry-based classification:
+1. **Junction detection**: find triple junctions where 3+ centerline segments converge (snap radius 30px)
+2. **Segment merging**: merge collinear segments at junctions using tangent continuity. Orientation guard prevents merging longitudinals (<25°) with crossveins (>55°)
+3. **Sharp-turn splitting**: split merged paths at direction changes >70° (catches merged crossvein+longitudinal artifacts)
+4. **Classification**: crossveins identified FIRST (steep orientation >60°, length <15% wing span). Longitudinals assigned via combinatorial scoring: 0.45×Y-position + 0.30×length + 0.25×crossvein-proximity. Post-processing ACV-based L4/L5 swap check
+5. **Region naming**: regions named by which veins bound each polygon (using `segment_keys` from MergedPaths → `VEIN_BOUNDARIES` lookup). Position validation catches Y/X ordering violations
+6. **Cross-validation**: boundary consistency, vein Y-ordering, crossvein connectivity, area outliers
+7. Costa extracted separately as the anterior margin of the marginal cell polygon
 
 ## Scale Calibration
 Optional. Passed as `microns_per_pixel: float | None` to `run_pipeline()`.

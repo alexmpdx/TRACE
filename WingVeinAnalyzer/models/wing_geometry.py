@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import linemerge, split, unary_union
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,16 +34,25 @@ class HingeLandmarks:
 def build_wing_outline(
     polygons: list[Polygon],
     buffer_dist: float = 20.0,
+    vein_polygons: Optional[list[Polygon]] = None,
 ) -> WingOutline:
-    """Build a wing outline from the union of intervein polygons.
+    """Build a wing outline from the union of intervein + vein polygons.
 
     Buffers each polygon slightly to bridge the vein gaps, then takes
-    the union and extracts the outer boundary.
+    the union and extracts the outer boundary.  When vein_polygons are
+    provided, they are included with a smaller buffer to extend the
+    outline to the full wing tip where vein tissue exists.
     """
     if not polygons:
         return WingOutline(polygon=Polygon())
 
     buffered = [p.buffer(buffer_dist) for p in polygons]
+
+    # Include vein polygons with smaller buffer to capture distal wing tip
+    if vein_polygons:
+        for vp in vein_polygons:
+            buffered.append(vp.buffer(5.0))
+
     union = unary_union(buffered)
 
     # Extract the largest polygon from the union
@@ -55,6 +67,50 @@ def build_wing_outline(
     return WingOutline(polygon=outline_poly)
 
 
+def _detect_hinge_side(
+    polygons: list[Polygon],
+    poly_names: dict[int, str],
+) -> str:
+    """Detect whether the hinge is on the left or right side of the image.
+
+    The hinge is the proximal end where small regions (1st_basal_cell,
+    costal_cell) cluster.  Returns "left" or "right".
+    """
+    proximal_regions = {"1st_basal_cell", "costal_cell", "discal_cell"}
+    distal_regions = {"3rd_posterior_cell", "2nd_posterior_cell", "marginal_cell"}
+
+    proximal_xs: list[float] = []
+    distal_xs: list[float] = []
+    for idx, name in poly_names.items():
+        if idx >= len(polygons):
+            continue
+        cx = polygons[idx].centroid.x
+        if name in proximal_regions:
+            proximal_xs.append(cx)
+        elif name in distal_regions:
+            distal_xs.append(cx)
+
+    if proximal_xs and distal_xs:
+        prox_mean = np.mean(proximal_xs)
+        dist_mean = np.mean(distal_xs)
+        side = "left" if prox_mean < dist_mean else "right"
+        logger.info("Hinge side detected: %s (proximal X=%.0f, distal X=%.0f)",
+                     side, prox_mean, dist_mean)
+        return side
+
+    # Fallback: use smallest polygon centroids vs largest
+    sorted_by_area = sorted(
+        [(idx, polygons[idx]) for idx in poly_names if idx < len(polygons)],
+        key=lambda t: t[1].area,
+    )
+    if len(sorted_by_area) >= 4:
+        small_x = np.mean([polygons[i].centroid.x for i, _ in sorted_by_area[:2]])
+        large_x = np.mean([polygons[i].centroid.x for i, _ in sorted_by_area[-2:]])
+        return "left" if small_x < large_x else "right"
+
+    return "left"  # default assumption
+
+
 def detect_hinge_landmarks(
     outline: WingOutline,
     polygons: list[Polygon],
@@ -63,6 +119,7 @@ def detect_hinge_landmarks(
     """Detect the subcostal break and alula notch to define the hinge line.
 
     The hinge line separates the wing blade from the hinge/thorax region.
+    Automatically detects whether the hinge is on the left or right side.
     """
     if outline.polygon.is_empty:
         return None
@@ -70,11 +127,16 @@ def detect_hinge_landmarks(
     wing_ring = np.array(outline.polygon.exterior.coords)
     min_x = wing_ring[:, 0].min()
     max_x = wing_ring[:, 0].max()
-    wing_span = max_x - min_x
+
+    hinge_side = _detect_hinge_side(polygons, poly_names)
+    # When hinge is on the right, "proximal" = max-X; otherwise min-X
+    use_max_x = (hinge_side == "right")
+
+    def _find_proximal_x(pts: np.ndarray) -> int:
+        """Return index of the most proximal (hinge-side) point."""
+        return int(pts[:, 0].argmax() if use_max_x else pts[:, 0].argmin())
 
     # Find the subcostal break: most proximal point of anterior margin
-    # This is where the costa starts, typically in the upper-left area
-    # Use the proximal (leftmost) boundary of the most anterior polygon
     costal_idx = None
     marginal_idx = None
     for idx, name in poly_names.items():
@@ -83,30 +145,27 @@ def detect_hinge_landmarks(
         elif name == "marginal_cell":
             marginal_idx = idx
 
-    # Subcostal break: leftmost extent of the marginal/costal cell
     target = marginal_idx if marginal_idx is not None else costal_idx
     if target is not None:
         ring = np.array(polygons[target].exterior.coords)
-        # Find point with minimum X in upper region
         upper_mask = ring[:, 1] < np.median(ring[:, 1])
         if upper_mask.any():
             upper_pts = ring[upper_mask]
-            min_x_idx = upper_pts[:, 0].argmin()
-            subcostal = (float(upper_pts[min_x_idx, 0]), float(upper_pts[min_x_idx, 1]))
+            idx_found = _find_proximal_x(upper_pts)
+            subcostal = (float(upper_pts[idx_found, 0]), float(upper_pts[idx_found, 1]))
         else:
-            min_x_idx = ring[:, 0].argmin()
-            subcostal = (float(ring[min_x_idx, 0]), float(ring[min_x_idx, 1]))
+            idx_found = _find_proximal_x(ring)
+            subcostal = (float(ring[idx_found, 0]), float(ring[idx_found, 1]))
     else:
-        # Fallback: upper-left region of wing outline
         upper = wing_ring[wing_ring[:, 1] < np.percentile(wing_ring[:, 1], 30)]
         if len(upper) > 0:
-            min_x_idx = upper[:, 0].argmin()
-            subcostal = (float(upper[min_x_idx, 0]), float(upper[min_x_idx, 1]))
+            idx_found = _find_proximal_x(upper)
+            subcostal = (float(upper[idx_found, 0]), float(upper[idx_found, 1]))
         else:
-            subcostal = (float(min_x), float(wing_ring[:, 1].min()))
+            px = float(max_x) if use_max_x else float(min_x)
+            subcostal = (px, float(wing_ring[:, 1].min()))
 
-    # Alula notch: find the most proximal indentation on the posterior margin
-    # This is typically a concavity in the lower-left region of the wing
+    # Alula notch: most proximal indentation on the posterior margin
     posterior_idx = None
     for idx, name in poly_names.items():
         if name == "3rd_posterior_cell":
@@ -114,26 +173,27 @@ def detect_hinge_landmarks(
 
     if posterior_idx is not None:
         ring = np.array(polygons[posterior_idx].exterior.coords)
-        # Lower-left region
         lower_mask = ring[:, 1] > np.median(ring[:, 1])
         if lower_mask.any():
             lower_pts = ring[lower_mask]
-            # Find the leftmost point in the lower region
-            proximal_idx = lower_pts[:, 0].argmin()
-            alula = (float(lower_pts[proximal_idx, 0]), float(lower_pts[proximal_idx, 1]))
+            idx_found = _find_proximal_x(lower_pts)
+            alula = (float(lower_pts[idx_found, 0]), float(lower_pts[idx_found, 1]))
         else:
-            proximal_idx = ring[:, 0].argmin()
-            alula = (float(ring[proximal_idx, 0]), float(ring[proximal_idx, 1]))
+            idx_found = _find_proximal_x(ring)
+            alula = (float(ring[idx_found, 0]), float(ring[idx_found, 1]))
     else:
-        # Fallback: lower-left of wing outline
         lower = wing_ring[wing_ring[:, 1] > np.percentile(wing_ring[:, 1], 70)]
         if len(lower) > 0:
-            proximal_idx = lower[:, 0].argmin()
-            alula = (float(lower[proximal_idx, 0]), float(lower[proximal_idx, 1]))
+            idx_found = _find_proximal_x(lower)
+            alula = (float(lower[idx_found, 0]), float(lower[idx_found, 1]))
         else:
-            alula = (float(min_x), float(wing_ring[:, 1].max()))
+            px = float(max_x) if use_max_x else float(min_x)
+            alula = (px, float(wing_ring[:, 1].max()))
 
     hinge_line = LineString([subcostal, alula])
+
+    logger.info("Hinge landmarks: subcostal=(%.0f, %.0f), alula=(%.0f, %.0f), side=%s",
+                subcostal[0], subcostal[1], alula[0], alula[1], hinge_side)
 
     return HingeLandmarks(
         subcostal_break=subcostal,
@@ -145,14 +205,19 @@ def detect_hinge_landmarks(
 def remove_hinge(
     outline: WingOutline,
     landmarks: HingeLandmarks,
+    polygons: list[Polygon] = (),
+    poly_names: dict[int, str] = {},
 ) -> Polygon:
     """Remove the hinge region by splitting the wing along the hinge line.
 
-    Returns the distal portion (larger x centroid) of the wing.
+    Returns the distal portion of the wing.  Uses hinge-side detection
+    to determine which piece to keep.
     """
     wing = outline.polygon
     if wing.is_empty:
         return wing
+
+    hinge_side = _detect_hinge_side(list(polygons), poly_names) if polygons else "left"
 
     # Extend the hinge line beyond the wing boundary
     p1 = np.array(landmarks.subcostal_break)
@@ -181,15 +246,18 @@ def remove_hinge(
     if not pieces:
         return wing
 
-    # Keep the distal piece (larger x centroid) and filter out tiny fragments
+    # Keep the distal piece and filter out tiny fragments
     total_area = wing.area
     valid_pieces = [p for p in pieces if isinstance(p, Polygon) and p.area > total_area * 0.05]
 
     if not valid_pieces:
         return wing
 
-    # Return piece with largest x centroid (distal)
-    return max(valid_pieces, key=lambda p: p.centroid.x)
+    # Distal = opposite side from hinge
+    if hinge_side == "right":
+        return min(valid_pieces, key=lambda p: p.centroid.x)
+    else:
+        return max(valid_pieces, key=lambda p: p.centroid.x)
 
 
 def partition_intervein_spaces(
