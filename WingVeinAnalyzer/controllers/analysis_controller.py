@@ -28,8 +28,10 @@ from WingVeinAnalyzer.models.vein_labeler import (
     _extract_costa,
 )
 from WingVeinAnalyzer.models.vein_identifier import (
+    VeinValidationReport,
     identify_veins_and_regions,
     validate_regions_against_ground_truth,
+    validate_veins_against_ground_truth,
 )
 from WingVeinAnalyzer.models.vein_skeleton import (
     extract_anterior_boundary,
@@ -122,6 +124,19 @@ def _run_polygon_pipeline(
     import logging
     logger = logging.getLogger(__name__)
 
+    # Set up file handler to capture pipeline log
+    diag_dir = output_dir / "diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    log_path = diag_dir / "pipeline.log"
+    file_handler = logging.FileHandler(str(log_path), mode="w")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    )
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+    logger.info("Pipeline log: %s", log_path)
+
     # Compute wing bounding box
     all_bounds = [p.bounds for p in polygons]
     wing_bbox = (
@@ -156,6 +171,7 @@ def _run_polygon_pipeline(
         _run_ground_truth_validation(
             geojson_path, poly_names, polygons, logger,
             image_shape=image.shape, output_dir=output_dir,
+            assignments=assignments,
         )
 
         # Add costa only if costal region exists
@@ -224,6 +240,7 @@ def _run_polygon_pipeline(
         _run_ground_truth_validation(
             geojson_path, poly_names, polygons, logger,
             image_shape=image.shape, output_dir=output_dir,
+            assignments=assignments,
         )
 
         # Add costa only if costal region exists
@@ -322,6 +339,11 @@ def _run_polygon_pipeline(
     )
     result.csv_path = csv_path
 
+    # Remove file handler to avoid duplicate logging in subsequent runs
+    root_logger.removeHandler(file_handler)
+    file_handler.close()
+    logger.info("Pipeline log saved to %s", log_path)
+
     return result
 
 
@@ -336,60 +358,153 @@ def _run_ground_truth_validation(
     logger,
     image_shape: tuple[int, ...] = (),
     output_dir: Optional[Path] = None,
+    assignments: Optional[list[VeinAssignment]] = None,
 ) -> None:
-    """Check for expected overlay file and run ground-truth validation."""
+    """Check for expected overlay files and run ground-truth validation."""
     if geojson_path is None:
         return
 
     geojson_dir = geojson_path.parent
     stem = geojson_path.stem
+
+    # --- Region validation ---
     expected_path = geojson_dir / f"{stem}_expected_intervein_overlay.geojson"
+    region_report: Optional[dict] = None
 
-    if not expected_path.exists():
-        return
-
-    logger.info("Found ground-truth overlay: %s", expected_path.name)
-    report = validate_regions_against_ground_truth(
-        poly_names, polygons, expected_path,
-    )
-
-    accuracy = report.get("accuracy", 0.0)
-    correct = report.get("correct", 0)
-    validated = report.get("validated", 0)
-    total = report.get("total", 0)
-    logger.info(
-        "Ground-truth accuracy: %d/%d validated (%.0f%%), %d total polygons",
-        correct, validated, accuracy * 100, total,
-    )
-
-    for idx, info in sorted(report.get("per_polygon", {}).items()):
-        if info["match"] is None:
-            logger.info(
-                "  P%d: %s — no GT region found (not validated)",
-                idx, info["our_name"],
-            )
-        elif info["match"]:
-            logger.info(
-                "  P%d: %s ✓ (IoU=%.3f)",
-                idx, info["our_name"], info["iou"],
-            )
-        else:
-            logger.warning(
-                "  P%d: %s ✗ expected %s (IoU=%.3f)",
-                idx, info["our_name"], info["expected_name"], info["iou"],
-            )
-
-    # Save mask PNGs if we have image dimensions
-    if len(image_shape) >= 2 and output_dir is not None:
-        diag_dir = output_dir / "diagnostics"
-        diag_dir.mkdir(parents=True, exist_ok=True)
-        h, w = image_shape[:2]
-        _save_region_mask(
-            poly_names, polygons, (h, w), diag_dir / "region_mask.png",
+    if expected_path.exists():
+        logger.info("Found ground-truth overlay: %s", expected_path.name)
+        region_report = validate_regions_against_ground_truth(
+            poly_names, polygons, expected_path,
         )
-        _save_ground_truth_mask(
-            expected_path, (h, w), diag_dir / "ground_truth_mask.png",
+
+        accuracy = region_report.get("accuracy", 0.0)
+        correct = region_report.get("correct", 0)
+        validated = region_report.get("validated", 0)
+        total = region_report.get("total", 0)
+        logger.info(
+            "Ground-truth accuracy: %d/%d validated (%.0f%%), %d total polygons",
+            correct, validated, accuracy * 100, total,
         )
+
+        for idx, info in sorted(region_report.get("per_polygon", {}).items()):
+            if info["match"] is None:
+                logger.info(
+                    "  P%d: %s — no GT region found (not validated)",
+                    idx, info["our_name"],
+                )
+            elif info["match"]:
+                logger.info(
+                    "  P%d: %s ✓ (IoU=%.3f, area=%.0fpx²)",
+                    idx, info["our_name"], info["iou"], info["area"],
+                )
+            else:
+                logger.warning(
+                    "  P%d: %s ✗ expected %s (IoU=%.3f, area=%.0fpx²)",
+                    idx, info["our_name"], info["expected_name"],
+                    info["iou"], info["area"],
+                )
+
+        # Save mask PNGs if we have image dimensions
+        if len(image_shape) >= 2 and output_dir is not None:
+            diag_dir = output_dir / "diagnostics"
+            diag_dir.mkdir(parents=True, exist_ok=True)
+            h, w = image_shape[:2]
+            _save_region_mask(
+                poly_names, polygons, (h, w), diag_dir / "region_mask.png",
+            )
+            _save_ground_truth_mask(
+                expected_path, (h, w), diag_dir / "ground_truth_mask.png",
+            )
+
+    # --- Vein skeleton validation ---
+    skeleton_path = geojson_dir / f"{stem}_expected_skeleton_overlay.geojson"
+    vein_report: Optional[VeinValidationReport] = None
+
+    if skeleton_path.exists() and assignments is not None:
+        logger.info("Found ground-truth skeleton: %s", skeleton_path.name)
+        vein_report = validate_veins_against_ground_truth(
+            assignments, skeleton_path,
+        )
+
+        for m in vein_report.per_vein:
+            logger.info(
+                "  %s: Hausdorff=%.1fpx, mean_dev=%.1fpx, P95=%.1fpx, "
+                "coverage=%.1f%%, GT=%.0fpx, pred=%.0fpx",
+                m.vein_name, m.hausdorff_px, m.mean_deviation_px,
+                m.p95_deviation_px, m.coverage_ratio * 100,
+                m.gt_length_px, m.pred_length_px,
+            )
+
+    # --- Write combined validation report ---
+    if output_dir is not None and (region_report is not None or vein_report is not None):
+        _write_validation_report(
+            output_dir, region_report, vein_report, poly_names, polygons,
+        )
+
+
+def _write_validation_report(
+    output_dir: Path,
+    region_report: Optional[dict],
+    vein_report: Optional[VeinValidationReport],
+    poly_names: dict[int, str],
+    polygons: list[Polygon],
+) -> None:
+    """Write a combined validation report with region + vein sections."""
+    diag_dir = output_dir / "diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    report_path = diag_dir / "validation_report.txt"
+
+    lines: list[str] = []
+    lines.append("=" * 60)
+    lines.append("VALIDATION REPORT")
+    lines.append("=" * 60)
+
+    # --- Region section ---
+    lines.append("")
+    lines.append("--- Region Identification ---")
+    if region_report is not None:
+        accuracy = region_report.get("accuracy", 0.0)
+        correct = region_report.get("correct", 0)
+        validated = region_report.get("validated", 0)
+        lines.append(f"Accuracy: {correct}/{validated} ({accuracy:.0%})")
+        lines.append("")
+        lines.append(f"{'Poly':<6} {'Name':<25} {'Expected':<25} {'IoU':<8} {'Area (px²)':<12} {'Match'}")
+        lines.append("-" * 90)
+        for idx, info in sorted(region_report.get("per_polygon", {}).items()):
+            match_str = "—" if info["match"] is None else ("✓" if info["match"] else "✗")
+            lines.append(
+                f"P{idx:<5} {info['our_name']:<25} {info.get('expected_name', ''):<25} "
+                f"{info['iou']:<8.3f} {info['area']:<12.0f} {match_str}"
+            )
+    else:
+        lines.append("No region ground truth available.")
+
+    # --- Vein section ---
+    lines.append("")
+    lines.append("--- Vein Skeleton ---")
+    if vein_report is not None and vein_report.per_vein:
+        lines.append(
+            f"Matched: {vein_report.matched_count}/{vein_report.total_gt_veins} GT veins, "
+            f"mean Hausdorff={vein_report.mean_hausdorff:.1f}px, "
+            f"mean coverage={vein_report.mean_coverage:.1%}"
+        )
+        lines.append("")
+        lines.append(
+            f"{'Vein':<8} {'Hausdorff':<12} {'Mean Dev':<12} {'P95 Dev':<12} "
+            f"{'Coverage':<10} {'GT len':<10} {'Pred len':<10}"
+        )
+        lines.append("-" * 80)
+        for m in vein_report.per_vein:
+            lines.append(
+                f"{m.vein_name:<8} {m.hausdorff_px:<12.1f} {m.mean_deviation_px:<12.1f} "
+                f"{m.p95_deviation_px:<12.1f} {m.coverage_ratio:<10.1%} "
+                f"{m.gt_length_px:<10.0f} {m.pred_length_px:<10.0f}"
+            )
+    else:
+        lines.append("No vein skeleton ground truth available.")
+
+    lines.append("")
+    report_path.write_text("\n".join(lines))
 
 
 def _save_region_mask(
@@ -452,30 +567,48 @@ def _save_ground_truth_mask(
         classification = props.get("classification", {})
         raw_name = classification.get("name", "")
 
-        if geom.get("type") != "Polygon" or not raw_name:
+        if not raw_name:
             continue
 
-        coords = geom.get("coordinates", [])
-        if not coords:
-            continue
+        geom_type = geom.get("type")
 
-        try:
-            poly = Polygon(coords[0])
-            if not poly.is_valid or poly.is_empty:
-                continue
-        except Exception:
+        # Collect polygons from Polygon or MultiPolygon geometry
+        polys_to_draw: list[Polygon] = []
+        if geom_type == "Polygon":
+            coords = geom.get("coordinates", [])
+            if coords:
+                try:
+                    poly = Polygon(coords[0])
+                    if poly.is_valid and not poly.is_empty:
+                        polys_to_draw.append(poly)
+                except Exception:
+                    pass
+        elif geom_type == "MultiPolygon":
+            for poly_coords in geom.get("coordinates", []):
+                if not poly_coords:
+                    continue
+                try:
+                    poly = Polygon(poly_coords[0])
+                    if poly.is_valid and not poly.is_empty:
+                        polys_to_draw.append(poly)
+                except Exception:
+                    continue
+
+        if not polys_to_draw:
             continue
 
         norm_name = _normalize_region_name(raw_name)
         color = INTERVEIN_COLORS.get(norm_name, (180, 180, 180))
 
-        poly_mask = np.zeros((h, w), dtype=np.uint8)
-        _fill_polygon(poly_mask, poly, 255)
-        mask[poly_mask > 0] = color
+        for poly in polys_to_draw:
+            poly_mask = np.zeros((h, w), dtype=np.uint8)
+            _fill_polygon(poly_mask, poly, 255)
+            mask[poly_mask > 0] = color
 
-        # Label
-        cx = int(poly.centroid.x)
-        cy = int(poly.centroid.y)
+        # Label at centroid of largest polygon
+        largest = max(polys_to_draw, key=lambda p: p.area)
+        cx = int(largest.centroid.x)
+        cy = int(largest.centroid.y)
         cv2.putText(
             mask, norm_name, (cx - 80, cy),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,

@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
+from scipy import ndimage
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 
 from WingVeinAnalyzer.models.vein_labeler import (
@@ -18,6 +20,7 @@ from WingVeinAnalyzer.models.vein_labeler import (
     _extract_costa,
     _merge_vein_lines,
 )
+from WingVeinAnalyzer.models.vein_skeleton import extract_centerline_between_polygons
 from WingVeinAnalyzer.models.vein_map import (
     CROSSVEIN_CONNECTIONS,
     MAX_ANGLE_CHANGE_DEG,
@@ -58,6 +61,39 @@ class MergedPath:
     x_centroid_norm: float = 0.0
     straightness: float = 0.0
     length_px: float = 0.0
+
+
+@dataclass
+class VeinMetrics:
+    """Per-vein accuracy metrics against ground truth."""
+    vein_name: str
+    hausdorff_px: float
+    mean_deviation_px: float
+    p95_deviation_px: float
+    coverage_ratio: float  # fraction of GT within tolerance of predicted
+    gt_length_px: float
+    pred_length_px: float
+
+
+@dataclass
+class VeinValidationReport:
+    """Results of vein centerline validation against ground truth."""
+    per_vein: list[VeinMetrics] = field(default_factory=list)
+    matched_count: int = 0
+    total_gt_veins: int = 0
+    total_pred_veins: int = 0
+    mean_hausdorff: float = 0.0
+    mean_coverage: float = 0.0
+
+
+@dataclass
+class SplitInfo:
+    """Metadata about a polygon split performed by split_merged_polygons()."""
+    orig_idx: int       # index of the original (oversized) polygon
+    new_idx: int        # index of the newly appended polygon
+    orig_name: str      # region name kept by the original polygon
+    new_name: str       # region name assigned to the new polygon
+    separating_vein: str  # vein that separates these two regions
 
 
 @dataclass
@@ -356,10 +392,15 @@ def _try_split_path(
         for i in range(n_steps + 1)
     ]
 
-    # Find the sharpest turn
+    # Find the sharpest turn at a position that can produce a valid split
+    # (both resulting pieces must be >= min_split_length)
     max_angle = 0.0
     max_angle_dist = 0.0
     for i in range(1, len(sample_pts) - 1):
+        dist = (i / n_steps) * line.length
+        if dist < min_split_length or (line.length - dist) < min_split_length:
+            continue  # skip turns too close to ends
+
         dx1 = sample_pts[i].x - sample_pts[i - 1].x
         dy1 = sample_pts[i].y - sample_pts[i - 1].y
         dx2 = sample_pts[i + 1].x - sample_pts[i].x
@@ -371,8 +412,27 @@ def _try_split_path(
 
         if angle_change > max_angle:
             max_angle = angle_change
-            # Distance along the line where the sharp turn occurs
-            max_angle_dist = (i / n_steps) * line.length
+            max_angle_dist = dist
+
+    # If narrow window didn't find a valid split, try wider tangent window
+    # to catch gradual transitions (e.g., crossvein→longitudinal junctions)
+    if max_angle <= angle_threshold_deg:
+        wide_window = 3  # 3× step_dist ≈ 150px
+        for i in range(wide_window, len(sample_pts) - wide_window):
+            dist = (i / n_steps) * line.length
+            if dist < min_split_length or (line.length - dist) < min_split_length:
+                continue
+
+            dx1 = sample_pts[i].x - sample_pts[i - wide_window].x
+            dy1 = sample_pts[i].y - sample_pts[i - wide_window].y
+            dx2 = sample_pts[i + wide_window].x - sample_pts[i].x
+            dy2 = sample_pts[i + wide_window].y - sample_pts[i].y
+            v1 = np.array([dx1, dy1])
+            v2 = np.array([dx2, dy2])
+            angle_change = _angle_between_vectors(v1, v2)
+            if angle_change > max_angle:
+                max_angle = angle_change
+                max_angle_dist = dist
 
     if max_angle <= angle_threshold_deg:
         return [path]
@@ -1199,20 +1259,20 @@ def split_merged_polygons(
     polygons: list[Polygon],
     vein_map: dict[str, MergedPath],
     wing_bbox: tuple[float, float, float, float],
-) -> tuple[dict[int, str], list[Polygon]]:
+    image_shape: tuple[int, int] = (0, 0),
+) -> tuple[dict[int, str], list[Polygon], list[SplitInfo]]:
     """Detect and split input polygons that appear to cover two merged regions.
 
     The pixel classifier may merge adjacent regions into a single polygon
     when a vein is absent or poorly detected.  This function detects
-    oversized polygons and uses identified vein centerlines to split them.
+    oversized polygons and splits them at their narrowest neck using
+    erosion + distance-transform watershed.
 
-    Returns updated (poly_names, polygons) — polygons list may grow.
+    Returns updated (poly_names, polygons, split_infos).
     """
-    from shapely.ops import split as shapely_split
-
     total_area = sum(p.area for p in polygons)
     if total_area == 0:
-        return poly_names, polygons
+        return poly_names, polygons, []
 
     # Find which expected regions have no assigned polygon
     assigned_regions = set(poly_names.values())
@@ -1220,11 +1280,12 @@ def split_merged_polygons(
     missing_regions = all_regions - assigned_regions - {"costal_cell"}
 
     if not missing_regions:
-        return poly_names, polygons
+        return poly_names, polygons, []
 
     # Check each named polygon for area overshoot
     polygons = list(polygons)  # make mutable copy
     splits_made = 0
+    split_infos: list[SplitInfo] = []
 
     for idx in list(poly_names.keys()):
         name = poly_names[idx]
@@ -1237,10 +1298,20 @@ def split_merged_polygons(
             continue
         lo, hi = REGION_AREA_PRIORS[name]
 
-        # Is this polygon significantly oversized?
-        overshoot = area_frac - hi
-        if overshoot < hi * 0.5:
-            # Not oversized enough to suspect a merge
+        # Multi-signal merge detection
+        area_over_max = area_frac > hi
+        if not area_over_max:
+            continue
+
+        # Strong area signal alone is sufficient
+        area_strongly_over = area_frac > hi * 1.3
+
+        # Moderate area + shape-based confirmation
+        solidity = poly.area / poly.convex_hull.area
+        has_poor_shape = solidity < 0.85
+        has_bottleneck = _detect_bottleneck(poly)
+
+        if not (area_strongly_over or has_poor_shape or has_bottleneck):
             continue
 
         logger.info(
@@ -1251,29 +1322,25 @@ def split_merged_polygons(
 
         # Find the best missing region to split off
         best_missing = None
-        best_vein = None
         for missing in missing_regions:
             split_key = (name, missing)
-            vein_name = _REGION_SPLIT_VEINS.get(split_key)
-            if vein_name and vein_name in vein_map:
+            if split_key in _REGION_SPLIT_VEINS:
                 best_missing = missing
-                best_vein = vein_name
                 break
 
-        if best_missing is None or best_vein is None:
+        if best_missing is None:
             logger.info(
-                "  No suitable split vein found for %s → %s",
+                "  No adjacent missing region found for %s → %s",
                 name, missing_regions,
             )
             continue
 
-        # Use the vein centerline to split the polygon
-        vein_line = vein_map[best_vein].line
-        pieces = _split_polygon_by_vein(poly, vein_line)
+        # Use erosion-watershed to split at the polygon's natural neck
+        pieces = _split_polygon_by_erosion(poly, image_shape)
         if pieces is None:
             logger.info(
-                "  Could not split P%d along %s",
-                idx, best_vein,
+                "  Could not split P%d by erosion",
+                idx,
             )
             continue
 
@@ -1302,75 +1369,105 @@ def split_merged_polygons(
         missing_regions.discard(best_missing)
         splits_made += 1
 
+        # Record split metadata for post-split centerline extraction
+        sep_vein = _REGION_SPLIT_VEINS.get((name, best_missing), "")
+        split_infos.append(SplitInfo(
+            orig_idx=idx,
+            new_idx=new_idx,
+            orig_name=name,
+            new_name=best_missing,
+            separating_vein=sep_vein,
+        ))
+
         logger.info(
-            "  Split P%d along %s: %s (%.0f px²) + P%d:%s (%.0f px²)",
-            idx, best_vein, name, orig_piece.area,
-            new_idx, best_missing, new_piece.area,
+            "  Split P%d by erosion: %s (%.0f px²) + P%d:%s (%.0f px²), "
+            "separating vein: %s",
+            idx, name, orig_piece.area,
+            new_idx, best_missing, new_piece.area, sep_vein,
         )
 
     if splits_made:
         logger.info("Split %d merged polygon(s)", splits_made)
 
-    return poly_names, polygons
+    return poly_names, polygons, split_infos
 
 
-def _split_polygon_by_vein(
+def _detect_bottleneck(poly: Polygon, min_part_frac: float = 0.15) -> bool:
+    """Check if polygon has a thin neck that splits on erosion."""
+    for amount in [10, 15, 20, 30]:
+        eroded = poly.buffer(-amount)
+        if eroded.geom_type == 'MultiPolygon':
+            parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
+            if len(parts) >= 2:
+                return True
+    return False
+
+
+def _fill_polygon_np(
+    mask: np.ndarray,
     poly: Polygon,
-    vein_line: LineString,
+    value: int,
+) -> None:
+    """Fill a shapely Polygon into a numpy array using cv2.fillPoly."""
+    coords = np.array(poly.exterior.coords, dtype=np.int32)
+    cv2.fillPoly(mask, [coords], int(value))
+
+
+def _split_polygon_by_erosion(
+    poly: Polygon,
+    image_shape: tuple[int, int],
+    min_part_frac: float = 0.15,
 ) -> Optional[tuple[Polygon, Polygon]]:
-    """Split a polygon using a vein centerline.
-
-    Extends the vein line to ensure it crosses the polygon boundary,
-    then performs the split.  Returns two pieces or None if split fails.
-    """
-    from shapely.ops import split as shapely_split
-
-    # Extend the vein line well beyond the polygon bounds
-    coords = np.array(vein_line.coords)
-    if len(coords) < 2:
+    """Split a polygon at its narrowest neck using erosion + distance transform."""
+    # 1. Find erosion amount that separates into 2+ large parts
+    erode_amount = None
+    parts: list[Polygon] = []
+    for amount in [10, 15, 20, 30, 50]:
+        eroded = poly.buffer(-amount)
+        if eroded.geom_type == 'MultiPolygon':
+            parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
+            if len(parts) >= 2:
+                erode_amount = amount
+                break
+    if erode_amount is None:
         return None
 
-    # Extend start
-    start_dir = coords[0] - coords[min(1, len(coords) - 1)]
-    start_len = np.linalg.norm(start_dir) + 1e-9
-    start_ext = coords[0] + (start_dir / start_len) * 500
+    # 2. Rasterize polygon and eroded seeds
+    h, w = image_shape
+    poly_mask = np.zeros((h, w), dtype=np.uint8)
+    _fill_polygon_np(poly_mask, poly, 1)
 
-    # Extend end
-    end_dir = coords[-1] - coords[max(0, len(coords) - 2)]
-    end_len = np.linalg.norm(end_dir) + 1e-9
-    end_ext = coords[-1] + (end_dir / end_len) * 500
+    seed_map = np.zeros((h, w), dtype=np.int32)
+    parts_sorted = sorted(parts, key=lambda g: g.area, reverse=True)[:2]
+    for i, part in enumerate(parts_sorted):
+        _fill_polygon_np(seed_map, part, i + 1)
+    seed_map[poly_mask == 0] = 0
 
-    extended = LineString(
-        [start_ext.tolist()] + list(vein_line.coords) + [end_ext.tolist()]
-    )
-
-    # Try splitting
-    try:
-        result = shapely_split(poly, extended)
-        pieces = [g for g in result.geoms
-                  if isinstance(g, Polygon) and g.area > 100]
-    except Exception:
-        pieces = []
-
-    # Fallback: buffer-based split
-    if len(pieces) < 2:
-        try:
-            strip = extended.buffer(1.0)
-            remainder = poly.difference(strip)
-            if isinstance(remainder, MultiPolygon):
-                pieces = [g for g in remainder.geoms
-                          if isinstance(g, Polygon) and g.area > 100]
-            else:
-                return None
-        except Exception:
-            return None
-
-    if len(pieces) < 2:
+    # 3. Distance transform to fill unseeded pixels
+    background = (seed_map == 0) & (poly_mask > 0)
+    if background.sum() == 0:
         return None
+    _, nearest_idx = ndimage.distance_transform_edt(background, return_indices=True)
+    filled = seed_map[nearest_idx[0], nearest_idx[1]]
+    filled[poly_mask == 0] = 0
+    filled[seed_map > 0] = seed_map[seed_map > 0]
 
-    # Return the two largest pieces
-    pieces.sort(key=lambda p: p.area, reverse=True)
-    return pieces[0], pieces[1]
+    # 4. Convert back to Polygons via cv2.findContours
+    piece_polys: list[Polygon] = []
+    for lbl in [1, 2]:
+        piece_mask = ((filled == lbl) * 255).astype(np.uint8)
+        contours, _ = cv2.findContours(piece_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            coords = [(float(pt[0][0]), float(pt[0][1])) for pt in largest]
+            if len(coords) >= 4:
+                p = Polygon(coords)
+                if p.is_valid and p.area > 100:
+                    piece_polys.append(p)
+    if len(piece_polys) < 2:
+        return None
+    piece_polys.sort(key=lambda p: p.area, reverse=True)
+    return piece_polys[0], piece_polys[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1420,20 +1517,43 @@ def cross_validate(
             report.boundary_mismatches.append(msg)
             report.warnings.append(msg)
 
-    # 2. Full VEIN_Y_ORDER check (including crossveins)
-    prev_y = -float("inf")
+    # 2. Full VEIN_Y_ORDER check using line-based median Y and Y-extents
+    prev_median_y = -float("inf")
     prev_name = None
+    prev_extent = (0.0, 0.0)
+    y_tolerance = 0.05
+
     for name in VEIN_Y_ORDER:
-        if name in vein_map:
-            y = vein_map[name].y_centroid_norm
-            if y < prev_y:
-                msg = (
-                    f"Vein ordering violation: {name} (Y={y:.2f}) is anterior "
-                    f"to {prev_name} (Y={prev_y:.2f})"
+        if name not in vein_map:
+            continue
+        mp = vein_map[name]
+        coords = np.array(mp.line.coords)
+        ys_norm = (coords[:, 1] - min_y) / bbox_h if bbox_h > 0 else np.full(len(coords), 0.5)
+        median_y = float(np.median(ys_norm))
+        y_min_norm = float(ys_norm.min())
+        y_max_norm = float(ys_norm.max())
+
+        if prev_name is not None and (prev_median_y - median_y) > y_tolerance:
+            msg = (
+                f"Vein ordering violation: {name} "
+                f"(median_Y={median_y:.3f}, extent={y_min_norm:.2f}-{y_max_norm:.2f}) "
+                f"is anterior to {prev_name} "
+                f"(median_Y={prev_median_y:.3f}, extent={prev_extent[0]:.2f}-{prev_extent[1]:.2f})"
+            )
+            report.warnings.append(msg)
+        elif prev_name is not None:
+            # Log Y-extent overlap as debug info
+            overlap_lo = max(prev_extent[0], y_min_norm)
+            overlap_hi = min(prev_extent[1], y_max_norm)
+            if overlap_lo < overlap_hi:
+                logger.debug(
+                    "Y-extent overlap: %s ↔ %s: %.2f-%.2f",
+                    prev_name, name, overlap_lo, overlap_hi,
                 )
-                report.warnings.append(msg)
-            prev_y = y
-            prev_name = name
+
+        prev_median_y = median_y
+        prev_name = name
+        prev_extent = (y_min_norm, y_max_norm)
 
     # 2b. Crossvein connectivity: verify crossveins are near their expected longitudinals
     cv_proximity_threshold = 50.0  # pixels
@@ -1522,9 +1642,48 @@ def identify_veins_and_regions(
     )
 
     # 3e''. Split merged polygons where pixel classifier merged regions
-    poly_names, intervein_polygons = split_merged_polygons(
+    poly_names, intervein_polygons, split_infos = split_merged_polygons(
         poly_names, intervein_polygons, vein_map, wing_bbox,
+        image_shape=image_shape,
     )
+
+    # 3e'''. Post-split centerline extraction
+    # For each split, extract the missing centerline between the two new pieces
+    # and merge it into the corresponding vein
+    for si in split_infos:
+        if not si.separating_vein or si.separating_vein not in vein_map:
+            continue
+        if not vein_polygons:
+            continue
+
+        new_line = extract_centerline_between_polygons(
+            intervein_polygons[si.orig_idx],
+            intervein_polygons[si.new_idx],
+            vein_polygons,
+            image_shape,
+        )
+        if new_line is None:
+            logger.info(
+                "  No post-split centerline extracted for %s (P%d↔P%d)",
+                si.separating_vein, si.orig_idx, si.new_idx,
+            )
+            continue
+
+        # Merge into the existing vein
+        mp = vein_map[si.separating_vein]
+        merged = _merge_vein_lines([mp.line, new_line])
+        if merged is not None and merged.length > mp.length_px:
+            old_len = mp.length_px
+            mp.line = merged
+            mp.length_px = merged.length
+            # Add a synthetic segment key for the new piece
+            new_key = (si.orig_idx, si.new_idx)
+            if new_key not in mp.segment_keys:
+                mp.segment_keys.append(new_key)
+            logger.info(
+                "  Merged post-split centerline into %s: %.0fpx → %.0fpx (+%.0fpx)",
+                si.separating_vein, old_len, mp.length_px, mp.length_px - old_len,
+            )
 
     # 3f. Cross-validate
     validation = cross_validate(
@@ -1608,21 +1767,38 @@ def validate_regions_against_ground_truth(
         classification = props.get("classification", {})
         raw_name = classification.get("name", "")
 
-        if geom.get("type") != "Polygon":
-            continue
         if not raw_name:
             continue
 
-        coords = geom["coordinates"]
-        if not coords:
-            continue
-        try:
-            poly = Polygon(coords[0])
-            if poly.is_valid and not poly.is_empty:
-                norm_name = _normalize_region_name(raw_name)
-                expected_regions.append((norm_name, poly))
-        except Exception:
-            continue
+        geom_type = geom.get("type")
+        norm_name = _normalize_region_name(raw_name)
+
+        if geom_type == "Polygon":
+            coords = geom.get("coordinates", [])
+            if not coords:
+                continue
+            try:
+                poly = Polygon(coords[0])
+                if poly.is_valid and not poly.is_empty:
+                    expected_regions.append((norm_name, poly))
+            except Exception:
+                continue
+        elif geom_type == "MultiPolygon":
+            # Use the largest polygon from the MultiPolygon
+            best_poly = None
+            best_area = 0.0
+            for poly_coords in geom.get("coordinates", []):
+                if not poly_coords:
+                    continue
+                try:
+                    poly = Polygon(poly_coords[0])
+                    if poly.is_valid and not poly.is_empty and poly.area > best_area:
+                        best_area = poly.area
+                        best_poly = poly
+                except Exception:
+                    continue
+            if best_poly is not None:
+                expected_regions.append((norm_name, best_poly))
 
     if not expected_regions:
         logger.warning("No valid expected regions found in %s", expected_geojson_path)
@@ -1685,3 +1861,114 @@ def validate_regions_against_ground_truth(
         "per_polygon": results,
         "n_expected": len(expected_regions),
     }
+
+
+def validate_veins_against_ground_truth(
+    assignments: list[VeinAssignment],
+    expected_geojson_path: Path,
+    tolerance_px: float = 25.0,
+    n_samples: int = 200,
+) -> VeinValidationReport:
+    """Compare predicted vein centerlines against ground-truth skeleton lines.
+
+    Loads GT skeleton from a GeoJSON FeatureCollection of LineStrings with
+    properties.classification.name = "L1"/"L2"/etc.  Skips "wing outline".
+
+    Per-vein metrics:
+    - Hausdorff distance (px)
+    - Mean lateral deviation: sample n_samples points along predicted, measure to GT
+    - P95 lateral deviation: 95th percentile of those distances
+    - Coverage ratio: fraction of n_samples GT points within tolerance_px of predicted
+    """
+    report = VeinValidationReport()
+
+    # Load GT skeleton
+    with open(expected_geojson_path) as f:
+        data = json.load(f)
+
+    gt_veins: dict[str, LineString] = {}
+    for feature in data.get("features", []):
+        geom = feature.get("geometry", {})
+        props = feature.get("properties", {})
+        classification = props.get("classification", {})
+        name = classification.get("name", "")
+
+        if geom.get("type") != "LineString":
+            continue
+        if not name or name.lower() == "wing outline":
+            continue
+
+        coords = geom.get("coordinates", [])
+        if len(coords) < 2:
+            continue
+        try:
+            line = LineString(coords)
+            if line.is_valid and line.length > 0:
+                gt_veins[name] = line
+        except Exception:
+            continue
+
+    report.total_gt_veins = len(gt_veins)
+    report.total_pred_veins = sum(
+        1 for a in assignments if a.line is not None and a.status != VeinStatus.ABSENT
+    )
+
+    if not gt_veins:
+        logger.warning("No valid GT vein lines found in %s", expected_geojson_path)
+        return report
+
+    # Match predicted veins to GT by name
+    for assignment in assignments:
+        if assignment.line is None or assignment.status == VeinStatus.ABSENT:
+            continue
+
+        vein_name = assignment.vein_id
+        gt_line = gt_veins.get(vein_name)
+        if gt_line is None:
+            continue
+
+        pred_line = assignment.line
+
+        # Hausdorff distance (Shapely built-in)
+        hausdorff = pred_line.hausdorff_distance(gt_line)
+
+        # Sample points along predicted line, measure distance to GT
+        pred_dists = []
+        for i in range(n_samples):
+            pt = pred_line.interpolate(i / max(n_samples - 1, 1), normalized=True)
+            pred_dists.append(pt.distance(gt_line))
+        pred_dists_arr = np.array(pred_dists)
+        mean_dev = float(pred_dists_arr.mean())
+        p95_dev = float(np.percentile(pred_dists_arr, 95))
+
+        # Coverage: fraction of GT samples within tolerance of predicted
+        gt_covered = 0
+        for i in range(n_samples):
+            pt = gt_line.interpolate(i / max(n_samples - 1, 1), normalized=True)
+            if pt.distance(pred_line) <= tolerance_px:
+                gt_covered += 1
+        coverage = gt_covered / n_samples
+
+        metrics = VeinMetrics(
+            vein_name=vein_name,
+            hausdorff_px=hausdorff,
+            mean_deviation_px=mean_dev,
+            p95_deviation_px=p95_dev,
+            coverage_ratio=coverage,
+            gt_length_px=gt_line.length,
+            pred_length_px=pred_line.length,
+        )
+        report.per_vein.append(metrics)
+        report.matched_count += 1
+
+    if report.per_vein:
+        report.mean_hausdorff = float(np.mean([m.hausdorff_px for m in report.per_vein]))
+        report.mean_coverage = float(np.mean([m.coverage_ratio for m in report.per_vein]))
+
+    logger.info(
+        "Vein GT validation: %d/%d matched, mean Hausdorff=%.1fpx, mean coverage=%.1f%%",
+        report.matched_count, report.total_gt_veins,
+        report.mean_hausdorff, report.mean_coverage * 100,
+    )
+
+    return report

@@ -17,6 +17,7 @@ def extract_veins_from_mask(
     vein_polygons: list[Polygon],
     intervein_polygons: list[Polygon],
     image_shape: tuple[int, int],
+    closing_kernel_size: int = 11,
 ) -> tuple[dict[tuple[int, int], LineString], np.ndarray, np.ndarray]:
     """Extract vein centerlines using Voronoi partition of vein mask.
 
@@ -53,6 +54,13 @@ def extract_veins_from_mask(
     for poly in vein_polygons:
         _fill_polygon(vein_mask, poly, 1)
 
+    # 2b. Morphological closing to bridge small gaps in vein mask
+    if closing_kernel_size > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (closing_kernel_size, closing_kernel_size)
+        )
+        vein_mask = cv2.morphologyEx(vein_mask, cv2.MORPH_CLOSE, kernel)
+
     # 3. Voronoi partition via distance transform
     # For every pixel not inside an intervein polygon, find the nearest polygon
     background = (label_map == 0)
@@ -88,7 +96,214 @@ def extract_veins_from_mask(
             centerlines[pair] = line
 
     logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
+
+    # 6. Bridge dangling endpoints (connect nearby segment tips)
+    centerlines = bridge_dangling_endpoints(centerlines, bridge_threshold=30.0)
+
     return centerlines, nearest_labels, vein_mask
+
+
+def bridge_dangling_endpoints(
+    centerlines: dict[tuple[int, int], LineString],
+    bridge_threshold: float = 30.0,
+) -> dict[tuple[int, int], LineString]:
+    """Bridge dangling endpoints by extending the shorter segment.
+
+    Collects all segment endpoints, identifies junctions (3+ endpoints from
+    different segments within snap radius), and for each remaining dangling
+    endpoint finds the nearest dangling endpoint from a different segment
+    within bridge_threshold.  Extends the shorter segment to close the gap.
+    """
+    if not centerlines:
+        return centerlines
+
+    # Collect all endpoints: (x, y, key, endpoint_index)
+    endpoints: list[tuple[float, float, tuple[int, int], int]] = []
+    for key, line in centerlines.items():
+        coords = list(line.coords)
+        endpoints.append((coords[0][0], coords[0][1], key, 0))
+        endpoints.append((coords[-1][0], coords[-1][1], key, -1))
+
+    n = len(endpoints)
+    snap_radius = bridge_threshold
+
+    # Identify junction endpoints (near 3+ endpoints from different segments)
+    junction_set: set[int] = set()
+    for i in range(n):
+        nearby_keys: set[tuple[int, int]] = {endpoints[i][2]}
+        for j in range(n):
+            if i == j:
+                continue
+            dx = endpoints[i][0] - endpoints[j][0]
+            dy = endpoints[i][1] - endpoints[j][1]
+            if dx * dx + dy * dy < snap_radius * snap_radius:
+                nearby_keys.add(endpoints[j][2])
+        if len(nearby_keys) >= 3:
+            junction_set.add(i)
+
+    # Build list of dangling endpoints (not at junctions)
+    dangling: list[int] = [i for i in range(n) if i not in junction_set]
+
+    # For each dangling endpoint, find nearest dangling from a different segment
+    bridged: set[int] = set()
+    result = dict(centerlines)
+    bridges_made = 0
+
+    for i in dangling:
+        if i in bridged:
+            continue
+        xi, yi, key_i, ep_i = endpoints[i]
+        best_j = -1
+        best_dist2 = bridge_threshold * bridge_threshold
+        for j in dangling:
+            if j in bridged or j == i:
+                continue
+            xj, yj, key_j, ep_j = endpoints[j]
+            if key_j == key_i:
+                continue
+            d2 = (xi - xj) ** 2 + (yi - yj) ** 2
+            if d2 < best_dist2:
+                best_dist2 = d2
+                best_j = j
+
+        if best_j < 0:
+            continue
+
+        xj, yj, key_j, ep_j = endpoints[best_j]
+
+        # Extend the shorter segment toward the bridge target
+        line_i = result[key_i]
+        line_j = result[key_j]
+        if line_i.length <= line_j.length:
+            # Extend line_i toward (xj, yj)
+            result[key_i] = _extend_line(line_i, ep_i, xj, yj)
+        else:
+            # Extend line_j toward (xi, yi)
+            result[key_j] = _extend_line(line_j, ep_j, xi, yi)
+
+        bridged.add(i)
+        bridged.add(best_j)
+        bridges_made += 1
+
+    if bridges_made:
+        logger.info("Bridged %d dangling endpoint pair(s)", bridges_made)
+
+    return result
+
+
+def _extend_line(
+    line: LineString, endpoint_idx: int, target_x: float, target_y: float,
+) -> LineString:
+    """Extend a LineString by appending/prepending a target coordinate."""
+    coords = list(line.coords)
+    target = (target_x, target_y)
+    if endpoint_idx == 0:
+        coords.insert(0, target)
+    else:
+        coords.append(target)
+    return LineString(coords)
+
+
+def extract_centerline_between_polygons(
+    poly_a: Polygon,
+    poly_b: Polygon,
+    vein_polygons: list[Polygon],
+    image_shape: tuple[int, int],
+    min_length: float = 50.0,
+) -> Optional[LineString]:
+    """Extract a centerline between two adjacent polygons via local Voronoi partition.
+
+    Used after split_merged_polygons() to recover the vein centerline that was
+    missing because the two regions were a single polygon during the initial
+    Voronoi extraction.
+
+    Works in a local bounding box (poly_a ∪ poly_b + padding) for efficiency.
+    Returns a LineString in global image coordinates, or None if too short.
+    """
+    from shapely.ops import unary_union
+
+    h, w = image_shape
+    pad = 20
+
+    # 1. Bounding box of poly_a ∪ poly_b + padding, clipped to image bounds
+    combined = unary_union([poly_a, poly_b])
+    bx0, by0, bx1, by1 = combined.bounds
+    x0 = max(0, int(bx0) - pad)
+    y0 = max(0, int(by0) - pad)
+    x1 = min(w, int(bx1) + pad + 1)
+    y1 = min(h, int(by1) + pad + 1)
+    local_h = y1 - y0
+    local_w = x1 - x0
+    if local_h < 5 or local_w < 5:
+        return None
+
+    # 2. Rasterize poly_a (label 1) and poly_b (label 2) into local seed map
+    seed_map = np.zeros((local_h, local_w), dtype=np.int32)
+    # Translate polygons to local coordinates
+    from shapely.affinity import translate
+    local_a = translate(poly_a, xoff=-x0, yoff=-y0)
+    local_b = translate(poly_b, xoff=-x0, yoff=-y0)
+    _fill_polygon(seed_map, local_a, 1)
+    _fill_polygon(seed_map, local_b, 2)
+
+    # 3. Rasterize vein mask (cropped to local bbox)
+    local_vein_mask = np.zeros((local_h, local_w), dtype=np.uint8)
+    for vpoly in vein_polygons:
+        # Quick bounds check to skip distant polygons
+        vbx0, vby0, vbx1, vby1 = vpoly.bounds
+        if vbx1 < x0 or vbx0 > x1 or vby1 < y0 or vby0 > y1:
+            continue
+        local_vpoly = translate(vpoly, xoff=-x0, yoff=-y0)
+        _fill_polygon(local_vein_mask, local_vpoly, 1)
+
+    # 4. Voronoi partition via distance transform
+    background = (seed_map == 0)
+    if background.sum() == 0:
+        return None
+    _, nearest_indices = ndimage.distance_transform_edt(
+        background, return_distances=True, return_indices=True
+    )
+    nearest_labels = seed_map[nearest_indices[0], nearest_indices[1]]
+    nearest_labels[~background] = seed_map[~background]
+
+    # 5. Extract boundary pixels where label transitions 1↔2, restricted to vein mask
+    padded = np.pad(nearest_labels, 1, mode='constant', constant_values=0)
+    center = padded[1:-1, 1:-1]
+    shifts = [
+        padded[0:-2, 1:-1],
+        padded[2:, 1:-1],
+        padded[1:-1, 0:-2],
+        padded[1:-1, 2:],
+    ]
+
+    is_boundary = np.zeros((local_h, local_w), dtype=bool)
+    for shifted in shifts:
+        # Boundary between labels 1 and 2 specifically
+        is_12 = ((center == 1) & (shifted == 2)) | ((center == 2) & (shifted == 1))
+        is_boundary |= is_12
+
+    # Restrict to vein mask
+    is_boundary &= (local_vein_mask > 0)
+
+    ys, xs = np.where(is_boundary)
+    if len(ys) < 5:
+        return None
+
+    # 6. Trace to LineString (in local coordinates)
+    pixels = list(zip(ys.tolist(), xs.tolist()))
+    line = _trace_pixels_to_line(pixels)
+    if line is None or line.length < min_length:
+        return None
+
+    # 7. Translate back to global coordinates
+    global_coords = [(px + x0, py + y0) for px, py in line.coords]
+    global_line = LineString(global_coords)
+
+    logger.info(
+        "Post-split centerline: %d boundary pixels, length=%.0fpx",
+        len(ys), global_line.length,
+    )
+    return global_line
 
 
 def extract_anterior_boundary(
