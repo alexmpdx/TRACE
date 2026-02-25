@@ -25,14 +25,15 @@ SPATIAL_PRIORS: dict[str, tuple[float, float]] = {
     "L5": (0.70, 0.90),
 }
 
-# Normalized Y centroid ranges (anterior=0.0, posterior=1.0)
+# Normalized Y median ranges (anterior=0.0, posterior=1.0)
+# Tuned against line-extent medians across test wings 1–3
 SPATIAL_PRIORS_Y: dict[str, tuple[float, float]] = {
     "costa": (0.00, 0.15),
-    "L1": (0.02, 0.18),
-    "L2": (0.05, 0.30),
-    "L3": (0.10, 0.40),
-    "L4": (0.25, 0.60),
-    "L5": (0.40, 0.75),
+    "L1": (0.02, 0.20),
+    "L2": (0.05, 0.32),
+    "L3": (0.10, 0.42),
+    "L4": (0.25, 0.62),
+    "L5": (0.38, 0.78),
 }
 
 # Crossvein connection topology

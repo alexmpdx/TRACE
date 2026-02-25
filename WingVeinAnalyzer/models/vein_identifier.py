@@ -59,6 +59,13 @@ class MergedPath:
     orientation_deg: float = 0.0
     y_centroid_norm: float = 0.0
     x_centroid_norm: float = 0.0
+    y_median_norm: float = 0.0
+    y_min_norm: float = 0.0
+    y_max_norm: float = 0.0
+    y_iqr_lo: float = 0.0
+    y_iqr_hi: float = 0.0
+    x_min_norm: float = 0.0
+    x_max_norm: float = 0.0
     straightness: float = 0.0
     length_px: float = 0.0
 
@@ -560,6 +567,17 @@ def _compute_path_features(
     path.x_centroid_norm = (centroid[0] - min_x) / bbox_w if bbox_w > 0 else 0.5
     path.y_centroid_norm = (centroid[1] - min_y) / bbox_h if bbox_h > 0 else 0.5
 
+    # Line-based Y features (more robust than single centroid for curved veins)
+    ys_norm = (coords[:, 1] - min_y) / bbox_h if bbox_h > 0 else np.full(len(coords), 0.5)
+    xs_norm = (coords[:, 0] - min_x) / bbox_w if bbox_w > 0 else np.full(len(coords), 0.5)
+    path.y_median_norm = float(np.median(ys_norm))
+    path.y_min_norm = float(ys_norm.min())
+    path.y_max_norm = float(ys_norm.max())
+    path.y_iqr_lo = float(np.percentile(ys_norm, 25))
+    path.y_iqr_hi = float(np.percentile(ys_norm, 75))
+    path.x_min_norm = float(xs_norm.min())
+    path.x_max_norm = float(xs_norm.max())
+
     # Orientation: angle from horizontal of the line connecting endpoints
     dx = coords[-1][0] - coords[0][0]
     dy = coords[-1][1] - coords[0][1]
@@ -607,16 +625,20 @@ def classify_merged_paths(
                 "Skipping steep long path (%.0f°, %.0fpx) — too long for crossvein",
                 p.orientation_deg, p.length_px,
             )
+        elif p.orientation_deg >= 50 and p.length_px <= 300:
+            # Ambiguous 50-60° but short — crossvein candidate
+            crossveins.append(p)
         else:
-            # Ambiguous orientation — classify by length
-            if p.length_px > 300:
-                longitudinals.append(p)
-            else:
-                crossveins.append(p)
+            # 30-50° or >300px — longitudinal (all real crossveins are >60°)
+            longitudinals.append(p)
 
     # Assign crossveins FIRST (reliable identification by orientation + position)
     vein_map: dict[str, MergedPath] = {}
     _assign_crossveins(crossveins, vein_map)
+
+    # Validate crossveins: demote any that aren't near >=2 longitudinal candidates
+    demoted = _validate_crossveins(vein_map, longitudinals, crossveins)
+    longitudinals.extend(demoted)
 
     # Assign longitudinals using combined Y-position + length + crossvein scoring
     acv_path = vein_map.get("ACV")
@@ -637,20 +659,73 @@ def _assign_crossveins(
 ) -> None:
     """Assign crossvein identities (ACV/PCV) by position."""
     if len(crossveins) >= 2:
-        # ACV is more anterior (lower Y centroid), PCV is more posterior
-        crossveins.sort(key=lambda p: p.y_centroid_norm)
+        # ACV is more anterior (lower median Y), PCV is more posterior
+        crossveins.sort(key=lambda p: p.y_median_norm)
         vein_map["ACV"] = crossveins[0]
         vein_map["PCV"] = crossveins[1]
     elif len(crossveins) == 1:
         cv = crossveins[0]
-        # With only one crossvein, determine identity by Y-position
+        # With only one crossvein, determine identity by median Y-position
         # ACV is more anterior (lower Y), PCV is more posterior (higher Y)
-        acv_mid = (SPATIAL_PRIORS_Y["L3"][1] + SPATIAL_PRIORS_Y["L4"][0]) / 2  # ~0.35
-        pcv_mid = (SPATIAL_PRIORS_Y["L4"][1] + SPATIAL_PRIORS_Y["L5"][0]) / 2  # ~0.50
-        if abs(cv.y_centroid_norm - acv_mid) <= abs(cv.y_centroid_norm - pcv_mid):
+        acv_mid = (SPATIAL_PRIORS_Y["L3"][1] + SPATIAL_PRIORS_Y["L4"][0]) / 2
+        pcv_mid = (SPATIAL_PRIORS_Y["L4"][1] + SPATIAL_PRIORS_Y["L5"][0]) / 2
+        if abs(cv.y_median_norm - acv_mid) <= abs(cv.y_median_norm - pcv_mid):
             vein_map["ACV"] = cv
         else:
             vein_map["PCV"] = cv
+
+
+def _validate_crossveins(
+    vein_map: dict[str, MergedPath],
+    longitudinals: list[MergedPath],
+    crossveins: list[MergedPath],
+    proximity_threshold: float = 100.0,
+    min_nearby_longitudinals: int = 2,
+) -> list[MergedPath]:
+    """Validate crossvein assignments by checking proximity to longitudinals.
+
+    A real crossvein connects two longitudinal veins, so it should be within
+    proximity_threshold of at least min_nearby_longitudinals longitudinal
+    candidates.  Demotes failures back to the longitudinal pool.
+    """
+    demoted: list[MergedPath] = []
+    cv_names_to_check = [n for n in ("ACV", "PCV") if n in vein_map]
+
+    for cv_name in cv_names_to_check:
+        cv_path = vein_map[cv_name]
+        nearby = sum(
+            1 for lp in longitudinals
+            if cv_path.line.distance(lp.line) < proximity_threshold
+        )
+        if nearby < min_nearby_longitudinals:
+            logger.info(
+                "Crossvein %s only near %d longitudinal(s) (need %d, "
+                "threshold=%.0fpx) — demoting to longitudinal pool",
+                cv_name, nearby, min_nearby_longitudinals, proximity_threshold,
+            )
+            demoted.append(cv_path)
+            del vein_map[cv_name]
+
+    # If any were demoted, re-run crossvein assignment with remaining candidates
+    if demoted:
+        remaining_cv = [
+            p for p in crossveins
+            if p not in demoted and not any(
+                p is vein_map.get(n) for n in ("ACV", "PCV")
+            )
+        ]
+        if remaining_cv:
+            # Clear existing crossvein assignments and reassign
+            for n in ("ACV", "PCV"):
+                if n in vein_map and vein_map[n] not in remaining_cv:
+                    pass  # keep valid assignments
+            # Only reassign if we lost a crossvein
+            for n in list(vein_map.keys()):
+                if n in ("ACV", "PCV"):
+                    del vein_map[n]
+            _assign_crossveins(remaining_cv, vein_map)
+
+    return demoted
 
 
 def _assign_longitudinals_scored(
@@ -791,15 +866,28 @@ def _longitudinal_match_score(
     pcv_path: Optional[MergedPath] = None,
 ) -> float:
     """Score how well a path matches a specific longitudinal vein identity."""
-    # Y-position score: closeness to expected Y centroid range
+    # Y-position score: blend of median-Y closeness (60%) and Y-range overlap (40%)
     y_lo, y_hi = SPATIAL_PRIORS_Y[vein_name]
     y_mid = (y_lo + y_hi) / 2
     y_range = y_hi - y_lo
-    y_dist = abs(path.y_centroid_norm - y_mid)
-    if y_lo <= path.y_centroid_norm <= y_hi:
-        y_score = 1.0 - (y_dist / y_range)
+
+    # Median Y score (more robust than centroid for curved veins)
+    y_dist = abs(path.y_median_norm - y_mid)
+    if y_lo <= path.y_median_norm <= y_hi:
+        median_y_score = 1.0 - (y_dist / y_range)
     else:
-        y_score = max(0.0, 0.5 - y_dist)
+        median_y_score = max(0.0, 0.5 - y_dist)
+
+    # Y-range overlap: Jaccard of path's [y_min, y_max] vs prior's [y_lo, y_hi]
+    overlap_lo = max(path.y_min_norm, y_lo)
+    overlap_hi = min(path.y_max_norm, y_hi)
+    overlap = max(0.0, overlap_hi - overlap_lo)
+    union_lo = min(path.y_min_norm, y_lo)
+    union_hi = max(path.y_max_norm, y_hi)
+    union_span = union_hi - union_lo
+    y_overlap_score = overlap / union_span if union_span > 0 else 0.0
+
+    y_score = 0.6 * median_y_score + 0.4 * y_overlap_score
 
     # Length score: closeness to expected length range
     length_frac = path.length_px / wing_span_px if wing_span_px > 0 else 0.0
@@ -818,7 +906,7 @@ def _longitudinal_match_score(
 
     # Combined score with crossvein topology
     if acv_path is not None or pcv_path is not None:
-        return 0.45 * y_score + 0.30 * len_score + 0.25 * cv_score
+        return 0.40 * y_score + 0.30 * len_score + 0.30 * cv_score
     else:
         # No crossvein info — fall back to original weights
         return 0.6 * y_score + 0.4 * len_score
