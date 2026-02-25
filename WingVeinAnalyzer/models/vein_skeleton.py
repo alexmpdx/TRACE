@@ -365,29 +365,36 @@ def extract_anterior_boundary(
     for sv in shifts_vm:
         at_vein_edge |= (sv == 0)
 
-    # All boundary pixels of the anterior polygon at the vein mask edge
-    has_bg_neighbor = is_ant_in_vein & at_vein_edge
-
-    # Filter to anterior-facing boundary only (Y < polygon centroid)
+    # 4b. Extract the vein mask anterior to the most-anterior polygon and
+    # skeletonize it to get L1's centerline (not just the edge).
+    # L1 = vein tissue between the wing edge and the marginal cell.
+    ant_bounds = intervein_polygons[ant_idx].bounds  # (xmin, ymin, xmax, ymax)
     ant_centroid_y = intervein_polygons[ant_idx].centroid.y
-    ys_all, xs_all = np.where(has_bg_neighbor)
-    anterior_mask = ys_all < ant_centroid_y
-    has_bg_neighbor = np.zeros((h, w), dtype=bool)
-    has_bg_neighbor[ys_all[anterior_mask], xs_all[anterior_mask]] = True
 
-    ys, xs = np.where(has_bg_neighbor)
-    if len(ys) < 5:
+    # Region of interest: vein mask pixels in the anterior polygon's Voronoi
+    # region, anterior to the polygon's 75th percentile Y.  This captures
+    # the wing tip where L1 continues past the centroid.
+    y_cutoff = ant_centroid_y + (ant_bounds[3] - ant_centroid_y) * 0.5
+    roi = is_ant_in_vein.copy()
+    roi[int(y_cutoff):, :] = False
+
+    # Skeletonize this region to get the centerline
+    from skimage.morphology import skeletonize as sk_skeletonize
+    skeleton = sk_skeletonize(roi)
+
+    skel_ys, skel_xs = np.where(skeleton)
+    if len(skel_ys) < 5:
         return None
 
-    pixels = list(zip(ys.tolist(), xs.tolist()))
+    pixels = list(zip(skel_ys.tolist(), skel_xs.tolist()))
     line = _trace_pixels_to_line(pixels)
 
     if line is None or line.length < 50:
         return None
 
     logger.info(
-        "Anterior boundary: polygon %d, %d pixels, length=%.0f",
-        ant_idx, len(pixels), line.length,
+        "Anterior boundary: polygon %d, %d skeleton pixels, length=%.0f",
+        ant_idx, len(skel_ys), line.length,
     )
     return (ant_idx, line)
 

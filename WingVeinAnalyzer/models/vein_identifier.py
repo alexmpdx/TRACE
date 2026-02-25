@@ -661,12 +661,14 @@ def _assign_longitudinals_scored(
 ) -> dict[str, MergedPath]:
     """Assign longitudinal veins using optimal combinatorial scoring.
 
-    Tries all valid subsets of paths (k=1..min(n,5)) and vein names,
-    respecting Y ordering, to find the globally optimal assignment.
+    Tries all valid subsets of paths (k=1..min(n,5)) and all permutations
+    of vein name assignments to find the globally optimal mapping.
     Allows fewer than 5 veins when some are absent.
     Uses crossvein proximity to disambiguate L3/L4/L5.
+    Does NOT enforce strict Y ordering — adjacent veins (e.g. L1/L2)
+    can have overlapping or inverted Y centroids in real specimens.
     """
-    from itertools import combinations
+    from itertools import combinations, permutations
 
     long_names = ["L1", "L2", "L3", "L4", "L5"]
     result: dict[str, MergedPath] = {}
@@ -697,23 +699,26 @@ def _assign_longitudinals_scored(
 
     for k in range(max_k, min_k - 1, -1):
         for path_indices in combinations(range(n), k):
-            for name_indices in combinations(range(5), k):
-                scores = [
-                    score_matrix[(path_indices[i], long_names[name_indices[i]])]
-                    for i in range(k)
-                ]
-                # Skip if any single assignment is terrible
-                if min(scores) < min_per_vein:
-                    continue
-                total = sum(scores)
-                # Normalize: average score + bonus for more veins
-                norm = total / k + 0.08 * k
-                if norm > best_norm_score:
-                    best_norm_score = norm
-                    best_assignment = [
-                        (path_indices[i], long_names[name_indices[i]])
+            for name_subset in combinations(range(5), k):
+                # Try all permutations of name assignment (not just Y-ordered)
+                # Adjacent veins (e.g. L1/L2) can have overlapping Y centroids
+                for name_perm in permutations(name_subset):
+                    scores = [
+                        score_matrix[(path_indices[i], long_names[name_perm[i]])]
                         for i in range(k)
                     ]
+                    # Skip if any single assignment is terrible
+                    if min(scores) < min_per_vein:
+                        continue
+                    total = sum(scores)
+                    # Normalize: average score + bonus for more veins
+                    norm = total / k + 0.08 * k
+                    if norm > best_norm_score:
+                        best_norm_score = norm
+                        best_assignment = [
+                            (path_indices[i], long_names[name_perm[i]])
+                            for i in range(k)
+                        ]
 
     used_paths: set[int] = set()
     for pi, name in best_assignment:
