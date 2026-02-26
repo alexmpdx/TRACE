@@ -997,9 +997,29 @@ def _extend_l1_with_edge_segments(
     max_l1 = VEIN_LENGTH_PRIORS["L1"][1] * wing_span * 1.5
     short_threshold = 0.10 * wing_span
 
+    # Pre-check: if L1 is short and sits right next to both L2 and L3,
+    # it's likely the radial sector (Rs = fused L2+L3 proximal stem),
+    # not L1.  Reclassify so L1 can be recovered from edge boundaries
+    # or reported as absent.
+    l1 = vein_map.get("L1")
+    l2_pre = vein_map.get("L2")
+    l3_pre = vein_map.get("L3")
+    if (l1 is not None and l2_pre is not None and l3_pre is not None
+            and l1.line is not None and l1.length_px < short_threshold):
+        dist_l2 = l1.line.distance(l2_pre.line)
+        dist_l3 = l1.line.distance(l3_pre.line)
+        if dist_l2 < 50 and dist_l3 < 50:
+            vein_map["Rs"] = l1
+            del vein_map["L1"]
+            l1 = None
+            logger.info(
+                "Reclassified short L1 as Rs: %.0fpx "
+                "(dist L2=%.0f, L3=%.0f)",
+                vein_map["Rs"].length_px, dist_l2, dist_l3,
+            )
+
     # Collect polygon indices: L1-only (for Phase 2) and L1+L2 (for Phase 1)
     l1_only_polys: set[int] = set()
-    l1 = vein_map.get("L1")
     if l1 is not None:
         for sk in l1.segment_keys:
             for idx in sk:
@@ -1154,40 +1174,22 @@ def _extend_l1_with_edge_segments(
             )
             extended = True
 
-    # ---------- Phase 2: Short/absent L1 — assign from edge boundary ----------
-    if not extended and (l1 is None or l1.length_px < short_threshold):
-        logger.debug(
-            "L1 %s — searching edge boundaries for assignment",
-            f"short ({l1.length_px:.0f}px < {short_threshold:.0f}px)"
-            if l1 else "absent",
-        )
+    # ---------- Phase 2: Absent L1 — assign from edge boundary ----------
+    # Only triggers when L1 is completely absent. When L1 exists but is short,
+    # the Voronoi assignment is in a reasonable position and replacing it with
+    # an edge boundary trace tends to be worse (edge traces cover the full
+    # polygon perimeter rather than the specific L1 segment).
+    if not extended and l1 is None:
+        logger.debug("L1 absent — searching edge boundaries for assignment")
 
         # Tighter cap for Phase 2 — no margin multiplier
         phase2_max = VEIN_LENGTH_PRIORS["L1"][1] * wing_span
-
-        # Use L2's direction as reference if available
-        l2_ref_dir: Optional[float] = None
-        if l2 is not None:
-            l2c = list(l2.line.coords)
-            l2_ref_dir = math.degrees(math.atan2(
-                l2c[-1][1] - l2c[0][1], l2c[-1][0] - l2c[0][0]
-            ))
 
         edge_paths: list[MergedPath] = []
         for key, line in phase2_edges:
             trimmed = _trim_to_anterior_portion(line, phase2_max, wing_bbox)
             if trimmed is None or trimmed.length < 80:
                 continue
-            # Apply direction-change trim to reject curves around wing tip
-            if l2_ref_dir is not None:
-                start_pt = Point(trimmed.coords[0])
-                trimmed = _trim_at_direction_change(
-                    trimmed, start_pt, phase2_max,
-                    max_turn=25.0, window_px=80.0,
-                    reference_dir=l2_ref_dir,
-                )
-                if trimmed is None or trimmed.length < 80:
-                    continue
             # Simplify noisy edge traces (perimeter pixel traces can zigzag)
             trimmed = trimmed.simplify(15.0)
             if trimmed.length < 80:
@@ -1206,6 +1208,8 @@ def _extend_l1_with_edge_segments(
                 edge_paths.append(mp)
 
         if edge_paths:
+            # When L1 is absent (no costal cell), the most-anterior edge of
+            # the marginal cell is the anterior wing margin (costa + L1).
             edge_paths.sort(key=lambda p: p.y_median_norm)
             best = edge_paths[0]
             if best.length_px <= phase2_max:
