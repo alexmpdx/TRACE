@@ -4,7 +4,7 @@ from __future__ import annotations
 
 LONGITUDINAL_VEINS = ["L1", "L2", "L3", "L4", "L5"]
 CROSSVEINS = ["ACV", "PCV"]
-ALL_VEINS = ["costa"] + LONGITUDINAL_VEINS + CROSSVEINS
+ALL_VEINS = ["costa"] + LONGITUDINAL_VEINS + CROSSVEINS + ["Rs"]
 
 # Priority-ordered cue types for vein identification
 CUE_TYPES = [
@@ -87,6 +87,7 @@ VEIN_COLORS: dict[str, tuple[int, int, int]] = {
     "L5":     (160, 60, 180),   # pink/magenta
     "ACV":    (180, 80, 120),   # purple
     "PCV":    (180, 60, 60),    # blue-purple
+    "Rs":     (80, 160, 120),   # olive green
 }
 
 # Vein boundary definitions: which intervein pair each vein separates
@@ -109,6 +110,7 @@ VEIN_BOUNDARIES: dict[str, list[tuple[str, str]]] = {
         ("discal_cell", "3rd_posterior_cell"),
         ("2nd_posterior_cell", "3rd_posterior_cell"),
     ],
+    "Rs": [("marginal_cell", "1st_basal_cell")],
 }
 
 # --- Geometric priors for independent vein/region identification ---

@@ -407,7 +407,6 @@ def extract_edge_boundary_veins(
     vein_mask: np.ndarray,
     existing_centerlines: dict[tuple[int, int], LineString],
     min_length: float = 100.0,
-    max_length: float = 4000.0,
 ) -> dict[tuple[int, int], LineString]:
     """Extract vein segments at the edge of the vein mask.
 
@@ -415,9 +414,9 @@ def extract_edge_boundary_veins(
     captured by inter-polygon boundaries: the Voronoi centerline between
     a polygon's region and the background within the vein mask.
 
-    Only keeps segments that are plausibly veins (not the entire wing
-    perimeter): length between min_length and max_length, reasonably
-    narrow band width.
+    Only keeps segments that pass band-width and minimum-length filters.
+    Downstream consumers (e.g. _extend_l1_with_edge_segments) trim long
+    segments to the relevant portion.
 
     Parameters
     ----------
@@ -445,83 +444,154 @@ def extract_edge_boundary_veins(
     at_vein_edge &= (vein_mask > 0)
 
     # Exclude pixels that are at a boundary between two labeled regions
-    # (those are already captured by _extract_boundary_pixels)
+    # WITHIN the vein mask (those are already captured by _extract_boundary_pixels).
+    # Only check neighbors that are also inside the vein mask — label
+    # differences outside the vein mask are just Voronoi artifacts.
     padded_nl = np.pad(nearest_labels, 1, mode='constant', constant_values=0)
+    padded_vm2 = np.pad(vein_mask, 1, mode='constant', constant_values=0)
     center_nl = padded_nl[1:-1, 1:-1]
     has_diff_neighbor = np.zeros((h, w), dtype=bool)
-    for shift in [
+    nl_shifts = [
         padded_nl[0:-2, 1:-1], padded_nl[2:, 1:-1],
         padded_nl[1:-1, 0:-2], padded_nl[1:-1, 2:],
-    ]:
-        has_diff_neighbor |= ((shift != center_nl) & (shift > 0) & (center_nl > 0))
+    ]
+    vm_shifts = [
+        padded_vm2[0:-2, 1:-1], padded_vm2[2:, 1:-1],
+        padded_vm2[1:-1, 0:-2], padded_vm2[1:-1, 2:],
+    ]
+    for nl_shift, vm_shift in zip(nl_shifts, vm_shifts):
+        has_diff_neighbor |= (
+            (nl_shift != center_nl) & (nl_shift > 0) & (center_nl > 0)
+            & (vm_shift > 0)  # neighbor must also be in vein mask
+        )
 
     # Edge-only boundary pixels: at vein mask edge AND NOT between two polygons
     edge_boundary = at_vein_edge & ~has_diff_neighbor
 
-    # Use connected components to separate distinct segments (8-connectivity)
+    # Split by polygon label BEFORE connected components to prevent wing
+    # perimeter from merging multiple polygons' edges into one giant component
     structure = ndimage.generate_binary_structure(2, 2)
-    labeled_cc, n_cc = ndimage.label(edge_boundary, structure=structure)
-
     result: dict[tuple[int, int], LineString] = {}
+    edge_seq: dict[int, int] = {}  # per-polygon sequence counter
 
-    for cc_id in range(1, n_cc + 1):
-        cc_ys, cc_xs = np.where(labeled_cc == cc_id)
-        if len(cc_ys) < 10:
+    unique_labels_in_edge = np.unique(nearest_labels[edge_boundary])
+    for label in unique_labels_in_edge:
+        if label == 0:
             continue
+        label_edge = edge_boundary & (nearest_labels == label)
+        labeled_cc, n_cc = ndimage.label(label_edge, structure=structure)
 
-        # Determine which polygon label dominates this component
-        labels_here = nearest_labels[cc_ys, cc_xs]
-        # Use the most common label
-        unique_labels, counts = np.unique(labels_here, return_counts=True)
-        dominant_label = int(unique_labels[counts.argmax()])
-        if dominant_label == 0:
-            continue
+        for cc_id in range(1, n_cc + 1):
+            cc_ys, cc_xs = np.where(labeled_cc == cc_id)
+            if len(cc_ys) < 10:
+                continue
 
-        # Compute band width: if pixels span a wide area, it's the wing perimeter
-        y_span = float(cc_ys.max() - cc_ys.min())
-        x_span = float(cc_xs.max() - cc_xs.min())
-        n_pixels = len(cc_ys)
+            # Split perimeter loops: if pixels span a large Y range and
+            # have two edges (top & bottom) at many X positions, split into
+            # anterior (top) and posterior (bottom) halves
+            pixel_groups = _split_perimeter_component(cc_ys, cc_xs)
 
-        # Estimate band width as area / max_span
-        max_span = max(x_span, y_span, 1.0)
-        band_width = n_pixels / max_span
+            for group_ys, group_xs in pixel_groups:
+                n_pixels = len(group_ys)
+                if n_pixels < 10:
+                    continue
 
-        # Skip wide bands (these are wing perimeter, not veins)
-        # Vein edges are typically 2-10 pixels wide
-        if band_width > 30:
-            continue
+                y_span = float(group_ys.max() - group_ys.min())
+                x_span = float(group_xs.max() - group_xs.min())
 
-        pixels = list(zip(cc_ys.tolist(), cc_xs.tolist()))
-        line = _trace_pixels_to_line(pixels)
-        if line is None:
-            continue
+                max_span = max(x_span, y_span, 1.0)
+                band_width = n_pixels / max_span
 
-        if line.length < min_length or line.length > max_length:
-            continue
+                if band_width > 30:
+                    continue
 
-        poly_idx = dominant_label - 1
-        key = (poly_idx, -1)
+                pixels = list(zip(group_ys.tolist(), group_xs.tolist()))
+                line = _trace_pixels_to_line(pixels)
+                if line is None:
+                    continue
 
-        # Check if this segment is near an existing centerline endpoint
-        # (should be a continuation of an existing vein)
-        near_existing = False
-        for cl in existing_centerlines.values():
-            if line.distance(cl) < 50:
-                near_existing = True
-                break
+                if line.length < min_length:
+                    continue
 
-        if not near_existing:
-            continue
+                poly_idx = int(label) - 1
+                # Use sequential negative indices so multiple edges from the
+                # same polygon are all preserved: (poly_idx, -1), (poly_idx, -2), ...
+                edge_seq.setdefault(poly_idx, 0)
+                edge_seq[poly_idx] += 1
+                key = (poly_idx, -edge_seq[poly_idx])
 
-        if key not in result or line.length > result[key].length:
-            result[key] = line
-            logger.info(
-                "Edge boundary vein: polygon %d, %d pixels, length=%.0f, "
-                "band_width=%.1f",
-                poly_idx, n_pixels, line.length, band_width,
-            )
+                result[key] = line
+                logger.info(
+                    "Edge boundary vein: polygon %d, %d pixels, length=%.0f, "
+                    "band_width=%.1f",
+                    poly_idx, n_pixels, line.length, band_width,
+                )
 
     logger.info("Extracted %d edge boundary vein segments", len(result))
+    return result
+
+
+def _split_perimeter_component(
+    cc_ys: np.ndarray, cc_xs: np.ndarray,
+    loop_ratio_threshold: float = 0.15,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Split a perimeter-like component into anterior and posterior halves.
+
+    Detects perimeter loops where edge pixels span a large Y range relative
+    to X range (forming the top and bottom edges of a polygon outline).
+    Splits at the median Y to produce two separate edge segments.
+
+    Returns list of (ys, xs) arrays — either the original component
+    (if not a perimeter loop) or two halves.
+    """
+    y_span = float(cc_ys.max() - cc_ys.min())
+    x_span = float(cc_xs.max() - cc_xs.min())
+
+    if x_span < 50 or y_span < 50:
+        return [(cc_ys, cc_xs)]
+
+    # Check if this is a perimeter loop: at most X positions, are there
+    # pixels at both high and low Y values?
+    # Sample X columns and check Y spread
+    x_min, x_max = int(cc_xs.min()), int(cc_xs.max())
+    n_samples = min(20, x_max - x_min)
+    if n_samples < 5:
+        return [(cc_ys, cc_xs)]
+
+    sample_xs = np.linspace(x_min + x_span * 0.1, x_max - x_span * 0.1,
+                            n_samples, dtype=int)
+    bimodal_count = 0
+    for sx in sample_xs:
+        col_mask = (cc_xs == sx)
+        if col_mask.sum() < 2:
+            continue
+        col_ys = cc_ys[col_mask]
+        y_gap = float(col_ys.max() - col_ys.min())
+        if y_gap > y_span * 0.3:
+            bimodal_count += 1
+
+    # If most sampled columns have bimodal Y distribution, it's a perimeter
+    if bimodal_count < n_samples * 0.3:
+        return [(cc_ys, cc_xs)]
+
+    # Split at median Y
+    median_y = float(np.median(cc_ys))
+    top_mask = cc_ys < median_y
+    bot_mask = cc_ys >= median_y
+
+    result = []
+    if top_mask.sum() >= 10:
+        result.append((cc_ys[top_mask], cc_xs[top_mask]))
+    if bot_mask.sum() >= 10:
+        result.append((cc_ys[bot_mask], cc_xs[bot_mask]))
+
+    if not result:
+        return [(cc_ys, cc_xs)]
+
+    logger.debug(
+        "Split perimeter component (%d pixels, Y=%d-%d) into %d parts",
+        len(cc_ys), cc_ys.min(), cc_ys.max(), len(result),
+    )
     return result
 
 

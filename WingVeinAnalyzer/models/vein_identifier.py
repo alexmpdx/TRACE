@@ -964,6 +964,444 @@ def _compute_crossvein_score(
 
 
 # ---------------------------------------------------------------------------
+# 3c'. L1 Extension from Edge Boundary Segments
+# ---------------------------------------------------------------------------
+
+def _extend_l1_with_edge_segments(
+    vein_map: dict[str, MergedPath],
+    edge_centerlines: dict[tuple[int, int], LineString],
+    wing_bbox: tuple[float, float, float, float],
+) -> None:
+    """Extend or create L1 from edge boundary centerlines.
+
+    Edge boundary centerlines are keyed as (poly_idx, -N), meaning they
+    run along the vein mask edge adjacent to background.
+
+    Phase 1 — endpoint extension: for a reasonably long L1, find edge
+    segments within 300px of either endpoint, trim via Y-band to stay
+    horizontal, and merge.
+
+    Phase 2 — short/absent L1: if L1 is absent or very short (< 10% wing
+    span), assign the most-anterior edge path from a relevant polygon
+    (trimmed to stay in the anterior zone).
+    """
+    from shapely.ops import substring
+
+    if not edge_centerlines:
+        return
+
+    min_x, min_y, max_x, max_y = wing_bbox
+    wing_span = max_x - min_x
+    bbox_h = max_y - min_y
+
+    max_l1 = VEIN_LENGTH_PRIORS["L1"][1] * wing_span * 1.5
+    short_threshold = 0.10 * wing_span
+
+    # Collect polygon indices: L1-only (for Phase 2) and L1+L2 (for Phase 1)
+    l1_only_polys: set[int] = set()
+    l1 = vein_map.get("L1")
+    if l1 is not None:
+        for sk in l1.segment_keys:
+            for idx in sk:
+                if idx >= 0:
+                    l1_only_polys.add(idx)
+
+    l2 = vein_map.get("L2")
+    l1_l2_polys = set(l1_only_polys)
+    if l2 is not None:
+        for sk in l2.segment_keys:
+            for idx in sk:
+                if idx >= 0:
+                    l1_l2_polys.add(idx)
+
+    logger.debug("L1 edge extension: l1_polys=%s, l1_l2_polys=%s",
+                 l1_only_polys, l1_l2_polys)
+
+    # Gather edge segments — Phase 1 uses broader set, Phase 2 uses L1-only
+    phase1_edges: list[tuple[tuple[int, int], LineString]] = []
+    phase2_edges: list[tuple[tuple[int, int], LineString]] = []
+    for key, line in edge_centerlines.items():
+        if key[1] >= 0:
+            continue  # not an edge boundary
+        if l1_l2_polys and key[0] in l1_l2_polys:
+            phase1_edges.append((key, line))
+        if l1_only_polys and key[0] in l1_only_polys:
+            phase2_edges.append((key, line))
+
+    if not phase1_edges and not phase2_edges:
+        return
+
+    # ---------- Phase 1: Endpoint extension for reasonable-length L1 ----------
+    # Skip if L1 is already long enough (> 15% wing span)
+    long_enough = 0.15 * wing_span
+    extended = False
+    if (l1 is not None and l1.length_px >= short_threshold
+            and l1.length_px < long_enough):
+        # Only extend from the distal (dangling) endpoint — the one NOT
+        # near other veins.  The proximal end connects to Rs/L2/L3.
+        l1_coords = list(l1.line.coords)
+        ep0, ep1 = Point(l1_coords[0]), Point(l1_coords[-1])
+
+        def _vein_proximity(pt: Point) -> float:
+            """Min distance from pt to any other vein's geometry."""
+            best = float("inf")
+            for name, mp in vein_map.items():
+                if name == "L1" or mp.line is None:
+                    continue
+                d = mp.line.distance(pt)
+                if d < best:
+                    best = d
+            return best
+
+        prox0, prox1 = _vein_proximity(ep0), _vein_proximity(ep1)
+        # The distal endpoint is further from other veins
+        if prox0 < prox1:
+            endpoints = [ep1]  # ep0 is proximal (near other veins)
+        elif prox1 < prox0:
+            endpoints = [ep0]  # ep1 is proximal
+        else:
+            endpoints = [ep0, ep1]
+        logger.debug("L1 Phase 1: prox0=%.0f, prox1=%.0f, extending from %d endpoint(s)",
+                     prox0, prox1, len(endpoints))
+
+        best_merge = None
+        best_key = None
+        best_len = l1.length_px
+        l1_dx = l1_coords[-1][0] - l1_coords[0][0]
+        l1_dy = l1_coords[-1][1] - l1_coords[0][1]
+        l1_avg_dir = math.degrees(math.atan2(l1_dy, l1_dx))
+
+        for key, line in phase1_edges:
+            for ep_pt in endpoints:
+                dist = line.distance(ep_pt)
+                if dist > 300:
+                    continue
+
+                logger.debug(
+                    "  Edge (%d,%d) len=%.0f within %.0fpx of L1 endpoint",
+                    key[0], key[1], line.length, dist,
+                )
+
+                # Determine which direction the extension goes (away from L1)
+                d0 = ep_pt.distance(Point(l1_coords[0]))
+                dN = ep_pt.distance(Point(l1_coords[-1]))
+                other = l1_coords[0] if dN < d0 else l1_coords[-1]
+                inward_dx = other[0] - ep_pt.x
+                inward_dy = other[1] - ep_pt.y
+                # Extension direction = outward from L1
+                ext_ref_dir = math.degrees(math.atan2(-inward_dy, -inward_dx))
+
+                # Project L1 endpoint onto edge line, extract both halves
+                proj = line.project(ep_pt)
+                for portion in [substring(line, 0, proj),
+                                substring(line, proj, line.length)]:
+                    if portion.length < 50:
+                        continue
+                    # Trim: walk from L1 endpoint, stop when direction
+                    # deviates from L1's outward direction.
+                    # Cap extension at 50% of L1's known length — the
+                    # recovered portion should be a minority of the vein.
+                    ext_budget = min(max_l1 - l1.length_px,
+                                     l1.length_px * 0.5)
+                    pre_len = portion.length
+                    portion = _trim_at_direction_change(
+                        portion, ep_pt, ext_budget,
+                        max_turn=20.0, window_px=50.0,
+                        reference_dir=ext_ref_dir,
+                    )
+                    if portion is None or portion.length < 50:
+                        continue
+                    # Guard 1: extension must continue L1's direction
+                    pc = list(portion.coords)
+                    ext_dx = pc[-1][0] - pc[0][0]
+                    ext_dy = pc[-1][1] - pc[0][1]
+                    if inward_dx * ext_dx + inward_dy * ext_dy > 0:
+                        continue
+
+                    # Guard 2: extension must stay anterior (low Y)
+                    l1_ys = [c[1] for c in l1_coords]
+                    l1_med_y = sorted(l1_ys)[len(l1_ys) // 2]
+                    p_ys = [c[1] for c in pc]
+                    p_med_y = sorted(p_ys)[len(p_ys) // 2]
+                    if p_med_y > l1_med_y + bbox_h * 0.03:
+                        continue
+                    logger.debug(
+                        "    Trimmed (%d,%d): %.0f → %.0fpx",
+                        key[0], key[1], pre_len, portion.length,
+                    )
+                    merged = _merge_vein_lines([l1.line, portion])
+                    if merged is None:
+                        logger.debug("      Merge failed for (%d,%d)", key[0], key[1])
+                    elif merged.length > max_l1:
+                        logger.debug("      Merge (%d,%d) too long: %.0f > %.0f",
+                                     key[0], key[1], merged.length, max_l1)
+                    elif merged.length <= best_len:
+                        logger.debug("      Merge (%d,%d) not longer: %.0f <= %.0f",
+                                     key[0], key[1], merged.length, best_len)
+                    else:
+                        best_merge = merged
+                        best_key = key
+                        best_len = merged.length
+
+        if best_merge:
+            old_len = l1.length_px
+            l1.line = best_merge
+            l1.length_px = best_merge.length
+            l1.segment_keys.append(best_key)
+            logger.info(
+                "Extended L1 with edge (%d,%d): %.0fpx → %.0fpx",
+                best_key[0], best_key[1], old_len, l1.length_px,
+            )
+            extended = True
+
+    # ---------- Phase 2: Short/absent L1 — assign from edge boundary ----------
+    if not extended and (l1 is None or l1.length_px < short_threshold):
+        logger.debug(
+            "L1 %s — searching edge boundaries for assignment",
+            f"short ({l1.length_px:.0f}px < {short_threshold:.0f}px)"
+            if l1 else "absent",
+        )
+
+        # Tighter cap for Phase 2 — no margin multiplier
+        phase2_max = VEIN_LENGTH_PRIORS["L1"][1] * wing_span
+
+        # Use L2's direction as reference if available
+        l2_ref_dir: Optional[float] = None
+        if l2 is not None:
+            l2c = list(l2.line.coords)
+            l2_ref_dir = math.degrees(math.atan2(
+                l2c[-1][1] - l2c[0][1], l2c[-1][0] - l2c[0][0]
+            ))
+
+        edge_paths: list[MergedPath] = []
+        for key, line in phase2_edges:
+            trimmed = _trim_to_anterior_portion(line, phase2_max, wing_bbox)
+            if trimmed is None or trimmed.length < 80:
+                continue
+            # Apply direction-change trim to reject curves around wing tip
+            if l2_ref_dir is not None:
+                start_pt = Point(trimmed.coords[0])
+                trimmed = _trim_at_direction_change(
+                    trimmed, start_pt, phase2_max,
+                    max_turn=25.0, window_px=80.0,
+                    reference_dir=l2_ref_dir,
+                )
+                if trimmed is None or trimmed.length < 80:
+                    continue
+            # Simplify noisy edge traces (perimeter pixel traces can zigzag)
+            trimmed = trimmed.simplify(15.0)
+            if trimmed.length < 80:
+                continue
+            mp = MergedPath(
+                segment_keys=[key], line=trimmed, length_px=trimmed.length,
+            )
+            _compute_path_features(mp, wing_bbox)
+            logger.debug(
+                "  Candidate edge (%d,%d): len=%.0f, Y=%.3f, orient=%.1f°, "
+                "straight=%.2f",
+                key[0], key[1], mp.length_px, mp.y_median_norm,
+                mp.orientation_deg, mp.straightness,
+            )
+            if mp.orientation_deg < 30 and mp.straightness > 0.5:
+                edge_paths.append(mp)
+
+        if edge_paths:
+            edge_paths.sort(key=lambda p: p.y_median_norm)
+            best = edge_paths[0]
+            if best.length_px <= phase2_max:
+                old_keys = list(l1.segment_keys) if l1 else []
+                old_len = l1.length_px if l1 else 0
+                best.segment_keys = old_keys + list(best.segment_keys)
+                vein_map["L1"] = best
+                logger.info(
+                    "Assigned L1 from edge boundary: %.0fpx (was %.0fpx), Y=%.3f",
+                    best.length_px, old_len, best.y_median_norm,
+                )
+
+
+def _trim_at_direction_change(
+    line: LineString,
+    start_point: Point,
+    max_length: float,
+    max_turn: float = 35.0,
+    window_px: float = 80.0,
+    reference_dir: Optional[float] = None,
+) -> Optional[LineString]:
+    """Trim a line by walking from *start_point*, stopping at a direction change.
+
+    Orients the coordinate list so the end nearest *start_point* comes first.
+    Computes the initial travel direction from the first ~80px (or uses
+    *reference_dir* if provided), then walks forward.  Stops when the local
+    direction deviates by more than *max_turn* degrees from the reference.
+    """
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return None
+
+    # Orient so we walk away from start_point
+    d_start = (coords[0][0] - start_point.x) ** 2 + (coords[0][1] - start_point.y) ** 2
+    d_end = (coords[-1][0] - start_point.x) ** 2 + (coords[-1][1] - start_point.y) ** 2
+    if d_end < d_start:
+        coords = list(reversed(coords))
+
+    # Use provided reference direction, or auto-detect from first window
+    initial_dir: Optional[float] = reference_dir
+    if initial_dir is None:
+        for c in coords[1:]:
+            dx = c[0] - coords[0][0]
+            dy = c[1] - coords[0][1]
+            if math.sqrt(dx * dx + dy * dy) >= window_px:
+                initial_dir = math.degrees(math.atan2(dy, dx))
+                break
+    if initial_dir is None:
+        # Line is shorter than one window — just return as-is
+        return line if line.length <= max_length else None
+
+    kept = [coords[0]]
+    cum_len = 0.0
+    last_check_len = 0.0
+    for i, c in enumerate(coords[1:], 1):
+        # Accumulate distance
+        prev = kept[-1]
+        seg_len = math.sqrt((c[0] - prev[0]) ** 2 + (c[1] - prev[1]) ** 2)
+        kept.append(c)
+        cum_len += seg_len
+
+        # Check direction every ~window_px
+        if cum_len - last_check_len >= window_px:
+            lookback = max(0, len(kept) - 1 - 10)
+            dx = c[0] - kept[lookback][0]
+            dy = c[1] - kept[lookback][1]
+            if abs(dx) + abs(dy) > 10:
+                local_dir = math.degrees(math.atan2(dy, dx))
+                turn = abs(local_dir - initial_dir)
+                if turn > 180:
+                    turn = 360 - turn
+                if turn > max_turn:
+                    kept.pop()
+                    break
+            last_check_len = cum_len
+
+        if cum_len >= max_length:
+            break
+
+    if len(kept) < 2:
+        return None
+    result = LineString(kept)
+    if result.length > max_length:
+        from shapely.ops import substring
+        result = substring(result, 0, max_length)
+    return result
+
+
+def _trim_to_anterior_portion(
+    line: LineString,
+    max_length: float,
+    wing_bbox: tuple[float, float, float, float],
+) -> Optional[LineString]:
+    """Trim a line to its most-anterior (lowest Y) contiguous portion.
+
+    For long polygon perimeter lines, finds the most-anterior point and
+    extracts the portion around it up to max_length, only following the
+    line while Y stays within the anterior zone.
+    """
+    from shapely.ops import substring
+
+    if line.length <= max_length:
+        return line
+
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return None
+
+    min_x, min_y, max_x, max_y = wing_bbox
+    bbox_h = max_y - min_y
+
+    # Find the most-anterior (lowest Y) point on the line
+    ys = np.array([c[1] for c in coords])
+    min_y_idx = int(np.argmin(ys))
+    min_y_val = ys[min_y_idx]
+
+    # Y threshold: keep points within a reasonable band of the minimum Y
+    # L1 is nearly horizontal, so it stays in a narrow Y band
+    y_threshold = min_y_val + bbox_h * 0.15
+
+    # Walk outward from min_y_idx in both directions, keeping points below threshold
+    left = min_y_idx
+    while left > 0 and ys[left - 1] < y_threshold:
+        left -= 1
+
+    right = min_y_idx
+    while right < len(coords) - 1 and ys[right + 1] < y_threshold:
+        right += 1
+
+    # Extract the sub-line
+    if right - left < 1:
+        return None
+
+    sub_coords = coords[left:right + 1]
+    sub_line = LineString(sub_coords)
+
+    # If still too long, trim from the ends to max_length centered on the minimum Y point
+    if sub_line.length > max_length:
+        # Find position of min_y_idx within sub_line
+        center_frac = (min_y_idx - left) / max(right - left, 1)
+        center_dist = center_frac * sub_line.length
+        half = max_length / 2
+        start = max(0, center_dist - half)
+        end = min(sub_line.length, center_dist + half)
+        sub_line = substring(sub_line, start, end)
+
+    return sub_line if sub_line.length >= 80 else None
+
+
+# ---------------------------------------------------------------------------
+# 3c''. Radial Sector (Rs) Identification
+# ---------------------------------------------------------------------------
+
+def _identify_radial_sector(
+    vein_map: dict[str, MergedPath],
+    paths: list[MergedPath],
+    wing_bbox: tuple[float, float, float, float],
+) -> None:
+    """Identify the radial sector (Rs) — the fused L2+L3 proximal stem.
+
+    Rs is an unassigned, roughly horizontal path near both L2 and L3.
+    """
+    l2 = vein_map.get("L2")
+    l3 = vein_map.get("L3")
+    if l2 is None or l3 is None:
+        return
+
+    assigned_paths = set(id(mp) for mp in vein_map.values())
+
+    best_rs: Optional[MergedPath] = None
+    best_score = -1.0
+
+    for p in paths:
+        if id(p) in assigned_paths:
+            continue
+        if p.orientation_deg > 35:
+            continue
+        dist_l2 = p.line.distance(l2.line)
+        dist_l3 = p.line.distance(l3.line)
+        if dist_l2 > 50 or dist_l3 > 50:
+            continue
+        # Score: prefer paths close to both and of moderate length
+        score = 1.0 / (1.0 + dist_l2 + dist_l3) * min(p.length_px, 800)
+        if score > best_score:
+            best_score = score
+            best_rs = p
+
+    if best_rs is not None:
+        vein_map["Rs"] = best_rs
+        logger.info(
+            "Identified Rs (radial sector): %.0fpx, Y=%.3f",
+            best_rs.length_px, best_rs.y_median_norm,
+        )
+
+
+# ---------------------------------------------------------------------------
 # 3d. Vein Shape Validation
 # ---------------------------------------------------------------------------
 
@@ -1703,6 +2141,7 @@ def identify_veins_and_regions(
     vein_polygons: list[Polygon],
     image_shape: tuple[int, int],
     wing_bbox: tuple[float, float, float, float],
+    edge_centerlines: Optional[dict[tuple[int, int], LineString]] = None,
 ) -> IdentificationResult:
     """Identify veins and regions independently using geometry, then cross-validate."""
     result = IdentificationResult()
@@ -1722,6 +2161,12 @@ def identify_veins_and_regions(
 
     # 3c. Classify merged paths → named veins
     vein_map = classify_merged_paths(paths, wing_bbox)
+
+    # 3c'. Extend L1 with edge boundary segments
+    _extend_l1_with_edge_segments(vein_map, edge_centerlines or {}, wing_bbox)
+
+    # 3c''. Identify radial sector (Rs)
+    _identify_radial_sector(vein_map, paths, wing_bbox)
 
     # 3d. Validate vein shapes
     shape_warnings = validate_vein_shapes(vein_map)
@@ -1793,7 +2238,7 @@ def identify_veins_and_regions(
 
     # Build VeinAssignment objects from vein_map
     assignments: list[VeinAssignment] = []
-    for vein_id in ["L1", "L2", "L3", "L4", "L5", "ACV", "PCV"]:
+    for vein_id in ["L1", "L2", "L3", "L4", "L5", "ACV", "PCV", "Rs"]:
         if vein_id in vein_map:
             mp = vein_map[vein_id]
             coords = list(mp.line.coords)
