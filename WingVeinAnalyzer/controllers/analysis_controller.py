@@ -34,9 +34,10 @@ from WingVeinAnalyzer.models.vein_identifier import (
     validate_veins_against_ground_truth,
 )
 from WingVeinAnalyzer.models.vein_skeleton import (
-    extract_anterior_boundary,
     extract_edge_boundary_veins,
     extract_veins_from_mask,
+    find_poly_pair_for_line,
+    split_oversized_polygons,
 )
 from WingVeinAnalyzer.models.wing_geometry import (
     WingOutline,
@@ -150,10 +151,23 @@ def _run_polygon_pipeline(
         # --- Vein-mask-primary path ---
         logger.info("Using vein-mask-primary pipeline (%d vein polygons)", len(annotations.vein_polygons))
 
+        # Pre-Voronoi split: detect oversized merged polygons and split them
+        # before the Voronoi step so it gets the correct number of seeds
+        polygons, synthetic_centerlines = split_oversized_polygons(
+            polygons, image,
+        )
+
         # Extract centerlines from vein mask (no poly_names needed)
         centerlines, nearest_labels, vein_mask_arr = extract_veins_from_mask(
             annotations.vein_polygons, polygons, image.shape[:2]
         )
+
+        # Add synthetic centerlines for split boundaries that Voronoi missed
+        for syn_line in synthetic_centerlines:
+            key = find_poly_pair_for_line(syn_line, polygons)
+            if key and key not in centerlines:
+                centerlines[key] = syn_line
+                logger.info("Added synthetic centerline for split boundary: %s", key)
 
         # Identify veins and regions independently via geometry
         id_result = identify_veins_and_regions(
@@ -172,9 +186,10 @@ def _run_polygon_pipeline(
         # edge of the vein mask instead.
         has_costal = "costal_cell" in poly_names.values()
         if not has_costal:
-            _recover_l1_from_anterior_edge(
-                assignments, annotations.vein_polygons, polygons,
-                image.shape[:2], logger,
+            _recover_l1_from_marginal_cell(
+                assignments, polygons, poly_names, wing_bbox, logger,
+                vein_polygons=annotations.vein_polygons,
+                image_shape=image.shape[:2],
             )
 
         # Ground-truth validation (if expected overlay file exists)
@@ -357,162 +372,172 @@ def _run_polygon_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# L1 recovery from anterior edge
+# L1 recovery from marginal cell boundary
 # ---------------------------------------------------------------------------
 
-def _recover_l1_from_anterior_edge(
+def _recover_l1_from_marginal_cell(
     assignments: list[VeinAssignment],
-    vein_polygons: list[Polygon],
-    intervein_polygons: list[Polygon],
-    image_shape: tuple[int, int],
+    polygons: list[Polygon],
+    poly_names: dict[int, str],
+    wing_bbox: tuple[float, float, float, float],
     logger,
-    min_improvement_px: float = 100.0,
+    vein_polygons: list[Polygon] | None = None,
+    image_shape: tuple[int, int] | None = None,
 ) -> None:
-    """Recover L1 by skeletonizing the vein mask anterior to L2 in the distal wing.
+    """Recover L1 from the vein mask in the proximal wing anterior to L2.
 
-    L1 runs along the anterior wing margin.  When no costal cell polygon
-    exists, the Voronoi approach can't find L1 because it only detects
-    boundaries between polygon pairs.  This function skeletonizes the vein
-    mask region that's anterior to L2 (in the distal wing) to extract L1's
-    centerline directly.
+    Uses the marginal cell polygon to determine the proximal wing region
+    where L1 runs, then skeletonizes the vein mask in that region.  L1
+    runs along the anterior margin from the hinge to the subcostal break,
+    which is in the proximal wing — not the distal wing where the old
+    approach searched.
     """
-    from shapely.geometry import LineString
-    from skimage.morphology import skeletonize as sk_skeletonize
-    from scipy import ndimage
+    from shapely.geometry import LineString, Point
     from WingVeinAnalyzer.models.vein_map import VEIN_LENGTH_PRIORS
-    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon, _trace_pixels_to_line
+    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
 
     l1 = next((a for a in assignments if a.vein_id == "L1"), None)
-    if l1 is None or not vein_polygons:
+    if l1 is None:
         return
 
     existing_length = l1.length_px or 0.0
 
+    # Need L2 geometry to define the anterior boundary
     l2 = next((a for a in assignments if a.vein_id == "L2" and a.line is not None), None)
     if l2 is None:
+        logger.debug("L1 recovery: no L2 line available")
         return
 
-    h, w = image_shape
+    # Need vein mask to skeletonize
+    if not vein_polygons or image_shape is None:
+        logger.debug("L1 recovery: no vein mask or image shape available")
+        return
 
-    # Rasterize vein mask
+    # Find marginal cell polygon (to determine proximal region)
+    marginal_idx = None
+    for idx, name in poly_names.items():
+        if name == "marginal_cell":
+            marginal_idx = idx
+            break
+    if marginal_idx is None or marginal_idx >= len(polygons):
+        logger.debug("L1 recovery: no marginal_cell polygon found")
+        return
+
+    wing_x_min, _, wing_x_max, _ = wing_bbox
+    wing_span = wing_x_max - wing_x_min
+
+    # --- Detect hinge side ---
+    proximal_regions = {"1st_basal_cell", "costal_cell", "discal_cell"}
+    proximal_xs: list[float] = []
+    for idx, name in poly_names.items():
+        if idx < len(polygons) and name in proximal_regions:
+            proximal_xs.append(polygons[idx].centroid.x)
+
+    wing_center_x = (wing_x_min + wing_x_max) / 2.0
+    hinge_is_left = np.mean(proximal_xs) < wing_center_x if proximal_xs else True
+
+    # --- Determine proximal X limit ---
+    # L1 runs from the hinge to the subcostal break.  Use L2's proximal
+    # endpoint as an approximate X limit, with generous margin.
+    l2_coords = np.array(l2.line.coords)
+    if hinge_is_left:
+        l2_prox_x = float(l2_coords[:, 0].min())
+        # L1 extends from hinge to roughly L2's proximal X + 30% margin
+        x_limit = l2_prox_x + wing_span * 0.10
+    else:
+        l2_prox_x = float(l2_coords[:, 0].max())
+        x_limit = l2_prox_x - wing_span * 0.10
+
+    # --- Rasterize vein mask ---
+    h, w = image_shape
     vein_mask = np.zeros((h, w), dtype=np.uint8)
     for poly in vein_polygons:
         _fill_polygon(vein_mask, poly, 1)
 
-    # Build a Y-threshold map from L2: for each X column, the anterior
-    # (lowest Y) point of L2 defines the boundary.  L1 runs above this.
-    l2_coords = list(l2.line.coords)
-    l2_xs = [c[0] for c in l2_coords]
-    l2_min_x = min(l2_xs)
-    l2_max_x = max(l2_xs)
-    l2_x_mid = (l2_min_x + l2_max_x) / 2
-
-    # Build per-column Y threshold from L2's most anterior Y
+    # --- Build Y-threshold map from L2 (most anterior Y at each column) ---
     l2_y_at_col = np.full(w, -1.0)
-    for cx, cy in l2_coords:
+    for cx, cy in l2.line.coords:
         col = int(cx)
         if 0 <= col < w:
             if l2_y_at_col[col] < 0 or cy < l2_y_at_col[col]:
                 l2_y_at_col[col] = cy
-    # Fill gaps by interpolation
-    filled = l2_y_at_col.copy()
-    valid = filled > 0
+    valid = l2_y_at_col > 0
     if valid.any():
-        from numpy import interp
         valid_idx = np.where(valid)[0]
-        filled = interp(np.arange(w), valid_idx, filled[valid_idx])
-        # Extend to wing tip (beyond L2's extent) using L2's last Y value
-        l2_y_at_col = filled
+        l2_y_at_col = np.interp(np.arange(w), valid_idx, l2_y_at_col[valid_idx])
 
-    # ROI: vein mask pixels where Y < L2_Y - margin (anterior to L2)
-    # Only in the distal wing (X >= L2 midpoint)
-    margin = 20  # small margin to avoid including L2 itself
-    roi = np.zeros((h, w), dtype=bool)
-    for col in range(int(l2_x_mid), w):
-        if l2_y_at_col[col] > 0:
-            y_thresh = int(l2_y_at_col[col]) - margin
-            roi[:y_thresh, col] = True
-    roi &= (vein_mask > 0)
+    # --- Trace L1 as the posterior edge of the most anterior vein band ---
+    # In each column, the vein mask has bands: costa/L1, gap (marginal cell),
+    # L2, gap, L3, etc.  The posterior edge of the first (most anterior)
+    # band of vein tissue approximates L1's position.
+    if hinge_is_left:
+        col_start, col_end = 0, min(int(x_limit), w)
+    else:
+        col_start, col_end = max(int(x_limit), 0), w
 
-    if roi.sum() < 50:
-        logger.debug("L1 recovery: ROI too small (%d pixels)", roi.sum())
+    l1_trace: list[tuple[float, float]] = []
+    min_gap_px = 5  # minimum gap to consider as intervein space
+    margin = 30  # must be anterior to L2 by this margin
+    for col in range(col_start, col_end):
+        if l2_y_at_col[col] <= 0:
+            continue
+        y_max = int(l2_y_at_col[col]) - margin
+        if y_max < 10:
+            continue
+        # Find vein mask pixels in this column above L2
+        col_mask = vein_mask[:y_max, col]
+        vein_rows = np.where(col_mask > 0)[0]
+        if len(vein_rows) < 2:
+            continue
+        # Find the first gap (vein→non-vein transition) = posterior edge of
+        # the first vein band.  Skip columns where vein tissue is continuous
+        # all the way to L2 (hinge region with merged veins).
+        diffs = np.diff(vein_rows)
+        gaps = np.where(diffs > min_gap_px)[0]
+        if len(gaps) > 0:
+            posterior_y = float(vein_rows[gaps[0]])
+            l1_trace.append((float(col), posterior_y))
+
+    if len(l1_trace) < 10:
+        logger.debug("L1 recovery: traced too few columns (%d)", len(l1_trace))
         return
 
-    # Morphological closing to bridge small gaps
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    roi_uint8 = roi.astype(np.uint8)
-    roi_uint8 = cv2.morphologyEx(roi_uint8, cv2.MORPH_CLOSE, kernel)
+    l1_line = LineString(l1_trace).simplify(10.0)
 
-    # Skeletonize
-    skeleton = sk_skeletonize(roi_uint8 > 0)
+    # --- Trim to max L1 length, keeping the distal portion ---
+    # L1 runs from the hinge to the subcostal break.  The trace may
+    # extend too far into the hinge where the gap between costa/L1 and
+    # L2 persists.  Keep the distal portion (nearest the subcostal break)
+    # and trim excess from the proximal end.
+    max_l1 = VEIN_LENGTH_PRIORS["L1"][1] * wing_span  # 25% of wing span
+    if l1_line.length > max_l1:
+        from shapely.ops import substring
+        l1_line = substring(l1_line, l1_line.length - max_l1, l1_line.length)
+    new_length = l1_line.length
 
-    # Component analysis — no blanket bridging (the ROI contains multiple
-    # parallel structures: costa, L1, and L2 boundary).  Just select the
-    # most distal sufficiently-long component.
-    structure = ndimage.generate_binary_structure(2, 2)
-    labeled, n_cc = ndimage.label(skeleton, structure=structure)
-
-    # Take the most distal sufficiently-long component (covers wing tip = GT L1)
-    best_line = None
-    best_max_x = -1.0
-    min_component_px = 100
-    for cc_id in range(1, n_cc + 1):
-        cc_ys, cc_xs = np.where(labeled == cc_id)
-        if len(cc_ys) < 10:
-            continue
-        pixels = list(zip(cc_ys.tolist(), cc_xs.tolist()))
-        line = _trace_pixels_to_line(pixels)
-        if line is None or line.length < min_component_px:
-            continue
-        max_x = float(cc_xs.max())
-        if max_x > best_max_x:
-            best_max_x = max_x
-            best_line = line
-
-    if best_line is None:
-        logger.debug("L1 recovery: no skeleton line found")
+    if new_length < 50:
+        logger.debug("L1 recovery: simplified line too short (%.0fpx)", new_length)
         return
 
-    best_length = best_line.length
-
-    # Trim to max L1 length from distal end
-    wing_span = max(b[2] for b in [p.bounds for p in intervein_polygons]) - \
-                min(b[0] for b in [p.bounds for p in intervein_polygons])
-    max_l1 = VEIN_LENGTH_PRIORS["L1"][1] * wing_span * 1.3
-
-    if best_length > max_l1:
-        coords = list(best_line.coords)
-        accum = 0.0
-        trim_idx = len(coords) - 1
-        for i in range(len(coords) - 1, 0, -1):
-            dx = coords[i][0] - coords[i - 1][0]
-            dy = coords[i][1] - coords[i - 1][1]
-            accum += (dx * dx + dy * dy) ** 0.5
-            if accum >= max_l1:
-                trim_idx = i
-                break
-        best_line = LineString(coords[trim_idx:])
-        best_length = best_line.length
-
-    if best_length <= existing_length + min_improvement_px:
+    # Only replace if the new line is a significant improvement
+    if existing_length > 0 and new_length <= existing_length * 0.8:
         logger.debug(
-            "L1 skeleton (%.0fpx) not much longer than existing (%.0fpx), skipping",
-            best_length, existing_length,
+            "L1 recovery: marginal boundary (%.0fpx) not better than existing (%.0fpx), skipping",
+            new_length, existing_length,
         )
         return
 
-    # Update L1 assignment
-    l1.line = best_line
-    l1.length_px = best_length
+    l1.line = l1_line
+    l1.length_px = new_length
     l1.status = VeinStatus.COMPLETE
     l1.confidence = 0.8
-    l1.evidence = ["anterior_skeleton_recovery"]
-    coords = list(best_line.coords)
+    l1.evidence = ["marginal_cell_boundary"]
+    coords = list(l1_line.coords)
     l1.endpoints = [coords[0], coords[-1]]
 
     logger.info(
-        "L1 recovered from anterior skeleton: %.0fpx → %.0fpx",
-        existing_length, best_length,
+        "L1 recovered from marginal cell boundary: %.0fpx → %.0fpx",
+        existing_length, new_length,
     )
 
 

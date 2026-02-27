@@ -35,7 +35,11 @@ from WingVeinAnalyzer.models.vein_labeler import (
     VeinStatus,
     _extract_costa,
 )
-from WingVeinAnalyzer.models.vein_skeleton import extract_veins_from_mask
+from WingVeinAnalyzer.models.vein_skeleton import (
+    extract_veins_from_mask,
+    find_poly_pair_for_line,
+    split_oversized_polygons,
+)
 from WingVeinAnalyzer.models.wing_geometry import (
     WingOutline,
     build_wing_outline,
@@ -59,6 +63,9 @@ class StepState:
     wing_bbox: Optional[tuple[float, float, float, float]] = None
     polygons: Optional[list[Polygon]] = None
     vein_polygons: Optional[list[Polygon]] = None
+
+    # Pre-split (from step 1)
+    pre_split_count: int = 0
 
     # Voronoi (from step 1)
     vein_mask: Optional[np.ndarray] = None
@@ -219,21 +226,39 @@ class StepRunner:
         return state
 
     def _step_voronoi(self, prev: StepState) -> StepState:
-        """Step 1: Rasterize vein mask and compute Voronoi partition."""
+        """Step 1: Pre-split oversized polygons, then rasterize vein mask and compute Voronoi."""
         state = self._copy_forward(prev)
 
         if not state.vein_polygons:
             logger.warning("No vein polygons — skipping Voronoi step")
             return state
 
+        # Pre-Voronoi split: detect oversized merged polygons
+        orig_count = len(state.polygons)
+        state.polygons, synthetic_centerlines = split_oversized_polygons(
+            state.polygons, state.image,
+        )
+        state.pre_split_count = len(state.polygons) - orig_count
+
         centerlines, nearest_labels, vein_mask = extract_veins_from_mask(
             state.vein_polygons, state.polygons, state.image.shape[:2],
         )
+
+        # Add synthetic centerlines for split boundaries that Voronoi missed
+        for syn_line in synthetic_centerlines:
+            key = find_poly_pair_for_line(syn_line, state.polygons)
+            if key and key not in centerlines:
+                centerlines[key] = syn_line
+                logger.info("Added synthetic centerline for split boundary: %s", key)
+
         state.centerlines = centerlines
         state.nearest_labels = nearest_labels
         state.vein_mask = vein_mask
 
-        state.params_used = {"closing_kernel_size": "11"}
+        state.params_used = {
+            "closing_kernel_size": "11",
+            "pre_split_count": str(state.pre_split_count),
+        }
         return state
 
     def _step_centerlines(self, prev: StepState) -> StepState:
@@ -355,19 +380,21 @@ class StepRunner:
         return state
 
     def _step_l1_recovery(self, prev: StepState) -> StepState:
-        """Step 11: L1 recovery from anterior edge (if needed)."""
+        """Step 11: L1 recovery from marginal cell boundary (if needed)."""
         state = self._copy_forward(prev)
 
         has_costal = "costal_cell" in (state.poly_names or {}).values()
-        if not has_costal and state.assignments and state.vein_polygons:
+        if not has_costal and state.assignments and state.polygons and state.poly_names:
             from WingVeinAnalyzer.controllers.analysis_controller import (
-                _recover_l1_from_anterior_edge,
+                _recover_l1_from_marginal_cell,
             )
-            _recover_l1_from_anterior_edge(
-                state.assignments, state.vein_polygons, state.polygons,
-                state.image.shape[:2], logger,
+            _recover_l1_from_marginal_cell(
+                state.assignments, state.polygons, state.poly_names,
+                state.wing_bbox, logger,
+                vein_polygons=state.vein_polygons,
+                image_shape=state.image.shape[:2] if state.image is not None else None,
             )
-            state.params_used = {"min_improvement": "100 px", "status": "Ran"}
+            state.params_used = {"method": "marginal_cell_boundary", "status": "Ran"}
         else:
             state.params_used = {"status": "Skipped (costal cell present)"}
 
@@ -522,6 +549,7 @@ class StepRunner:
         state.wing_bbox = prev.wing_bbox
         state.polygons = prev.polygons
         state.vein_polygons = prev.vein_polygons
+        state.pre_split_count = prev.pre_split_count
         state.vein_mask = prev.vein_mask
         state.nearest_labels = prev.nearest_labels
         state.centerlines = prev.centerlines
