@@ -391,8 +391,6 @@ class StepRunner:
             _recover_l1_from_marginal_cell(
                 state.assignments, state.polygons, state.poly_names,
                 state.wing_bbox, logger,
-                vein_polygons=state.vein_polygons,
-                image_shape=state.image.shape[:2] if state.image is not None else None,
             )
             state.params_used = {"method": "marginal_cell_boundary", "status": "Ran"}
         else:

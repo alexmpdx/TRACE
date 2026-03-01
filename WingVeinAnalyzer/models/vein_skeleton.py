@@ -679,3 +679,469 @@ def _scan_median_to_line(
 
     line = LineString(points).simplify(simplify_tolerance)
     return line if line.length > 0 else None
+
+
+# ---------------------------------------------------------------------------
+# Pre-Voronoi polygon splitting
+# ---------------------------------------------------------------------------
+
+
+def split_oversized_polygons(
+    intervein_polygons: list[Polygon],
+    image: np.ndarray,
+    max_single_frac: float = 0.28,
+) -> tuple[list[Polygon], list[LineString]]:
+    """Detect and split oversized intervein polygons before Voronoi.
+
+    When the pixel classifier merges two adjacent regions into one polygon
+    (e.g. missing L5 merges discal + 3rd_posterior), the Voronoi gets too
+    few seeds and produces wrong centerlines.  This function detects such
+    oversized polygons by area fraction alone (no naming needed), splits
+    them using erosion or image-guided ridge detection, and returns the
+    updated polygon list plus synthetic centerlines along split boundaries.
+
+    Returns (updated_polygons, synthetic_centerlines).
+    """
+    total_area = sum(p.area for p in intervein_polygons)
+    if total_area == 0:
+        return list(intervein_polygons), []
+
+    polygons = list(intervein_polygons)
+    synthetic_centerlines: list[LineString] = []
+
+    for i in range(len(intervein_polygons)):
+        poly = polygons[i]
+        frac = poly.area / total_area
+        if frac <= max_single_frac:
+            continue
+
+        logger.info(
+            "Pre-Voronoi split: P%d area=%.1f%% exceeds threshold %.0f%%",
+            i, frac * 100, max_single_frac * 100,
+        )
+
+        # Attempt 1: erosion-based splitting (larger erosion amounts)
+        split_line, pieces = _pre_split_by_erosion(poly)
+
+        # Attempt 2: image-guided ridge detection
+        if split_line is None:
+            split_line, pieces = _pre_split_by_ridge(
+                poly, image, image.shape[:2],
+            )
+
+        if split_line is None or pieces is None:
+            logger.warning(
+                "  Could not split P%d — continuing with original polygon", i,
+            )
+            continue
+
+        piece_a, piece_b = pieces
+        logger.info(
+            "  Split P%d into two pieces: %.0f px² + %.0f px², "
+            "split line length=%.0f px",
+            i, piece_a.area, piece_b.area, split_line.length,
+        )
+
+        # Replace original polygon with piece_a, append piece_b
+        polygons[i] = piece_a
+        polygons.append(piece_b)
+        synthetic_centerlines.append(split_line)
+
+    if len(polygons) != len(intervein_polygons):
+        logger.info(
+            "Pre-Voronoi split: %d → %d polygons, %d synthetic centerlines",
+            len(intervein_polygons), len(polygons), len(synthetic_centerlines),
+        )
+
+    return polygons, synthetic_centerlines
+
+
+def _pre_split_by_erosion(
+    poly: Polygon,
+    min_part_frac: float = 0.15,
+) -> tuple[Optional[LineString], Optional[tuple[Polygon, Polygon]]]:
+    """Split a polygon at its narrowest neck using progressive erosion.
+
+    Uses larger erosion amounts than the post-identification split because
+    pre-Voronoi merged polygons are typically very large.
+    """
+    erode_amount = None
+    parts: list[Polygon] = []
+
+    for amount in [20, 40, 60, 80, 100, 150]:
+        eroded = poly.buffer(-amount)
+        if eroded.is_empty:
+            continue
+        if eroded.geom_type == 'MultiPolygon':
+            parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
+            if len(parts) >= 2:
+                erode_amount = amount
+                break
+
+    if erode_amount is None:
+        return None, None
+
+    # Sort by area, keep two largest
+    parts.sort(key=lambda g: g.area, reverse=True)
+    seed_a = parts[0]
+    seed_b = parts[1]
+
+    # Watershed fill: rasterize polygon and seeds, distance-transform fill
+    bounds = poly.bounds  # (minx, miny, maxx, maxy)
+    pad = 10
+    x0 = int(bounds[0]) - pad
+    y0 = int(bounds[1]) - pad
+    x1 = int(bounds[2]) + pad + 1
+    y1 = int(bounds[3]) + pad + 1
+    local_h = y1 - y0
+    local_w = x1 - x0
+
+    from shapely.affinity import translate
+
+    local_poly = translate(poly, xoff=-x0, yoff=-y0)
+    local_a = translate(seed_a, xoff=-x0, yoff=-y0)
+    local_b = translate(seed_b, xoff=-x0, yoff=-y0)
+
+    poly_mask = np.zeros((local_h, local_w), dtype=np.uint8)
+    _fill_polygon(poly_mask, local_poly, 1)
+
+    seed_map = np.zeros((local_h, local_w), dtype=np.int32)
+    _fill_polygon(seed_map, local_a, 1)
+    _fill_polygon(seed_map, local_b, 2)
+    seed_map[poly_mask == 0] = 0
+
+    background = (seed_map == 0) & (poly_mask > 0)
+    if background.sum() == 0:
+        return None, None
+
+    _, nearest_idx = ndimage.distance_transform_edt(background, return_indices=True)
+    filled = seed_map[nearest_idx[0], nearest_idx[1]]
+    filled[poly_mask == 0] = 0
+    filled[seed_map > 0] = seed_map[seed_map > 0]
+
+    # Extract boundary between label 1 and 2 as the split line
+    split_line = _extract_split_boundary(filled, x0, y0)
+
+    # Convert filled regions back to polygons
+    piece_polys = _filled_to_polygons(filled, x0, y0)
+    if piece_polys is None:
+        return None, None
+
+    return split_line, piece_polys
+
+
+def _pre_split_by_ridge(
+    poly: Polygon,
+    image: np.ndarray,
+    image_shape: tuple[int, int],
+) -> tuple[Optional[LineString], Optional[tuple[Polygon, Polygon]]]:
+    """Split a polygon using intensity-profile-based dark-band detection.
+
+    In brightfield wing images, veins appear as dark bands. This function
+    projects mean intensity along the polygon's minor axis, finds the
+    darkest band (valley in the profile), and uses it to split the polygon.
+    """
+    from shapely.affinity import translate
+
+    h, w = image_shape
+    bounds = poly.bounds  # (minx, miny, maxx, maxy)
+    pad = 5
+    x0 = max(0, int(bounds[0]) - pad)
+    y0 = max(0, int(bounds[1]) - pad)
+    x1 = min(w, int(bounds[2]) + pad + 1)
+    y1 = min(h, int(bounds[3]) + pad + 1)
+
+    # Extract grayscale ROI
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image[y0:y1, x0:x1].copy()
+
+    local_h, local_w = gray.shape
+
+    # Create polygon mask in local coordinates
+    local_poly = translate(poly, xoff=-x0, yoff=-y0)
+    poly_mask = np.zeros((local_h, local_w), dtype=np.uint8)
+    _fill_polygon(poly_mask, local_poly, 1)
+
+    # Determine scan axis: scan along the minor axis of the polygon
+    x_span = bounds[2] - bounds[0]
+    y_span = bounds[3] - bounds[1]
+
+    # Try both axes and pick the one with a clearer valley
+    best_result = None
+    best_valley_depth = 0.0
+
+    for scan_axis in ("y", "x"):
+        result = _find_dark_band(
+            gray, poly_mask, local_h, local_w, scan_axis,
+        )
+        if result is not None:
+            valley_pos, valley_depth, band_width = result
+            if valley_depth > best_valley_depth:
+                best_valley_depth = valley_depth
+                best_result = (scan_axis, valley_pos, band_width)
+
+    if best_result is None:
+        return None, None
+
+    scan_axis, valley_pos, band_width = best_result
+    logger.info(
+        "  Dark band found: axis=%s, pos=%d, depth=%.1f, width=%d",
+        scan_axis, valley_pos, best_valley_depth, band_width,
+    )
+
+    # Build a split line through the valley position, following the
+    # polygon boundary to get the right extent
+    split_line = _trace_dark_band_line(
+        gray, poly_mask, scan_axis, valley_pos, band_width,
+        x0, y0,
+    )
+    if split_line is None or split_line.length < 50:
+        return None, None
+
+    # Split the polygon using the dark band line
+    split_zone = split_line.buffer(max(band_width / 2, 5.0))
+    remainder = poly.difference(split_zone)
+
+    if remainder.is_empty:
+        return None, None
+
+    if remainder.geom_type == 'MultiPolygon':
+        pieces = sorted(remainder.geoms, key=lambda g: g.area, reverse=True)
+        big_pieces = [p for p in pieces if p.area > poly.area * 0.10]
+        if len(big_pieces) >= 2:
+            return split_line, (big_pieces[0], big_pieces[1])
+
+    return None, None
+
+
+def _find_dark_band(
+    gray: np.ndarray,
+    poly_mask: np.ndarray,
+    local_h: int,
+    local_w: int,
+    scan_axis: str,
+    band_size: int = 10,
+) -> Optional[tuple[int, float, int]]:
+    """Find the darkest band along a given axis within the polygon.
+
+    Computes mean intensity in bands along scan_axis, smooths the profile,
+    and finds the deepest valley. Returns (valley_pos, valley_depth, band_width)
+    or None if no clear valley.
+    """
+    if scan_axis == "y":
+        n_positions = local_h
+    else:
+        n_positions = local_w
+
+    if n_positions < band_size * 5:
+        return None
+
+    # Compute mean intensity for each position along the scan axis
+    profile = np.full(n_positions, np.nan)
+    for pos in range(n_positions):
+        if scan_axis == "y":
+            row_mask = poly_mask[pos, :]
+            row_vals = gray[pos, :]
+        else:
+            row_mask = poly_mask[:, pos]
+            row_vals = gray[:, pos]
+
+        valid = row_mask > 0
+        if valid.sum() > 5:
+            profile[pos] = float(np.mean(row_vals[valid]))
+
+    # Interpolate NaN gaps
+    valid_idx = np.where(~np.isnan(profile))[0]
+    if len(valid_idx) < 20:
+        return None
+
+    profile_clean = np.interp(
+        np.arange(n_positions), valid_idx, profile[valid_idx],
+    )
+
+    # Smooth with a wide kernel to find the broad valley
+    kernel_size = max(band_size * 3, 31)
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    smoothed = np.convolve(
+        profile_clean, np.ones(kernel_size) / kernel_size, mode='same',
+    )
+
+    # Find the deepest valley: exclude edges (first/last 15% of range)
+    margin = int(n_positions * 0.15)
+    interior = smoothed[margin:n_positions - margin]
+    if len(interior) < 20:
+        return None
+
+    valley_idx = int(np.argmin(interior)) + margin
+    valley_val = smoothed[valley_idx]
+
+    # Compute depth relative to surrounding peaks
+    left_peak = np.max(smoothed[margin:valley_idx]) if valley_idx > margin else smoothed[margin]
+    right_peak = np.max(smoothed[valley_idx:n_positions - margin]) if valley_idx < n_positions - margin else smoothed[n_positions - margin - 1]
+    surrounding = min(left_peak, right_peak)
+    depth = surrounding - valley_val
+
+    # The valley must be meaningful (at least 3 intensity units deep)
+    if depth < 3.0:
+        return None
+
+    # Estimate band width: how wide is the valley (below surrounding - depth/2)?
+    threshold = surrounding - depth / 2
+    below = smoothed < threshold
+    # Find the contiguous region around valley_idx that's below threshold
+    left = valley_idx
+    while left > 0 and below[left - 1]:
+        left -= 1
+    right = valley_idx
+    while right < n_positions - 1 and below[right + 1]:
+        right += 1
+    band_width = right - left + 1
+
+    return (valley_idx, depth, band_width)
+
+
+def _trace_dark_band_line(
+    gray: np.ndarray,
+    poly_mask: np.ndarray,
+    scan_axis: str,
+    valley_pos: int,
+    band_width: int,
+    x_offset: int,
+    y_offset: int,
+) -> Optional[LineString]:
+    """Trace a line through the darkest pixels at the valley position.
+
+    For each position along the primary axis, finds the darkest pixel
+    within the band width centered on valley_pos along the scan axis.
+    """
+    local_h, local_w = gray.shape
+    half_band = max(band_width, 20)
+
+    points: list[tuple[float, float]] = []
+
+    if scan_axis == "y":
+        # Valley is a horizontal band at row=valley_pos
+        # For each column, find the darkest row near valley_pos
+        y_lo = max(0, valley_pos - half_band)
+        y_hi = min(local_h, valley_pos + half_band + 1)
+
+        step = max(1, (local_w) // 200)  # Sample ~200 points
+        for col in range(0, local_w, step):
+            band_mask = poly_mask[y_lo:y_hi, col]
+            if band_mask.sum() == 0:
+                continue
+            band_vals = gray[y_lo:y_hi, col].astype(np.float64)
+            band_vals[band_mask == 0] = 999  # ignore non-polygon pixels
+            best_row = int(np.argmin(band_vals)) + y_lo
+            points.append((float(col + x_offset), float(best_row + y_offset)))
+    else:
+        # Valley is a vertical band at col=valley_pos
+        x_lo = max(0, valley_pos - half_band)
+        x_hi = min(local_w, valley_pos + half_band + 1)
+
+        step = max(1, (local_h) // 200)
+        for row in range(0, local_h, step):
+            band_mask = poly_mask[row, x_lo:x_hi]
+            if band_mask.sum() == 0:
+                continue
+            band_vals = gray[row, x_lo:x_hi].astype(np.float64)
+            band_vals[band_mask == 0] = 999
+            best_col = int(np.argmin(band_vals)) + x_lo
+            points.append((float(best_col + x_offset), float(row + y_offset)))
+
+    if len(points) < 5:
+        return None
+
+    line = LineString(points).simplify(5.0)
+    return line if line.length > 0 else None
+
+
+def _extract_split_boundary(
+    filled: np.ndarray,
+    x_offset: int,
+    y_offset: int,
+) -> Optional[LineString]:
+    """Extract the boundary line between label 1 and 2 in a filled array."""
+    local_h, local_w = filled.shape
+
+    padded = np.pad(filled, 1, mode='constant', constant_values=0)
+    center = padded[1:-1, 1:-1]
+    shifts = [
+        padded[0:-2, 1:-1],
+        padded[2:, 1:-1],
+        padded[1:-1, 0:-2],
+        padded[1:-1, 2:],
+    ]
+
+    is_boundary = np.zeros((local_h, local_w), dtype=bool)
+    for shifted in shifts:
+        is_12 = ((center == 1) & (shifted == 2)) | ((center == 2) & (shifted == 1))
+        is_boundary |= is_12
+
+    ys, xs = np.where(is_boundary)
+    if len(ys) < 5:
+        return None
+
+    pixels = list(zip(ys.tolist(), xs.tolist()))
+    line = _trace_pixels_to_line(pixels)
+    if line is None:
+        return None
+
+    # Convert to global coordinates
+    global_coords = [(px + x_offset, py + y_offset) for px, py in line.coords]
+    return LineString(global_coords)
+
+
+def _filled_to_polygons(
+    filled: np.ndarray,
+    x_offset: int,
+    y_offset: int,
+) -> Optional[tuple[Polygon, Polygon]]:
+    """Convert a 2-label filled array back to two Polygons in global coords."""
+    piece_polys: list[Polygon] = []
+    for lbl in [1, 2]:
+        piece_mask = ((filled == lbl) * 255).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            piece_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            coords = [
+                (float(pt[0][0]) + x_offset, float(pt[0][1]) + y_offset)
+                for pt in largest
+            ]
+            if len(coords) >= 4:
+                p = Polygon(coords)
+                if p.is_valid and p.area > 100:
+                    piece_polys.append(p)
+
+    if len(piece_polys) < 2:
+        return None
+
+    piece_polys.sort(key=lambda p: p.area, reverse=True)
+    return piece_polys[0], piece_polys[1]
+
+
+def find_poly_pair_for_line(
+    syn_line: LineString,
+    polygons: list[Polygon],
+    buffer_dist: float = 15.0,
+) -> Optional[tuple[int, int]]:
+    """Find which two polygons a synthetic centerline separates."""
+    buffered = syn_line.buffer(buffer_dist)
+    touching: list[int] = []
+
+    for idx, poly in enumerate(polygons):
+        if buffered.intersects(poly):
+            touching.append(idx)
+
+    if len(touching) >= 2:
+        # Return the pair with largest overlap
+        touching.sort(key=lambda idx: buffered.intersection(polygons[idx]).area, reverse=True)
+        a, b = touching[0], touching[1]
+        return (min(a, b), max(a, b))
+
+    return None
