@@ -81,10 +81,11 @@ class BatchWorker(QThread):
     file_done = pyqtSignal(int, bool, str)  # file index, success, message
     all_done = pyqtSignal()
 
-    def __init__(self, pairs: list[FilePair], output_dir: Path, parent=None):
+    def __init__(self, pairs: list[FilePair], output_dir: Path, smooth_sigma: float = 3.0, parent=None):
         super().__init__(parent)
         self._pairs = pairs
         self._output_dir = output_dir
+        self._smooth_sigma = smooth_sigma
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -104,6 +105,7 @@ class BatchWorker(QThread):
                     image_path=pair.image_path,
                     geojson_path=pair.geojson_path,
                     output_dir=self._output_dir / pair.display_name,
+                    smooth_sigma=self._smooth_sigma,
                 )
                 self.file_done.emit(i, True, f"{pair.display_name}: OK")
             except Exception:
@@ -118,11 +120,12 @@ class BatchWorker(QThread):
 class BatchDialog(QDialog):
     """Batch processing dialog with file checkboxes and progress."""
 
-    def __init__(self, pairs: list[FilePair], parent=None):
+    def __init__(self, pairs: list[FilePair], parent=None, smooth_sigma: float = 3.0):
         super().__init__(parent)
         self.setWindowTitle("Batch Processing")
         self.resize(700, 500)
         self._pairs = pairs
+        self._smooth_sigma = smooth_sigma
         self._worker: Optional[BatchWorker] = None
 
         layout = QVBoxLayout(self)
@@ -201,7 +204,7 @@ class BatchDialog(QDialog):
         for cb in self._checkboxes:
             cb.setEnabled(False)
 
-        self._worker = BatchWorker(selected, output_dir, self)
+        self._worker = BatchWorker(selected, output_dir, self._smooth_sigma, self)
         self._worker.progress.connect(self._on_progress)
         self._worker.file_done.connect(self._on_file_done)
         self._worker.all_done.connect(self._on_all_done)

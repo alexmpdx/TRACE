@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSplitter,
     QStatusBar,
     QTextEdit,
@@ -215,6 +216,28 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        # Smoothing slider
+        smooth_label = QLabel("  Smooth: ")
+        smooth_label.setFont(QFont("Menlo", 11))
+        toolbar.addWidget(smooth_label)
+
+        self._smooth_slider = QSlider(Qt.Horizontal)
+        self._smooth_slider.setRange(0, 100)  # 0.0 – 10.0 in 0.1 steps
+        self._smooth_slider.setValue(30)       # default sigma = 3.0
+        self._smooth_slider.setSingleStep(5)   # 0.5 increments
+        self._smooth_slider.setPageStep(10)    # 1.0 increments
+        self._smooth_slider.setFixedWidth(140)
+        self._smooth_slider.setToolTip("Gaussian smoothing sigma for vein lines and region boundaries")
+        self._smooth_slider.valueChanged.connect(self._on_smooth_changed)
+        toolbar.addWidget(self._smooth_slider)
+
+        self._smooth_value_label = QLabel(" 3.0 ")
+        self._smooth_value_label.setFont(QFont("Menlo", 11))
+        self._smooth_value_label.setFixedWidth(40)
+        toolbar.addWidget(self._smooth_value_label)
+
+        toolbar.addSeparator()
+
         # Batch
         self._batch_action = QAction("Run All (Batch)", self)
         self._batch_action.triggered.connect(self._on_batch)
@@ -270,6 +293,17 @@ class MainWindow(QMainWindow):
         self._current_step = row
         self._display_step(row)
         self._update_nav_buttons()
+
+    def _on_smooth_changed(self, value: int) -> None:
+        """Handle smoothing slider change."""
+        sigma = value / 10.0
+        self._smooth_value_label.setText(f" {sigma:.1f} ")
+        self._runner.smooth_sigma = sigma
+
+        # If we're on the overlay step (17), re-render immediately
+        if self._current_step == 17 and self._current_pair is not None:
+            self._runner.invalidate_from(17)
+            self._run_step_async(17)
 
     def _update_nav_buttons(self) -> None:
         """Enable/disable navigation based on current state."""
@@ -535,5 +569,5 @@ class MainWindow(QMainWindow):
             self._file_pairs = pairs
 
         from WingVeinAnalyzer.gui.batch_dialog import BatchDialog
-        dialog = BatchDialog(self._file_pairs, self)
+        dialog = BatchDialog(self._file_pairs, self, smooth_sigma=self._runner.smooth_sigma)
         dialog.exec_()

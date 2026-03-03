@@ -48,6 +48,7 @@ from WingVeinAnalyzer.models.wing_geometry import (
     partition_intervein_spaces,
     remove_hinge,
 )
+from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ class StepRunner:
         self._image_path: Optional[Path] = None
         self._geojson_path: Optional[Path] = None
         self._last_completed: int = -1
+        self._smooth_sigma: float = 3.0
 
     @property
     def image_path(self) -> Optional[Path]:
@@ -123,6 +125,14 @@ class StepRunner:
     def last_completed(self) -> int:
         return self._last_completed
 
+    @property
+    def smooth_sigma(self) -> float:
+        return self._smooth_sigma
+
+    @smooth_sigma.setter
+    def smooth_sigma(self, value: float) -> None:
+        self._smooth_sigma = value
+
     def load_inputs(self, image_path: Path, geojson_path: Path) -> None:
         """Reset and set new input files."""
         self._states.clear()
@@ -133,6 +143,14 @@ class StepRunner:
     def state_at(self, index: int) -> Optional[StepState]:
         """Return cached state at the given step, or None if not yet computed."""
         return self._states.get(index)
+
+    def invalidate_from(self, index: int) -> None:
+        """Clear cached states from index onward so they will be recomputed."""
+        keys_to_remove = [k for k in self._states if k >= index]
+        for k in keys_to_remove:
+            del self._states[k]
+        if keys_to_remove:
+            self._last_completed = min(self._last_completed, index - 1)
 
     def run_step(self, index: int) -> StepState:
         """Execute one step. Must be called sequentially (0, 1, 2, ...)."""
@@ -520,19 +538,51 @@ class StepRunner:
         return state
 
     def _step_overlays(self, prev: StepState) -> StepState:
-        """Step 17: Render final skeleton and rainbow overlays."""
-        state = self._copy_forward(prev)
+        """Step 17: Render final skeleton and rainbow overlays with smoothing."""
+        from copy import copy
 
+        state = self._copy_forward(prev)
+        sigma = self._smooth_sigma
+
+        # Smooth copies of assignments for rendering
+        smoothed_assignments = []
+        for a in (state.assignments or []):
+            if a.line is not None and sigma > 0:
+                sa = copy(a)
+                if sa.vein_id in ("ACV", "PCV"):
+                    sa.line = smooth_line(sa.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=3.0)
+                else:
+                    sa.line = smooth_line(sa.line, sigma=sigma, sample_spacing=5.0)
+                smoothed_assignments.append(sa)
+            else:
+                smoothed_assignments.append(a)
+
+        # Smooth outline for display
         outline_poly = state.outline.polygon if state.outline else None
+        if outline_poly and sigma > 0:
+            outline_poly = smooth_polygon(outline_poly, sigma=sigma * 1.67)
+
         state.skeleton_overlay = render_skeleton_overlay(
-            state.image, state.assignments or [], outline_polygon=outline_poly,
+            state.image, smoothed_assignments, outline_polygon=outline_poly,
         )
+
+        # Smooth region boundaries for display
+        smoothed_regions = {}
+        for k, v in (state.intervein_regions or {}).items():
+            if sigma > 0:
+                smoothed_regions[k] = smooth_polygon(v, sigma=sigma)
+            else:
+                smoothed_regions[k] = v
 
         state.rainbow_overlay = render_rainbow_overlay(
-            state.image, state.intervein_regions or {},
+            state.image, smoothed_regions,
         )
 
-        state.params_used = {"line_thickness": "6 px", "opacity": "0.75"}
+        state.params_used = {
+            "line_thickness": "6 px",
+            "opacity": "0.75",
+            "smooth_sigma": f"{sigma:.1f}",
+        }
         return state
 
     # ------------------------------------------------------------------

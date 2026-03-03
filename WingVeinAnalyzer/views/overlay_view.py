@@ -56,6 +56,7 @@ def render_skeleton_overlay(
         cv2.polylines(
             overlay, [pts], isClosed=True,
             color=OUTLINE_COLOR, thickness=OUTLINE_THICKNESS,
+            lineType=cv2.LINE_AA,
         )
 
     # Draw each vein in its assigned color
@@ -70,6 +71,7 @@ def render_skeleton_overlay(
         cv2.polylines(
             overlay, [pts], isClosed=False,
             color=color, thickness=VEIN_THICKNESS,
+            lineType=cv2.LINE_AA,
         )
         legend_entries.append((color, a.vein_id))
 

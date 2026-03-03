@@ -47,6 +47,7 @@ from WingVeinAnalyzer.models.wing_geometry import (
     partition_intervein_spaces,
     remove_hinge,
 )
+from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
 from WingVeinAnalyzer.views.results_view import export_csv
 
@@ -75,6 +76,7 @@ def run_pipeline(
     microns_per_pixel: Optional[float] = None,
     snap_tolerance: float = 50.0,
     max_gap: float = 80.0,
+    smooth_sigma: float = 3.0,
 ) -> PipelineResult:
     """Run the full vein analysis pipeline on a TIFF image + GeoJSON annotations."""
     result = PipelineResult()
@@ -97,7 +99,7 @@ def run_pipeline(
     if annotations.intervein_polygons:
         result = _run_polygon_pipeline(
             image, annotations, output_dir, stem, microns_per_pixel, max_gap,
-            geojson_path,
+            geojson_path, smooth_sigma=smooth_sigma,
         )
     elif annotations.veins:
         result = _run_vein_pipeline(
@@ -117,6 +119,7 @@ def _run_polygon_pipeline(
     microns_per_pixel: Optional[float],
     max_gap: float,
     geojson_path: Optional[Path] = None,
+    smooth_sigma: float = 3.0,
 ) -> PipelineResult:
     """Pipeline for intervein polygon annotations."""
     result = PipelineResult()
@@ -232,6 +235,9 @@ def _run_polygon_pipeline(
         result.assignments = assignments
         result.poly_names = poly_names
 
+        # Smooth vein geometries
+        _smooth_vein_assignments(assignments, sigma=smooth_sigma)
+
         # Apply scale calibration
         compile_results(assignments, microns_per_pixel)
 
@@ -301,6 +307,9 @@ def _run_polygon_pipeline(
         result.assignments = assignments
         result.poly_names = poly_names
 
+        # Smooth vein geometries
+        _smooth_vein_assignments(assignments, sigma=smooth_sigma)
+
         # Apply scale calibration
         compile_results(assignments, microns_per_pixel)
 
@@ -325,6 +334,9 @@ def _run_polygon_pipeline(
     all_regions = partition_intervein_spaces(wing_blade, polygons, poly_names)
     # Exclude costal cell from output regions
     regions = {k: v for k, v in all_regions.items() if k != "costal_cell"}
+    # Smooth region boundaries
+    if smooth_sigma > 0:
+        regions = {k: smooth_polygon(v, sigma=smooth_sigma) for k, v in regions.items()}
     result.intervein_regions = regions
 
     # Compute compartments
@@ -345,10 +357,11 @@ def _run_polygon_pipeline(
     )
     result.measurements = measurements
 
-    # Render overlays
+    # Render overlays (smooth the wing outline for display)
+    outline_smooth = smooth_polygon(outline.polygon, sigma=smooth_sigma * 1.67) if smooth_sigma > 0 else outline.polygon
     skel_path = output_dir / f"{stem}_skeleton_overlay.jpg"
     render_skeleton_overlay(
-        image, assignments, outline_polygon=outline.polygon, output_path=skel_path,
+        image, assignments, outline_polygon=outline_smooth, output_path=skel_path,
     )
     result.skeleton_overlay_path = skel_path
 
@@ -369,6 +382,30 @@ def _run_polygon_pipeline(
     logger.info("Pipeline log saved to %s", log_path)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Vein smoothing
+# ---------------------------------------------------------------------------
+
+_CROSSVEIN_IDS = {"ACV", "PCV"}
+
+
+def _smooth_vein_assignments(
+    assignments: list[VeinAssignment],
+    sigma: float = 3.0,
+) -> None:
+    """Apply Gaussian smoothing to all vein LineStrings in-place."""
+    if sigma <= 0:
+        return
+    for a in assignments:
+        if a.line is None:
+            continue
+        if a.vein_id in _CROSSVEIN_IDS:
+            a.line = smooth_line(a.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=3.0)
+        else:
+            a.line = smooth_line(a.line, sigma=sigma, sample_spacing=5.0)
+        a.length_px = a.line.length
 
 
 # ---------------------------------------------------------------------------

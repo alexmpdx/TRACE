@@ -4,4 +4,5 @@ pandas
 matplotlib
 opencv-python
 shapely
+scipy
 PyQt5
