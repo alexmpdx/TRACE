@@ -65,28 +65,28 @@ INTERVEIN_SPACE_NAMES = [
     "3rd_posterior_cell",
 ]
 
-# Colors for intervein spaces (BGR for OpenCV, matching reference overlay)
+# Colors for intervein spaces (BGR for OpenCV, matching ground-truth overlay)
 INTERVEIN_COLORS: dict[str, tuple[int, int, int]] = {
-    "costal_cell":         (120, 210, 210),  # yellow-green
-    "marginal_cell":       (120, 120, 230),  # salmon/coral
-    "submarginal_cell":    (150, 180, 255),  # peach/orange
-    "1st_basal_cell":      (190, 140, 130),  # blue/indigo
-    "1st_posterior_cell":  (100, 200, 160),  # olive/light green
-    "discal_cell":         (120, 190, 120),  # green
-    "2nd_posterior_cell":  (230, 210, 130),  # cyan/sky blue
-    "3rd_posterior_cell":  (210, 130, 200),  # purple/lavender
+    "costal_cell":         (0, 200, 200),    # yellow (no GT; distinct neutral)
+    "marginal_cell":       (0, 0, 255),      # red
+    "submarginal_cell":    (0, 94, 255),     # orange
+    "1st_basal_cell":      (0, 191, 219),    # gold
+    "1st_posterior_cell":  (0, 128, 0),      # green
+    "discal_cell":         (255, 0, 0),      # blue
+    "2nd_posterior_cell":  (255, 187, 0),    # cyan
+    "3rd_posterior_cell":  (255, 0, 147),    # purple
 }
 
-# Colors for individual veins on skeleton overlay (BGR for OpenCV)
+# Colors for individual veins on skeleton overlay (BGR for OpenCV, matching ground-truth)
 VEIN_COLORS: dict[str, tuple[int, int, int]] = {
-    "costa":  (130, 100, 40),   # dark teal
-    "L1":     (60, 60, 200),    # red
-    "L2":     (30, 140, 210),   # orange
-    "L3":     (20, 170, 200),   # dark yellow/gold
-    "L4":     (40, 190, 190),   # yellow-green
-    "L5":     (160, 60, 180),   # pink/magenta
-    "ACV":    (180, 80, 120),   # purple
-    "PCV":    (180, 60, 60),    # blue-purple
+    "costa":  (0, 0, 0),        # black (matches wing outline)
+    "L1":     (0, 0, 255),      # red
+    "L2":     (0, 94, 255),     # orange
+    "L3":     (0, 191, 219),    # gold
+    "L4":     (255, 0, 0),      # blue
+    "L5":     (255, 0, 147),    # purple
+    "ACV":    (0, 128, 0),      # green
+    "PCV":    (255, 187, 0),    # cyan
 }
 
 # Vein boundary definitions: which intervein pair each vein separates
