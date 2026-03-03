@@ -41,9 +41,11 @@ from WingVeinAnalyzer.models.vein_skeleton import (
     split_oversized_polygons,
 )
 from WingVeinAnalyzer.models.wing_geometry import (
+    WingMidline,
     WingOutline,
     build_wing_outline,
     compute_compartments,
+    compute_wing_midline,
     detect_hinge_landmarks,
     partition_intervein_spaces,
     remove_hinge,
@@ -73,7 +75,10 @@ class StepState:
     nearest_labels: Optional[np.ndarray] = None
     centerlines: Optional[dict[tuple[int, int], LineString]] = None
 
-    # Identification (from step 3, cached through step 10)
+    # Wing midline (from step 3)
+    wing_midline: Optional[WingMidline] = None
+
+    # Identification (from step 4, cached through step 11)
     id_result: Optional[IdentificationResult] = None
     junctions: Optional[list[JunctionPoint]] = None
     merged_paths: Optional[list[MergedPath]] = None
@@ -81,10 +86,10 @@ class StepState:
     vein_map: Optional[dict[str, MergedPath]] = None
     poly_names: Optional[dict[int, str]] = None
 
-    # Assignments (from steps 11-12)
+    # Assignments (from steps 12-13)
     assignments: Optional[list[VeinAssignment]] = None
 
-    # Geometry (from steps 13-15)
+    # Geometry (from steps 14-16)
     outline: Optional[WingOutline] = None
     hinge_landmarks: Optional[Any] = None
     wing_blade: Optional[Polygon] = None
@@ -92,10 +97,10 @@ class StepState:
     anterior_compartment: Optional[Polygon] = None
     posterior_compartment: Optional[Polygon] = None
 
-    # Measurements (from step 16)
+    # Measurements (from step 17)
     measurements: Optional[WingMeasurements] = None
 
-    # Overlays (from step 17)
+    # Overlays (from step 18)
     skeleton_overlay: Optional[np.ndarray] = None
     rainbow_overlay: Optional[np.ndarray] = None
 
@@ -175,8 +180,8 @@ class StepRunner:
         return state or self._states.get(target, StepState())
 
     def run_all(self) -> StepState:
-        """Run all 18 steps."""
-        return self.run_through(17)
+        """Run all 19 steps."""
+        return self.run_through(18)
 
     # ------------------------------------------------------------------
     # Step implementations
@@ -188,21 +193,22 @@ class StepRunner:
             0: self._step_load,
             1: self._step_voronoi,
             2: self._step_centerlines,
-            3: self._step_identify,
-            4: self._step_merge_viz,
-            5: self._step_split_viz,
-            6: self._step_crossvein_viz,
-            7: self._step_longitudinal_viz,
-            8: self._step_regions_viz,
-            9: self._step_poly_split_viz,
-            10: self._step_validate_viz,
-            11: self._step_l1_recovery,
-            12: self._step_costa,
-            13: self._step_outline,
-            14: self._step_hinge,
-            15: self._step_compartments,
-            16: self._step_measurements,
-            17: self._step_overlays,
+            3: self._step_midline,
+            4: self._step_identify,
+            5: self._step_merge_viz,
+            6: self._step_split_viz,
+            7: self._step_crossvein_viz,
+            8: self._step_longitudinal_viz,
+            9: self._step_regions_viz,
+            10: self._step_poly_split_viz,
+            11: self._step_validate_viz,
+            12: self._step_l1_recovery,
+            13: self._step_costa,
+            14: self._step_outline,
+            15: self._step_hinge,
+            16: self._step_compartments,
+            17: self._step_measurements,
+            18: self._step_overlays,
         }
         handler = handlers.get(index)
         if handler is None:
@@ -289,8 +295,28 @@ class StepRunner:
         }
         return state
 
+    def _step_midline(self, prev: StepState) -> StepState:
+        """Step 3: Compute the wing midline for crossvein-independent identification."""
+        state = self._copy_forward(prev)
+
+        if state.polygons and state.wing_bbox:
+            midline = compute_wing_midline(state.polygons, state.wing_bbox)
+            state.wing_midline = midline
+            if midline is not None:
+                state.params_used = {
+                    "sample_spacing": "5 px",
+                    "smooth_sigma": "30 px",
+                    "num_samples": str(len(midline.line.coords)),
+                }
+            else:
+                state.params_used = {"status": "Failed (too few samples)"}
+        else:
+            state.params_used = {"status": "Skipped (no polygons)"}
+
+        return state
+
     def _step_identify(self, prev: StepState) -> StepState:
-        """Step 3: Run full identify_veins_and_regions() and cache result."""
+        """Step 4: Run full identify_veins_and_regions() and cache result."""
         state = self._copy_forward(prev)
 
         if state.centerlines is None:
@@ -300,6 +326,7 @@ class StepRunner:
         id_result = identify_veins_and_regions(
             state.centerlines, state.polygons, state.vein_polygons or [],
             state.image.shape[:2], state.wing_bbox,
+            midline=state.wing_midline,
         )
         state.id_result = id_result
         state.assignments = list(id_result.assignments)
@@ -333,7 +360,7 @@ class StepRunner:
         return state
 
     def _step_merge_viz(self, prev: StepState) -> StepState:
-        """Step 4: Visualization-only — show merged paths."""
+        """Step 5: Visualization-only — show merged paths."""
         state = self._copy_forward(prev)
         state.params_used = {
             "collinearity_threshold": "45°",
@@ -344,7 +371,7 @@ class StepRunner:
         return state
 
     def _step_split_viz(self, prev: StepState) -> StepState:
-        """Step 5: Visualization-only — show paths after sharp-turn splitting."""
+        """Step 6: Visualization-only — show paths after sharp-turn splitting."""
         state = self._copy_forward(prev)
         state.params_used = {
             "angle_threshold": "70°",
@@ -355,7 +382,7 @@ class StepRunner:
         return state
 
     def _step_crossvein_viz(self, prev: StepState) -> StepState:
-        """Step 6: Visualization-only — highlight ACV/PCV."""
+        """Step 7: Visualization-only — highlight ACV/PCV."""
         state = self._copy_forward(prev)
         state.params_used = {
             "max_crossvein_len": "15% wing span",
@@ -365,17 +392,23 @@ class StepRunner:
         return state
 
     def _step_longitudinal_viz(self, prev: StepState) -> StepState:
-        """Step 7: Visualization-only — show all classified veins."""
+        """Step 8: Visualization-only — show all classified veins."""
         state = self._copy_forward(prev)
-        state.params_used = {
-            "y_position_weight": "0.40",
-            "length_weight": "0.30",
-            "crossvein_weight": "0.30",
-        }
+        has_midline = state.wing_midline is not None
+        has_cv = state.vein_map and ("ACV" in state.vein_map or "PCV" in state.vein_map)
+        if has_midline and has_cv:
+            weights = "Y:0.30, Len:0.25, CV:0.20, Mid:0.25"
+        elif has_midline:
+            weights = "Y:0.30, Len:0.25, Mid:0.45"
+        elif has_cv:
+            weights = "Y:0.40, Len:0.30, CV:0.30"
+        else:
+            weights = "Y:0.60, Len:0.40"
+        state.params_used = {"scoring_weights": weights}
         return state
 
     def _step_regions_viz(self, prev: StepState) -> StepState:
-        """Step 8: Visualization-only — show named regions."""
+        """Step 9: Visualization-only — show named regions."""
         state = self._copy_forward(prev)
         state.params_used = {
             "num_regions": str(len(state.poly_names or {})),
@@ -383,13 +416,13 @@ class StepRunner:
         return state
 
     def _step_poly_split_viz(self, prev: StepState) -> StepState:
-        """Step 9: Visualization-only — show polygon split results."""
+        """Step 10: Visualization-only — show polygon split results."""
         state = self._copy_forward(prev)
         state.params_used = {"area_threshold": "1.5x expected max"}
         return state
 
     def _step_validate_viz(self, prev: StepState) -> StepState:
-        """Step 10: Visualization-only — show cross-validation results."""
+        """Step 11: Visualization-only — show cross-validation results."""
         state = self._copy_forward(prev)
         warnings = []
         if state.id_result and state.id_result.validation_report:
@@ -398,7 +431,7 @@ class StepRunner:
         return state
 
     def _step_l1_recovery(self, prev: StepState) -> StepState:
-        """Step 11: L1 recovery from marginal cell boundary (if needed)."""
+        """Step 12: L1 recovery from marginal cell boundary (if needed)."""
         state = self._copy_forward(prev)
 
         has_costal = "costal_cell" in (state.poly_names or {}).values()
@@ -419,7 +452,7 @@ class StepRunner:
         return state
 
     def _step_costa(self, prev: StepState) -> StepState:
-        """Step 12: Extract costa."""
+        """Step 13: Extract costa."""
         state = self._copy_forward(prev)
 
         has_costal = "costal_cell" in (state.poly_names or {}).values()
@@ -462,7 +495,7 @@ class StepRunner:
         return state
 
     def _step_outline(self, prev: StepState) -> StepState:
-        """Step 13: Build wing outline."""
+        """Step 14: Build wing outline."""
         state = self._copy_forward(prev)
 
         outline = build_wing_outline(
@@ -473,7 +506,7 @@ class StepRunner:
         return state
 
     def _step_hinge(self, prev: StepState) -> StepState:
-        """Step 14: Detect hinge landmarks and remove hinge."""
+        """Step 15: Detect hinge landmarks and remove hinge."""
         state = self._copy_forward(prev)
 
         landmarks = detect_hinge_landmarks(
@@ -492,7 +525,7 @@ class StepRunner:
         return state
 
     def _step_compartments(self, prev: StepState) -> StepState:
-        """Step 15: Compute compartments and partition intervein spaces."""
+        """Step 16: Compute compartments and partition intervein spaces."""
         state = self._copy_forward(prev)
 
         # Partition intervein spaces
@@ -519,7 +552,7 @@ class StepRunner:
         return state
 
     def _step_measurements(self, prev: StepState) -> StepState:
-        """Step 16: Compute all measurements."""
+        """Step 17: Compute all measurements."""
         state = self._copy_forward(prev)
 
         measurements = compute_measurements(
@@ -538,7 +571,7 @@ class StepRunner:
         return state
 
     def _step_overlays(self, prev: StepState) -> StepState:
-        """Step 17: Render final skeleton and rainbow overlays with smoothing."""
+        """Step 18: Render final skeleton and rainbow overlays with smoothing."""
         from copy import copy
 
         state = self._copy_forward(prev)
@@ -564,6 +597,7 @@ class StepRunner:
 
         state.skeleton_overlay = render_skeleton_overlay(
             state.image, smoothed_assignments, outline_polygon=outline_poly,
+            midline=state.wing_midline.line if state.wing_midline else None,
         )
 
         # Smooth region boundaries for display
@@ -603,6 +637,7 @@ class StepRunner:
         state.vein_mask = prev.vein_mask
         state.nearest_labels = prev.nearest_labels
         state.centerlines = prev.centerlines
+        state.wing_midline = prev.wing_midline
         state.id_result = prev.id_result
         state.junctions = prev.junctions
         state.merged_paths = prev.merged_paths

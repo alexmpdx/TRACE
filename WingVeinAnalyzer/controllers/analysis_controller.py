@@ -43,6 +43,7 @@ from WingVeinAnalyzer.models.wing_geometry import (
     WingOutline,
     build_wing_outline,
     compute_compartments,
+    compute_wing_midline,
     detect_hinge_landmarks,
     partition_intervein_spaces,
     remove_hinge,
@@ -172,10 +173,13 @@ def _run_polygon_pipeline(
                 centerlines[key] = syn_line
                 logger.info("Added synthetic centerline for split boundary: %s", key)
 
+        # Compute wing midline for crossvein-independent identification
+        midline = compute_wing_midline(polygons, wing_bbox)
+
         # Identify veins and regions independently via geometry
         id_result = identify_veins_and_regions(
             centerlines, polygons, annotations.vein_polygons,
-            image.shape[:2], wing_bbox,
+            image.shape[:2], wing_bbox, midline=midline,
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -255,9 +259,12 @@ def _run_polygon_pipeline(
             e.poly_pair: e.line for e in edges if e.poly_pair
         }
 
+        # Compute wing midline for crossvein-independent identification
+        midline = compute_wing_midline(polygons, wing_bbox)
+
         id_result = identify_veins_and_regions(
             centerlines, polygons, [],
-            image.shape[:2], wing_bbox,
+            image.shape[:2], wing_bbox, midline=midline,
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -362,6 +369,7 @@ def _run_polygon_pipeline(
     skel_path = output_dir / f"{stem}_skeleton_overlay.jpg"
     render_skeleton_overlay(
         image, assignments, outline_polygon=outline_smooth, output_path=skel_path,
+        midline=midline.line if midline else None,
     )
     result.skeleton_overlay_path = skel_path
 

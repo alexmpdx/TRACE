@@ -36,6 +36,16 @@ SPATIAL_PRIORS_Y: dict[str, tuple[float, float]] = {
     "L5": (0.38, 0.78),
 }
 
+# Signed distance from wing midline as fraction of local half-height
+# Negative = anterior (above midline), positive = posterior (below)
+MIDLINE_PRIORS: dict[str, tuple[float, float]] = {
+    "L1": (-0.95, -0.50),
+    "L2": (-0.75, -0.20),
+    "L3": (-0.45, +0.05),
+    "L4": (-0.05, +0.45),
+    "L5": (+0.10, +0.70),
+}
+
 # Crossvein connection topology
 CROSSVEIN_CONNECTIONS: dict[str, tuple[str, str]] = {
     "ACV": ("L3", "L4"),

@@ -1,4 +1,4 @@
-"""Step metadata: names, descriptions, parameter specs for all 18 pipeline steps."""
+"""Step metadata: names, descriptions, parameter specs for all 19 pipeline steps."""
 
 from __future__ import annotations
 
@@ -96,9 +96,35 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 1
     ),
-    # 3: Find Junctions
+    # 3: Wing Midline
     StepDef(
         index=3,
+        name="Compute Wing Midline",
+        short_name="Midline",
+        description=(
+            "Compute the anterior-posterior midline of the wing. For each X position "
+            "across the wing, a vertical cross-section through the buffered polygon union "
+            "determines the wing's Y extent. The midpoint of each cross-section defines "
+            "the midline Y. Gaussian smoothing (sigma=30px) produces a clean curve. "
+            "The midline anchors L3/L4 identification independent of crossveins."
+        ),
+        pseudocode=(
+            "wing_shape = unary_union([p.buffer(20) for p in polygons])\n"
+            "for x in range(min_x, max_x, 5px):\n"
+            "  slice = wing_shape.intersection(vertical_line(x))\n"
+            "  midline_y[x] = (slice.min_y + slice.max_y) / 2\n"
+            "  half_height[x] = (slice.max_y - slice.min_y) / 2\n"
+            "midline = smooth(midline_y, sigma=30px)"
+        ),
+        params=[
+            StepParam("sample_spacing", "5 px", "Horizontal sampling interval"),
+            StepParam("smooth_sigma", "30 px", "Gaussian smoothing sigma"),
+        ],
+        runs_computation=True,
+    ),
+    # 4: Find Junctions
+    StepDef(
+        index=4,
         name="Find Triple Junctions",
         short_name="Junctions",
         description=(
@@ -119,9 +145,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,  # runs identify_veins_and_regions() (full)
     ),
-    # 4: Merge Segments
+    # 5: Merge Segments
     StepDef(
-        index=4,
+        index=5,
         name="Merge Segments at Junctions",
         short_name="Merge",
         description=(
@@ -144,11 +170,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("min_gap", "15°", "Min separation from next-best pair"),
             StepParam("orientation_guard", "25°/55°", "Longitudinal/crossvein cutoffs"),
         ],
-        runs_computation=False,  # cached from step 3
+        runs_computation=False,  # cached from step 4
     ),
-    # 5: Split Sharp Turns
+    # 6: Split Sharp Turns
     StepDef(
-        index=5,
+        index=6,
         name="Split at Sharp Turns",
         short_name="Split",
         description=(
@@ -172,11 +198,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("min_path_length", "500 px", "Only split paths longer than this"),
             StepParam("min_split_length", "200 px", "Both halves must exceed this"),
         ],
-        runs_computation=False,  # cached from step 3
+        runs_computation=False,  # cached from step 4
     ),
-    # 6: Classify Crossveins
+    # 7: Classify Crossveins
     StepDef(
-        index=6,
+        index=7,
         name="Classify Crossveins",
         short_name="Crossveins",
         description=(
@@ -197,41 +223,42 @@ STEP_DEFS: list[StepDef] = [
             StepParam("orientation_cutoff", "60°", "Minimum orientation from horizontal"),
             StepParam("proximity_threshold", "100 px", "Max distance to longitudinal endpoint"),
         ],
-        runs_computation=False,  # cached from step 3
+        runs_computation=False,  # cached from step 4
     ),
-    # 7: Classify Longitudinals
+    # 8: Classify Longitudinals
     StepDef(
-        index=7,
+        index=8,
         name="Classify Longitudinals",
         short_name="Longitudinals",
         description=(
             "Assign L1-L5 identities to the remaining paths using combinatorial scoring. "
             "All permutations of candidate-to-vein assignments are evaluated. Each candidate "
-            "is scored on: Y-position match (0.40 weight), length match to priors (0.30), "
-            "and proximity to known crossvein endpoints (0.30). The permutation with the "
-            "highest total score wins. An ACV-based L4/L5 swap check runs post-assignment."
+            "is scored on: Y-position match, length match to priors, crossvein proximity, "
+            "and signed distance from the wing midline. The permutation with the highest "
+            "total score wins. An ACV-based L4/L5 swap check runs post-assignment."
         ),
         pseudocode=(
             "candidates = [p for p in paths if not crossvein]\n"
             "for perm in permutations(candidates, [L1..L5]):\n"
             "  score = sum(\n"
-            "    0.40 * y_position_score(c, vein) +\n"
-            "    0.30 * length_score(c, vein) +\n"
-            "    0.30 * crossvein_proximity(c, vein)\n"
+            "    0.30 * y_position_score(c, vein) +\n"
+            "    0.25 * length_score(c, vein) +\n"
+            "    0.20 * crossvein_proximity(c, vein) +\n"
+            "    0.25 * midline_distance(c, vein)\n"
             "  )\n"
             "best_perm = argmax(score)"
         ),
         params=[
-            StepParam("y_position_weight", "0.40", "Weight for Y-position scoring"),
-            StepParam("length_weight", "0.30", "Weight for length prior match"),
-            StepParam("crossvein_weight", "0.30", "Weight for crossvein proximity"),
-            StepParam("SPATIAL_PRIORS_Y", "L1:0.02-0.20, L2:0.05-0.32, ...", "Normalized Y ranges"),
+            StepParam("y_position_weight", "0.30", "Weight for Y-position scoring"),
+            StepParam("length_weight", "0.25", "Weight for length prior match"),
+            StepParam("crossvein_weight", "0.20", "Weight for crossvein proximity"),
+            StepParam("midline_weight", "0.25", "Weight for midline distance scoring"),
         ],
-        runs_computation=False,  # cached from step 3
+        runs_computation=False,  # cached from step 4
     ),
-    # 8: Name Regions
+    # 9: Name Regions
     StepDef(
-        index=8,
+        index=9,
         name="Name Regions from Veins",
         short_name="Regions",
         description=(
@@ -254,11 +281,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("REGION_EXPECTED_VEINS", "marginal:{L1,L2}, submarginal:{L2,L3}, ...", ""),
             StepParam("REGION_AREA_PRIORS", "marginal:0.05-0.18, submarginal:0.08-0.25, ...", ""),
         ],
-        runs_computation=False,  # cached from step 3
+        runs_computation=False,  # cached from step 4
     ),
-    # 9: Split Merged Polygons
+    # 10: Split Merged Polygons
     StepDef(
-        index=9,
+        index=10,
         name="Split Merged Polygons",
         short_name="Poly Split",
         description=(
@@ -278,11 +305,11 @@ STEP_DEFS: list[StepDef] = [
         params=[
             StepParam("area_threshold", "1.5x expected max", "Threshold for oversized detection"),
         ],
-        runs_computation=False,  # cached from step 3
+        runs_computation=False,  # cached from step 4
     ),
-    # 10: Cross-Validation
+    # 11: Cross-Validation
     StepDef(
-        index=10,
+        index=11,
         name="Cross-Validation",
         short_name="Validate",
         description=(
@@ -302,11 +329,11 @@ STEP_DEFS: list[StepDef] = [
             "# Flag warnings (don't modify assignments)"
         ),
         params=[],
-        runs_computation=False,  # cached from step 3
+        runs_computation=False,  # cached from step 4
     ),
-    # 11: L1 Recovery
+    # 12: L1 Recovery
     StepDef(
-        index=11,
+        index=12,
         name="L1 Recovery from Anterior Edge",
         short_name="L1 Recovery",
         description=(
@@ -330,9 +357,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 12: Costa Extraction
+    # 13: Costa Extraction
     StepDef(
-        index=12,
+        index=13,
         name="Costa Extraction",
         short_name="Costa",
         description=(
@@ -349,9 +376,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 13: Wing Outline
+    # 14: Wing Outline
     StepDef(
-        index=13,
+        index=14,
         name="Build Wing Outline",
         short_name="Outline",
         description=(
@@ -372,9 +399,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 14: Hinge Detection & Removal
+    # 15: Hinge Detection & Removal
     StepDef(
-        index=14,
+        index=15,
         name="Hinge Detection & Removal",
         short_name="Hinge",
         description=(
@@ -397,9 +424,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 15: Compartments
+    # 16: Compartments
     StepDef(
-        index=15,
+        index=16,
         name="Compute Compartments",
         short_name="Compartments",
         description=(
@@ -421,9 +448,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 16: Measurements
+    # 17: Measurements
     StepDef(
-        index=16,
+        index=17,
         name="Compute Measurements",
         short_name="Measurements",
         description=(
@@ -444,9 +471,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 17: Final Overlays
+    # 18: Final Overlays
     StepDef(
-        index=17,
+        index=18,
         name="Final Overlays",
         short_name="Overlays",
         description=(

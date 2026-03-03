@@ -24,6 +24,7 @@ from WingVeinAnalyzer.models.vein_skeleton import extract_centerline_between_pol
 from WingVeinAnalyzer.models.vein_map import (
     CROSSVEIN_CONNECTIONS,
     MAX_ANGLE_CHANGE_DEG,
+    MIDLINE_PRIORS,
     REGION_AREA_PRIORS,
     REGION_EXPECTED_VEINS,
     REGION_Y_ORDER,
@@ -593,6 +594,7 @@ def _compute_path_features(
 def classify_merged_paths(
     paths: list[MergedPath],
     wing_bbox: tuple[float, float, float, float],
+    midline=None,
 ) -> dict[str, MergedPath]:
     """Classify merged paths into named veins by geometry.
 
@@ -640,10 +642,12 @@ def classify_merged_paths(
     demoted = _validate_crossveins(vein_map, longitudinals, crossveins)
     longitudinals.extend(demoted)
 
-    # Assign longitudinals using combined Y-position + length + crossvein scoring
+    # Assign longitudinals using combined Y-position + length + crossvein + midline scoring
     acv_path = vein_map.get("ACV")
     pcv_path = vein_map.get("PCV")
-    long_map = _assign_longitudinals_scored(longitudinals, bbox_w, acv_path, pcv_path)
+    long_map = _assign_longitudinals_scored(
+        longitudinals, bbox_w, acv_path, pcv_path, midline=midline,
+    )
     vein_map.update(long_map)
 
     logger.info(
@@ -733,13 +737,14 @@ def _assign_longitudinals_scored(
     wing_span_px: float,
     acv_path: Optional[MergedPath] = None,
     pcv_path: Optional[MergedPath] = None,
+    midline=None,
 ) -> dict[str, MergedPath]:
     """Assign longitudinal veins using optimal combinatorial scoring.
 
     Tries all valid subsets of paths (k=1..min(n,5)) and all permutations
     of vein name assignments to find the globally optimal mapping.
     Allows fewer than 5 veins when some are absent.
-    Uses crossvein proximity to disambiguate L3/L4/L5.
+    Uses crossvein proximity and midline distance to disambiguate L3/L4/L5.
     Does NOT enforce strict Y ordering — adjacent veins (e.g. L1/L2)
     can have overlapping or inverted Y centroids in real specimens.
     """
@@ -761,6 +766,7 @@ def _assign_longitudinals_scored(
         for name in long_names:
             score_matrix[(pi, name)] = _longitudinal_match_score(
                 path, name, wing_span_px, acv_path, pcv_path,
+                midline=midline,
             )
 
     # Try all k from min(n,5) down to max(1, min(n,5)-2)
@@ -864,6 +870,7 @@ def _longitudinal_match_score(
     wing_span_px: float,
     acv_path: Optional[MergedPath] = None,
     pcv_path: Optional[MergedPath] = None,
+    midline=None,
 ) -> float:
     """Score how well a path matches a specific longitudinal vein identity."""
     # Y-position score: blend of median-Y closeness (60%) and Y-range overlap (40%)
@@ -904,12 +911,75 @@ def _longitudinal_match_score(
     # Crossvein proximity score
     cv_score = _compute_crossvein_score(path, vein_name, acv_path, pcv_path)
 
-    # Combined score with crossvein topology
-    if acv_path is not None or pcv_path is not None:
+    # Midline distance score
+    mid_score = _compute_midline_score(path, vein_name, midline) if midline is not None else None
+
+    # Combined score — weights depend on available information
+    has_cv = acv_path is not None or pcv_path is not None
+    has_mid = mid_score is not None
+
+    if has_mid and has_cv:
+        return 0.30 * y_score + 0.25 * len_score + 0.20 * cv_score + 0.25 * mid_score
+    elif has_mid:
+        return 0.30 * y_score + 0.25 * len_score + 0.45 * mid_score
+    elif has_cv:
         return 0.40 * y_score + 0.30 * len_score + 0.30 * cv_score
     else:
-        # No crossvein info — fall back to original weights
         return 0.6 * y_score + 0.4 * len_score
+
+
+def _compute_midline_score(
+    path: MergedPath,
+    vein_name: str,
+    midline,
+) -> float:
+    """Score how well a path's signed distance from the midline matches priors."""
+    if vein_name not in MIDLINE_PRIORS:
+        return 0.5  # neutral for unknown veins
+
+    mid_lo, mid_hi = MIDLINE_PRIORS[vein_name]
+    mid_center = (mid_lo + mid_hi) / 2
+    mid_range = mid_hi - mid_lo
+
+    # Sample points along the path
+    line = path.line
+    n_samples = max(5, min(20, int(line.length / 50)))
+    midline_xs = np.array([c[0] for c in midline.line.coords])
+    midline_ys = np.array([c[1] for c in midline.line.coords])
+    half_heights = midline.half_heights
+
+    signed_dists: list[float] = []
+    for i in range(n_samples):
+        frac = i / max(n_samples - 1, 1)
+        pt = line.interpolate(frac, normalized=True)
+        x, y = pt.x, pt.y
+
+        # Interpolate midline Y and half-height at this X
+        if x < midline_xs[0] or x > midline_xs[-1]:
+            continue
+        mid_y = float(np.interp(x, midline_xs, midline_ys))
+        hh = float(np.interp(x, midline_xs, half_heights))
+        if hh < 5.0:
+            continue
+
+        signed_dist = (y - mid_y) / hh
+        signed_dists.append(signed_dist)
+
+    if not signed_dists:
+        return 0.5  # neutral
+
+    median_dist = float(np.median(signed_dists))
+
+    # Score using same pattern as Y-position scoring
+    dist_from_center = abs(median_dist - mid_center)
+    if mid_lo <= median_dist <= mid_hi:
+        score = 1.0 - (dist_from_center / mid_range) if mid_range > 0 else 1.0
+    else:
+        # Outside range — decaying penalty
+        overshoot = max(mid_lo - median_dist, median_dist - mid_hi, 0)
+        score = max(0.0, 0.5 - overshoot)
+
+    return score
 
 
 def _compute_crossvein_score(
@@ -1703,6 +1773,7 @@ def identify_veins_and_regions(
     vein_polygons: list[Polygon],
     image_shape: tuple[int, int],
     wing_bbox: tuple[float, float, float, float],
+    midline=None,
 ) -> IdentificationResult:
     """Identify veins and regions independently using geometry, then cross-validate."""
     result = IdentificationResult()
@@ -1721,7 +1792,7 @@ def identify_veins_and_regions(
     paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0)
 
     # 3c. Classify merged paths → named veins
-    vein_map = classify_merged_paths(paths, wing_bbox)
+    vein_map = classify_merged_paths(paths, wing_bbox, midline=midline)
 
     # 3d. Validate vein shapes
     shape_warnings = validate_vein_shapes(vein_map)

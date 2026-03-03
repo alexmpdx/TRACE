@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from shapely.geometry import LineString, MultiPolygon, Point, Polygon
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.ops import linemerge, split, unary_union
+from scipy.ndimage import gaussian_filter1d
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,119 @@ def build_wing_outline(
     outline_poly = outline_poly.buffer(5).buffer(-5)
 
     return WingOutline(polygon=outline_poly)
+
+
+@dataclass
+class WingMidline:
+    """Wing midline with per-sample half-heights for signed-distance normalization."""
+
+    line: LineString
+    half_heights: np.ndarray  # parallel array of (max_y - min_y) / 2 at each sample X
+
+
+def compute_wing_midline(
+    polygons: list[Polygon],
+    wing_bbox: tuple[float, float, float, float],
+    sample_spacing: float = 5.0,
+    smooth_sigma: float = 30.0,
+) -> Optional[WingMidline]:
+    """Compute the anterior-posterior midline of the wing.
+
+    For each X position across the wing, intersects a vertical line with the
+    wing outline to find the Y extent, then takes the midpoint.  Returns a
+    smoothed LineString and an array of local half-heights (for normalizing
+    signed distances during vein scoring).
+    """
+    if not polygons:
+        return None
+
+    # Build wing shape from buffered polygon union (same as build_wing_outline)
+    buffered = [p.buffer(20.0) for p in polygons]
+    union = unary_union(buffered)
+    if isinstance(union, MultiPolygon):
+        wing_shape = max(union.geoms, key=lambda p: p.area)
+    else:
+        wing_shape = union
+
+    if wing_shape.is_empty:
+        return None
+
+    min_x, min_y, max_x, max_y = wing_bbox
+    xs: list[float] = []
+    ys: list[float] = []
+    hhs: list[float] = []
+
+    x = min_x
+    while x <= max_x:
+        vline = LineString([(x, min_y - 100), (x, max_y + 100)])
+        inter = wing_shape.intersection(vline)
+
+        if inter.is_empty:
+            x += sample_spacing
+            continue
+
+        # Extract Y bounds from intersection
+        if isinstance(inter, LineString):
+            coords = np.array(inter.coords)
+        elif isinstance(inter, MultiLineString):
+            coords = np.concatenate([np.array(g.coords) for g in inter.geoms])
+        elif isinstance(inter, Point):
+            x += sample_spacing
+            continue
+        else:
+            # GeometryCollection or other — extract all coordinates
+            try:
+                coords = np.array(inter.coords)
+            except Exception:
+                x += sample_spacing
+                continue
+
+        if len(coords) < 2:
+            x += sample_spacing
+            continue
+
+        y_min_local = coords[:, 1].min()
+        y_max_local = coords[:, 1].max()
+        mid_y = (y_min_local + y_max_local) / 2.0
+        half_h = (y_max_local - y_min_local) / 2.0
+
+        if half_h < 5.0:  # skip degenerate slices
+            x += sample_spacing
+            continue
+
+        xs.append(x)
+        ys.append(mid_y)
+        hhs.append(half_h)
+
+        x += sample_spacing
+
+    if len(xs) < 10:
+        logger.warning("Too few midline samples (%d) — skipping midline", len(xs))
+        return None
+
+    xs_arr = np.array(xs)
+    ys_arr = np.array(ys)
+    hhs_arr = np.array(hhs)
+
+    # Smooth half-heights for scoring normalization
+    sigma_samples = smooth_sigma / sample_spacing
+    hhs_smooth = gaussian_filter1d(hhs_arr, sigma=sigma_samples)
+
+    # Straight line from first to last sampled midpoint
+    x0, y0 = float(xs_arr[0]), float(ys_arr[0])
+    x1, y1 = float(xs_arr[-1]), float(ys_arr[-1])
+    # Resample at the same X positions so half_heights stay aligned
+    ys_line = np.interp(xs_arr, [x0, x1], [y0, y1])
+
+    coords = list(zip(xs_arr.tolist(), ys_line.tolist()))
+    midline = LineString(coords)
+
+    logger.info(
+        "Wing midline: straight line (%.0f,%.0f)→(%.0f,%.0f), %d samples, mean half-height=%.0fpx",
+        x0, y0, x1, y1, len(xs), hhs_smooth.mean(),
+    )
+
+    return WingMidline(line=midline, half_heights=hhs_smooth)
 
 
 def _detect_hinge_side(
