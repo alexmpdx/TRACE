@@ -852,7 +852,7 @@ def _validate_crossveins(
             demoted.append(cv_path)
             del vein_map[cv_name]
 
-    # If any were demoted, re-run crossvein assignment with remaining candidates
+    # If any were demoted, reassign only the lost slot(s) from remaining candidates
     if demoted:
         remaining_cv = [
             p for p in crossveins
@@ -861,15 +861,18 @@ def _validate_crossveins(
             )
         ]
         if remaining_cv:
-            # Clear existing crossvein assignments and reassign
-            for n in ("ACV", "PCV"):
-                if n in vein_map and vein_map[n] not in remaining_cv:
-                    pass  # keep valid assignments
-            # Only reassign if we lost a crossvein
-            for n in list(vein_map.keys()):
-                if n in ("ACV", "PCV"):
-                    del vein_map[n]
-            _assign_crossveins(remaining_cv, vein_map)
+            # Only reassign the slot(s) that were demoted — keep valid ones
+            lost_slots = [n for n in ("ACV", "PCV") if n not in vein_map]
+            if lost_slots and len(remaining_cv) >= 1:
+                # Sort remaining by Y to assign: lower Y → ACV, higher Y → PCV
+                remaining_cv.sort(key=lambda p: p.y_median_norm)
+                for slot in lost_slots:
+                    if not remaining_cv:
+                        break
+                    if slot == "ACV":
+                        vein_map["ACV"] = remaining_cv.pop(0)
+                    elif slot == "PCV":
+                        vein_map["PCV"] = remaining_cv.pop(-1)
 
     return demoted
 
