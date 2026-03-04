@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from scipy import ndimage
 from shapely.geometry import LineString, Polygon
+from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
 
@@ -61,27 +62,46 @@ def extract_veins_from_mask(
         )
         vein_mask = cv2.morphologyEx(vein_mask, cv2.MORPH_CLOSE, kernel)
 
-    # 3. Voronoi partition via distance transform
-    # For every pixel not inside an intervein polygon, find the nearest polygon
-    background = (label_map == 0)
+    # 3. Hull-vein seeding: for each polygon, use its non-vein pixels
+    #    as Voronoi seeds.  Excluding vein-mask pixels from seeds
+    #    produces more equidistant centerlines within the vein tissue.
+    #    Fall back to full polygon for those entirely covered by vein
+    #    mask.  The Voronoi distance transform extends region labels
+    #    to the full image (including hull margin beyond the polygons).
+    seed_labels = np.zeros((h, w), dtype=np.int32)
+    n_fallback = 0
+    for label in range(1, len(intervein_polygons) + 1):
+        poly_pixels = (label_map == label)
+        non_vein = poly_pixels & (vein_mask == 0)
+        if np.any(non_vein):
+            seed_labels[non_vein] = label
+        else:
+            # Polygon entirely under vein mask — use full extent
+            seed_labels[poly_pixels] = label
+            n_fallback += 1
+
+    logger.info(
+        "Hull-vein seeding: %d polygons (%d vein-mask fallbacks)",
+        len(intervein_polygons), n_fallback,
+    )
+
+    # 4. Voronoi partition via distance transform
+    background = (seed_labels == 0)
     _, nearest_indices = ndimage.distance_transform_edt(
         background, return_distances=True, return_indices=True
     )
-    # nearest_indices has shape (2, h, w) — [0] = row indices, [1] = col indices
-    # Map each background pixel to the label of its nearest polygon pixel
-    nearest_labels = label_map[nearest_indices[0], nearest_indices[1]]
-    # Keep original labels where polygons exist
-    nearest_labels[~background] = label_map[~background]
+    nearest_labels = seed_labels[nearest_indices[0], nearest_indices[1]]
+    nearest_labels[~background] = seed_labels[~background]
 
     logger.info(
         "Voronoi partition: %d unique labels, vein mask covers %d pixels",
         len(np.unique(nearest_labels)), int(vein_mask.sum()),
     )
 
-    # 4. Extract label boundaries within the vein mask
+    # 5. Extract label boundaries within the vein mask
     boundary_pixels = _extract_boundary_pixels(nearest_labels, vein_mask)
 
-    # 5. Filter and trace into LineStrings
+    # 6. Filter and trace into LineStrings
     centerlines: dict[tuple[int, int], LineString] = {}
     for (label_a, label_b), pixels in boundary_pixels.items():
         # Convert labels back to polygon indices (label = idx + 1)
@@ -97,7 +117,7 @@ def extract_veins_from_mask(
 
     logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
 
-    # 6. Bridge dangling endpoints (connect nearby segment tips)
+    # 7. Bridge dangling endpoints (connect nearby segment tips)
     centerlines = bridge_dangling_endpoints(centerlines, bridge_threshold=30.0)
 
     return centerlines, nearest_labels, vein_mask
@@ -220,8 +240,6 @@ def extract_centerline_between_polygons(
     Works in a local bounding box (poly_a ∪ poly_b + padding) for efficiency.
     Returns a LineString in global image coordinates, or None if too short.
     """
-    from shapely.ops import unary_union
-
     h, w = image_shape
     pad = 20
 
