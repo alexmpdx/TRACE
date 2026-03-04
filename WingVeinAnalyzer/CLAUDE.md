@@ -113,7 +113,7 @@ The vein-mask-primary pipeline uses geometry-based classification:
 1. **Junction detection**: find triple junctions where 3+ centerline segments converge (snap radius 30px)
 2. **Segment merging**: merge collinear segments at junctions using tangent continuity. Orientation guard prevents merging longitudinals (<25°) with crossveins (>55°)
 3. **Sharp-turn splitting**: split merged paths at direction changes >70° (catches merged crossvein+longitudinal artifacts)
-4. **Classification**: crossveins identified FIRST (steep orientation >60°, length <15% wing span). Longitudinals assigned via combinatorial scoring: 0.45×Y-position + 0.30×length + 0.25×crossvein-proximity. Post-processing ACV-based L4/L5 swap check
+4. **Classification**: longitudinals assigned FIRST (L3/L4 from midline, then L1/L2/L5 by position and length). Crossveins then identified by proximity to assigned longitudinals (ACV near L3+L4, PCV near L4+L5). Post-processing ACV-based L4/L5 swap check
 5. **Region naming**: regions named by which veins bound each polygon (using `segment_keys` from MergedPaths → `VEIN_BOUNDARIES` lookup). Position validation catches Y/X ordering violations
 6. **Cross-validation**: boundary consistency, vein Y-ordering, crossvein connectivity, area outliers
 7. Costa extracted separately as the anterior margin of the marginal cell polygon

@@ -40,15 +40,15 @@ def render_step(
     """
     renderers = {
         0: _render_load,
-        1: _render_voronoi,
-        2: _render_hull_seeds,
-        3: _render_centerlines,
-        4: _render_midline,
+        1: _render_midline,
+        2: _render_voronoi,
+        3: _render_hull_seeds,
+        4: _render_centerlines,
         5: _render_junctions,
         6: _render_merge,
         7: _render_split,
-        8: _render_crossveins,
-        9: _render_longitudinals,
+        8: _render_longitudinals,
+        9: _render_crossveins,
         10: _render_regions,
         11: _render_poly_split,
         12: _render_validation,
@@ -103,7 +103,7 @@ def _render_load(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarra
 
 
 def _render_voronoi(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 1: Vein mask → Voronoi color map within mask."""
+    """Step 2: Vein mask → Voronoi color map within mask."""
     # Left: vein mask on image
     left = state.image.copy()
     if state.vein_mask is not None:
@@ -128,7 +128,7 @@ def _render_voronoi(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
 
 
 def _render_hull_seeds(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 2: Convex hull + vein mask → hull-minus-vein seed components."""
+    """Step 3: Convex hull + vein mask → hull-minus-vein seed components."""
     # Left: vein mask on image + convex hull outline
     left = state.image.copy()
     if state.vein_mask is not None:
@@ -179,7 +179,7 @@ def _render_hull_seeds(state: StepState, prev: Optional[StepState]) -> tuple[np.
 
 
 def _render_centerlines(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 2: Voronoi boundaries → traced LineString centerlines."""
+    """Step 4: Voronoi boundaries → traced LineString centerlines."""
     # Left: Voronoi boundaries (same as step 1 right)
     left = state.image.copy()
     if state.nearest_labels is not None and state.vein_mask is not None:
@@ -211,15 +211,15 @@ def _render_centerlines(state: StepState, prev: Optional[StepState]) -> tuple[np
 
 
 def _render_midline(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 3: Centerlines → centerlines + wing midline."""
-    # Left: centerlines only
+    """Step 1: Annotation polygons → polygons + wing midline."""
+    # Left: image + polygon outlines (annotation footprint)
     left = state.image.copy()
-    if state.centerlines:
-        for idx, (key, line) in enumerate(state.centerlines.items()):
-            color = SEGMENT_COLORS[idx % len(SEGMENT_COLORS)]
-            _draw_linestring(left, line, color, thickness=2)
+    polys = state.polygons or []
+    for i, poly in enumerate(polys):
+        color = SEGMENT_COLORS[i % len(SEGMENT_COLORS)]
+        _draw_polygon_outline(left, poly, color, thickness=2)
 
-    # Right: centerlines + midline
+    # Right: polygon outlines + midline
     right = left.copy()
     if state.wing_midline is not None:
         pts = np.array(state.wing_midline.line.coords, dtype=np.int32)
@@ -241,7 +241,7 @@ def _render_midline(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
 
 
 def _render_junctions(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 4: Centerlines → centerlines + junction point markers."""
+    """Step 5: Centerlines → centerlines + junction point markers."""
     # Left: just centerlines
     left = state.image.copy()
     if state.centerlines:
@@ -272,7 +272,7 @@ def _render_junctions(state: StepState, prev: Optional[StepState]) -> tuple[np.n
 
 
 def _render_merge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 5: Separate segments → merged paths (same-color groups)."""
+    """Step 6: Separate segments → merged paths (same-color groups)."""
     # Left: individual centerline segments
     left = state.image.copy()
     if state.centerlines:
@@ -298,7 +298,7 @@ def _render_merge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
 
 
 def _render_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 6: Merged paths → split paths with angle annotations."""
+    """Step 7: Merged paths → split paths with angle annotations."""
     # Left: merged paths (before split)
     left = state.image.copy()
     if state.merged_paths:
@@ -326,7 +326,41 @@ def _render_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
 
 
 def _render_crossveins(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 7: All paths → ACV/PCV colored, rest gray."""
+    """Step 9: L1-L5 colored + crossveins gray → all veins colored (ACV/PCV highlighted)."""
+    # Left: L1-L5 colored, crossveins gray
+    left = state.image.copy()
+    if state.assignments:
+        for a in state.assignments:
+            if a.line is None:
+                continue
+            if a.vein_id in ("ACV", "PCV"):
+                _draw_linestring(left, a.line, (128, 128, 128), thickness=2)
+            else:
+                color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
+                _draw_linestring(left, a.line, color, thickness=4)
+
+    # Right: all veins colored, ACV/PCV highlighted with labels
+    right = state.image.copy()
+    if state.assignments:
+        for a in state.assignments:
+            if a.line is None:
+                continue
+            color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
+            thickness = 5 if a.vein_id in ("ACV", "PCV") else 3
+            _draw_linestring(right, a.line, color, thickness=thickness)
+            if a.vein_id in ("ACV", "PCV"):
+                coords = list(a.line.coords)
+                mid = coords[len(coords) // 2]
+                cv2.putText(
+                    right, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3, cv2.LINE_AA,
+                )
+
+    return left, right
+
+
+def _render_longitudinals(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
+    """Step 8: All paths gray → L1-L5 colored, crossveins gray."""
     # Left: all paths in gray
     left = state.image.copy()
     if state.assignments:
@@ -335,61 +369,29 @@ def _render_crossveins(state: StepState, prev: Optional[StepState]) -> tuple[np.
                 continue
             _draw_linestring(left, a.line, (128, 128, 128), thickness=3)
 
-    # Right: ACV/PCV highlighted, rest gray
+    # Right: L1-L5 colored with labels, crossveins gray
     right = state.image.copy()
     if state.assignments:
         for a in state.assignments:
             if a.line is None:
                 continue
             if a.vein_id in ("ACV", "PCV"):
-                color = VEIN_COLORS.get(a.vein_id, (0, 255, 0))
-                _draw_linestring(right, a.line, color, thickness=5)
+                _draw_linestring(right, a.line, (128, 128, 128), thickness=2)
+            else:
+                color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
+                _draw_linestring(right, a.line, color, thickness=4)
                 coords = list(a.line.coords)
                 mid = coords[len(coords) // 2]
                 cv2.putText(
                     right, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3, cv2.LINE_AA,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA,
                 )
-            else:
-                _draw_linestring(right, a.line, (128, 128, 128), thickness=2)
-
-    return left, right
-
-
-def _render_longitudinals(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 8: Crossveins only → all veins in VEIN_COLORS."""
-    # Left: only crossveins colored
-    left = state.image.copy()
-    if state.assignments:
-        for a in state.assignments:
-            if a.line is None:
-                continue
-            if a.vein_id in ("ACV", "PCV"):
-                color = VEIN_COLORS.get(a.vein_id, (0, 255, 0))
-                _draw_linestring(left, a.line, color, thickness=4)
-            else:
-                _draw_linestring(left, a.line, (128, 128, 128), thickness=2)
-
-    # Right: all veins in their assigned colors
-    right = state.image.copy()
-    if state.assignments:
-        for a in state.assignments:
-            if a.line is None:
-                continue
-            color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
-            _draw_linestring(right, a.line, color, thickness=4)
-            coords = list(a.line.coords)
-            mid = coords[len(coords) // 2]
-            cv2.putText(
-                right, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA,
-            )
 
     return left, right
 
 
 def _render_regions(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 9: Named veins → veins + colored/labeled regions."""
+    """Step 10: Named veins → veins + colored/labeled regions."""
     # Left: classified veins only
     left = state.image.copy()
     if state.assignments:
@@ -427,7 +429,7 @@ def _render_regions(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
 
 
 def _render_poly_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 10: Pre-split → post-split regions."""
+    """Step 11: Pre-split → post-split regions."""
     # Left: regions as they were before splitting (use prev state if available)
     left = state.image.copy()
     right = state.image.copy()
@@ -456,7 +458,7 @@ def _render_poly_split(state: StepState, prev: Optional[StepState]) -> tuple[np.
 
 
 def _render_validation(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 11: Classification → warnings highlighted in red."""
+    """Step 12: Classification → warnings highlighted in red."""
     # Left: clean classified view
     left = state.image.copy()
     if state.assignments:
@@ -496,7 +498,7 @@ def _render_validation(state: StepState, prev: Optional[StepState]) -> tuple[np.
 
 
 def _render_l1_recovery(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 12: Pre-recovery → veins with recovered L1."""
+    """Step 13: Pre-recovery → veins with recovered L1."""
     # Left: veins before L1 recovery (from prev state)
     left = state.image.copy()
     prev_assignments = prev.assignments if prev else state.assignments
@@ -533,7 +535,7 @@ def _render_l1_recovery(state: StepState, prev: Optional[StepState]) -> tuple[np
 
 
 def _render_costa(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 13: Marginal cell → costa LineString."""
+    """Step 14: Marginal cell → costa LineString."""
     # Left: marginal cell highlighted
     left = state.image.copy()
     if state.poly_names and state.polygons:
@@ -571,7 +573,7 @@ def _render_costa(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
 
 
 def _render_outline(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 14: All polygons → outline polygon boundary."""
+    """Step 15: All polygons → outline polygon boundary."""
     # Left: all polygons outlined
     left = state.image.copy()
     if state.polygons:
@@ -589,7 +591,7 @@ def _render_outline(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
 
 
 def _render_hinge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 15: Outline + hinge landmarks → wing blade."""
+    """Step 16: Outline + hinge landmarks → wing blade."""
     # Left: outline with hinge landmarks
     left = state.image.copy()
     if state.outline and state.outline.polygon and not state.outline.polygon.is_empty:
@@ -623,7 +625,7 @@ def _render_hinge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
 
 
 def _render_compartments(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 16: Wing blade + L4 → anterior/posterior colored."""
+    """Step 17: Wing blade + L4 → anterior/posterior colored."""
     # Left: wing blade
     left = state.image.copy()
     if state.wing_blade and not state.wing_blade.is_empty:
@@ -654,7 +656,7 @@ def _render_compartments(state: StepState, prev: Optional[StepState]) -> tuple[n
 
 
 def _render_measurements(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 17: Geometry → measurement values as text overlay."""
+    """Step 18: Geometry → measurement values as text overlay."""
     # Left: classified veins + regions
     left = state.image.copy()
     if state.assignments:
@@ -732,7 +734,7 @@ def _render_measurements(state: StepState, prev: Optional[StepState]) -> tuple[n
 
 
 def _render_overlays(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 18: Skeleton overlay (left) + Rainbow overlay (right)."""
+    """Step 19: Skeleton overlay (left) + Rainbow overlay (right)."""
     left = state.skeleton_overlay if state.skeleton_overlay is not None else _blank(state)
     right = state.rainbow_overlay if state.rainbow_overlay is not None else _blank(state)
     return left, right

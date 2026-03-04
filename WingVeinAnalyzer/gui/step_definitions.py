@@ -47,19 +47,49 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 1: Rasterize & Voronoi
+    # 1: Wing Midline
     StepDef(
         index=1,
+        name="Compute Wing Midline",
+        short_name="Midline",
+        description=(
+            "Compute the anterior-posterior midline from the original annotation polygons "
+            "and bounding box (before any hull/Voronoi processing). For each X position "
+            "across the wing, a vertical cross-section through the buffered polygon union "
+            "determines the wing's Y extent. The midpoint of each cross-section defines "
+            "the midline Y. Gaussian smoothing (sigma=30px) produces a clean curve. "
+            "The midline anchors L3/L4 identification independent of crossveins."
+        ),
+        pseudocode=(
+            "annotation_polys = intervein_polygons + vein_polygons\n"
+            "annotation_bbox = bounding_box(annotation_polys)\n"
+            "wing_shape = unary_union([p.buffer(20) for p in annotation_polys])\n"
+            "for x in range(min_x, max_x, 5px):\n"
+            "  slice = wing_shape.intersection(vertical_line(x))\n"
+            "  midline_y[x] = (slice.min_y + slice.max_y) / 2\n"
+            "  half_height[x] = (slice.max_y - slice.min_y) / 2\n"
+            "midline = smooth(midline_y, sigma=30px)"
+        ),
+        params=[
+            StepParam("sample_spacing", "5 px", "Horizontal sampling interval"),
+            StepParam("smooth_sigma", "30 px", "Gaussian smoothing sigma"),
+        ],
+        runs_computation=True,
+    ),
+    # 2: Rasterize & Voronoi
+    StepDef(
+        index=2,
         name="Rasterize & Hull-Seeded Voronoi",
         short_name="Voronoi",
         description=(
             "Rasterize the vein mask to binary. Apply morphological closing to bridge "
             "small gaps. Compute the convex hull of the vein mask, subtract the vein mask "
             "to get non-vein regions (hull seeds). Assign sequential labels 1..M to large "
-            "connected components (>=10k px). Use distance_transform_edt to build a Voronoi "
-            "partition from these hull seeds. Boundaries between adjacent Voronoi regions "
-            "within the vein mask become vein centerlines. Voronoi regions are vectorized "
-            "into polygons that replace the input intervein polygons."
+            "connected components (>=10k px). Phantom seeds with <10%% overlap with the "
+            "original intervein polygons are filtered out. Use distance_transform_edt to "
+            "build a Voronoi partition from these hull seeds. Boundaries between adjacent "
+            "Voronoi regions within the vein mask become vein centerlines. Voronoi regions "
+            "are vectorized into polygons that replace the input intervein polygons."
         ),
         pseudocode=(
             "vein_mask = rasterize(vein_polygons)\n"
@@ -68,6 +98,7 @@ STEP_DEFS: list[StepDef] = [
             "seed_mask = hull_raster & ~vein_mask\n"
             "components = connected_components(seed_mask)\n"
             "seed_labels[large_comp_i] = i  # sequential 1..M\n"
+            "filter_phantom_seeds(seed_labels, intervein_polygons)\n"
             "nearest_labels = voronoi_edt(seed_labels)\n"
             "voronoi_polygons = vectorize(nearest_labels, hull)"
         ),
@@ -77,9 +108,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 2: Hull Seeds
+    # 3: Hull Seeds
     StepDef(
-        index=2,
+        index=3,
         name="Hull Seed Visualization",
         short_name="Hull Seeds",
         description=(
@@ -100,11 +131,11 @@ STEP_DEFS: list[StepDef] = [
             "voronoi_polygons = vectorize(nearest_labels)"
         ),
         params=[],
-        runs_computation=False,  # visualization of step 1 data
+        runs_computation=False,  # visualization of step 2 data
     ),
-    # 3: Centerline Extraction
+    # 4: Centerline Extraction
     StepDef(
-        index=3,
+        index=4,
         name="Centerline Extraction",
         short_name="Centerlines",
         description=(
@@ -125,51 +156,29 @@ STEP_DEFS: list[StepDef] = [
             StepParam("min_line_length", "10 px", "Minimum centerline segment length"),
             StepParam("bridge_threshold", "30 px", "Max gap to bridge nearby endpoints"),
         ],
-        runs_computation=False,  # cached from step 1
+        runs_computation=False,  # cached from step 2
     ),
-    # 4: Wing Midline
-    StepDef(
-        index=4,
-        name="Compute Wing Midline",
-        short_name="Midline",
-        description=(
-            "Compute the anterior-posterior midline of the wing. For each X position "
-            "across the wing, a vertical cross-section through the buffered polygon union "
-            "determines the wing's Y extent. The midpoint of each cross-section defines "
-            "the midline Y. Gaussian smoothing (sigma=30px) produces a clean curve. "
-            "The midline anchors L3/L4 identification independent of crossveins."
-        ),
-        pseudocode=(
-            "wing_shape = unary_union([p.buffer(20) for p in polygons])\n"
-            "for x in range(min_x, max_x, 5px):\n"
-            "  slice = wing_shape.intersection(vertical_line(x))\n"
-            "  midline_y[x] = (slice.min_y + slice.max_y) / 2\n"
-            "  half_height[x] = (slice.max_y - slice.min_y) / 2\n"
-            "midline = smooth(midline_y, sigma=30px)"
-        ),
-        params=[
-            StepParam("sample_spacing", "5 px", "Horizontal sampling interval"),
-            StepParam("smooth_sigma", "30 px", "Gaussian smoothing sigma"),
-        ],
-        runs_computation=True,
-    ),
-    # 5: Find Junctions
+    # 5: Identify Veins & Regions
     StepDef(
         index=5,
-        name="Find Triple Junctions",
-        short_name="Junctions",
+        name="Identify Veins & Regions",
+        short_name="Identify",
         description=(
-            "Detect triple (or higher) junctions where 3+ vein centerline segments "
-            "converge. All segment endpoints are collected, then clustered: endpoints "
-            "within snap_radius pixels of each other are grouped. Clusters with 3+ "
-            "endpoints become junction points."
+            "Run the full identify_veins_and_regions() pipeline: find triple junctions, "
+            "merge collinear segments, split sharp turns, assign longitudinals (L1-L5) "
+            "first, then classify crossveins (ACV/PCV) by proximity to assigned "
+            "longitudinals, name intervein regions from vein boundaries, split oversized "
+            "polygons, and cross-validate. Steps 6-12 visualize cached sub-results."
         ),
         pseudocode=(
-            "endpoints = [start, end for each centerline segment]\n"
-            "for ep in endpoints:\n"
-            "  cluster = find_nearby(ep, snap_radius=30px)\n"
-            "  if len(cluster) >= 3:\n"
-            "    junctions.append(JunctionPoint(mean(cluster)))"
+            "junctions = find_triple_junctions(centerlines, snap=30px)\n"
+            "merged = merge_segments_at_junctions(centerlines, junctions)\n"
+            "split = split_sharp_turns(merged, angle=70°)\n"
+            "longitudinals = assign_longitudinals(split, midline)\n"
+            "crossveins = classify_crossveins_from_longitudinals(split)\n"
+            "poly_names = name_regions_from_veins(polygons, vein_map)\n"
+            "poly_names = split_merged_polygons(polygons, poly_names)\n"
+            "validation = cross_validate(assignments, poly_names)"
         ),
         params=[
             StepParam("snap_radius", "30 px", "Max distance to cluster endpoints"),
@@ -231,59 +240,56 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 5
     ),
-    # 8: Classify Crossveins
+    # 8: Classify Longitudinals
     StepDef(
         index=8,
-        name="Classify Crossveins",
-        short_name="Crossveins",
-        description=(
-            "Identify ACV and PCV from the merged/split paths. Crossveins are characterized "
-            "by steep orientation (>60 deg from horizontal) and short length (<15%% of wing "
-            "span). Among crossvein candidates, the more anterior one is ACV and the more "
-            "posterior one is PCV. Proximity to longitudinal endpoints helps confirm identity."
-        ),
-        pseudocode=(
-            "candidates = [p for p in paths\n"
-            "  if p.orientation > 60° and p.length < 0.15 * wing_span]\n"
-            "sort candidates by y_centroid (anterior to posterior)\n"
-            "ACV = candidates[0]  # more anterior\n"
-            "PCV = candidates[1]  # more posterior"
-        ),
-        params=[
-            StepParam("max_crossvein_len", "15% wing span", "Maximum crossvein length"),
-            StepParam("orientation_cutoff", "60°", "Minimum orientation from horizontal"),
-            StepParam("proximity_threshold", "100 px", "Max distance to longitudinal endpoint"),
-        ],
-        runs_computation=False,  # cached from step 5
-    ),
-    # 9: Classify Longitudinals
-    StepDef(
-        index=9,
         name="Classify Longitudinals",
         short_name="Longitudinals",
         description=(
-            "Assign L1-L5 identities to the remaining paths using combinatorial scoring. "
-            "All permutations of candidate-to-vein assignments are evaluated. Each candidate "
-            "is scored on: Y-position match, length match to priors, crossvein proximity, "
-            "and signed distance from the wing midline. The permutation with the highest "
-            "total score wins. An ACV-based L4/L5 swap check runs post-assignment."
+            "Assign L1-L5 identities to the remaining paths after L3/L4 anchoring. "
+            "L2 is the longest anterior vein above L3, L1 is the most anterior short vein "
+            "above L2, and L5 is the longest posterior vein below L4. When no midline is "
+            "available, falls back to combinatorial scoring over all permutations using "
+            "Y-position, length, and midline distance."
         ),
         pseudocode=(
-            "candidates = [p for p in paths if not crossvein]\n"
-            "for perm in permutations(candidates, [L1..L5]):\n"
-            "  score = sum(\n"
-            "    0.30 * y_position_score(c, vein) +\n"
-            "    0.25 * length_score(c, vein) +\n"
-            "    0.20 * crossvein_proximity(c, vein) +\n"
-            "    0.25 * midline_distance(c, vein)\n"
-            "  )\n"
-            "best_perm = argmax(score)"
+            "# L3/L4 already anchored from midline\n"
+            "anterior = [p for p in remaining if p.y < L3.y]\n"
+            "posterior = [p for p in remaining if p.y > L4.y]\n"
+            "L2 = longest(anterior)\n"
+            "L1 = most_anterior_short(anterior - L2)\n"
+            "L5 = longest(posterior)"
         ),
         params=[
             StepParam("y_position_weight", "0.30", "Weight for Y-position scoring"),
             StepParam("length_weight", "0.25", "Weight for length prior match"),
-            StepParam("crossvein_weight", "0.20", "Weight for crossvein proximity"),
             StepParam("midline_weight", "0.25", "Weight for midline distance scoring"),
+        ],
+        runs_computation=False,  # cached from step 5
+    ),
+    # 9: Classify Crossveins
+    StepDef(
+        index=9,
+        name="Classify Crossveins",
+        short_name="Crossveins",
+        description=(
+            "Identify ACV and PCV from the crossvein candidates using proximity to "
+            "assigned longitudinals. ACV is scored by closeness to L3+L4, PCV by closeness "
+            "to L4+L5. When multiple candidates exist, all pairings are evaluated and the "
+            "best total score wins. Falls back to Y-sort if insufficient longitudinals."
+        ),
+        pseudocode=(
+            "candidates = [p for p in paths\n"
+            "  if p.orientation > 60° and p.length < 0.15 * wing_span]\n"
+            "for each candidate:\n"
+            "  acv_score = 1 - (dist_to_L3 + dist_to_L4) / (2 * 200px)\n"
+            "  pcv_score = 1 - (dist_to_L4 + dist_to_L5) / (2 * 200px)\n"
+            "best_pairing = argmax(acv_score[i] + pcv_score[j])"
+        ),
+        params=[
+            StepParam("max_crossvein_len", "15% wing span", "Maximum crossvein length"),
+            StepParam("orientation_cutoff", "60°", "Minimum orientation from horizontal"),
+            StepParam("norm_dist", "200 px", "Normalization distance for proximity scoring"),
         ],
         runs_computation=False,  # cached from step 5
     ),

@@ -690,8 +690,9 @@ def classify_merged_paths(
 ) -> dict[str, MergedPath]:
     """Classify merged paths into named veins by geometry.
 
-    Identifies crossveins FIRST (they're reliably identified by steep
-    orientation), then uses their positions to inform longitudinal scoring.
+    Assigns longitudinals FIRST (L3/L4 from midline, then L1/L2/L5),
+    then identifies crossveins by proximity to assigned longitudinals
+    (ACV between L3+L4, PCV between L4+L5).
     """
     min_x, min_y, max_x, max_y = wing_bbox
     bbox_w = max_x - min_x
@@ -744,30 +745,44 @@ def classify_merged_paths(
         if l4:
             vein_map["L4"] = l4
 
-    # Assign crossveins (ACV/PCV by orientation + position)
+    # Pre-validate crossvein candidates: demote those too far from any
+    # longitudinal back to the longitudinal pool before assignment
     _assign_crossveins(crossveins, vein_map)
-
-    # Validate crossveins: demote any that aren't near >=2 longitudinal candidates
-    # L3/L4 are now in the vein_map, so they count as known longitudinals for
-    # proximity checks
-    known_longitudinals = longitudinals + [
+    known_for_precheck = longitudinals + [
         vein_map[k] for k in ("L3", "L4") if k in vein_map
     ]
-    demoted = _validate_crossveins(vein_map, known_longitudinals, crossveins,
-                                    junctions=junctions)
+    demoted = _validate_crossveins(vein_map, known_for_precheck, crossveins,
+                                   junctions=junctions)
     longitudinals.extend(demoted)
+    # Clear provisional crossveins — will be reassigned from longitudinals
+    for k in list(vein_map.keys()):
+        if k in ("ACV", "PCV"):
+            del vein_map[k]
 
-    # Assign remaining longitudinals (L1, L2, L5)
+    # Assign remaining longitudinals (L1, L2, L5) BEFORE crossveins
     if midline is not None and ("L3" in vein_map or "L4" in vein_map):
         _assign_remaining_longitudinals(longitudinals, midline, vein_map)
     else:
         # No midline or no anchors — fall back to scored assignment
-        acv_path = vein_map.get("ACV")
-        pcv_path = vein_map.get("PCV")
         long_map = _assign_longitudinals_scored(
-            longitudinals, bbox_w, acv_path, pcv_path, midline=midline,
+            longitudinals, bbox_w, midline=midline,
         )
         vein_map.update(long_map)
+
+    # Assign crossveins using proximity to now-known longitudinals
+    # Only use candidates that weren't demoted
+    valid_crossveins = [c for c in crossveins if c not in demoted]
+    _assign_crossveins_from_longitudinals(valid_crossveins, vein_map)
+
+    # Final crossvein validation
+    all_longitudinals = [
+        vein_map[k] for k in ("L1", "L2", "L3", "L4", "L5") if k in vein_map
+    ]
+    _validate_crossveins(vein_map, all_longitudinals, valid_crossveins,
+                         junctions=junctions)
+
+    # Post-assignment L4/L5 swap check using now-known crossveins
+    _swap_l4_l5_if_needed(vein_map, vein_map.get("ACV"), vein_map.get("PCV"))
 
     logger.info(
         "Classified veins: %s",
@@ -814,6 +829,78 @@ def _assign_crossveins(
             vein_map["ACV"] = cv
         else:
             vein_map["PCV"] = cv
+
+
+def _assign_crossveins_from_longitudinals(
+    crossveins: list[MergedPath],
+    vein_map: dict[str, MergedPath],
+) -> None:
+    """Assign crossvein identities (ACV/PCV) by proximity to longitudinals.
+
+    ACV connects L3-L4, PCV connects L4-L5.  Scores each candidate by
+    distance to the relevant longitudinal pair.  Falls back to Y-sort
+    when insufficient longitudinals are available.
+    """
+    if not crossveins:
+        return
+
+    l3 = vein_map.get("L3")
+    l4 = vein_map.get("L4")
+    l5 = vein_map.get("L5")
+
+    has_acv_refs = l3 is not None and l4 is not None
+    has_pcv_refs = l4 is not None and l5 is not None
+
+    if not has_acv_refs and not has_pcv_refs:
+        # Insufficient longitudinals — fall back to Y-sort
+        _assign_crossveins(crossveins, vein_map)
+        return
+
+    # Score each candidate for ACV and PCV roles
+    norm_dist = 200.0  # normalization distance in pixels
+    acv_scores: list[float] = []
+    pcv_scores: list[float] = []
+
+    for cv in crossveins:
+        if has_acv_refs:
+            d_l3 = cv.line.distance(l3.line)
+            d_l4 = cv.line.distance(l4.line)
+            acv_scores.append(1.0 - (d_l3 + d_l4) / (2 * norm_dist))
+        else:
+            acv_scores.append(-999.0)
+
+        if has_pcv_refs:
+            d_l4 = cv.line.distance(l4.line)
+            d_l5 = cv.line.distance(l5.line)
+            pcv_scores.append(1.0 - (d_l4 + d_l5) / (2 * norm_dist))
+        else:
+            pcv_scores.append(-999.0)
+
+    if len(crossveins) >= 2:
+        # Try all (i, j) pairings, pick max acv_score[i] + pcv_score[j]
+        best_total = -999.0
+        best_acv_idx = -1
+        best_pcv_idx = -1
+        for i in range(len(crossveins)):
+            for j in range(len(crossveins)):
+                if i == j:
+                    continue
+                total = acv_scores[i] + pcv_scores[j]
+                if total > best_total:
+                    best_total = total
+                    best_acv_idx = i
+                    best_pcv_idx = j
+        if best_acv_idx >= 0 and acv_scores[best_acv_idx] > -999.0:
+            vein_map["ACV"] = crossveins[best_acv_idx]
+        if best_pcv_idx >= 0 and pcv_scores[best_pcv_idx] > -999.0:
+            vein_map["PCV"] = crossveins[best_pcv_idx]
+    elif len(crossveins) == 1:
+        acv_s = acv_scores[0]
+        pcv_s = pcv_scores[0]
+        if acv_s >= pcv_s and acv_s > -999.0:
+            vein_map["ACV"] = crossveins[0]
+        elif pcv_s > -999.0:
+            vein_map["PCV"] = crossveins[0]
 
 
 def _validate_crossveins(
@@ -1339,10 +1426,6 @@ def _assign_longitudinals_scored(
                 "Unassigned longitudinal: len=%.0fpx, Y=%.3f (boundary artifact)",
                 sorted_paths[i].length_px, sorted_paths[i].y_centroid_norm,
             )
-
-    # Post-processing: swap L4/L5 if crossvein proximity strongly favors it
-    # (Y centroids can overlap when paths have different extents)
-    _swap_l4_l5_if_needed(result, acv_path, pcv_path)
 
     return result
 
