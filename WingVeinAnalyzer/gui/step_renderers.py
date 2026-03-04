@@ -171,7 +171,7 @@ def _render_hull_seeds(state: StepState, prev: Optional[StepState]) -> tuple[np.
                 cx, cy = int(xs.mean()), int(ys.mean())
                 color = SEGMENT_COLORS[(i - 1) % len(SEGMENT_COLORS)]
                 cv2.putText(
-                    right, f"L{i}", (cx - 15, cy),
+                    right, f"S{i}", (cx - 15, cy),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA,
                 )
 

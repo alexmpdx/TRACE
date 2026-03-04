@@ -53,23 +53,23 @@ STEP_DEFS: list[StepDef] = [
         name="Rasterize & Hull-Seeded Voronoi",
         short_name="Voronoi",
         description=(
-            "Rasterize intervein polygons to a label map and the vein mask to binary. "
-            "Apply morphological closing to bridge small gaps. Compute the convex hull of "
-            "the vein mask, subtract the vein mask to get non-vein regions (hull seeds). "
-            "Map each hull seed component to its overlapping polygon label. Use "
-            "distance_transform_edt to build a Voronoi partition from these hull seeds. "
-            "Boundaries between adjacent Voronoi regions within the vein mask become "
-            "vein centerlines centered in the vein tissue."
+            "Rasterize the vein mask to binary. Apply morphological closing to bridge "
+            "small gaps. Compute the convex hull of the vein mask, subtract the vein mask "
+            "to get non-vein regions (hull seeds). Assign sequential labels 1..M to large "
+            "connected components (>=10k px). Use distance_transform_edt to build a Voronoi "
+            "partition from these hull seeds. Boundaries between adjacent Voronoi regions "
+            "within the vein mask become vein centerlines. Voronoi regions are vectorized "
+            "into polygons that replace the input intervein polygons."
         ),
         pseudocode=(
-            "label_map[polygon_i] = i + 1\n"
             "vein_mask = rasterize(vein_polygons)\n"
             "vein_mask = morphological_close(vein_mask, kernel=11)\n"
             "hull = convex_hull(vein_mask_points)\n"
             "seed_mask = hull_raster & ~vein_mask\n"
             "components = connected_components(seed_mask)\n"
-            "seed_labels = map_components_to_polygon_labels(components)\n"
-            "nearest_labels = voronoi_edt(seed_labels)"
+            "seed_labels[large_comp_i] = i  # sequential 1..M\n"
+            "nearest_labels = voronoi_edt(seed_labels)\n"
+            "voronoi_polygons = vectorize(nearest_labels, hull)"
         ),
         params=[
             StepParam("closing_kernel_size", "11", "Morphological closing kernel for vein mask"),
@@ -85,11 +85,10 @@ STEP_DEFS: list[StepDef] = [
         description=(
             "Visualize the hull seeding process. Left: the convex hull outline drawn "
             "over the vein mask. Right: the hull-minus-vein connected components colored "
-            "by their assigned polygon label. Small components (<10k px) from vein mask "
-            "holes are filtered out. When a component spans multiple polygon labels "
-            "(e.g. after pre-Voronoi splitting), each polygon's area seeds independently. "
-            "Missing labels (e.g. costal cell merges with marginal) fall back to their "
-            "original polygon rasterization."
+            "by their sequential label. Small components (<10k px) from vein mask "
+            "holes are filtered out. Each large component becomes its own Voronoi seed — "
+            "the number of regions is determined by the vein mask topology, not the input "
+            "polygon count."
         ),
         pseudocode=(
             "hull_mask = rasterize(convex_hull(vein_mask))\n"
@@ -97,9 +96,8 @@ STEP_DEFS: list[StepDef] = [
             "components = label(seed_mask, 8-connectivity)\n"
             "for comp in components:\n"
             "  if comp.area < 10k: skip\n"
-            "  if comp overlaps 1 polygon: seed_labels[comp] = label\n"
-            "  if comp overlaps N polygons: per-pixel label_map\n"
-            "fallback: missing labels get label_map pixels"
+            "  seed_labels[comp] = next_label++\n"
+            "voronoi_polygons = vectorize(nearest_labels)"
         ),
         params=[],
         runs_computation=False,  # visualization of step 1 data

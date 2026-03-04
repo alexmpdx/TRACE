@@ -1,8 +1,9 @@
-"""Voronoi-based vein centerline extraction from vein mask + intervein polygons."""
+"""Voronoi-based vein centerline extraction from vein mask."""
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 import cv2
@@ -14,51 +15,55 @@ from shapely.ops import unary_union
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class VoronoiResult:
+    """Result of Voronoi-based vein extraction from vein mask."""
+    centerlines: dict[tuple[int, int], LineString]
+    voronoi_polygons: list[Polygon]
+    nearest_labels: np.ndarray
+    vein_mask: np.ndarray
+    hull_mask: np.ndarray
+    seed_labels: np.ndarray
+
+
 def extract_veins_from_mask(
     vein_polygons: list[Polygon],
-    intervein_polygons: list[Polygon],
     image_shape: tuple[int, int],
     closing_kernel_size: int = 11,
-) -> tuple[dict[tuple[int, int], LineString], np.ndarray, np.ndarray,
-           np.ndarray, np.ndarray]:
+    min_seed_area: int = 10000,
+) -> VoronoiResult:
     """Extract vein centerlines using Voronoi partition of vein mask.
 
-    Uses distance_transform_edt to assign every pixel to its nearest
-    intervein polygon.  Within the vein mask, boundaries between adjacent
-    Voronoi regions are the equidistant centerlines.
+    Hull-minus-vein connected components become Voronoi seeds with
+    sequential labels 1..M. No input polygon overlap mapping is needed;
+    each large connected component defines its own region.  Voronoi-derived
+    polygons replace the input intervein polygons downstream.
 
     Parameters
     ----------
     vein_polygons : list[Polygon]
         Polygons defining where vein tissue exists.
-    intervein_polygons : list[Polygon]
-        Intervein region polygons (seeds for Voronoi partition).
     image_shape : (height, width)
         Image dimensions for rasterization.
+    closing_kernel_size : int
+        Morphological closing kernel size for vein mask.
+    min_seed_area : int
+        Minimum component area (in pixels) to use as a Voronoi seed.
 
     Returns
     -------
-    (centerlines, nearest_labels, vein_mask, hull_mask, seed_labels)
-        centerlines: dict[(poly_idx_a, poly_idx_b), LineString]
-        nearest_labels: Voronoi label array (for reuse by edge boundary extraction)
-        vein_mask: binary vein mask array
-        hull_mask: convex hull of vein mask (for visualization)
-        seed_labels: hull-minus-vein seed labels (for visualization)
+    VoronoiResult
+        centerlines, voronoi_polygons, nearest_labels, vein_mask,
+        hull_mask, seed_labels.
     """
     h, w = image_shape
 
-    # 1. Rasterize intervein polygons to a label map
-    label_map = np.zeros((h, w), dtype=np.int32)
-    for i, poly in enumerate(intervein_polygons):
-        label = i + 1  # labels 1..N, 0 = background
-        _fill_polygon(label_map, poly, label)
-
-    # 2. Rasterize vein mask to binary
+    # 1. Rasterize vein mask to binary
     vein_mask = np.zeros((h, w), dtype=np.uint8)
     for poly in vein_polygons:
         _fill_polygon(vein_mask, poly, 1)
 
-    # 2b. Morphological closing to bridge small gaps in vein mask
+    # 2. Morphological closing to bridge small gaps in vein mask
     if closing_kernel_size > 0:
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (closing_kernel_size, closing_kernel_size)
@@ -66,9 +71,6 @@ def extract_veins_from_mask(
         vein_mask = cv2.morphologyEx(vein_mask, cv2.MORPH_CLOSE, kernel)
 
     # 3. Vein-mask hull seeding
-    # Compute convex hull of vein mask, subtract vein mask, use the
-    # resulting non-vein connected components as Voronoi seeds.
-    # Seeds follow vein-mask edges → boundaries land in vein centers.
     vm_ys, vm_xs = np.where(vein_mask > 0)
     step = max(1, len(vm_ys) // 10000)  # subsample for speed
     hull = MultiPoint(
@@ -82,46 +84,27 @@ def extract_veins_from_mask(
     structure = ndimage.generate_binary_structure(2, 2)
     component_labels, n_components = ndimage.label(seed_mask, structure=structure)
 
-    # Map each large component to its overlapping polygon label.
-    # Small components (<10k px) are vein-mask holes — skip.
+    # 4. Assign sequential labels 1..M to large components
     seed_labels = np.zeros((h, w), dtype=np.int32)
-    min_seed_area = 10000
     comp_sizes = ndimage.sum(
         np.ones_like(component_labels), component_labels,
         range(1, n_components + 1),
     )
+    next_label = 1
     for comp_id in range(1, n_components + 1):
         if comp_sizes[comp_id - 1] < min_seed_area:
             continue
         comp_mask = (component_labels == comp_id)
-        labels_in = label_map[comp_mask]
-        nonzero = labels_in[labels_in > 0]
-        if len(nonzero) == 0:
-            continue
-        unique, counts = np.unique(nonzero, return_counts=True)
-        if len(unique) == 1:
-            # Single label — extend seed to vein-mask edge (hull benefit)
-            seed_labels[comp_mask] = int(unique[0])
-        else:
-            # Multiple labels merged — use label_map to preserve boundaries.
-            # Only label_map pixels get seeded; gap pixels stay 0 for the
-            # distance transform to fill.
-            labeled_pixels = comp_mask & (label_map > 0)
-            seed_labels[labeled_pixels] = label_map[labeled_pixels]
+        seed_labels[comp_mask] = next_label
+        next_label += 1
 
-    # Fallback: polygon labels missing from seeds get label_map pixels.
-    # Happens when a small polygon (costal cell) merges with its
-    # neighbor in the hull-minus-vein mask.
-    n_fallback = 0
-    for label in range(1, len(intervein_polygons) + 1):
-        if not np.any(seed_labels == label):
-            seed_labels[label_map == label] = label
-            n_fallback += 1
+    n_seeds = next_label - 1
+    logger.info(
+        "Hull seeding: %d large components from %d total (min_area=%d)",
+        n_seeds, n_components, min_seed_area,
+    )
 
-    if n_fallback:
-        logger.info("Hull seeding fallback: %d labels from label_map", n_fallback)
-
-    # Voronoi partition
+    # 5. Voronoi partition via EDT
     background = (seed_labels == 0)
     _, nearest_indices = ndimage.distance_transform_edt(
         background, return_distances=True, return_indices=True
@@ -134,13 +117,12 @@ def extract_veins_from_mask(
         len(np.unique(nearest_labels)), int(vein_mask.sum()),
     )
 
-    # 4. Extract label boundaries within the vein mask
+    # 6. Extract label boundaries within the vein mask
     boundary_pixels = _extract_boundary_pixels(nearest_labels, vein_mask)
 
-    # 5. Filter and trace into LineStrings
+    # 7. Filter and trace into LineStrings
     centerlines: dict[tuple[int, int], LineString] = {}
     for (label_a, label_b), pixels in boundary_pixels.items():
-        # Convert labels back to polygon indices (label = idx + 1)
         idx_a = label_a - 1
         idx_b = label_b - 1
         if idx_a < 0 or idx_b < 0:
@@ -153,10 +135,22 @@ def extract_veins_from_mask(
 
     logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
 
-    # 6. Bridge dangling endpoints (connect nearby segment tips)
+    # 8. Bridge dangling endpoints
     centerlines = bridge_dangling_endpoints(centerlines, bridge_threshold=30.0)
 
-    return centerlines, nearest_labels, vein_mask, hull_mask, seed_labels
+    # 9. Vectorize Voronoi regions into polygons
+    voronoi_polygons = _vectorize_voronoi_regions(
+        nearest_labels, hull_mask, n_seeds,
+    )
+
+    return VoronoiResult(
+        centerlines=centerlines,
+        voronoi_polygons=voronoi_polygons,
+        nearest_labels=nearest_labels,
+        vein_mask=vein_mask,
+        hull_mask=hull_mask,
+        seed_labels=seed_labels,
+    )
 
 
 def bridge_dangling_endpoints(
@@ -245,6 +239,38 @@ def bridge_dangling_endpoints(
         logger.info("Bridged %d dangling endpoint pair(s)", bridges_made)
 
     return result
+
+
+def _vectorize_voronoi_regions(
+    nearest_labels: np.ndarray,
+    hull_mask: np.ndarray,
+    n_labels: int,
+) -> list[Polygon]:
+    """Convert Voronoi label regions into Shapely Polygons.
+
+    For each label 1..n_labels, creates a binary mask restricted to the
+    hull, finds the largest contour, and converts to a Shapely Polygon.
+    Returns a list where index i corresponds to label i+1.
+    """
+    polygons: list[Polygon] = []
+    for label in range(1, n_labels + 1):
+        region_mask = ((nearest_labels == label) & (hull_mask > 0)).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(
+            region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            coords = [(float(pt[0][0]), float(pt[0][1])) for pt in largest]
+            if len(coords) >= 4:
+                p = Polygon(coords)
+                if p.is_valid and p.area > 100:
+                    polygons.append(p)
+                    continue
+        # Placeholder for invalid/empty regions
+        polygons.append(Polygon())
+
+    logger.info("Vectorized %d Voronoi regions into polygons", len(polygons))
+    return polygons
 
 
 def _extend_line(

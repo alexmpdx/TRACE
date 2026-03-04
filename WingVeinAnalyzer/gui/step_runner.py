@@ -36,9 +36,8 @@ from WingVeinAnalyzer.models.vein_labeler import (
     _extract_costa,
 )
 from WingVeinAnalyzer.models.vein_skeleton import (
+    VoronoiResult,
     extract_veins_from_mask,
-    find_poly_pair_for_line,
-    split_oversized_polygons,
 )
 from WingVeinAnalyzer.models.wing_geometry import (
     WingMidline,
@@ -66,9 +65,6 @@ class StepState:
     wing_bbox: Optional[tuple[float, float, float, float]] = None
     polygons: Optional[list[Polygon]] = None
     vein_polygons: Optional[list[Polygon]] = None
-
-    # Pre-split (from step 1)
-    pre_split_count: int = 0
 
     # Voronoi (from step 1)
     vein_mask: Optional[np.ndarray] = None
@@ -255,41 +251,37 @@ class StepRunner:
         return state
 
     def _step_voronoi(self, prev: StepState) -> StepState:
-        """Step 1: Pre-split oversized polygons, then rasterize vein mask and compute Voronoi."""
+        """Step 1: Rasterize vein mask, hull-component seeding, Voronoi partition."""
         state = self._copy_forward(prev)
 
         if not state.vein_polygons:
             logger.warning("No vein polygons — skipping Voronoi step")
             return state
 
-        # Pre-Voronoi split: detect oversized merged polygons
-        orig_count = len(state.polygons)
-        state.polygons, synthetic_centerlines = split_oversized_polygons(
-            state.polygons, state.image,
+        voronoi_result = extract_veins_from_mask(
+            state.vein_polygons, state.image.shape[:2],
         )
-        state.pre_split_count = len(state.polygons) - orig_count
+        state.polygons = voronoi_result.voronoi_polygons
+        state.centerlines = voronoi_result.centerlines
+        state.nearest_labels = voronoi_result.nearest_labels
+        state.vein_mask = voronoi_result.vein_mask
+        state.hull_mask = voronoi_result.hull_mask
+        state.seed_labels = voronoi_result.seed_labels
 
-        centerlines, nearest_labels, vein_mask, hull_mask, seed_labels_arr = \
-            extract_veins_from_mask(
-                state.vein_polygons, state.polygons, state.image.shape[:2],
+        # Recompute wing bounding box from Voronoi-derived polygons
+        valid_polys = [p for p in state.polygons if not p.is_empty]
+        if valid_polys:
+            all_bounds = [p.bounds for p in valid_polys]
+            state.wing_bbox = (
+                min(b[0] for b in all_bounds),
+                min(b[1] for b in all_bounds),
+                max(b[2] for b in all_bounds),
+                max(b[3] for b in all_bounds),
             )
-
-        # Add synthetic centerlines for split boundaries that Voronoi missed
-        for syn_line in synthetic_centerlines:
-            key = find_poly_pair_for_line(syn_line, state.polygons)
-            if key and key not in centerlines:
-                centerlines[key] = syn_line
-                logger.info("Added synthetic centerline for split boundary: %s", key)
-
-        state.centerlines = centerlines
-        state.nearest_labels = nearest_labels
-        state.vein_mask = vein_mask
-        state.hull_mask = hull_mask
-        state.seed_labels = seed_labels_arr
 
         state.params_used = {
             "closing_kernel_size": "11",
-            "pre_split_count": str(state.pre_split_count),
+            "voronoi_polygons": str(len(state.polygons)),
         }
         return state
 
@@ -297,21 +289,14 @@ class StepRunner:
         """Step 2: Visualization-only — show hull seeding intermediates."""
         state = self._copy_forward(prev)
         n_seed_labels = 0
-        n_fallback = 0
         if state.seed_labels is not None:
             unique = set(int(v) for v in np.unique(state.seed_labels) if v > 0)
             n_seed_labels = len(unique)
-        if state.seed_labels is not None and state.nearest_labels is not None:
-            # Count how many polygon labels needed fallback (present in
-            # nearest_labels but absent from seed_labels before fallback)
-            n_polys = len(state.polygons) if state.polygons else 0
-            for lbl in range(1, n_polys + 1):
-                if not np.any(state.seed_labels == lbl):
-                    n_fallback += 1
+        n_voronoi_polys = len(state.polygons) if state.polygons else 0
         state.params_used = {
             "hull_coverage": f"{int(state.hull_mask.sum()) if state.hull_mask is not None else 0} px",
-            "seed_labels": str(n_seed_labels),
-            "fallback_labels": str(n_fallback),
+            "seed_components": str(n_seed_labels),
+            "voronoi_polygons": str(n_voronoi_polys),
         }
         return state
 
@@ -663,7 +648,6 @@ class StepRunner:
         state.wing_bbox = prev.wing_bbox
         state.polygons = prev.polygons
         state.vein_polygons = prev.vein_polygons
-        state.pre_split_count = prev.pre_split_count
         state.vein_mask = prev.vein_mask
         state.nearest_labels = prev.nearest_labels
         state.centerlines = prev.centerlines

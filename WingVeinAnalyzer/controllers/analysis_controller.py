@@ -34,10 +34,9 @@ from WingVeinAnalyzer.models.vein_identifier import (
     validate_veins_against_ground_truth,
 )
 from WingVeinAnalyzer.models.vein_skeleton import (
+    VoronoiResult,
     extract_edge_boundary_veins,
     extract_veins_from_mask,
-    find_poly_pair_for_line,
-    split_oversized_polygons,
 )
 from WingVeinAnalyzer.models.wing_geometry import (
     WingOutline,
@@ -162,24 +161,27 @@ def _run_polygon_pipeline(
         # --- Vein-mask-primary path ---
         logger.info("Using vein-mask-primary pipeline (%d vein polygons)", len(annotations.vein_polygons))
 
-        # Pre-Voronoi split: detect oversized merged polygons and split them
-        # before the Voronoi step so it gets the correct number of seeds
-        polygons, synthetic_centerlines = split_oversized_polygons(
-            polygons, image,
+        # Extract centerlines from vein mask via hull-component Voronoi
+        voronoi_result = extract_veins_from_mask(
+            annotations.vein_polygons, image.shape[:2],
         )
+        centerlines = voronoi_result.centerlines
+        vein_mask_arr = voronoi_result.vein_mask
+        hull_mask = voronoi_result.hull_mask
+        seed_labels_arr = voronoi_result.seed_labels
+        nearest_labels = voronoi_result.nearest_labels
+        polygons = voronoi_result.voronoi_polygons  # replaces input polygons
 
-        # Extract centerlines from vein mask (no poly_names needed)
-        centerlines, nearest_labels, vein_mask_arr, hull_mask, seed_labels_arr = \
-            extract_veins_from_mask(
-                annotations.vein_polygons, polygons, image.shape[:2]
+        # Recompute wing bounding box from Voronoi-derived polygons
+        valid_polys = [p for p in polygons if not p.is_empty]
+        if valid_polys:
+            all_bounds = [p.bounds for p in valid_polys]
+            wing_bbox = (
+                min(b[0] for b in all_bounds),
+                min(b[1] for b in all_bounds),
+                max(b[2] for b in all_bounds),
+                max(b[3] for b in all_bounds),
             )
-
-        # Add synthetic centerlines for split boundaries that Voronoi missed
-        for syn_line in synthetic_centerlines:
-            key = find_poly_pair_for_line(syn_line, polygons)
-            if key and key not in centerlines:
-                centerlines[key] = syn_line
-                logger.info("Added synthetic centerline for split boundary: %s", key)
 
         # Compute wing midline for crossvein-independent identification
         midline = compute_wing_midline(polygons, wing_bbox)
@@ -1174,15 +1176,6 @@ def _write_step_summary(
         # Step 1: Rasterize & Hull-Seeded Voronoi
         step(1, "Rasterize & Hull-Seeded Voronoi")
 
-        # Pre-Voronoi split info
-        n_split = n_final_polys - n_input_polys
-        if n_split > 0:
-            lines.append(f"  Pre-Voronoi split: {n_input_polys} → {n_final_polys} polygons ({n_split} oversized split)")
-            for i in range(n_input_polys, n_final_polys):
-                lines.append(f"    New P{i}: area={polygons[i].area:.0f} px²")
-        else:
-            lines.append(f"  Pre-Voronoi split: no oversized polygons (all ≤28% of total area)")
-
         vein_px = int(vein_mask_arr.sum()) if vein_mask_arr is not None else 0
         lines.append(f"  Vein mask: {vein_px} pixels ({100.0 * vein_px / (h * w):.1f}% of image)")
 
@@ -1191,55 +1184,16 @@ def _write_step_summary(
             lines.append(f"  Convex hull: {hull_px} pixels")
             lines.append(f"  Logic: hull = convex_hull(vein_mask_points)")
             lines.append(f"         seed_mask = hull & ~vein_mask")
-            lines.append(f"         → non-vein connected components become Voronoi seeds")
+            lines.append(f"         → large connected components (≥10k px) get sequential labels 1..M")
 
         if seed_labels_arr is not None:
             unique_seeds = set(int(v) for v in np.unique(seed_labels_arr) if v > 0)
-            lines.append(f"  Seed labels: {len(unique_seeds)} distinct labels")
+            lines.append(f"  Seed labels: {len(unique_seeds)} distinct components")
 
-            # Count components and their label assignments
-            from scipy import ndimage as _ndi
-            seed_mask = (hull_mask > 0) & (vein_mask_arr == 0) if hull_mask is not None else None
-            if seed_mask is not None:
-                structure = _ndi.generate_binary_structure(2, 2)
-                comp_labels, n_comp = _ndi.label(seed_mask, structure=structure)
-                comp_sizes = _ndi.sum(
-                    np.ones_like(comp_labels), comp_labels, range(1, n_comp + 1),
-                )
-                large = sum(1 for s in comp_sizes if s >= 10000)
-                small = n_comp - large
-                lines.append(f"  Hull-minus-vein components: {n_comp} total, {large} large (≥10k px), {small} small (filtered)")
-
-                # Show label mapping for large components
-                label_map = np.zeros((h, w), dtype=np.int32)
-                for i, poly in enumerate(polygons):
-                    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
-                    _fill_polygon(label_map, poly, i + 1)
-
-                for comp_id in range(1, n_comp + 1):
-                    if comp_sizes[comp_id - 1] < 10000:
-                        continue
-                    comp_mask = (comp_labels == comp_id)
-                    labels_in = label_map[comp_mask]
-                    nonzero = labels_in[labels_in > 0]
-                    if len(nonzero) == 0:
-                        lines.append(f"    Component {comp_id}: {int(comp_sizes[comp_id - 1])} px → NO LABEL (outside all polygons)")
-                    else:
-                        unique, counts = np.unique(nonzero, return_counts=True)
-                        if len(unique) == 1:
-                            lines.append(f"    Component {comp_id}: {int(comp_sizes[comp_id - 1])} px → label {int(unique[0])} (single polygon, hull-seeded)")
-                        else:
-                            label_str = ", ".join(f"L{int(u)}:{int(c)}px" for u, c in zip(unique, counts))
-                            lines.append(f"    Component {comp_id}: {int(comp_sizes[comp_id - 1])} px → multi-label ({label_str}), per-pixel seeding")
-
-            # Fallback labels
-            n_fallback = 0
-            for lbl in range(1, n_final_polys + 1):
-                if not np.any(seed_labels_arr == lbl):
-                    n_fallback += 1
-                    lines.append(f"  Fallback: label {lbl} missing from hull seeds → using original polygon rasterization")
-            if n_fallback == 0:
-                lines.append(f"  Fallback: none needed (all {n_final_polys} labels present in hull seeds)")
+        lines.append(f"  Voronoi polygons: {n_final_polys} regions vectorized from Voronoi partition")
+        for i, poly in enumerate(polygons):
+            if not poly.is_empty:
+                lines.append(f"    V{i}: area={poly.area:.0f} px², centroid=({poly.centroid.x:.0f}, {poly.centroid.y:.0f})")
 
         lines.append(f"  Voronoi: distance_transform_edt from seed_labels")
         lines.append(f"    → each pixel assigned to nearest seed label")
