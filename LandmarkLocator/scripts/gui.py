@@ -503,9 +503,10 @@ class TrainingDialog(QDialog):
         "wing_tip": "#870b2e",
     }
 
-    def __init__(self, parent=None):
+    def __init__(self, model_name: str = "", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Training — Fold 0")
+        title = f"Training — {model_name}" if model_name else "Training"
+        self.setWindowTitle(title)
         self.resize(820, 600)
         layout = QVBoxLayout(self)
 
@@ -873,7 +874,7 @@ class LandmarkGUI(QMainWindow):
             return
         model_name = name.strip()
 
-        self._train_dialog = TrainingDialog(self)
+        self._train_dialog = TrainingDialog(model_name, self)
         self._train_thread = TrainingThread(model_name)
         self._train_thread.progress.connect(self._train_dialog.append_log)
         self._train_thread.epoch_data.connect(self._train_dialog.update_chart)
