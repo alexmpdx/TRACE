@@ -183,8 +183,9 @@ def _run_polygon_pipeline(
                 max(b[3] for b in all_bounds),
             )
 
-        # Compute wing midline for crossvein-independent identification
-        midline = compute_wing_midline(polygons, wing_bbox)
+        # Compute wing midline from original annotation polygons (not hull-derived Voronoi)
+        original_polys = annotations.intervein_polygons + annotations.vein_polygons
+        midline = compute_wing_midline(original_polys, wing_bbox)
 
         # Identify veins and regions independently via geometry
         id_result = identify_veins_and_regions(

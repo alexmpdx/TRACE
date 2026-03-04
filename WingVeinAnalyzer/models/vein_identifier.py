@@ -292,14 +292,14 @@ def merge_segments_at_junctions(
         second_score = pair_scores[1][0] if len(pair_scores) > 1 else 999.0
         gap = second_score - best_score
 
-        # Orientation guard: prevent merging a longitudinal (<30°) with
-        # a crossvein (>50°) regardless of collinearity score
+        # Orientation guard: prevent merging a longitudinal (<25°) with
+        # a crossvein (>60°) regardless of collinearity score
         key_a = arrivals[bi][0]
         key_b = arrivals[bj][0]
         ori_a = _line_orientation(centerlines[key_a])
         ori_b = _line_orientation(centerlines[key_b])
         orientation_mismatch = (
-            (ori_a < 25 and ori_b > 55) or (ori_b < 25 and ori_a > 55)
+            (ori_a < 25 and ori_b > 60) or (ori_b < 25 and ori_a > 60)
         )
 
         # Determine the second-best pair for storing as alternative
@@ -482,7 +482,7 @@ def _try_split_path(
 
     # Smooth the line before measuring angle changes to prevent
     # noisy pixel jitter from creating false sharp turns
-    line = smooth_line(path.line, sigma=5.0, sample_spacing=5.0)
+    line = smooth_line(path.line, sigma=50.0, sample_spacing=5.0)
     n_steps = max(2, int(line.length / step_dist))
 
     # Sample points along the merged line
