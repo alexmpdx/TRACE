@@ -3,3 +3,6 @@ __pycache__/
 .DS_Store
 .claude/
 Chat_files/
+LandmarkLocator/training_data_pics/
+LandmarkLocator/output/
+LandmarkLocator/save_gui/

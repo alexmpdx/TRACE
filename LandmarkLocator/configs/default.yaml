@@ -1,0 +1,64 @@
+# LandmarkLocator default configuration
+
+# Data paths (relative to project root)
+data:
+  annotation_dir: training_data
+  image_dir: training_data_pics
+  image_suffix: .tif
+
+# Model input resolution (divisible by 32, aspect ratio ~1.45:1)
+input:
+  width: 512
+  height: 352
+
+# Landmark heatmap settings
+heatmap:
+  sigma: 5  # Gaussian sigma in pixels at model resolution
+  num_landmarks: 5
+
+# Model architecture
+model:
+  encoder: resnet18
+  pretrained: true
+  decoder_channels: [256, 128, 64, 32]
+
+# Training
+training:
+  epochs: 300
+  batch_size: 4
+  num_workers: 0  # 0 for MPS compatibility
+  optimizer:
+    type: AdamW
+    lr: 1.0e-3
+    weight_decay: 1.0e-4
+  scheduler:
+    type: CosineAnnealingLR
+    T_max: 300  # same as epochs
+    eta_min: 1.0e-6
+  encoder_freeze_epochs: 20
+  encoder_lr_factor: 0.1
+  early_stopping_patience: 50
+
+# Cross-validation
+cv:
+  n_folds: 5
+  stratify_by: genotype  # group images by genotype for balanced folds
+
+# Augmentation
+augmentation:
+  rotation_limit: 30
+  horizontal_flip_p: 0.5
+  scale_limit: 0.15
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  blur_limit: 5
+  blur_p: 0.3
+  coarse_dropout_max_holes: 4
+  coarse_dropout_max_height: 40
+  coarse_dropout_max_width: 40
+  coarse_dropout_p: 0.3
+
+# Output
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs
