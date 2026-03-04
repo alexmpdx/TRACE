@@ -41,23 +41,24 @@ def render_step(
     renderers = {
         0: _render_load,
         1: _render_voronoi,
-        2: _render_centerlines,
-        3: _render_midline,
-        4: _render_junctions,
-        5: _render_merge,
-        6: _render_split,
-        7: _render_crossveins,
-        8: _render_longitudinals,
-        9: _render_regions,
-        10: _render_poly_split,
-        11: _render_validation,
-        12: _render_l1_recovery,
-        13: _render_costa,
-        14: _render_outline,
-        15: _render_hinge,
-        16: _render_compartments,
-        17: _render_measurements,
-        18: _render_overlays,
+        2: _render_hull_seeds,
+        3: _render_centerlines,
+        4: _render_midline,
+        5: _render_junctions,
+        6: _render_merge,
+        7: _render_split,
+        8: _render_crossveins,
+        9: _render_longitudinals,
+        10: _render_regions,
+        11: _render_poly_split,
+        12: _render_validation,
+        13: _render_l1_recovery,
+        14: _render_costa,
+        15: _render_outline,
+        16: _render_hinge,
+        17: _render_compartments,
+        18: _render_measurements,
+        19: _render_overlays,
     }
     renderer = renderers.get(step_index)
     if renderer is None:
@@ -122,6 +123,57 @@ def _render_voronoi(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
                 np.array(right[region_mask], dtype=np.float32) * 0.4
                 + np.array(color, dtype=np.float32) * 0.6
             ).astype(np.uint8)
+
+    return left, right
+
+
+def _render_hull_seeds(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
+    """Step 2: Convex hull + vein mask → hull-minus-vein seed components."""
+    # Left: vein mask on image + convex hull outline
+    left = state.image.copy()
+    if state.vein_mask is not None:
+        overlay = np.zeros_like(left)
+        overlay[:, :, 2] = (state.vein_mask > 0).astype(np.uint8) * 255
+        left = cv2.addWeighted(left, 0.7, overlay, 0.3, 0)
+    if state.hull_mask is not None:
+        # Draw hull outline in white
+        hull_contours, _ = cv2.findContours(
+            state.hull_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        cv2.drawContours(left, hull_contours, -1, (255, 255, 255), 3)
+
+    # Right: seed labels colored by polygon assignment
+    right = state.image.copy()
+    if state.seed_labels is not None:
+        n_labels = int(state.seed_labels.max())
+        for i in range(1, n_labels + 1):
+            region_mask = state.seed_labels == i
+            if not np.any(region_mask):
+                continue
+            color = SEGMENT_COLORS[(i - 1) % len(SEGMENT_COLORS)]
+            right[region_mask] = (
+                np.array(right[region_mask], dtype=np.float32) * 0.3
+                + np.array(color, dtype=np.float32) * 0.7
+            ).astype(np.uint8)
+        # Draw vein mask outline on top so boundaries are visible
+        if state.vein_mask is not None:
+            vein_contours, _ = cv2.findContours(
+                state.vein_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            )
+            cv2.drawContours(right, vein_contours, -1, (200, 200, 200), 1)
+        # Label each seed region
+        if state.polygons:
+            for i in range(1, n_labels + 1):
+                region_mask = state.seed_labels == i
+                if not np.any(region_mask):
+                    continue
+                ys, xs = np.where(region_mask)
+                cx, cy = int(xs.mean()), int(ys.mean())
+                color = SEGMENT_COLORS[(i - 1) % len(SEGMENT_COLORS)]
+                cv2.putText(
+                    right, f"L{i}", (cx - 15, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA,
+                )
 
     return left, right
 

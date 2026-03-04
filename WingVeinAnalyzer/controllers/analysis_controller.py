@@ -151,6 +151,13 @@ def _run_polygon_pipeline(
         max(b[3] for b in all_bounds),
     )
 
+    # Initialize variables shared across both pipeline paths
+    hull_mask = None
+    seed_labels_arr = None
+    vein_mask_arr = None
+    centerlines = {}
+    midline = None
+
     if annotations.vein_polygons:
         # --- Vein-mask-primary path ---
         logger.info("Using vein-mask-primary pipeline (%d vein polygons)", len(annotations.vein_polygons))
@@ -162,9 +169,10 @@ def _run_polygon_pipeline(
         )
 
         # Extract centerlines from vein mask (no poly_names needed)
-        centerlines, nearest_labels, vein_mask_arr = extract_veins_from_mask(
-            annotations.vein_polygons, polygons, image.shape[:2]
-        )
+        centerlines, nearest_labels, vein_mask_arr, hull_mask, seed_labels_arr = \
+            extract_veins_from_mask(
+                annotations.vein_polygons, polygons, image.shape[:2]
+            )
 
         # Add synthetic centerlines for split boundaries that Voronoi missed
         for syn_line in synthetic_centerlines:
@@ -383,6 +391,18 @@ def _run_polygon_pipeline(
         assignments, csv_path, image_name=stem, measurements=measurements
     )
     result.csv_path = csv_path
+
+    # Write step-by-step logic summary
+    _write_step_summary(
+        output_dir, image, annotations, polygons, poly_names,
+        assignments, measurements, outline, wing_blade,
+        regions, anterior, posterior,
+        hull_mask=hull_mask if annotations.vein_polygons else None,
+        seed_labels_arr=seed_labels_arr if annotations.vein_polygons else None,
+        vein_mask_arr=vein_mask_arr if annotations.vein_polygons else None,
+        centerlines=centerlines,
+        midline=midline,
+    )
 
     # Remove file handler to avoid duplicate logging in subsequent runs
     root_logger.removeHandler(file_handler)
@@ -1094,6 +1114,249 @@ def _save_diagnostics_voronoi(
     for idx in sorted(poly_names.keys()):
         log_lines.append(f"P{idx}\t{poly_names[idx]}\n")
     (diag_dir / "vein_assignments.txt").write_text("".join(log_lines))
+
+
+def _write_step_summary(
+    output_dir: Path,
+    image: np.ndarray,
+    annotations: ParsedAnnotations,
+    polygons: list[Polygon],
+    poly_names: dict[int, str],
+    assignments: list[VeinAssignment],
+    measurements: Optional['WingMeasurements'],
+    outline: Optional['WingOutline'],
+    wing_blade: Optional[Polygon],
+    regions: dict[str, Polygon],
+    anterior: Optional[Polygon],
+    posterior: Optional[Polygon],
+    hull_mask: Optional[np.ndarray] = None,
+    seed_labels_arr: Optional[np.ndarray] = None,
+    vein_mask_arr: Optional[np.ndarray] = None,
+    centerlines: Optional[dict] = None,
+    midline=None,
+) -> None:
+    """Write a step-by-step logic summary to diagnostics/pipeline_steps.txt."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    diag_dir = output_dir / "diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    h, w = image.shape[:2]
+    n_input_polys = len(annotations.intervein_polygons)
+    n_vein_polys = len(annotations.vein_polygons)
+    has_vein_mask = n_vein_polys > 0
+    n_final_polys = len(polygons)
+
+    lines: list[str] = []
+
+    def section(title: str) -> None:
+        lines.append(f"\n{'=' * 60}")
+        lines.append(title)
+        lines.append('=' * 60)
+
+    def step(num: int, name: str) -> None:
+        lines.append(f"\n--- Step {num}: {name} ---")
+
+    # Header
+    lines.append("PIPELINE STEP-BY-STEP SUMMARY")
+    lines.append(f"Image: {w}x{h} px")
+    lines.append(f"Pipeline: {'vein-mask-primary' if has_vein_mask else 'midline-fallback'}")
+
+    # Step 0: Load
+    step(0, "Load Inputs")
+    lines.append(f"  Intervein polygons: {n_input_polys}")
+    lines.append(f"  Vein mask polygons: {n_vein_polys}")
+    for i, p in enumerate(annotations.intervein_polygons):
+        lines.append(f"    P{i}: area={p.area:.0f} px², centroid=({p.centroid.x:.0f}, {p.centroid.y:.0f})")
+
+    if has_vein_mask:
+        # Step 1: Rasterize & Hull-Seeded Voronoi
+        step(1, "Rasterize & Hull-Seeded Voronoi")
+
+        # Pre-Voronoi split info
+        n_split = n_final_polys - n_input_polys
+        if n_split > 0:
+            lines.append(f"  Pre-Voronoi split: {n_input_polys} → {n_final_polys} polygons ({n_split} oversized split)")
+            for i in range(n_input_polys, n_final_polys):
+                lines.append(f"    New P{i}: area={polygons[i].area:.0f} px²")
+        else:
+            lines.append(f"  Pre-Voronoi split: no oversized polygons (all ≤28% of total area)")
+
+        vein_px = int(vein_mask_arr.sum()) if vein_mask_arr is not None else 0
+        lines.append(f"  Vein mask: {vein_px} pixels ({100.0 * vein_px / (h * w):.1f}% of image)")
+
+        if hull_mask is not None:
+            hull_px = int(hull_mask.sum())
+            lines.append(f"  Convex hull: {hull_px} pixels")
+            lines.append(f"  Logic: hull = convex_hull(vein_mask_points)")
+            lines.append(f"         seed_mask = hull & ~vein_mask")
+            lines.append(f"         → non-vein connected components become Voronoi seeds")
+
+        if seed_labels_arr is not None:
+            unique_seeds = set(int(v) for v in np.unique(seed_labels_arr) if v > 0)
+            lines.append(f"  Seed labels: {len(unique_seeds)} distinct labels")
+
+            # Count components and their label assignments
+            from scipy import ndimage as _ndi
+            seed_mask = (hull_mask > 0) & (vein_mask_arr == 0) if hull_mask is not None else None
+            if seed_mask is not None:
+                structure = _ndi.generate_binary_structure(2, 2)
+                comp_labels, n_comp = _ndi.label(seed_mask, structure=structure)
+                comp_sizes = _ndi.sum(
+                    np.ones_like(comp_labels), comp_labels, range(1, n_comp + 1),
+                )
+                large = sum(1 for s in comp_sizes if s >= 10000)
+                small = n_comp - large
+                lines.append(f"  Hull-minus-vein components: {n_comp} total, {large} large (≥10k px), {small} small (filtered)")
+
+                # Show label mapping for large components
+                label_map = np.zeros((h, w), dtype=np.int32)
+                for i, poly in enumerate(polygons):
+                    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
+                    _fill_polygon(label_map, poly, i + 1)
+
+                for comp_id in range(1, n_comp + 1):
+                    if comp_sizes[comp_id - 1] < 10000:
+                        continue
+                    comp_mask = (comp_labels == comp_id)
+                    labels_in = label_map[comp_mask]
+                    nonzero = labels_in[labels_in > 0]
+                    if len(nonzero) == 0:
+                        lines.append(f"    Component {comp_id}: {int(comp_sizes[comp_id - 1])} px → NO LABEL (outside all polygons)")
+                    else:
+                        unique, counts = np.unique(nonzero, return_counts=True)
+                        if len(unique) == 1:
+                            lines.append(f"    Component {comp_id}: {int(comp_sizes[comp_id - 1])} px → label {int(unique[0])} (single polygon, hull-seeded)")
+                        else:
+                            label_str = ", ".join(f"L{int(u)}:{int(c)}px" for u, c in zip(unique, counts))
+                            lines.append(f"    Component {comp_id}: {int(comp_sizes[comp_id - 1])} px → multi-label ({label_str}), per-pixel seeding")
+
+            # Fallback labels
+            n_fallback = 0
+            for lbl in range(1, n_final_polys + 1):
+                if not np.any(seed_labels_arr == lbl):
+                    n_fallback += 1
+                    lines.append(f"  Fallback: label {lbl} missing from hull seeds → using original polygon rasterization")
+            if n_fallback == 0:
+                lines.append(f"  Fallback: none needed (all {n_final_polys} labels present in hull seeds)")
+
+        lines.append(f"  Voronoi: distance_transform_edt from seed_labels")
+        lines.append(f"    → each pixel assigned to nearest seed label")
+        lines.append(f"    → boundaries within vein mask = vein centerlines")
+
+        # Step 2: Hull Seeds (visualization)
+        step(2, "Hull Seeds (visualization)")
+        lines.append(f"  Shows hull outline over vein mask (left) and seed components colored by label (right)")
+
+        # Step 3: Centerlines
+        step(3, "Centerline Extraction")
+    else:
+        step(1, "Midline Boundary Extraction (fallback)")
+        lines.append(f"  No vein mask — using midline sampling between polygon boundaries")
+
+    n_cl = len(centerlines) if centerlines else 0
+    lines.append(f"  Centerlines extracted: {n_cl} segments")
+    if centerlines:
+        for key, line in sorted(centerlines.items()):
+            lines.append(f"    ({key[0]},{key[1]}): {line.length:.0f} px")
+
+    # Step 4: Midline
+    step_offset = 4 if has_vein_mask else 2
+    step(step_offset, "Compute Wing Midline")
+    if midline is not None:
+        lines.append(f"  Midline: {len(midline.line.coords)} samples")
+        coords = list(midline.line.coords)
+        lines.append(f"  Start: ({coords[0][0]:.0f}, {coords[0][1]:.0f})")
+        lines.append(f"  End: ({coords[-1][0]:.0f}, {coords[-1][1]:.0f})")
+        lines.append(f"  Logic: vertical cross-sections → midpoint Y → Gaussian smooth (sigma=30px)")
+    else:
+        lines.append(f"  Midline: could not compute")
+
+    # Steps 5-12: Identification
+    step(step_offset + 1, "Find Triple Junctions → Merge → Split → Classify → Name Regions → Validate")
+    lines.append(f"  Logic:")
+    lines.append(f"    1. Find triple junctions (3+ endpoints within 30px)")
+    lines.append(f"    2. Merge collinear segments at junctions (tangent continuity)")
+    lines.append(f"    3. Split merged paths at sharp turns (>70° direction change)")
+    lines.append(f"    4. Classify crossveins: orientation >60°, length <15% wing span")
+    lines.append(f"    5. Classify longitudinals: combinatorial scoring (Y + length + CV + midline)")
+    lines.append(f"    6. Name regions: boundary vein set → Jaccard match → area priors")
+    lines.append(f"    7. Cross-validate: Y-ordering, boundary consistency, CV connectivity")
+
+    # Vein results
+    lines.append(f"\n  Classified veins:")
+    for a in assignments:
+        if a.line is not None:
+            lines.append(f"    {a.vein_id}: {a.length_px:.0f} px, status={a.status.value}, confidence={a.confidence:.2f}")
+        else:
+            lines.append(f"    {a.vein_id}: ABSENT")
+
+    # Region results
+    lines.append(f"\n  Named regions ({len(poly_names)}/{n_final_polys} polygons):")
+    for idx in sorted(poly_names.keys()):
+        area = polygons[idx].area if idx < len(polygons) else 0
+        lines.append(f"    P{idx} → {poly_names[idx]} ({area:.0f} px²)")
+
+    # Step 13-14: L1 Recovery / Costa
+    step(step_offset + 2, "L1 Recovery & Costa Extraction")
+    has_costal = "costal_cell" in poly_names.values()
+    l1 = next((a for a in assignments if a.vein_id == "L1"), None)
+    costa = next((a for a in assignments if a.vein_id == "costa"), None)
+    if not has_costal:
+        lines.append(f"  No costal cell → L1 recovered from anterior vein mask edge")
+    if l1 and l1.line:
+        lines.append(f"  L1: {l1.length_px:.0f} px")
+    if costa and costa.line:
+        lines.append(f"  Costa: {costa.length_px:.0f} px (anterior margin of marginal cell)")
+    elif costa:
+        lines.append(f"  Costa: ABSENT")
+
+    # Step 15: Outline
+    step(step_offset + 3, "Build Wing Outline")
+    if outline and outline.polygon:
+        lines.append(f"  Outline area: {outline.polygon.area:.0f} px²")
+        lines.append(f"  Logic: union(polygons.buffer(20px) + vein_polys.buffer(5px)).exterior")
+
+    # Step 16: Hinge
+    step(step_offset + 4, "Hinge Detection & Removal")
+    if wing_blade:
+        lines.append(f"  Wing blade area: {wing_blade.area:.0f} px²")
+        if outline and outline.polygon:
+            pct = wing_blade.area / outline.polygon.area * 100
+            lines.append(f"  Blade/outline ratio: {pct:.1f}%")
+
+    # Step 17: Compartments
+    step(step_offset + 5, "Compute Compartments")
+    if anterior and not anterior.is_empty:
+        lines.append(f"  Anterior: {anterior.area:.0f} px²")
+    if posterior and not posterior.is_empty:
+        lines.append(f"  Posterior: {posterior.area:.0f} px²")
+    if anterior and posterior and not anterior.is_empty and not posterior.is_empty:
+        total = anterior.area + posterior.area
+        lines.append(f"  Ratio: {anterior.area / total * 100:.1f}% / {posterior.area / total * 100:.1f}%")
+    lines.append(f"  Logic: split wing blade along L4 vein")
+
+    # Step 18: Measurements
+    step(step_offset + 6, "Compute Measurements")
+    if measurements:
+        lines.append(f"  Wing length: {measurements.wing_length_px:.0f} px" if measurements.wing_length_px else "  Wing length: N/A")
+        lines.append(f"  Wing width: {measurements.wing_width_px:.0f} px" if measurements.wing_width_px else "  Wing width: N/A")
+        lines.append(f"  Wing area: {measurements.total_wing_area_px2:.0f} px²" if measurements.total_wing_area_px2 else "  Wing area: N/A")
+        if measurements.crossvein_distance_px:
+            lines.append(f"  ACV-PCV distance: {measurements.crossvein_distance_px:.0f} px")
+        lines.append(f"  Region areas:")
+        for name, area in measurements.intervein_areas_px2.items():
+            lines.append(f"    {name}: {area:.0f} px²")
+
+    # Step 19: Overlays
+    step(step_offset + 7, "Final Overlays")
+    lines.append(f"  Skeleton overlay: veins in assigned colors on original image")
+    lines.append(f"  Rainbow overlay: intervein regions filled with semi-transparent colors")
+
+    summary_path = diag_dir / "pipeline_steps.txt"
+    summary_path.write_text("\n".join(lines) + "\n")
+    logger.info("Step summary saved to %s", summary_path)
 
 
 def _run_vein_pipeline(

@@ -50,30 +50,63 @@ STEP_DEFS: list[StepDef] = [
     # 1: Rasterize & Voronoi
     StepDef(
         index=1,
-        name="Rasterize & Voronoi Partition",
+        name="Rasterize & Hull-Seeded Voronoi",
         short_name="Voronoi",
         description=(
             "Rasterize intervein polygons to a label map and the vein mask to binary. "
-            "Apply morphological closing to bridge small gaps. Use distance_transform_edt "
-            "to build a Voronoi partition: every background pixel is assigned to its nearest "
-            "intervein polygon. Within the vein mask, boundaries between adjacent Voronoi "
-            "regions become the equidistant centerlines."
+            "Apply morphological closing to bridge small gaps. Compute the convex hull of "
+            "the vein mask, subtract the vein mask to get non-vein regions (hull seeds). "
+            "Map each hull seed component to its overlapping polygon label. Use "
+            "distance_transform_edt to build a Voronoi partition from these hull seeds. "
+            "Boundaries between adjacent Voronoi regions within the vein mask become "
+            "vein centerlines centered in the vein tissue."
         ),
         pseudocode=(
             "label_map[polygon_i] = i + 1\n"
             "vein_mask = rasterize(vein_polygons)\n"
             "vein_mask = morphological_close(vein_mask, kernel=11)\n"
-            "nearest_labels = voronoi_edt(label_map)\n"
-            "# Each vein-mask pixel now knows which polygon it's closest to"
+            "hull = convex_hull(vein_mask_points)\n"
+            "seed_mask = hull_raster & ~vein_mask\n"
+            "components = connected_components(seed_mask)\n"
+            "seed_labels = map_components_to_polygon_labels(components)\n"
+            "nearest_labels = voronoi_edt(seed_labels)"
         ),
         params=[
             StepParam("closing_kernel_size", "11", "Morphological closing kernel for vein mask"),
+            StepParam("min_seed_area", "10000 px", "Minimum component area to use as seed"),
         ],
         runs_computation=True,
     ),
-    # 2: Centerline Extraction
+    # 2: Hull Seeds
     StepDef(
         index=2,
+        name="Hull Seed Visualization",
+        short_name="Hull Seeds",
+        description=(
+            "Visualize the hull seeding process. Left: the convex hull outline drawn "
+            "over the vein mask. Right: the hull-minus-vein connected components colored "
+            "by their assigned polygon label. Small components (<10k px) from vein mask "
+            "holes are filtered out. When a component spans multiple polygon labels "
+            "(e.g. after pre-Voronoi splitting), each polygon's area seeds independently. "
+            "Missing labels (e.g. costal cell merges with marginal) fall back to their "
+            "original polygon rasterization."
+        ),
+        pseudocode=(
+            "hull_mask = rasterize(convex_hull(vein_mask))\n"
+            "seed_mask = hull_mask & ~vein_mask\n"
+            "components = label(seed_mask, 8-connectivity)\n"
+            "for comp in components:\n"
+            "  if comp.area < 10k: skip\n"
+            "  if comp overlaps 1 polygon: seed_labels[comp] = label\n"
+            "  if comp overlaps N polygons: per-pixel label_map\n"
+            "fallback: missing labels get label_map pixels"
+        ),
+        params=[],
+        runs_computation=False,  # visualization of step 1 data
+    ),
+    # 3: Centerline Extraction
+    StepDef(
+        index=3,
         name="Centerline Extraction",
         short_name="Centerlines",
         description=(
@@ -96,9 +129,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 1
     ),
-    # 3: Wing Midline
+    # 4: Wing Midline
     StepDef(
-        index=3,
+        index=4,
         name="Compute Wing Midline",
         short_name="Midline",
         description=(
@@ -122,9 +155,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 4: Find Junctions
+    # 5: Find Junctions
     StepDef(
-        index=4,
+        index=5,
         name="Find Triple Junctions",
         short_name="Junctions",
         description=(
@@ -145,9 +178,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,  # runs identify_veins_and_regions() (full)
     ),
-    # 5: Merge Segments
+    # 6: Merge Segments
     StepDef(
-        index=5,
+        index=6,
         name="Merge Segments at Junctions",
         short_name="Merge",
         description=(
@@ -170,11 +203,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("min_gap", "15°", "Min separation from next-best pair"),
             StepParam("orientation_guard", "25°/55°", "Longitudinal/crossvein cutoffs"),
         ],
-        runs_computation=False,  # cached from step 4
+        runs_computation=False,  # cached from step 5
     ),
-    # 6: Split Sharp Turns
+    # 7: Split Sharp Turns
     StepDef(
-        index=6,
+        index=7,
         name="Split at Sharp Turns",
         short_name="Split",
         description=(
@@ -198,11 +231,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("min_path_length", "500 px", "Only split paths longer than this"),
             StepParam("min_split_length", "200 px", "Both halves must exceed this"),
         ],
-        runs_computation=False,  # cached from step 4
+        runs_computation=False,  # cached from step 5
     ),
-    # 7: Classify Crossveins
+    # 8: Classify Crossveins
     StepDef(
-        index=7,
+        index=8,
         name="Classify Crossveins",
         short_name="Crossveins",
         description=(
@@ -223,11 +256,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("orientation_cutoff", "60°", "Minimum orientation from horizontal"),
             StepParam("proximity_threshold", "100 px", "Max distance to longitudinal endpoint"),
         ],
-        runs_computation=False,  # cached from step 4
+        runs_computation=False,  # cached from step 5
     ),
-    # 8: Classify Longitudinals
+    # 9: Classify Longitudinals
     StepDef(
-        index=8,
+        index=9,
         name="Classify Longitudinals",
         short_name="Longitudinals",
         description=(
@@ -254,11 +287,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("crossvein_weight", "0.20", "Weight for crossvein proximity"),
             StepParam("midline_weight", "0.25", "Weight for midline distance scoring"),
         ],
-        runs_computation=False,  # cached from step 4
+        runs_computation=False,  # cached from step 5
     ),
-    # 9: Name Regions
+    # 10: Name Regions
     StepDef(
-        index=9,
+        index=10,
         name="Name Regions from Veins",
         short_name="Regions",
         description=(
@@ -281,11 +314,11 @@ STEP_DEFS: list[StepDef] = [
             StepParam("REGION_EXPECTED_VEINS", "marginal:{L1,L2}, submarginal:{L2,L3}, ...", ""),
             StepParam("REGION_AREA_PRIORS", "marginal:0.05-0.18, submarginal:0.08-0.25, ...", ""),
         ],
-        runs_computation=False,  # cached from step 4
+        runs_computation=False,  # cached from step 5
     ),
-    # 10: Split Merged Polygons
+    # 11: Split Merged Polygons
     StepDef(
-        index=10,
+        index=11,
         name="Split Merged Polygons",
         short_name="Poly Split",
         description=(
@@ -305,11 +338,11 @@ STEP_DEFS: list[StepDef] = [
         params=[
             StepParam("area_threshold", "1.5x expected max", "Threshold for oversized detection"),
         ],
-        runs_computation=False,  # cached from step 4
+        runs_computation=False,  # cached from step 5
     ),
-    # 11: Cross-Validation
+    # 12: Cross-Validation
     StepDef(
-        index=11,
+        index=12,
         name="Cross-Validation",
         short_name="Validate",
         description=(
@@ -329,11 +362,11 @@ STEP_DEFS: list[StepDef] = [
             "# Flag warnings (don't modify assignments)"
         ),
         params=[],
-        runs_computation=False,  # cached from step 4
+        runs_computation=False,  # cached from step 5
     ),
-    # 12: L1 Recovery
+    # 13: L1 Recovery
     StepDef(
-        index=12,
+        index=13,
         name="L1 Recovery from Anterior Edge",
         short_name="L1 Recovery",
         description=(
@@ -357,9 +390,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 13: Costa Extraction
+    # 14: Costa Extraction
     StepDef(
-        index=13,
+        index=14,
         name="Costa Extraction",
         short_name="Costa",
         description=(
@@ -376,9 +409,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 14: Wing Outline
+    # 15: Wing Outline
     StepDef(
-        index=14,
+        index=15,
         name="Build Wing Outline",
         short_name="Outline",
         description=(
@@ -399,9 +432,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 15: Hinge Detection & Removal
+    # 16: Hinge Detection & Removal
     StepDef(
-        index=15,
+        index=16,
         name="Hinge Detection & Removal",
         short_name="Hinge",
         description=(
@@ -424,9 +457,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 16: Compartments
+    # 17: Compartments
     StepDef(
-        index=16,
+        index=17,
         name="Compute Compartments",
         short_name="Compartments",
         description=(
@@ -448,9 +481,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 17: Measurements
+    # 18: Measurements
     StepDef(
-        index=17,
+        index=18,
         name="Compute Measurements",
         short_name="Measurements",
         description=(
@@ -471,9 +504,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 18: Final Overlays
+    # 19: Final Overlays
     StepDef(
-        index=18,
+        index=19,
         name="Final Overlays",
         short_name="Overlays",
         description=(

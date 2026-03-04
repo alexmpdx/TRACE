@@ -300,10 +300,10 @@ class MainWindow(QMainWindow):
         self._smooth_value_label.setText(f" {sigma:.1f} ")
         self._runner.smooth_sigma = sigma
 
-        # If we're on the overlay step (18), re-render immediately
-        if self._current_step == 18 and self._current_pair is not None:
-            self._runner.invalidate_from(18)
-            self._run_step_async(18)
+        # If we're on the overlay step (19), re-render immediately
+        if self._current_step == 19 and self._current_pair is not None:
+            self._runner.invalidate_from(19)
+            self._run_step_async(19)
 
     def _update_nav_buttons(self) -> None:
         """Enable/disable navigation based on current state."""

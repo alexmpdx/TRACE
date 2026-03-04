@@ -75,6 +75,10 @@ class StepState:
     nearest_labels: Optional[np.ndarray] = None
     centerlines: Optional[dict[tuple[int, int], LineString]] = None
 
+    # Hull seeding intermediates (from step 1, displayed in step 2)
+    hull_mask: Optional[np.ndarray] = None
+    seed_labels: Optional[np.ndarray] = None
+
     # Wing midline (from step 3)
     wing_midline: Optional[WingMidline] = None
 
@@ -180,8 +184,8 @@ class StepRunner:
         return state or self._states.get(target, StepState())
 
     def run_all(self) -> StepState:
-        """Run all 19 steps."""
-        return self.run_through(18)
+        """Run all 20 steps."""
+        return self.run_through(19)
 
     # ------------------------------------------------------------------
     # Step implementations
@@ -192,23 +196,24 @@ class StepRunner:
         handlers = {
             0: self._step_load,
             1: self._step_voronoi,
-            2: self._step_centerlines,
-            3: self._step_midline,
-            4: self._step_identify,
-            5: self._step_merge_viz,
-            6: self._step_split_viz,
-            7: self._step_crossvein_viz,
-            8: self._step_longitudinal_viz,
-            9: self._step_regions_viz,
-            10: self._step_poly_split_viz,
-            11: self._step_validate_viz,
-            12: self._step_l1_recovery,
-            13: self._step_costa,
-            14: self._step_outline,
-            15: self._step_hinge,
-            16: self._step_compartments,
-            17: self._step_measurements,
-            18: self._step_overlays,
+            2: self._step_hull_seeds,
+            3: self._step_centerlines,
+            4: self._step_midline,
+            5: self._step_identify,
+            6: self._step_merge_viz,
+            7: self._step_split_viz,
+            8: self._step_crossvein_viz,
+            9: self._step_longitudinal_viz,
+            10: self._step_regions_viz,
+            11: self._step_poly_split_viz,
+            12: self._step_validate_viz,
+            13: self._step_l1_recovery,
+            14: self._step_costa,
+            15: self._step_outline,
+            16: self._step_hinge,
+            17: self._step_compartments,
+            18: self._step_measurements,
+            19: self._step_overlays,
         }
         handler = handlers.get(index)
         if handler is None:
@@ -264,9 +269,10 @@ class StepRunner:
         )
         state.pre_split_count = len(state.polygons) - orig_count
 
-        centerlines, nearest_labels, vein_mask = extract_veins_from_mask(
-            state.vein_polygons, state.polygons, state.image.shape[:2],
-        )
+        centerlines, nearest_labels, vein_mask, hull_mask, seed_labels_arr = \
+            extract_veins_from_mask(
+                state.vein_polygons, state.polygons, state.image.shape[:2],
+            )
 
         # Add synthetic centerlines for split boundaries that Voronoi missed
         for syn_line in synthetic_centerlines:
@@ -278,6 +284,8 @@ class StepRunner:
         state.centerlines = centerlines
         state.nearest_labels = nearest_labels
         state.vein_mask = vein_mask
+        state.hull_mask = hull_mask
+        state.seed_labels = seed_labels_arr
 
         state.params_used = {
             "closing_kernel_size": "11",
@@ -285,8 +293,30 @@ class StepRunner:
         }
         return state
 
+    def _step_hull_seeds(self, prev: StepState) -> StepState:
+        """Step 2: Visualization-only — show hull seeding intermediates."""
+        state = self._copy_forward(prev)
+        n_seed_labels = 0
+        n_fallback = 0
+        if state.seed_labels is not None:
+            unique = set(int(v) for v in np.unique(state.seed_labels) if v > 0)
+            n_seed_labels = len(unique)
+        if state.seed_labels is not None and state.nearest_labels is not None:
+            # Count how many polygon labels needed fallback (present in
+            # nearest_labels but absent from seed_labels before fallback)
+            n_polys = len(state.polygons) if state.polygons else 0
+            for lbl in range(1, n_polys + 1):
+                if not np.any(state.seed_labels == lbl):
+                    n_fallback += 1
+        state.params_used = {
+            "hull_coverage": f"{int(state.hull_mask.sum()) if state.hull_mask is not None else 0} px",
+            "seed_labels": str(n_seed_labels),
+            "fallback_labels": str(n_fallback),
+        }
+        return state
+
     def _step_centerlines(self, prev: StepState) -> StepState:
-        """Step 2: Visualization-only — centerlines already extracted in step 1."""
+        """Step 3: Viz-only — centerlines already extracted in step 1."""
         state = self._copy_forward(prev)
         state.params_used = {
             "min_line_length": "10 px",
@@ -296,7 +326,7 @@ class StepRunner:
         return state
 
     def _step_midline(self, prev: StepState) -> StepState:
-        """Step 3: Compute the wing midline for crossvein-independent identification."""
+        """Step 4: Compute the wing midline for crossvein-independent identification."""
         state = self._copy_forward(prev)
 
         if state.polygons and state.wing_bbox:
@@ -316,7 +346,7 @@ class StepRunner:
         return state
 
     def _step_identify(self, prev: StepState) -> StepState:
-        """Step 4: Run full identify_veins_and_regions() and cache result."""
+        """Step 5: Run full identify_veins_and_regions() and cache result."""
         state = self._copy_forward(prev)
 
         if state.centerlines is None:
@@ -637,6 +667,8 @@ class StepRunner:
         state.vein_mask = prev.vein_mask
         state.nearest_labels = prev.nearest_labels
         state.centerlines = prev.centerlines
+        state.hull_mask = prev.hull_mask
+        state.seed_labels = prev.seed_labels
         state.wing_midline = prev.wing_midline
         state.id_result = prev.id_result
         state.junctions = prev.junctions
