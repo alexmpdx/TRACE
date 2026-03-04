@@ -260,6 +260,10 @@ class StepRunner:
 
         voronoi_result = extract_veins_from_mask(
             state.vein_polygons, state.image.shape[:2],
+            intervein_polygons=(
+                list(state.annotations.intervein_polygons)
+                if state.annotations else None
+            ),
         )
         state.polygons = voronoi_result.voronoi_polygons
         state.centerlines = voronoi_result.centerlines

@@ -164,6 +164,7 @@ def _run_polygon_pipeline(
         # Extract centerlines from vein mask via hull-component Voronoi
         voronoi_result = extract_veins_from_mask(
             annotations.vein_polygons, image.shape[:2],
+            intervein_polygons=annotations.intervein_polygons,
         )
         centerlines = voronoi_result.centerlines
         vein_mask_arr = voronoi_result.vein_mask

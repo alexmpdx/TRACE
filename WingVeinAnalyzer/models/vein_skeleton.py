@@ -31,6 +31,7 @@ def extract_veins_from_mask(
     image_shape: tuple[int, int],
     closing_kernel_size: int = 11,
     min_seed_area: int = 10000,
+    intervein_polygons: list[Polygon] | None = None,
 ) -> VoronoiResult:
     """Extract vein centerlines using Voronoi partition of vein mask.
 
@@ -97,6 +98,36 @@ def extract_veins_from_mask(
         comp_mask = (component_labels == comp_id)
         seed_labels[comp_mask] = next_label
         next_label += 1
+
+    # Remove phantom seeds outside the annotation footprint
+    if intervein_polygons:
+        ivn_mask = np.zeros((h, w), dtype=np.uint8)
+        for poly in intervein_polygons:
+            _fill_polygon(ivn_mask, poly, 1)
+        phantom_ids = []
+        for label_id in range(1, next_label):
+            comp_pixels = seed_labels == label_id
+            overlap = (comp_pixels & (ivn_mask > 0)).sum()
+            if overlap / comp_pixels.sum() < 0.1:
+                phantom_ids.append(label_id)
+                seed_labels[comp_pixels] = 0
+        if phantom_ids:
+            # Renumber remaining labels sequentially
+            old_to_new = {}
+            new_id = 1
+            for old_id in range(1, next_label):
+                if old_id not in phantom_ids:
+                    old_to_new[old_id] = new_id
+                    new_id += 1
+            new_seed_labels = np.zeros_like(seed_labels)
+            for old_id, new_id_val in old_to_new.items():
+                new_seed_labels[seed_labels == old_id] = new_id_val
+            seed_labels = new_seed_labels
+            next_label = new_id
+            logger.info(
+                "Removed %d phantom seed(s) outside annotation boundary",
+                len(phantom_ids),
+            )
 
     n_seeds = next_label - 1
     logger.info(
