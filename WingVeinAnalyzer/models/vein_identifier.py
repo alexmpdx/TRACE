@@ -595,6 +595,7 @@ def classify_merged_paths(
     paths: list[MergedPath],
     wing_bbox: tuple[float, float, float, float],
     midline=None,
+    junctions: list[JunctionPoint] | None = None,
 ) -> dict[str, MergedPath]:
     """Classify merged paths into named veins by geometry.
 
@@ -617,6 +618,7 @@ def classify_merged_paths(
     max_crossvein_len = max(max_crossvein_len, 400.0)  # floor of 400px
 
     for p in paths:
+        jn = (_count_junction_endpoints(p, junctions) if junctions else 0)
         if p.orientation_deg > 60 and p.length_px < max_crossvein_len:
             crossveins.append(p)
         elif p.orientation_deg < 30:
@@ -627,6 +629,13 @@ def classify_merged_paths(
                 "Skipping steep long path (%.0f°, %.0fpx) — too long for crossvein",
                 p.orientation_deg, p.length_px,
             )
+        elif jn == 2 and p.orientation_deg > 40 and p.length_px < max_crossvein_len:
+            # Both endpoints at triple junctions — strong crossvein signal
+            logger.info(
+                "Junction-promoted crossvein (%.0f°, %.0fpx, 2 junction endpoints)",
+                p.orientation_deg, p.length_px,
+            )
+            crossveins.append(p)
         elif p.orientation_deg >= 50 and p.length_px <= 300:
             # Ambiguous 50-60° but short — crossvein candidate
             crossveins.append(p)
@@ -653,7 +662,8 @@ def classify_merged_paths(
     known_longitudinals = longitudinals + [
         vein_map[k] for k in ("L3", "L4") if k in vein_map
     ]
-    demoted = _validate_crossveins(vein_map, known_longitudinals, crossveins)
+    demoted = _validate_crossveins(vein_map, known_longitudinals, crossveins,
+                                    junctions=junctions)
     longitudinals.extend(demoted)
 
     # Assign remaining longitudinals (L1, L2, L5)
@@ -673,6 +683,24 @@ def classify_merged_paths(
         {k: f"{v.length_px:.0f}px" for k, v in vein_map.items()},
     )
     return vein_map
+
+
+def _count_junction_endpoints(
+    path: MergedPath,
+    junctions: list[JunctionPoint],
+    snap_radius: float = 40.0,
+) -> int:
+    """Count how many of a path's endpoints are near a triple junction (0, 1, or 2)."""
+    coords = list(path.line.coords)
+    start = coords[0]
+    end = coords[-1]
+    count = 0
+    for pt in (start, end):
+        for j in junctions:
+            if (pt[0] - j.x) ** 2 + (pt[1] - j.y) ** 2 <= snap_radius ** 2:
+                count += 1
+                break
+    return count
 
 
 def _assign_crossveins(
@@ -703,12 +731,14 @@ def _validate_crossveins(
     crossveins: list[MergedPath],
     proximity_threshold: float = 100.0,
     min_nearby_longitudinals: int = 2,
+    junctions: list[JunctionPoint] | None = None,
 ) -> list[MergedPath]:
     """Validate crossvein assignments by checking proximity to longitudinals.
 
     A real crossvein connects two longitudinal veins, so it should be within
     proximity_threshold of at least min_nearby_longitudinals longitudinal
-    candidates.  Demotes failures back to the longitudinal pool.
+    candidates.  If both endpoints are at triple junctions, relax to 1.
+    Demotes failures back to the longitudinal pool.
     """
     demoted: list[MergedPath] = []
     cv_names_to_check = [n for n in ("ACV", "PCV") if n in vein_map]
@@ -719,11 +749,14 @@ def _validate_crossveins(
             1 for lp in longitudinals
             if cv_path.line.distance(lp.line) < proximity_threshold
         )
-        if nearby < min_nearby_longitudinals:
+        # Relax threshold if both endpoints sit at triple junctions
+        jn = (_count_junction_endpoints(cv_path, junctions) if junctions else 0)
+        required = 1 if jn == 2 else min_nearby_longitudinals
+        if nearby < required:
             logger.info(
                 "Crossvein %s only near %d longitudinal(s) (need %d, "
-                "threshold=%.0fpx) — demoting to longitudinal pool",
-                cv_name, nearby, min_nearby_longitudinals, proximity_threshold,
+                "threshold=%.0fpx, jn_endpoints=%d) — demoting to longitudinal pool",
+                cv_name, nearby, required, proximity_threshold, jn,
             )
             demoted.append(cv_path)
             del vein_map[cv_name]
@@ -2027,7 +2060,8 @@ def identify_veins_and_regions(
     paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0)
 
     # 3c. Classify merged paths → named veins
-    vein_map = classify_merged_paths(paths, wing_bbox, midline=midline)
+    vein_map = classify_merged_paths(paths, wing_bbox, midline=midline,
+                                     junctions=junctions)
 
     # 3d. Validate vein shapes
     shape_warnings = validate_vein_shapes(vein_map)
