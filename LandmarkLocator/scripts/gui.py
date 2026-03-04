@@ -450,8 +450,6 @@ class TrainingThread(QThread):
 
     def run(self) -> None:
         """Execute training fold 0."""
-        import shutil
-
         capture = _StdoutCapture(self.progress)
         old_stdout = sys.stdout
         sys.stdout = capture
@@ -481,13 +479,11 @@ class TrainingThread(QThread):
                 })
 
             train_fold(cfg, 0, train_idx, val_idx, output_dir, device,
-                       epoch_callback=_on_epoch)
+                       epoch_callback=_on_epoch,
+                       checkpoint_name=self._model_name)
 
-            # Rename checkpoint to user-chosen name
-            src = output_dir / "checkpoints" / "best_fold0.pt"
             name = self._model_name if self._model_name.endswith(".pt") else self._model_name + ".pt"
             dest = output_dir / "checkpoints" / name
-            shutil.copy2(str(src), str(dest))
             self.finished_training.emit(str(dest))
         except Exception as e:
             self.error.emit(str(e))

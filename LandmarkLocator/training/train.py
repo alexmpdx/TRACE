@@ -97,6 +97,7 @@ def train_fold(
     output_dir: Path,
     device: torch.device,
     epoch_callback: Optional[callable] = None,
+    checkpoint_name: Optional[str] = None,
 ) -> dict:
     """Train one fold and return best validation metrics."""
     project_root = Path(__file__).resolve().parent.parent
@@ -260,6 +261,9 @@ def train_fold(
                 "mean_pixel_error": mean_error,
                 "per_landmark_error": landmark_errors.copy(),
             }
+            ckpt_filename = checkpoint_name if checkpoint_name else f"best_fold{fold}.pt"
+            if not ckpt_filename.endswith(".pt"):
+                ckpt_filename += ".pt"
             torch.save(
                 {
                     "epoch": epoch,
@@ -269,7 +273,7 @@ def train_fold(
                     "mean_pixel_error": mean_error,
                     "config": cfg,
                 },
-                checkpoint_dir / f"best_fold{fold}.pt",
+                checkpoint_dir / ckpt_filename,
             )
         else:
             patience_counter += 1
