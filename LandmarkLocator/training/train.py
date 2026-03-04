@@ -96,6 +96,7 @@ def train_fold(
     val_indices: list[int],
     output_dir: Path,
     device: torch.device,
+    epoch_callback: Optional[callable] = None,
 ) -> dict:
     """Train one fold and return best validation metrics."""
     project_root = Path(__file__).resolve().parent.parent
@@ -236,6 +237,10 @@ def train_fold(
             landmark_errors[name] = np.mean(errs) if errs else 0.0
 
         mean_error = np.mean([e for _, e in all_errors])
+
+        # Epoch callback for live monitoring
+        if epoch_callback is not None:
+            epoch_callback(epoch, mean_error, landmark_errors)
 
         # Log progress
         if epoch % 10 == 0 or epoch == train_cfg["epochs"] - 1:

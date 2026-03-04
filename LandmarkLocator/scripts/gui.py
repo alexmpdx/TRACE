@@ -46,6 +46,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+
 from data.dataset import LANDMARK_ORDER
 from scripts.visualize import LANDMARK_COLORS, draw_landmarks_on_image, load_ground_truth
 
@@ -258,7 +261,7 @@ class LegendWidget(QWidget):
 # HeatmapPanel — right-side scrollable heatmap thumbnails
 # ---------------------------------------------------------------------------
 class HeatmapPanel(QScrollArea):
-    """Scrollable panel showing predicted heatmaps with optional GT cross overlay."""
+    """Scrollable panel showing predicted heatmap thumbnails with optional GT cross overlay."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -269,10 +272,10 @@ class HeatmapPanel(QScrollArea):
         self._layout.setAlignment(Qt.AlignTop)
         self.setWidget(self._container)
 
-        # Toggle for GT cross overlay
+        # GT cross toggle
         self._show_gt = QCheckBox("Show GT cross")
         self._show_gt.setChecked(True)
-        self._show_gt.setStyleSheet("color: #ddd; padding: 4px;")
+        self._show_gt.setStyleSheet("color: #ccc;")
         self._show_gt.toggled.connect(self._refresh)
         self._layout.addWidget(self._show_gt)
 
@@ -286,64 +289,59 @@ class HeatmapPanel(QScrollArea):
             header.setStyleSheet("padding-top: 6px;")
             self._layout.addWidget(header)
 
-            pred_lbl = QLabel("No model")
-            pred_lbl.setAlignment(Qt.AlignCenter)
-            pred_lbl.setFixedSize(HEATMAP_THUMB_W, HEATMAP_THUMB_H)
-            pred_lbl.setStyleSheet("background: #222; color: #666; border: 1px solid #444;")
-            self._layout.addWidget(pred_lbl)
-            self._pred_labels[name] = pred_lbl
+            lbl = QLabel("No model")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setFixedSize(HEATMAP_THUMB_W, HEATMAP_THUMB_H)
+            lbl.setStyleSheet("background: #222; color: #666; border: 1px solid #444;")
+            self._layout.addWidget(lbl)
+            self._pred_labels[name] = lbl
 
         self._layout.addStretch()
 
-        # Cache current data for re-draws on toggle
+        # Cached state for refresh on toggle
         self._cur_pred_heatmaps: Optional[np.ndarray] = None
         self._cur_gt_coords: Optional[dict[str, tuple[float, float]]] = None
+
+    @staticmethod
+    def _draw_cross(pixmap: QPixmap, x: int, y: int, color: QColor, arm: int = 8) -> QPixmap:
+        """Draw a cross marker on a pixmap and return it."""
+        pm = QPixmap(pixmap)
+        p = QPainter(pm)
+        p.setPen(color)
+        p.drawLine(x - arm, y, x + arm, y)
+        p.drawLine(x, y - arm, x, y + arm)
+        p.end()
+        return pm
+
+    def _refresh(self) -> None:
+        """Redraw thumbnails with current toggle state."""
+        self.update_heatmaps(self._cur_pred_heatmaps, self._cur_gt_coords)
 
     def update_heatmaps(
         self,
         pred_heatmaps: Optional[np.ndarray],
         gt_coords: Optional[dict[str, tuple[float, float]]],
     ) -> None:
-        """Update heatmap thumbnails. gt_coords are in model-resolution pixels."""
+        """Update heatmap thumbnails. gt_coords are in model resolution (MODEL_W x MODEL_H)."""
         self._cur_pred_heatmaps = pred_heatmaps
         self._cur_gt_coords = gt_coords
-        self._refresh()
 
-    def _refresh(self) -> None:
-        """Redraw all heatmap labels from cached data."""
-        show_gt = self._show_gt.isChecked()
         for i, name in enumerate(LANDMARK_ORDER):
             lbl = self._pred_labels[name]
-            if self._cur_pred_heatmaps is not None:
-                pm = heatmap_to_pixmap(self._cur_pred_heatmaps[i])
-                # Draw GT cross on top if available and toggled on
-                if show_gt and self._cur_gt_coords and name in self._cur_gt_coords:
-                    gx, gy = self._cur_gt_coords[name]
-                    tx = gx * HEATMAP_THUMB_W / MODEL_W
-                    ty = gy * HEATMAP_THUMB_H / MODEL_H
-                    self._draw_cross(pm, tx, ty)
+            if pred_heatmaps is not None:
+                pm = heatmap_to_pixmap(pred_heatmaps[i])
+                # Draw GT cross if enabled and available
+                if self._show_gt.isChecked() and gt_coords and name in gt_coords:
+                    gx, gy = gt_coords[name]
+                    tx = int(gx * HEATMAP_THUMB_W / MODEL_W)
+                    ty = int(gy * HEATMAP_THUMB_H / MODEL_H)
+                    color = LANDMARK_QCOLORS.get(name, QColor(255, 255, 255))
+                    pm = self._draw_cross(pm, tx, ty, color)
                 lbl.setPixmap(pm)
                 lbl.setText("")
             else:
                 lbl.clear()
                 lbl.setText("No model")
-
-    @staticmethod
-    def _draw_cross(pixmap: QPixmap, x: float, y: float, size: int = 8) -> None:
-        """Draw a white cross with dark outline on a pixmap."""
-        p = QPainter(pixmap)
-        p.setRenderHint(QPainter.Antialiasing)
-        ix, iy = int(round(x)), int(round(y))
-        # Dark outline
-        from PyQt5.QtGui import QPen
-        p.setPen(QPen(QColor(0, 0, 0), 3))
-        p.drawLine(ix - size, iy - size, ix + size, iy + size)
-        p.drawLine(ix - size, iy + size, ix + size, iy - size)
-        # White cross
-        p.setPen(QPen(QColor(255, 255, 255), 1))
-        p.drawLine(ix - size, iy - size, ix + size, iy + size)
-        p.drawLine(ix - size, iy + size, ix + size, iy - size)
-        p.end()
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +368,7 @@ class TrainingThread(QThread):
     """Background worker that trains a single fold."""
 
     progress = pyqtSignal(str)
+    epoch_data = pyqtSignal(object)  # dict with epoch, mean_error, landmark_errors
     finished_training = pyqtSignal(str)  # checkpoint path
     error = pyqtSignal(str)
 
@@ -396,7 +395,15 @@ class TrainingThread(QThread):
             train_idx, val_idx = splits[0]
             print(f"Fold 0: {len(train_idx)} train, {len(val_idx)} val")
 
-            train_fold(cfg, 0, train_idx, val_idx, output_dir, device)
+            def _on_epoch(epoch, mean_error, landmark_errors):
+                self.epoch_data.emit({
+                    "epoch": epoch,
+                    "mean_error": mean_error,
+                    "landmark_errors": landmark_errors.copy(),
+                })
+
+            train_fold(cfg, 0, train_idx, val_idx, output_dir, device,
+                       epoch_callback=_on_epoch)
 
             ckpt = output_dir / "checkpoints" / "best_fold0.pt"
             self.finished_training.emit(str(ckpt))
@@ -407,23 +414,93 @@ class TrainingThread(QThread):
 
 
 class TrainingDialog(QDialog):
-    """Modal dialog showing live training log output."""
+    """Modal dialog showing live training log output and error chart."""
+
+    # Map landmark names to RGB hex colors (from LANDMARK_COLORS BGR)
+    _CHART_COLORS = {
+        "subcostal_break": "#ffa500",
+        "alula_notch": "#4133d6",
+        "l1_rs_junction": "#e5a093",
+        "l4_l5_junction": "#07d2f2",
+        "wing_tip": "#870b2e",
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Training — Fold 0")
-        self.resize(620, 450)
+        self.resize(820, 600)
         layout = QVBoxLayout(self)
 
+        # Per-landmark data series (must init before _setup_chart)
+        self._epochs: list[int] = []
+        self._series: dict[str, list[float]] = {name: [] for name in LANDMARK_ORDER}
+        self._mean_series: list[float] = []
+        self._lines: dict[str, object] = {}
+
+        # Matplotlib chart
+        self._fig = Figure(figsize=(7, 3), facecolor="#1e1e1e")
+        self._ax = self._fig.add_subplot(111)
+        self._canvas = FigureCanvasQTAgg(self._fig)
+        layout.addWidget(self._canvas, stretch=2)
+        self._setup_chart()
+
+        # Log output
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setStyleSheet("background: #1e1e1e; color: #ccc; font-family: monospace;")
-        layout.addWidget(self._log)
+        layout.addWidget(self._log, stretch=1)
 
         self._close_btn = QPushButton("Close")
         self._close_btn.setEnabled(False)
         self._close_btn.clicked.connect(self.accept)
         layout.addWidget(self._close_btn)
+
+    def _setup_chart(self) -> None:
+        """Configure the chart axes and style."""
+        ax = self._ax
+        ax.set_facecolor("#252526")
+        ax.set_xlabel("Epoch", color="#aaa", fontsize=9)
+        ax.set_ylabel("Pixel Error", color="#aaa", fontsize=9)
+        ax.set_title("Validation Error by Landmark", color="#ddd", fontsize=10)
+        ax.tick_params(colors="#888", labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_color("#444")
+        ax.grid(True, color="#333", linewidth=0.5)
+
+        # Create lines for each landmark + mean
+        for name in LANDMARK_ORDER:
+            color = self._CHART_COLORS.get(name, "#ffffff")
+            display = LANDMARK_DISPLAY.get(name, name)
+            line, = ax.plot([], [], color=color, linewidth=1.2, label=display)
+            self._lines[name] = line
+        mean_line, = ax.plot([], [], color="#ffffff", linewidth=2, linestyle="--", label="Mean")
+        self._lines["_mean"] = mean_line
+
+        ax.legend(loc="upper right", fontsize=7, facecolor="#333", edgecolor="#555",
+                  labelcolor="#ccc")
+        self._fig.tight_layout()
+
+    def update_chart(self, data: dict) -> None:
+        """Add one epoch's data and redraw the chart."""
+        epoch = data["epoch"]
+        self._epochs.append(epoch)
+        self._mean_series.append(data["mean_error"])
+        for name in LANDMARK_ORDER:
+            self._series[name].append(data["landmark_errors"].get(name, 0.0))
+
+        # Update line data
+        for name in LANDMARK_ORDER:
+            self._lines[name].set_data(self._epochs, self._series[name])
+        self._lines["_mean"].set_data(self._epochs, self._mean_series)
+
+        # Rescale axes
+        self._ax.set_xlim(0, max(self._epochs[-1], 1))
+        all_vals = self._mean_series + [v for s in self._series.values() for v in s]
+        if all_vals:
+            ymax = max(all_vals) * 1.1
+            self._ax.set_ylim(0, max(ymax, 1))
+
+        self._canvas.draw_idle()
 
     def append_log(self, text: str) -> None:
         """Append a line to the log view."""
@@ -664,6 +741,7 @@ class LandmarkGUI(QMainWindow):
         self._train_dialog = TrainingDialog(self)
         self._train_thread = TrainingThread()
         self._train_thread.progress.connect(self._train_dialog.append_log)
+        self._train_thread.epoch_data.connect(self._train_dialog.update_chart)
         self._train_thread.finished_training.connect(self._on_training_finished)
         self._train_thread.error.connect(self._on_training_error)
         self._train_thread.start()
