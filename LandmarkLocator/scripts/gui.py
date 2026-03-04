@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -46,7 +47,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
 from data.dataset import LANDMARK_ORDER
@@ -138,6 +139,11 @@ def generate_gt_heatmaps(
 # ---------------------------------------------------------------------------
 # Heatmap → QPixmap helper
 # ---------------------------------------------------------------------------
+def _colorize_heatmap(gray: np.ndarray) -> np.ndarray:
+    """Colorize a uint8 grayscale array using OpenCV's HOT colormap (BGR output)."""
+    return cv2.applyColorMap(gray, cv2.COLORMAP_HOT)
+
+
 def heatmap_to_pixmap(
     channel: np.ndarray,
     thumb_w: int = HEATMAP_THUMB_W,
@@ -149,7 +155,7 @@ def heatmap_to_pixmap(
         norm = (channel / vmax * 255).astype(np.uint8)
     else:
         norm = np.zeros_like(channel, dtype=np.uint8)
-    colored = cv2.applyColorMap(norm, cv2.COLORMAP_HOT)  # BGR
+    colored = _colorize_heatmap(norm)
     colored = cv2.resize(colored, (thumb_w, thumb_h))
     rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
     qimg = QImage(rgb.data, thumb_w, thumb_h, thumb_w * 3, QImage.Format_RGB888)
@@ -258,10 +264,32 @@ class LegendWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Clickable heatmap label
+# ---------------------------------------------------------------------------
+class _ClickableLabel(QLabel):
+    """QLabel that emits a signal with its landmark name when clicked."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, name: str, parent=None):
+        super().__init__(parent)
+        self._name = name
+
+    def mousePressEvent(self, event) -> None:
+        self.clicked.emit(self._name)
+        super().mousePressEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # HeatmapPanel — right-side scrollable heatmap thumbnails
 # ---------------------------------------------------------------------------
 class HeatmapPanel(QScrollArea):
     """Scrollable panel showing predicted heatmap thumbnails with optional GT cross overlay."""
+
+    heatmap_clicked = pyqtSignal(str)  # landmark name
+
+    _STYLE_NORMAL = "background: #222; color: #666; border: 1px solid #444;"
+    _STYLE_SELECTED = "background: #222; color: #666; border: 2px solid #2a82da;"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -279,7 +307,28 @@ class HeatmapPanel(QScrollArea):
         self._show_gt.toggled.connect(self._refresh)
         self._layout.addWidget(self._show_gt)
 
-        self._pred_labels: dict[str, QLabel] = {}
+        # Color legend bar
+        bar_row = QHBoxLayout()
+        low_lbl = QLabel("Low")
+        low_lbl.setStyleSheet("color: #888; font-size: 9px;")
+        bar_row.addWidget(low_lbl)
+        gradient = np.arange(256, dtype=np.uint8).reshape(1, 256)
+        colored = _colorize_heatmap(gradient)  # (1, 256, 3) BGR
+        colored = cv2.resize(colored, (HEATMAP_THUMB_W - 50, 14))
+        rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
+        bar_lbl = QLabel()
+        bar_lbl.setPixmap(QPixmap.fromImage(qimg.copy()))
+        bar_lbl.setFixedHeight(14)
+        bar_row.addWidget(bar_lbl)
+        high_lbl = QLabel("High")
+        high_lbl.setStyleSheet("color: #888; font-size: 9px;")
+        bar_row.addWidget(high_lbl)
+        self._layout.addLayout(bar_row)
+
+        self._pred_labels: dict[str, _ClickableLabel] = {}
+        self._selected: Optional[str] = None
 
         for name in LANDMARK_ORDER:
             display = LANDMARK_DISPLAY.get(name, name)
@@ -289,10 +338,12 @@ class HeatmapPanel(QScrollArea):
             header.setStyleSheet("padding-top: 6px;")
             self._layout.addWidget(header)
 
-            lbl = QLabel("No model")
+            lbl = _ClickableLabel(name)
+            lbl.setText("No model")
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setFixedSize(HEATMAP_THUMB_W, HEATMAP_THUMB_H)
-            lbl.setStyleSheet("background: #222; color: #666; border: 1px solid #444;")
+            lbl.setStyleSheet(self._STYLE_NORMAL)
+            lbl.clicked.connect(self._on_label_clicked)
             self._layout.addWidget(lbl)
             self._pred_labels[name] = lbl
 
@@ -301,6 +352,17 @@ class HeatmapPanel(QScrollArea):
         # Cached state for refresh on toggle
         self._cur_pred_heatmaps: Optional[np.ndarray] = None
         self._cur_gt_coords: Optional[dict[str, tuple[float, float]]] = None
+
+    def _on_label_clicked(self, name: str) -> None:
+        """Handle click on a heatmap thumbnail — toggle selection."""
+        if self._selected == name:
+            self._selected = None
+        else:
+            self._selected = name
+        # Update border highlights
+        for n, lbl in self._pred_labels.items():
+            lbl.setStyleSheet(self._STYLE_SELECTED if n == self._selected else self._STYLE_NORMAL)
+        self.heatmap_clicked.emit(self._selected or "")
 
     @staticmethod
     def _draw_cross(pixmap: QPixmap, x: int, y: int, color: QColor, arm: int = 8) -> QPixmap:
@@ -372,8 +434,14 @@ class TrainingThread(QThread):
     finished_training = pyqtSignal(str)  # checkpoint path
     error = pyqtSignal(str)
 
+    def __init__(self, model_name: str, parent=None):
+        super().__init__(parent)
+        self._model_name = model_name
+
     def run(self) -> None:
         """Execute training fold 0."""
+        import shutil
+
         capture = _StdoutCapture(self.progress)
         old_stdout = sys.stdout
         sys.stdout = capture
@@ -405,8 +473,12 @@ class TrainingThread(QThread):
             train_fold(cfg, 0, train_idx, val_idx, output_dir, device,
                        epoch_callback=_on_epoch)
 
-            ckpt = output_dir / "checkpoints" / "best_fold0.pt"
-            self.finished_training.emit(str(ckpt))
+            # Rename checkpoint to user-chosen name
+            src = output_dir / "checkpoints" / "best_fold0.pt"
+            name = self._model_name if self._model_name.endswith(".pt") else self._model_name + ".pt"
+            dest = output_dir / "checkpoints" / name
+            shutil.copy2(str(src), str(dest))
+            self.finished_training.emit(str(dest))
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -437,11 +509,15 @@ class TrainingDialog(QDialog):
         self._mean_series: list[float] = []
         self._lines: dict[str, object] = {}
 
-        # Matplotlib chart
+        # Matplotlib chart with navigation toolbar for pan/zoom
         self._fig = Figure(figsize=(7, 3), facecolor="#1e1e1e")
         self._ax = self._fig.add_subplot(111)
         self._canvas = FigureCanvasQTAgg(self._fig)
+        self._nav_toolbar = NavigationToolbar2QT(self._canvas, self)
+        self._nav_toolbar.setStyleSheet("background: #333; border: none;")
+        layout.addWidget(self._nav_toolbar)
         layout.addWidget(self._canvas, stretch=2)
+        self._user_zoomed = False
         self._setup_chart()
 
         # Log output
@@ -480,6 +556,9 @@ class TrainingDialog(QDialog):
                   labelcolor="#ccc")
         self._fig.tight_layout()
 
+        # Track when user manually zooms/pans so we stop auto-scaling
+        self._canvas.mpl_connect("button_press_event", lambda e: setattr(self, "_user_zoomed", True))
+
     def update_chart(self, data: dict) -> None:
         """Add one epoch's data and redraw the chart."""
         epoch = data["epoch"]
@@ -493,12 +572,13 @@ class TrainingDialog(QDialog):
             self._lines[name].set_data(self._epochs, self._series[name])
         self._lines["_mean"].set_data(self._epochs, self._mean_series)
 
-        # Rescale axes
-        self._ax.set_xlim(0, max(self._epochs[-1], 1))
-        all_vals = self._mean_series + [v for s in self._series.values() for v in s]
-        if all_vals:
-            ymax = max(all_vals) * 1.1
-            self._ax.set_ylim(0, max(ymax, 1))
+        # Auto-rescale unless user has manually zoomed/panned
+        if not self._user_zoomed:
+            self._ax.set_xlim(0, max(self._epochs[-1], 1))
+            all_vals = self._mean_series + [v for s in self._series.values() for v in s]
+            if all_vals:
+                ymax = max(all_vals) * 1.1
+                self._ax.set_ylim(0, max(ymax, 1))
 
         self._canvas.draw_idle()
 
@@ -536,6 +616,12 @@ class LandmarkGUI(QMainWindow):
         self._current_idx: int = -1
         self._predictor = None  # LandmarkPredictor or None
         self._output_dir: Optional[Path] = None
+
+        # Heatmap overlay state
+        self._base_vis: Optional[np.ndarray] = None  # BGR image without heatmap overlay
+        self._overlay_heatmaps: Optional[np.ndarray] = None  # (5, MODEL_H, MODEL_W)
+        self._overlay_orig_shape: Optional[tuple[int, int]] = None  # (orig_h, orig_w)
+        self._selected_heatmap: Optional[str] = None
 
         self._build_toolbar()
         self._build_ui()
@@ -606,6 +692,23 @@ class LandmarkGUI(QMainWindow):
         self._image_widget = ImageWidget()
         center_layout.addWidget(self._image_widget, stretch=3)
 
+        # Heatmap overlay opacity slider
+        slider_row = QHBoxLayout()
+        slider_label = QLabel("Heatmap opacity:")
+        slider_label.setStyleSheet("color: #aaa; font-size: 10px;")
+        slider_row.addWidget(slider_label)
+        self._opacity_slider = QSlider(Qt.Horizontal)
+        self._opacity_slider.setRange(0, 100)
+        self._opacity_slider.setValue(50)
+        self._opacity_slider.setFixedHeight(20)
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        slider_row.addWidget(self._opacity_slider)
+        self._opacity_label = QLabel("50%")
+        self._opacity_label.setStyleSheet("color: #aaa; font-size: 10px;")
+        self._opacity_label.setFixedWidth(32)
+        slider_row.addWidget(self._opacity_label)
+        center_layout.addLayout(slider_row)
+
         self._info_table = QTableWidget(len(LANDMARK_ORDER), 6)
         self._info_table.setHorizontalHeaderLabels(
             ["Landmark", "Pred X", "Pred Y", "GT X", "GT Y", "Error (px)"]
@@ -624,6 +727,7 @@ class LandmarkGUI(QMainWindow):
 
         # -- Right panel: heatmaps --
         self._heatmap_panel = HeatmapPanel()
+        self._heatmap_panel.heatmap_clicked.connect(self._on_heatmap_clicked)
         splitter.addWidget(self._heatmap_panel)
 
         splitter.setSizes([220, 800, 300])
@@ -738,20 +842,39 @@ class LandmarkGUI(QMainWindow):
             self.statusBar().showMessage("No ground-truth annotations found — cannot train")
             return
 
+        # Prompt for model name
+        from PyQt5.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, "Model Name", "Enter a name for the model checkpoint:",
+            text="landmark_model",
+        )
+        if not ok or not name.strip():
+            return
+        model_name = name.strip()
+
         self._train_dialog = TrainingDialog(self)
-        self._train_thread = TrainingThread()
+        self._train_thread = TrainingThread(model_name)
         self._train_thread.progress.connect(self._train_dialog.append_log)
         self._train_thread.epoch_data.connect(self._train_dialog.update_chart)
         self._train_thread.finished_training.connect(self._on_training_finished)
         self._train_thread.error.connect(self._on_training_error)
         self._train_thread.start()
-        self._train_dialog.append_log(f"Starting training with {gt_count} annotated images...")
+        self._train_dialog.append_log(
+            f"Starting training '{model_name}' with {gt_count} annotated images..."
+        )
         self._train_dialog.exec_()
 
     def _on_training_finished(self, ckpt_path: str) -> None:
         """Handle successful training completion."""
         self._train_dialog.append_log(f"\nTraining complete! Checkpoint: {ckpt_path}")
         self._train_dialog.enable_close()
+        # Save the error chart next to the checkpoint
+        chart_path = Path(ckpt_path).with_suffix(".png")
+        try:
+            self._train_dialog._fig.savefig(str(chart_path), dpi=150, facecolor="#1e1e1e")
+            self._train_dialog.append_log(f"Error chart saved: {chart_path}")
+        except Exception as e:
+            self._train_dialog.append_log(f"Warning: could not save chart: {e}")
         # Auto-load the trained model
         try:
             from inference.predict import LandmarkPredictor
@@ -770,6 +893,43 @@ class LandmarkGUI(QMainWindow):
         self._train_dialog.append_log(f"\nERROR: {msg}")
         self._train_dialog.enable_close()
         self.statusBar().showMessage(f"Training failed: {msg}")
+
+    # ---- Heatmap overlay ----
+    def _on_heatmap_clicked(self, name: str) -> None:
+        """Toggle heatmap overlay on the main image."""
+        self._selected_heatmap = name if name else None
+        self._apply_heatmap_overlay()
+
+    def _on_opacity_changed(self, value: int) -> None:
+        """Update opacity label and reapply overlay."""
+        self._opacity_label.setText(f"{value}%")
+        if self._selected_heatmap:
+            self._apply_heatmap_overlay()
+
+    def _apply_heatmap_overlay(self) -> None:
+        """Blend the selected heatmap channel onto the base visualization."""
+        if self._base_vis is None:
+            return
+        if not self._selected_heatmap or self._overlay_heatmaps is None:
+            self._image_widget.set_image(self._base_vis)
+            return
+
+        idx = LANDMARK_ORDER.index(self._selected_heatmap)
+        hm = self._overlay_heatmaps[idx]  # (MODEL_H, MODEL_W)
+        orig_h, orig_w = self._overlay_orig_shape
+
+        # Resize heatmap to original image size and colorize
+        hm_resized = cv2.resize(hm, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+        vmax = hm_resized.max()
+        if vmax > 0:
+            hm_norm = (hm_resized / vmax * 255).astype(np.uint8)
+        else:
+            hm_norm = np.zeros((orig_h, orig_w), dtype=np.uint8)
+        colored = _colorize_heatmap(hm_norm)
+
+        alpha = self._opacity_slider.value() / 100.0
+        blended = cv2.addWeighted(self._base_vis, 1.0, colored, alpha, 0)
+        self._image_widget.set_image(blended)
 
     # ---- Image loading ----
     def _load_image_folder(self, img_dir: Path, gt_dir: Optional[Path]) -> None:
@@ -828,9 +988,16 @@ class LandmarkGUI(QMainWindow):
             except Exception as e:
                 self.statusBar().showMessage(f"Prediction failed: {e}")
 
-        # Draw overlay
+        # Draw overlay and cache base visualization
         preds = entry.prediction["landmarks"] if entry.prediction else {}
         vis = draw_landmarks_on_image(image, preds, entry.gt)
+        self._base_vis = vis.copy()
+        self._overlay_heatmaps = entry.prediction["heatmaps"] if entry.prediction else None
+        self._overlay_orig_shape = (orig_h, orig_w)
+        self._selected_heatmap = None
+        self._heatmap_panel._selected = None
+        for lbl in self._heatmap_panel._pred_labels.values():
+            lbl.setStyleSheet(HeatmapPanel._STYLE_NORMAL)
         self._image_widget.set_image(vis)
         self._image_widget.fit_in_view()
 
