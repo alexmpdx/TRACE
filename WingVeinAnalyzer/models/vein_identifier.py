@@ -21,6 +21,7 @@ from WingVeinAnalyzer.models.vein_labeler import (
     _merge_vein_lines,
 )
 from WingVeinAnalyzer.models.vein_skeleton import extract_centerline_between_polygons
+from WingVeinAnalyzer.utils.skeleton_utils import smooth_line
 from WingVeinAnalyzer.models.vein_map import (
     CROSSVEIN_CONNECTIONS,
     MAX_ANGLE_CHANGE_DEG,
@@ -183,21 +184,23 @@ def find_triple_junctions(
 # ---------------------------------------------------------------------------
 
 def _get_tangent_away_from_junction(
-    line: LineString, endpoint_idx: int, tangent_dist: float = 50.0,
+    line: LineString, endpoint_idx: int, tangent_dist: float = 80.0,
 ) -> np.ndarray:
     """Compute tangent vector pointing AWAY from a junction endpoint."""
-    coords = list(line.coords)
+    # Smooth the line to reduce pixel-level noise near junctions
+    smoothed = smooth_line(line, sigma=5.0, sample_spacing=5.0)
+    coords = list(smoothed.coords)
     if endpoint_idx == 0:
         # Junction is at start → tangent points from start toward interior
         jx, jy = coords[0]
-        dist = min(tangent_dist, 0.2 * line.length)
-        pt = line.interpolate(dist)
+        dist = min(tangent_dist, 0.2 * smoothed.length)
+        pt = smoothed.interpolate(dist)
         return np.array([pt.x - jx, pt.y - jy])
     else:
         # Junction is at end → tangent points from end toward interior
         jx, jy = coords[-1]
-        dist = max(0, line.length - min(tangent_dist, 0.2 * line.length))
-        pt = line.interpolate(dist)
+        dist = max(0, smoothed.length - min(tangent_dist, 0.2 * smoothed.length))
+        pt = smoothed.interpolate(dist)
         return np.array([pt.x - jx, pt.y - jy])
 
 
@@ -224,12 +227,17 @@ def merge_segments_at_junctions(
     junctions: list[JunctionPoint],
     collinearity_threshold_deg: float = 45.0,
     min_gap_deg: float = 15.0,
-) -> list[MergedPath]:
+) -> tuple[list[MergedPath], dict]:
     """Merge segments at triple junctions by tangent continuity.
 
-    Only merges when the best collinear pair is clearly better than
-    the second-best pair (gap > min_gap_deg), preventing ambiguous merges
-    at Y-junctions where multiple pairs look equally collinear.
+    When the best collinear pair is clearly better than the second-best
+    (gap > min_gap_deg), merges on angle alone.  When the gap is small,
+    uses fragment length as a tiebreaker: the shortest fragment is likely
+    the crossvein, so the two longer fragments should merge.
+
+    Returns (paths, merge_decisions) where merge_decisions maps
+    junction (x, y) → {"chosen": (key_a, key_b), "alternative": (key_c, key_d),
+    "arrivals": [...]} for post-classification validation.
     """
     # Union-find for segment merging
     parent: dict[tuple[int, int], tuple[int, int]] = {}
@@ -248,6 +256,8 @@ def merge_segments_at_junctions(
     # Initialize all segments as their own root
     for key in centerlines:
         parent[key] = key
+
+    merge_decisions: dict[tuple[float, float], dict] = {}
 
     # At each junction, find the most collinear pair and merge them
     for junc in junctions:
@@ -280,6 +290,7 @@ def merge_segments_at_junctions(
         pair_scores.sort()
         best_score, bi, bj = pair_scores[0]
         second_score = pair_scores[1][0] if len(pair_scores) > 1 else 999.0
+        gap = second_score - best_score
 
         # Orientation guard: prevent merging a longitudinal (<30°) with
         # a crossvein (>50°) regardless of collinearity score
@@ -291,26 +302,104 @@ def merge_segments_at_junctions(
             (ori_a < 25 and ori_b > 55) or (ori_b < 25 and ori_a > 55)
         )
 
-        # Only merge if: (1) best is below threshold, (2) clear gap over 2nd,
-        # (3) no crossvein-longitudinal orientation mismatch
-        if (best_score < collinearity_threshold_deg
-                and (second_score - best_score) > min_gap_deg
-                and not orientation_mismatch):
+        # Determine the second-best pair for storing as alternative
+        si, sj = pair_scores[1][1], pair_scores[1][2] if len(pair_scores) > 1 else (0, 0)
+        alt_key_a = arrivals[si][0] if len(pair_scores) > 1 else None
+        alt_key_b = arrivals[sj][0] if len(pair_scores) > 1 else None
+
+        junc_coord = (junc.x, junc.y)
+
+        if best_score >= collinearity_threshold_deg or orientation_mismatch:
+            reason = "orientation mismatch" if orientation_mismatch else "above threshold"
+            logger.debug(
+                "Skipped merge at junction (%.0f, %.0f): "
+                "best=%.1f°, gap=%.1f°, reason=%s",
+                junc.x, junc.y, best_score, gap, reason,
+            )
+            continue
+
+        if gap > min_gap_deg:
+            # Clear winner on angle alone
             union(key_a, key_b)
+            merge_decisions[junc_coord] = {
+                "chosen": (key_a, key_b),
+                "alternative": (alt_key_a, alt_key_b),
+                "arrivals": [(a[0], a[1]) for a in arrivals],
+            }
             logger.debug(
                 "Merged %s + %s at junction (%.0f, %.0f), "
                 "collinearity=%.1f°, gap=%.1f°",
                 key_a, key_b, junc.x, junc.y,
-                best_score, second_score - best_score,
+                best_score, gap,
             )
         else:
-            reason = "orientation mismatch" if orientation_mismatch else "gap too small"
-            logger.debug(
-                "Skipped merge at junction (%.0f, %.0f): "
-                "best=%.1f°, gap=%.1f° (need >%.1f°), reason=%s",
-                junc.x, junc.y, best_score,
-                second_score - best_score, min_gap_deg, reason,
-            )
+            # Close angles — use fragment length as tiebreaker
+            # The shortest fragment is likely the crossvein; the two
+            # longer fragments should be merged
+            lengths = [
+                (k, centerlines[arrivals[k][0]].length)
+                for k in range(len(arrivals))
+            ]
+            shortest_idx = min(range(len(arrivals)), key=lambda k: lengths[k][1])
+            non_shortest = [k for k in range(len(arrivals)) if k != shortest_idx]
+            length_pair = tuple(sorted(non_shortest))
+            angle_pair = tuple(sorted([bi, bj]))
+
+            if length_pair == angle_pair:
+                # Length and angle agree — merge confidently
+                union(key_a, key_b)
+                merge_decisions[junc_coord] = {
+                    "chosen": (key_a, key_b),
+                    "alternative": (alt_key_a, alt_key_b),
+                    "arrivals": [(a[0], a[1]) for a in arrivals],
+                }
+                logger.info(
+                    "Merged %s + %s at junction (%.0f, %.0f), "
+                    "collinearity=%.1f°, gap=%.1f° (length agrees)",
+                    key_a, key_b, junc.x, junc.y,
+                    best_score, gap,
+                )
+            else:
+                # Disagreement — prefer length-based pair (shortest is
+                # the crossvein, merge the other two)
+                len_key_a = arrivals[non_shortest[0]][0]
+                len_key_b = arrivals[non_shortest[1]][0]
+                # Check orientation guard for the length-based pair too
+                len_ori_a = _line_orientation(centerlines[len_key_a])
+                len_ori_b = _line_orientation(centerlines[len_key_b])
+                len_mismatch = (
+                    (len_ori_a < 25 and len_ori_b > 55)
+                    or (len_ori_b < 25 and len_ori_a > 55)
+                )
+                if not len_mismatch:
+                    union(len_key_a, len_key_b)
+                    merge_decisions[junc_coord] = {
+                        "chosen": (len_key_a, len_key_b),
+                        "alternative": (key_a, key_b),
+                        "arrivals": [(a[0], a[1]) for a in arrivals],
+                    }
+                    logger.info(
+                        "Merged %s + %s at junction (%.0f, %.0f), "
+                        "collinearity=%.1f°, gap=%.1f° "
+                        "(length tiebreak: shortest=%s)",
+                        len_key_a, len_key_b, junc.x, junc.y,
+                        best_score, gap, arrivals[shortest_idx][0],
+                    )
+                else:
+                    # Length pair has orientation mismatch — fall back to angle
+                    union(key_a, key_b)
+                    merge_decisions[junc_coord] = {
+                        "chosen": (key_a, key_b),
+                        "alternative": (alt_key_a, alt_key_b),
+                        "arrivals": [(a[0], a[1]) for a in arrivals],
+                    }
+                    logger.info(
+                        "Merged %s + %s at junction (%.0f, %.0f), "
+                        "collinearity=%.1f°, gap=%.1f° "
+                        "(length pair had orientation mismatch)",
+                        key_a, key_b, junc.x, junc.y,
+                        best_score, gap,
+                    )
 
     # Collect connected components
     groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
@@ -337,7 +426,7 @@ def merge_segments_at_junctions(
     logger.info(
         "Merged %d segments into %d paths", len(centerlines), len(paths),
     )
-    return paths
+    return paths, merge_decisions
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +480,9 @@ def _try_split_path(
     """Attempt to split a single MergedPath at its sharpest turn."""
     from shapely.ops import substring
 
-    line = path.line
+    # Smooth the line before measuring angle changes to prevent
+    # noisy pixel jitter from creating false sharp turns
+    line = smooth_line(path.line, sigma=5.0, sample_spacing=5.0)
     n_steps = max(2, int(line.length / step_dist))
 
     # Sample points along the merged line
@@ -781,6 +872,164 @@ def _validate_crossveins(
             _assign_crossveins(remaining_cv, vein_map)
 
     return demoted
+
+
+def _validate_junction_orientations(
+    vein_map: dict[str, MergedPath],
+    junctions: list[JunctionPoint],
+    centerlines: dict[tuple[int, int], LineString],
+    merge_decisions: dict[tuple[float, float], dict],
+    wing_bbox: tuple[float, float, float, float],
+    midline=None,
+    snap_radius: float = 40.0,
+) -> dict[str, MergedPath]:
+    """Validate that triple junctions have correct vein topology after classification.
+
+    At crossvein junctions (ACV/PCV), we expect exactly 2 longitudinals + 1 crossvein.
+    If the topology is wrong and an alternative merge was recorded, retry with that
+    alternative and re-classify.
+    """
+    if not merge_decisions or not junctions:
+        return vein_map
+
+    # Build reverse map: segment_key → vein name
+    def _build_seg_to_vein(vm: dict[str, MergedPath]) -> dict[tuple[int, int], str]:
+        result: dict[tuple[int, int], str] = {}
+        for name, mp in vm.items():
+            for sk in mp.segment_keys:
+                result[sk] = name
+        return result
+
+    seg_to_vein = _build_seg_to_vein(vein_map)
+
+    # Check each junction that had a merge decision
+    for junc_coord, decision in merge_decisions.items():
+        arrivals = decision.get("arrivals", [])
+        if len(arrivals) < 3:
+            continue
+
+        # Find which veins meet at this junction
+        vein_names_at_junction: set[str] = set()
+        for seg_key, _ep_idx in arrivals:
+            name = seg_to_vein.get(seg_key)
+            if name:
+                vein_names_at_junction.add(name)
+
+        if len(vein_names_at_junction) < 2:
+            continue
+
+        # Classify arrivals as longitudinal or crossvein
+        longitudinals_here = {n for n in vein_names_at_junction if n.startswith("L")}
+        crossveins_here = {n for n in vein_names_at_junction if n in ("ACV", "PCV")}
+
+        # Expected: 2 longitudinals + 1 crossvein at CV junctions
+        # Check ACV junction: should have L3 + L4 + ACV
+        # Check PCV junction: should have L4 + L5 + PCV
+        is_cv_junction = len(crossveins_here) > 0
+
+        if not is_cv_junction:
+            continue  # non-crossvein junctions don't need validation
+
+        # Topology is correct if we have exactly 1 crossvein + 2 longitudinals
+        if len(crossveins_here) == 1 and len(longitudinals_here) >= 2:
+            continue  # correct topology
+
+        # Wrong topology — try the alternative merge
+        alternative = decision.get("alternative")
+        chosen = decision.get("chosen")
+        if alternative is None or chosen is None:
+            continue
+        if alternative[0] is None or alternative[1] is None:
+            continue
+
+        logger.info(
+            "Junction (%.0f, %.0f): wrong topology (veins: %s) — "
+            "trying alternative merge %s → %s",
+            junc_coord[0], junc_coord[1],
+            vein_names_at_junction, chosen, alternative,
+        )
+
+        # Re-merge: undo the chosen merge and apply the alternative
+        # Build new groups from scratch using all merge decisions except
+        # this junction's, then apply the alternative for this junction
+        # This is expensive but junctions are few (typically 2-4)
+        parent: dict[tuple[int, int], tuple[int, int]] = {
+            k: k for k in centerlines
+        }
+
+        def find(k: tuple[int, int]) -> tuple[int, int]:
+            while parent.get(k, k) != k:
+                parent[k] = parent.get(parent[k], parent[k])
+                k = parent[k]
+            return k
+
+        def union(a: tuple[int, int], b: tuple[int, int]) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        # Replay all merge decisions, substituting this junction's alternative
+        for jc, dec in merge_decisions.items():
+            ch = dec.get("chosen")
+            if ch is None or ch[0] is None or ch[1] is None:
+                continue
+            if jc == junc_coord:
+                # Apply alternative instead
+                union(alternative[0], alternative[1])
+            else:
+                union(ch[0], ch[1])
+
+        # Rebuild paths from the new groups
+        groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for key in centerlines:
+            root = find(key)
+            if root not in groups:
+                groups[root] = []
+            groups[root].append(key)
+
+        new_paths: list[MergedPath] = []
+        for root, seg_keys in groups.items():
+            lines = [centerlines[k] for k in seg_keys]
+            merged = _merge_vein_lines(lines)
+            if merged is None or merged.length < 10:
+                continue
+            new_paths.append(MergedPath(
+                segment_keys=seg_keys,
+                line=merged,
+                length_px=merged.length,
+            ))
+
+        # Re-split and re-classify
+        new_paths = _split_on_sharp_turns(new_paths, centerlines, angle_threshold_deg=70.0)
+        new_vein_map = classify_merged_paths(
+            new_paths, wing_bbox, midline=midline, junctions=junctions,
+        )
+
+        # Check if the new topology is better at this junction
+        new_seg_to_vein = _build_seg_to_vein(new_vein_map)
+        new_veins: set[str] = set()
+        for seg_key, _ep_idx in arrivals:
+            name = new_seg_to_vein.get(seg_key)
+            if name:
+                new_veins.add(name)
+
+        new_longs = {n for n in new_veins if n.startswith("L")}
+        new_cvs = {n for n in new_veins if n in ("ACV", "PCV")}
+
+        if len(new_cvs) == 1 and len(new_longs) >= 2:
+            logger.info(
+                "  Alternative merge fixes topology: %s → accepting",
+                new_veins,
+            )
+            vein_map = new_vein_map
+            seg_to_vein = new_seg_to_vein
+        else:
+            logger.info(
+                "  Alternative merge didn't improve topology: %s → keeping original",
+                new_veins,
+            )
+
+    return vein_map
 
 
 def _path_y_at_x(path: MergedPath, target_x: float) -> float:
@@ -2054,7 +2303,7 @@ def identify_veins_and_regions(
     junctions = find_triple_junctions(centerlines, snap_radius=30.0)
 
     # 3b. Merge segments at junctions
-    paths = merge_segments_at_junctions(centerlines, junctions)
+    paths, merge_decisions = merge_segments_at_junctions(centerlines, junctions)
 
     # 3b'. Split merged paths at sharp turns
     paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0)
@@ -2062,6 +2311,13 @@ def identify_veins_and_regions(
     # 3c. Classify merged paths → named veins
     vein_map = classify_merged_paths(paths, wing_bbox, midline=midline,
                                      junctions=junctions)
+
+    # 3c'. Validate junction topology — retry merges if crossvein/longitudinal
+    # orientation is wrong at any triple junction
+    vein_map = _validate_junction_orientations(
+        vein_map, junctions, centerlines, merge_decisions,
+        wing_bbox, midline=midline,
+    )
 
     # 3d. Validate vein shapes
     shape_warnings = validate_vein_shapes(vein_map)

@@ -354,7 +354,7 @@ class StepRunner:
         junctions = find_triple_junctions(state.centerlines, snap_radius=30.0)
         state.junctions = junctions
 
-        merged_paths = merge_segments_at_junctions(state.centerlines, junctions)
+        merged_paths, _merge_decisions = merge_segments_at_junctions(state.centerlines, junctions)
         state.merged_paths = merged_paths
 
         # We don't have access to _split_on_sharp_turns directly but the
