@@ -150,12 +150,15 @@ def _run_polygon_pipeline(
         max(b[3] for b in all_bounds),
     )
 
+    # Compute wing midline from original annotation polygons (before hull/Voronoi)
+    original_polys = annotations.intervein_polygons + annotations.vein_polygons
+    midline = compute_wing_midline(original_polys, wing_bbox) if original_polys else None
+
     # Initialize variables shared across both pipeline paths
     hull_mask = None
     seed_labels_arr = None
     vein_mask_arr = None
     centerlines = {}
-    midline = None
 
     if annotations.vein_polygons:
         # --- Vein-mask-primary path ---
@@ -183,10 +186,6 @@ def _run_polygon_pipeline(
                 max(b[2] for b in all_bounds),
                 max(b[3] for b in all_bounds),
             )
-
-        # Compute wing midline from original annotation polygons (not hull-derived Voronoi)
-        original_polys = annotations.intervein_polygons + annotations.vein_polygons
-        midline = compute_wing_midline(original_polys, wing_bbox)
 
         # Identify veins and regions independently via geometry
         id_result = identify_veins_and_regions(

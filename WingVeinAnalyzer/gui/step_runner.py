@@ -319,15 +319,23 @@ class StepRunner:
         state = self._copy_forward(prev)
 
         if state.polygons and state.wing_bbox:
-            # Use original annotation polygons for midline (not hull-derived Voronoi)
+            # Use original annotation polygons + bbox for midline (not hull-derived Voronoi)
             if state.annotations and state.annotations.intervein_polygons:
                 midline_polys = (
                     list(state.annotations.intervein_polygons)
                     + list(state.annotations.vein_polygons)
                 )
+                ann_bounds = [p.bounds for p in midline_polys]
+                midline_bbox = (
+                    min(b[0] for b in ann_bounds),
+                    min(b[1] for b in ann_bounds),
+                    max(b[2] for b in ann_bounds),
+                    max(b[3] for b in ann_bounds),
+                )
             else:
                 midline_polys = state.polygons
-            midline = compute_wing_midline(midline_polys, state.wing_bbox)
+                midline_bbox = state.wing_bbox
+            midline = compute_wing_midline(midline_polys, midline_bbox)
             state.wing_midline = midline
             if midline is not None:
                 state.params_used = {
