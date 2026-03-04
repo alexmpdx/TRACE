@@ -24,7 +24,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=_project_root / "output",
+        default=_project_root / "trained_models",
         help="Output directory for checkpoints and logs",
     )
     parser.add_argument(

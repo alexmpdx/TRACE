@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +61,15 @@ MODEL_W, MODEL_H = 512, 352
 HEATMAP_SIGMA = 5
 HEATMAP_THUMB_W, HEATMAP_THUMB_H = 240, 165
 IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+
+# Internal name → GeoJSON classification name (reverse of GEOJSON_TO_LANDMARK)
+LANDMARK_TO_GEOJSON = {
+    "subcostal_break": "subcostal break",
+    "alula_notch": "alula notch",
+    "l1_rs_junction": "L1-Rs",
+    "l4_l5_junction": "L4-L5",
+    "wing_tip": "DTip",
+}
 
 # Pretty display names for landmarks
 LANDMARK_DISPLAY = {
@@ -452,7 +462,7 @@ class TrainingThread(QThread):
             with open(config_path) as f:
                 cfg = yaml.safe_load(f)
 
-            output_dir = _project_root / "output"
+            output_dir = _project_root / "trained_models"
             output_dir.mkdir(parents=True, exist_ok=True)
 
             device = get_device()
@@ -829,10 +839,25 @@ class LandmarkGUI(QMainWindow):
             vis = draw_landmarks_on_image(image, preds, entry.gt)
             out_path = self._output_dir / f"{entry.path.stem}_landmarks.jpg"
             cv2.imwrite(str(out_path), vis)
+
+            # Write GeoJSON with predicted landmarks
+            if preds:
+                features = []
+                for name, (x, y) in preds.items():
+                    geojson_name = LANDMARK_TO_GEOJSON.get(name, name)
+                    features.append({
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [x, y]},
+                        "properties": {"classification": {"name": geojson_name}},
+                    })
+                geojson_path = self._output_dir / f"{entry.path.stem}_landmarks.geojson"
+                with open(geojson_path, "w") as f:
+                    json.dump({"type": "FeatureCollection", "features": features}, f, indent=2)
+
             saved += 1
 
         progress.setValue(len(self._entries))
-        self.statusBar().showMessage(f"Saved {saved} images to {self._output_dir}")
+        self.statusBar().showMessage(f"Saved {saved} images + GeoJSON to {self._output_dir}")
 
     def _on_train_model(self) -> None:
         """Launch training fold 0 in a background thread with live log dialog."""
