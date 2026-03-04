@@ -121,6 +121,7 @@ class IdentificationResult:
     poly_names: dict[int, str] = field(default_factory=dict)
     polygons: list[Polygon] = field(default_factory=list)  # possibly updated by splitting
     validation_report: ValidationReport = field(default_factory=ValidationReport)
+    vein_map: dict[str, MergedPath] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -2472,6 +2473,7 @@ def identify_veins_and_regions(
     result.poly_names = poly_names
     result.polygons = intervein_polygons
     result.validation_report = validation
+    result.vein_map = vein_map
 
     # Build VeinAssignment objects from vein_map
     assignments: list[VeinAssignment] = []
@@ -2506,6 +2508,325 @@ def identify_veins_and_regions(
     result.assignments = assignments
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 3g'. Transfer Region Names to Original Polygons
+# ---------------------------------------------------------------------------
+
+
+def _find_separating_vein(
+    name_a: str,
+    name_b: str,
+    vein_map: dict[str, MergedPath],
+) -> Optional[LineString]:
+    """Find the vein LineString that separates two named regions."""
+    for vein_id, boundaries in VEIN_BOUNDARIES.items():
+        for ant, post in boundaries:
+            if {ant, post} == {name_a, name_b}:
+                if vein_id in vein_map and vein_map[vein_id].line is not None:
+                    return vein_map[vein_id].line
+    return None
+
+
+def match_names_to_original_polygons(
+    voronoi_polygons: list[Polygon],
+    voronoi_names: dict[int, str],
+    original_polygons: list[Polygon],
+    vein_map: dict[str, MergedPath],
+    wing_bbox: tuple[float, float, float, float],
+) -> tuple[dict[int, str], list[Polygon]]:
+    """Transfer region names from Voronoi polygons to original annotation polygons.
+
+    Uses greedy bipartite matching (highest overlap first) to ensure each name
+    is assigned to at most one original polygon.  Originals spanning two Voronoi
+    regions are split along the separating vein.
+
+    Returns (poly_names, polygons) using original shapes with transferred names.
+    """
+    from shapely.ops import split as shapely_split
+
+    result_polys: list[Polygon] = list(original_polygons)
+
+    # Build name → Voronoi polygon lookup (merge polygons with same name)
+    name_to_vpoly: dict[str, Polygon] = {}
+    for vi, vpoly in enumerate(voronoi_polygons):
+        if vi in voronoi_names and not vpoly.is_empty:
+            name = voronoi_names[vi]
+            if name in name_to_vpoly:
+                name_to_vpoly[name] = name_to_vpoly[name].union(vpoly)
+            else:
+                name_to_vpoly[name] = vpoly
+
+    available_names = set(name_to_vpoly.keys())
+
+    # --- Pass 1: Build overlap matrix ---
+    # overlap_matrix[oi] = [(name, overlap_area, frac_of_orig), ...]
+    overlap_matrix: dict[int, list[tuple[str, float, float]]] = {}
+    for oi, opoly in enumerate(original_polygons):
+        if opoly.is_empty:
+            continue
+        overlaps: list[tuple[str, float, float]] = []
+        for name, vpoly in name_to_vpoly.items():
+            try:
+                inter = opoly.intersection(vpoly)
+                area = inter.area
+            except Exception:
+                area = 0.0
+            if area > 0:
+                overlaps.append((name, area, area / opoly.area))
+        overlaps.sort(key=lambda x: x[1], reverse=True)
+        if overlaps:
+            overlap_matrix[oi] = overlaps
+
+    # --- Pass 2: Greedy one-to-one matching ---
+    # Build flat list of (overlap_area, orig_idx, name) sorted descending
+    candidates: list[tuple[float, int, str]] = []
+    for oi, overlaps in overlap_matrix.items():
+        for name, area, frac in overlaps:
+            candidates.append((area, oi, name))
+    candidates.sort(reverse=True)
+
+    result_names: dict[int, str] = {}
+    assigned_originals: set[int] = set()
+    assigned_names: set[str] = set()
+
+    for _area, oi, name in candidates:
+        if oi in assigned_originals or name in assigned_names:
+            continue
+        result_names[oi] = name
+        assigned_originals.add(oi)
+        assigned_names.add(name)
+
+    logger.info(
+        "Name transfer: %d/%d originals matched, %d/%d names used",
+        len(assigned_originals), len(original_polygons),
+        len(assigned_names), len(available_names),
+    )
+
+    # --- Pass 3: Split originals that span two unassigned Voronoi names ---
+    unassigned_names = available_names - assigned_names
+    if unassigned_names:
+        for oi in range(len(original_polygons)):
+            if oi in assigned_originals:
+                continue
+            if oi not in overlap_matrix:
+                continue
+
+            overlaps = overlap_matrix[oi]
+            # Find the two best overlaps with still-available names
+            avail_overlaps = [
+                (n, a, f) for n, a, f in overlaps if n not in assigned_names
+            ]
+            if not avail_overlaps:
+                continue
+
+            # Single available name → assign
+            if len(avail_overlaps) == 1:
+                name = avail_overlaps[0][0]
+                result_names[oi] = name
+                assigned_originals.add(oi)
+                assigned_names.add(name)
+                unassigned_names.discard(name)
+                continue
+
+            # Already assigned with a different name in pass 2? Check...
+            # This orig was unassigned, so try to split if two significant overlaps
+            first_name, first_area, first_frac = avail_overlaps[0]
+            second_name, second_area, second_frac = avail_overlaps[1]
+
+            # Just assign the best if second overlap is tiny
+            total = first_area + second_area
+            if total == 0:
+                continue
+            if second_area / total < 0.15:
+                result_names[oi] = first_name
+                assigned_originals.add(oi)
+                assigned_names.add(first_name)
+                unassigned_names.discard(first_name)
+                continue
+
+            # Attempt split
+            split_result = _split_original_polygon(
+                result_polys[oi], first_name, second_name,
+                name_to_vpoly, vein_map,
+            )
+            if split_result is None:
+                result_names[oi] = first_name
+                assigned_originals.add(oi)
+                assigned_names.add(first_name)
+                unassigned_names.discard(first_name)
+                continue
+
+            piece_a, name_a, piece_b, name_b = split_result
+            result_polys[oi] = piece_a
+            result_names[oi] = name_a
+            assigned_originals.add(oi)
+            assigned_names.add(name_a)
+            unassigned_names.discard(name_a)
+
+            new_idx = len(result_polys)
+            result_polys.append(piece_b)
+            result_names[new_idx] = name_b
+            assigned_names.add(name_b)
+            unassigned_names.discard(name_b)
+
+            logger.info(
+                "Original P%d split → %s (%.0f px²) + P%d:%s (%.0f px²)",
+                oi, name_a, piece_a.area, new_idx, name_b, piece_b.area,
+            )
+
+    # --- Pass 4: Handle already-assigned originals that span a missing name ---
+    # An assigned original might be large enough to cover its own region plus
+    # an unassigned one.  Check for this and split if beneficial.
+    if unassigned_names:
+        for oi in list(assigned_originals):
+            if not unassigned_names:
+                break
+            if oi not in overlap_matrix:
+                continue
+
+            overlaps = overlap_matrix[oi]
+            current_name = result_names[oi]
+
+            for name, area, frac in overlaps:
+                if name == current_name or name not in unassigned_names:
+                    continue
+                if frac < 0.10:
+                    continue
+
+                split_result = _split_original_polygon(
+                    result_polys[oi], current_name, name,
+                    name_to_vpoly, vein_map,
+                )
+                if split_result is None:
+                    continue
+
+                piece_a, name_a, piece_b, name_b = split_result
+                result_polys[oi] = piece_a
+                result_names[oi] = name_a
+
+                new_idx = len(result_polys)
+                result_polys.append(piece_b)
+                result_names[new_idx] = name_b
+                assigned_names.add(name_b)
+                unassigned_names.discard(name_b)
+
+                logger.info(
+                    "Original P%d split (pass 4) → %s (%.0f px²) + P%d:%s (%.0f px²)",
+                    oi, name_a, piece_a.area, new_idx, name_b, piece_b.area,
+                )
+                break  # only one split per original
+
+    # Log unmatched
+    for oi in range(len(original_polygons)):
+        if oi not in assigned_originals and oi not in result_names:
+            logger.warning(
+                "Original P%d (area=%.0f) has no name after transfer",
+                oi, original_polygons[oi].area,
+            )
+
+    return result_names, result_polys
+
+
+def _split_original_polygon(
+    opoly: Polygon,
+    name_a: str,
+    name_b: str,
+    name_to_vpoly: dict[str, Polygon],
+    vein_map: dict[str, MergedPath],
+) -> Optional[tuple[Polygon, str, Polygon, str]]:
+    """Split an original polygon into two pieces using Voronoi region intersection.
+
+    Primary method: intersect the original polygon with each Voronoi region to
+    produce two pieces.  Fallback: split along the separating vein LineString.
+
+    Returns (piece_a, name_a, piece_b, name_b) or None on failure.
+    """
+    min_frac = 0.05  # minimum piece size as fraction of original
+
+    # --- Primary: Voronoi-based intersection ---
+    vpoly_a = name_to_vpoly.get(name_a)
+    vpoly_b = name_to_vpoly.get(name_b)
+
+    if vpoly_a is not None and vpoly_b is not None:
+        try:
+            piece_a = opoly.intersection(vpoly_a)
+            piece_b = opoly.intersection(vpoly_b)
+            # Extract largest polygon from potential MultiPolygon results
+            piece_a = _largest_polygon(piece_a)
+            piece_b = _largest_polygon(piece_b)
+            if (piece_a is not None and piece_b is not None
+                    and piece_a.area > opoly.area * min_frac
+                    and piece_b.area > opoly.area * min_frac):
+                return piece_a, name_a, piece_b, name_b
+        except Exception:
+            pass
+
+    # --- Fallback: split along separating vein LineString ---
+    from shapely.ops import split as shapely_split
+
+    sep_line = _find_separating_vein(name_a, name_b, vein_map)
+    if sep_line is None:
+        return None
+
+    # Extend the vein line to ensure it fully crosses the polygon
+    coords = list(sep_line.coords)
+    dx = coords[-1][0] - coords[0][0]
+    dy = coords[-1][1] - coords[0][1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length > 0:
+        ext = 50.0
+        ux, uy = dx / length, dy / length
+        extended_coords = [
+            (coords[0][0] - ux * ext, coords[0][1] - uy * ext),
+        ] + coords + [
+            (coords[-1][0] + ux * ext, coords[-1][1] + uy * ext),
+        ]
+        split_line = LineString(extended_coords)
+    else:
+        split_line = sep_line
+
+    try:
+        pieces = shapely_split(opoly, split_line)
+        geoms = [g for g in pieces.geoms if g.area > opoly.area * min_frac]
+    except Exception:
+        geoms = []
+
+    if len(geoms) < 2:
+        return None
+
+    geoms.sort(key=lambda g: g.area, reverse=True)
+
+    # Assign each piece to the Voronoi region it overlaps most
+    if vpoly_a is not None:
+        try:
+            ov0 = geoms[0].intersection(vpoly_a).area
+            ov1 = geoms[1].intersection(vpoly_a).area
+        except Exception:
+            ov0, ov1 = geoms[0].area, 0
+        if ov0 >= ov1:
+            return geoms[0], name_a, geoms[1], name_b
+        else:
+            return geoms[0], name_b, geoms[1], name_a
+    return geoms[0], name_a, geoms[1], name_b
+
+
+def _largest_polygon(geom) -> Optional[Polygon]:
+    """Extract the largest Polygon from a geometry (handles MultiPolygon)."""
+    if geom is None or geom.is_empty:
+        return None
+    if geom.geom_type == 'Polygon':
+        return geom if geom.is_valid and geom.area > 0 else None
+    if geom.geom_type == 'MultiPolygon':
+        polys = [g for g in geom.geoms if g.is_valid and g.area > 0]
+        return max(polys, key=lambda g: g.area) if polys else None
+    # GeometryCollection — extract polygons
+    if hasattr(geom, 'geoms'):
+        polys = [g for g in geom.geoms
+                 if g.geom_type == 'Polygon' and g.is_valid and g.area > 0]
+        return max(polys, key=lambda g: g.area) if polys else None
+    return None
 
 
 # ---------------------------------------------------------------------------

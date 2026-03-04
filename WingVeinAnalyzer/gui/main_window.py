@@ -301,9 +301,9 @@ class MainWindow(QMainWindow):
         self._runner.smooth_sigma = sigma
 
         # If we're on the overlay step (19), re-render immediately
-        if self._current_step == 19 and self._current_pair is not None:
-            self._runner.invalidate_from(19)
-            self._run_step_async(19)
+        if self._current_step == NUM_STEPS - 1 and self._current_pair is not None:
+            self._runner.invalidate_from(NUM_STEPS - 1)
+            self._run_step_async(NUM_STEPS - 1)
 
     def _update_nav_buttons(self) -> None:
         """Enable/disable navigation based on current state."""

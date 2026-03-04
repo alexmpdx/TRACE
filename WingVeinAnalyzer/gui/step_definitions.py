@@ -168,7 +168,9 @@ STEP_DEFS: list[StepDef] = [
             "merge collinear segments, split sharp turns, assign longitudinals (L1-L5) "
             "first, then classify crossveins (ACV/PCV) by proximity to assigned "
             "longitudinals, name intervein regions from vein boundaries, split oversized "
-            "polygons, and cross-validate. Steps 6-12 visualize cached sub-results."
+            "polygons, and cross-validate. Region names are then transferred back to the "
+            "original GeoJSON annotation polygons via greedy bipartite overlap matching "
+            "(match_names_to_original_polygons). Steps 6-12 visualize cached sub-results."
         ),
         pseudocode=(
             "junctions = find_triple_junctions(centerlines, snap=30px)\n"
@@ -178,7 +180,9 @@ STEP_DEFS: list[StepDef] = [
             "crossveins = classify_crossveins_from_longitudinals(split)\n"
             "poly_names = name_regions_from_veins(polygons, vein_map)\n"
             "poly_names = split_merged_polygons(polygons, poly_names)\n"
-            "validation = cross_validate(assignments, poly_names)"
+            "validation = cross_validate(assignments, poly_names)\n"
+            "original_poly_names = match_names_to_original_polygons(\n"
+            "  voronoi_polygons, poly_names, original_polygons)"
         ),
         params=[
             StepParam("snap_radius", "30 px", "Max distance to cluster endpoints"),

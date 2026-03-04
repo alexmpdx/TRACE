@@ -24,6 +24,7 @@ from WingVeinAnalyzer.models.vein_identifier import (
     ValidationReport,
     find_triple_junctions,
     identify_veins_and_regions,
+    match_names_to_original_polygons,
     merge_segments_at_junctions,
     classify_merged_paths,
     name_regions_from_veins,
@@ -65,6 +66,7 @@ class StepState:
     wing_bbox: Optional[tuple[float, float, float, float]] = None
     polygons: Optional[list[Polygon]] = None
     vein_polygons: Optional[list[Polygon]] = None
+    original_polygons: Optional[list[Polygon]] = None
 
     # Wing midline (from step 1)
     wing_midline: Optional[WingMidline] = None
@@ -230,6 +232,7 @@ class StepRunner:
         state.annotations = annotations
         state.polygons = list(annotations.intervein_polygons)
         state.vein_polygons = list(annotations.vein_polygons)
+        state.original_polygons = list(annotations.intervein_polygons)
 
         # Compute wing bounding box
         all_bounds = [p.bounds for p in state.polygons]
@@ -378,19 +381,18 @@ class StepRunner:
         merged_paths, _merge_decisions = merge_segments_at_junctions(state.centerlines, junctions)
         state.merged_paths = merged_paths
 
-        # We don't have access to _split_on_sharp_turns directly but the
-        # id_result captures the final vein_map which includes post-split paths
-        state.vein_map = {}
-        for vein_id in ["L1", "L2", "L3", "L4", "L5", "ACV", "PCV"]:
-            for a in id_result.assignments:
-                if a.vein_id == vein_id and a.line is not None:
-                    # Create a MergedPath-like entry for visualization
-                    mp = MergedPath(
-                        segment_keys=[],
-                        line=a.line,
-                        length_px=a.length_px or a.line.length,
-                    )
-                    state.vein_map[vein_id] = mp
+        # Use the real vein_map from identification (preserves segment_keys)
+        state.vein_map = dict(id_result.vein_map) if id_result.vein_map else {}
+
+        # Transfer names from Voronoi polygons to original annotation polygons
+        if state.original_polygons is not None and state.vein_map:
+            orig_names, orig_polys = match_names_to_original_polygons(
+                state.polygons, state.poly_names,
+                list(state.original_polygons),
+                state.vein_map, state.wing_bbox,
+            )
+            state.polygons = orig_polys
+            state.poly_names = orig_names
 
         state.params_used = {"snap_radius": "30 px"}
         return state
@@ -669,6 +671,7 @@ class StepRunner:
         state.wing_bbox = prev.wing_bbox
         state.polygons = prev.polygons
         state.vein_polygons = prev.vein_polygons
+        state.original_polygons = prev.original_polygons
         state.vein_mask = prev.vein_mask
         state.nearest_labels = prev.nearest_labels
         state.centerlines = prev.centerlines

@@ -81,7 +81,7 @@ Per-vein lengths, crossvein distance, wing length/width, total area, intervein a
 
 ### Polygon mode (current):
 1. `geojson_parser.parse_geojson()` — extract intervein Polygons + vein mask Polygons
-2a. **If vein mask present**: `vein_skeleton.extract_veins_from_mask()` — Voronoi partition → centerlines → `vein_identifier.identify_veins_and_regions()` — geometry-based classification
+2a. **If vein mask present**: `vein_skeleton.extract_veins_from_mask()` — Voronoi partition → centerlines → `vein_identifier.identify_veins_and_regions()` — geometry-based classification → `vein_identifier.match_names_to_original_polygons()` — transfer names back to original annotation polygon shapes
 2b. **Fallback**: `vein_graph.build_graph_from_polygons()` → `vein_labeler.assign_veins_from_polygons()`
 3. `measurement_controller.compile_results()` — apply scale calibration
 4. `wing_geometry.build_wing_outline()` — union of buffered polygons (including vein polygons for full wing tip coverage)
@@ -116,7 +116,8 @@ The vein-mask-primary pipeline uses geometry-based classification:
 4. **Classification**: longitudinals assigned FIRST (L3/L4 from midline, then L1/L2/L5 by position and length). Crossveins then identified by proximity to assigned longitudinals (ACV near L3+L4, PCV near L4+L5). Post-processing ACV-based L4/L5 swap check
 5. **Region naming**: regions named by which veins bound each polygon (using `segment_keys` from MergedPaths → `VEIN_BOUNDARIES` lookup). Position validation catches Y/X ordering violations
 6. **Cross-validation**: boundary consistency, vein Y-ordering, crossvein connectivity, area outliers
-7. Costa extracted separately as the anterior margin of the marginal cell polygon
+7. **Name transfer to original polygons**: `match_names_to_original_polygons()` transfers Voronoi-derived region names to the original GeoJSON annotation polygons via spatial overlap (greedy bipartite matching). Oversized originals spanning two Voronoi regions are split using Voronoi polygon intersection. Original polygon shapes are used for all downstream steps (outline, hinge, measurements, overlays)
+8. Costa extracted separately as the anterior margin of the marginal cell polygon
 
 ## Scale Calibration
 Optional. Passed as `microns_per_pixel: float | None` to `run_pipeline()`.
