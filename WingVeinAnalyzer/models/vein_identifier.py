@@ -35,6 +35,30 @@ from WingVeinAnalyzer.models.vein_map import (
     VEIN_ORIENTATION_PRIORS,
     VEIN_Y_ORDER,
     SPATIAL_PRIORS_Y,
+    um_to_px,
+    um2_to_px2,
+    SNAP_RADIUS_UM,
+    SNAP_RADIUS_LARGE_UM,
+    TANGENT_DIST_UM,
+    STEP_DIST_UM,
+    MIN_SEGMENT_LENGTH_UM,
+    MIN_SPLIT_LENGTH_UM,
+    MIN_PATH_LENGTH_UM,
+    SMOOTH_SIGMA_SPLIT_UM,
+    SMOOTH_SPACING_UM,
+    MAX_CROSSVEIN_FLOOR_UM,
+    SHORT_CROSSVEIN_UM,
+    MAX_CROSSVEIN_DEFAULT_UM,
+    CV_PROXIMITY_UM,
+    CV_NORM_DIST_UM,
+    CV_CONNECTIVITY_UM,
+    BUFFER_SPATIAL_UM,
+    MIN_SPATIAL_LENGTH_UM,
+    MIN_POLY_AREA_UM2,
+    BOTTLENECK_EROSION_UM,
+    SPLIT_EROSION_UM,
+    MIN_HALF_HEIGHT_UM,
+    GT_TOLERANCE_UM,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,9 +154,11 @@ class IdentificationResult:
 
 def find_triple_junctions(
     centerlines: dict[tuple[int, int], LineString],
-    snap_radius: float = 30.0,
+    snap_radius: float | None = None,
 ) -> list[JunctionPoint]:
     """Find triple junctions where 3+ vein segments converge."""
+    if snap_radius is None:
+        snap_radius = um_to_px(SNAP_RADIUS_UM)
     # Collect all segment endpoints
     endpoints: list[tuple[float, float, tuple[int, int], int]] = []
     for key, line in centerlines.items():
@@ -185,11 +211,13 @@ def find_triple_junctions(
 # ---------------------------------------------------------------------------
 
 def _get_tangent_away_from_junction(
-    line: LineString, endpoint_idx: int, tangent_dist: float = 80.0,
+    line: LineString, endpoint_idx: int, tangent_dist: float | None = None,
 ) -> np.ndarray:
     """Compute tangent vector pointing AWAY from a junction endpoint."""
+    if tangent_dist is None:
+        tangent_dist = um_to_px(TANGENT_DIST_UM)
     # Smooth the line to reduce pixel-level noise near junctions
-    smoothed = smooth_line(line, sigma=5.0, sample_spacing=5.0)
+    smoothed = smooth_line(line, sigma=um_to_px(SMOOTH_SPACING_UM), sample_spacing=um_to_px(SMOOTH_SPACING_UM))
     coords = list(smoothed.coords)
     if endpoint_idx == 0:
         # Junction is at start → tangent points from start toward interior
@@ -415,7 +443,7 @@ def merge_segments_at_junctions(
     for root, seg_keys in groups.items():
         lines = [centerlines[k] for k in seg_keys]
         merged = _merge_vein_lines(lines)
-        if merged is None or merged.length < 10:
+        if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
             continue
 
         paths.append(MergedPath(
@@ -438,9 +466,9 @@ def _split_on_sharp_turns(
     paths: list[MergedPath],
     centerlines: dict[tuple[int, int], LineString],
     angle_threshold_deg: float = 70.0,
-    step_dist: float = 50.0,
-    min_path_length: float = 500.0,
-    min_split_length: float = 200.0,
+    step_dist: float | None = None,
+    min_path_length: float | None = None,
+    min_split_length: float | None = None,
 ) -> list[MergedPath]:
     """Split merged paths at points where direction changes sharply.
 
@@ -450,6 +478,12 @@ def _split_on_sharp_turns(
     paths split the LineString directly.  Paths shorter than min_path_length
     are never split, and both halves must be >= min_split_length.
     """
+    if step_dist is None:
+        step_dist = um_to_px(STEP_DIST_UM)
+    if min_path_length is None:
+        min_path_length = um_to_px(MIN_PATH_LENGTH_UM)
+    if min_split_length is None:
+        min_split_length = um_to_px(MIN_SPLIT_LENGTH_UM)
     result: list[MergedPath] = []
 
     for path in paths:
@@ -475,15 +509,19 @@ def _try_split_path(
     centerlines: dict[tuple[int, int], LineString],
     angle_threshold_deg: float,
     step_dist: float,
-    min_path_length: float = 500.0,
-    min_split_length: float = 200.0,
+    min_path_length: float | None = None,
+    min_split_length: float | None = None,
 ) -> list[MergedPath]:
     """Attempt to split a single MergedPath at its sharpest turn."""
     from shapely.ops import substring
 
+    if min_path_length is None:
+        min_path_length = um_to_px(MIN_PATH_LENGTH_UM)
+    if min_split_length is None:
+        min_split_length = um_to_px(MIN_SPLIT_LENGTH_UM)
     # Smooth the line before measuring angle changes to prevent
     # noisy pixel jitter from creating false sharp turns
-    line = smooth_line(path.line, sigma=50.0, sample_spacing=5.0)
+    line = smooth_line(path.line, sigma=um_to_px(SMOOTH_SIGMA_SPLIT_UM), sample_spacing=um_to_px(SMOOTH_SPACING_UM))
     n_steps = max(2, int(line.length / step_dist))
 
     # Sample points along the merged line
@@ -617,7 +655,7 @@ def _try_split_path(
     for group in [group_a, group_b]:
         lines = [centerlines[k] for k in group if k in centerlines]
         merged = _merge_vein_lines(lines)
-        if merged is None or merged.length < 10:
+        if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
             continue
         result_paths.append(MergedPath(
             segment_keys=list(group),
@@ -707,8 +745,8 @@ def classify_merged_paths(
     crossveins: list[MergedPath] = []
 
     # Max plausible crossvein length: ~15% of wing span
-    max_crossvein_len = bbox_w * 0.15 if bbox_w > 0 else 600.0
-    max_crossvein_len = max(max_crossvein_len, 400.0)  # floor of 400px
+    max_crossvein_len = bbox_w * 0.15 if bbox_w > 0 else um_to_px(MAX_CROSSVEIN_DEFAULT_UM)
+    max_crossvein_len = max(max_crossvein_len, um_to_px(MAX_CROSSVEIN_FLOOR_UM))
 
     for p in paths:
         jn = (_count_junction_endpoints(p, junctions) if junctions else 0)
@@ -729,7 +767,7 @@ def classify_merged_paths(
                 p.orientation_deg, p.length_px,
             )
             crossveins.append(p)
-        elif p.orientation_deg >= 50 and p.length_px <= 300:
+        elif p.orientation_deg >= 50 and p.length_px <= um_to_px(SHORT_CROSSVEIN_UM):
             # Ambiguous 50-60° but short — crossvein candidate
             crossveins.append(p)
         else:
@@ -795,9 +833,11 @@ def classify_merged_paths(
 def _count_junction_endpoints(
     path: MergedPath,
     junctions: list[JunctionPoint],
-    snap_radius: float = 40.0,
+    snap_radius: float | None = None,
 ) -> int:
     """Count how many of a path's endpoints are near a triple junction (0, 1, or 2)."""
+    if snap_radius is None:
+        snap_radius = um_to_px(SNAP_RADIUS_LARGE_UM)
     coords = list(path.line.coords)
     start = coords[0]
     end = coords[-1]
@@ -858,7 +898,7 @@ def _assign_crossveins_from_longitudinals(
         return
 
     # Score each candidate for ACV and PCV roles
-    norm_dist = 200.0  # normalization distance in pixels
+    norm_dist = um_to_px(CV_NORM_DIST_UM)
     acv_scores: list[float] = []
     pcv_scores: list[float] = []
 
@@ -908,7 +948,7 @@ def _validate_crossveins(
     vein_map: dict[str, MergedPath],
     longitudinals: list[MergedPath],
     crossveins: list[MergedPath],
-    proximity_threshold: float = 100.0,
+    proximity_threshold: float | None = None,
     min_nearby_longitudinals: int = 2,
     junctions: list[JunctionPoint] | None = None,
 ) -> list[MergedPath]:
@@ -919,6 +959,8 @@ def _validate_crossveins(
     candidates.  If both endpoints are at triple junctions, relax to 1.
     Demotes failures back to the longitudinal pool.
     """
+    if proximity_threshold is None:
+        proximity_threshold = um_to_px(CV_PROXIMITY_UM)
     demoted: list[MergedPath] = []
     cv_names_to_check = [n for n in ("ACV", "PCV") if n in vein_map]
 
@@ -972,7 +1014,7 @@ def _validate_junction_orientations(
     merge_decisions: dict[tuple[float, float], dict],
     wing_bbox: tuple[float, float, float, float],
     midline=None,
-    snap_radius: float = 40.0,
+    snap_radius: float | None = None,
 ) -> dict[str, MergedPath]:
     """Validate that triple junctions have correct vein topology after classification.
 
@@ -980,6 +1022,9 @@ def _validate_junction_orientations(
     If the topology is wrong and an alternative merge was recorded, retry with that
     alternative and re-classify.
     """
+    if snap_radius is None:
+        snap_radius = um_to_px(SNAP_RADIUS_LARGE_UM)
+
     if not merge_decisions or not junctions:
         return vein_map
 
@@ -1082,7 +1127,7 @@ def _validate_junction_orientations(
         for root, seg_keys in groups.items():
             lines = [centerlines[k] for k in seg_keys]
             merged = _merge_vein_lines(lines)
-            if merged is None or merged.length < 10:
+            if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
                 continue
             new_paths.append(MergedPath(
                 segment_keys=seg_keys,
@@ -1458,9 +1503,10 @@ def _swap_l4_l5_if_needed(
     # Swap only when: (1) L5 is notably closer, (2) the separation is meaningful,
     # and (3) the closer vein is actually adjacent to ACV (< 50px).
     # Without check (3), we'd swap when both veins are far from ACV (meaningless).
+    _swap_thresh = um_to_px(CV_CONNECTIVITY_UM)
     if (acv_to_l5 < acv_to_l4
-            and (acv_to_l4 - acv_to_l5) > 50
-            and min(acv_to_l5, acv_to_l4) < 50):
+            and (acv_to_l4 - acv_to_l5) > _swap_thresh
+            and min(acv_to_l5, acv_to_l4) < _swap_thresh):
         logger.info(
             "Swapping L4/L5: ACV closer to L5 (%.0fpx) than L4 (%.0fpx)",
             acv_to_l5, acv_to_l4,
@@ -1547,7 +1593,7 @@ def _compute_midline_score(
 
     # Sample points along the path
     line = path.line
-    n_samples = max(5, min(20, int(line.length / 50)))
+    n_samples = max(5, min(20, int(line.length / um_to_px(STEP_DIST_UM))))
     midline_xs = np.array([c[0] for c in midline.line.coords])
     midline_ys = np.array([c[1] for c in midline.line.coords])
     half_heights = midline.half_heights
@@ -1563,7 +1609,7 @@ def _compute_midline_score(
             continue
         mid_y = float(np.interp(x, midline_xs, midline_ys))
         hh = float(np.interp(x, midline_xs, half_heights))
-        if hh < 5.0:
+        if hh < um_to_px(MIN_HALF_HEIGHT_UM):
             continue
 
         signed_dist = (y - mid_y) / hh
@@ -1606,8 +1652,8 @@ def _compute_crossvein_score(
     acv_dist = path.line.distance(acv_path.line) if acv_path else None
     pcv_dist = path.line.distance(pcv_path.line) if pcv_path else None
 
-    # Normalize distances by a reference scale (~200px = typical crossvein gap)
-    ref_dist = 200.0
+    # Normalize distances by a reference scale
+    ref_dist = um_to_px(CV_NORM_DIST_UM)
 
     if vein_name == "L3":
         # L3 should be near ACV (it connects to ACV)
@@ -1660,7 +1706,7 @@ def validate_vein_shapes(
 
         # Angular continuity: walk in ~50px steps
         coords = list(path.line.coords)
-        step_dist = 50.0
+        step_dist = um_to_px(STEP_DIST_UM)
         n_steps = max(2, int(path.length_px / step_dist))
         sample_pts = [
             path.line.interpolate(i / n_steps, normalized=True)
@@ -1711,28 +1757,55 @@ def validate_vein_shapes(
 # 3e. Region Identification from Veins
 # ---------------------------------------------------------------------------
 
+def _build_poly_veins_spatial(
+    polygons: list[Polygon],
+    vein_map: dict[str, MergedPath],
+    buffer_dist: float | None = None,
+    min_length: float | None = None,
+) -> dict[int, set[str]]:
+    """Build polygon→bounding veins mapping using spatial proximity."""
+    if buffer_dist is None:
+        buffer_dist = um_to_px(BUFFER_SPATIAL_UM)
+    if min_length is None:
+        min_length = um_to_px(MIN_SPATIAL_LENGTH_UM)
+    poly_veins: dict[int, set[str]] = {i: set() for i in range(len(polygons))}
+    for vein_id, mp in vein_map.items():
+        if mp.line is None:
+            continue
+        for i, poly in enumerate(polygons):
+            try:
+                inter = poly.buffer(buffer_dist).intersection(mp.line)
+                if inter.length >= min_length:
+                    poly_veins[i].add(vein_id)
+            except Exception:
+                pass
+    return poly_veins
+
+
 def name_regions_from_veins(
     polygons: list[Polygon],
     vein_map: dict[str, MergedPath],
     wing_bbox: tuple[float, float, float, float],
+    poly_veins: dict[int, set[str]] | None = None,
 ) -> dict[int, str]:
     """Name intervein polygons based on which veins bound them.
 
-    Uses the segment_keys from each MergedPath to directly determine
-    which polygon indices each named vein borders — no proximity sampling.
+    If poly_veins is provided (spatial proximity mapping), uses it directly.
+    Otherwise falls back to segment_keys from each MergedPath.
     """
     min_x, min_y, max_x, max_y = wing_bbox
     bbox_h = max_y - min_y
 
-    # Build polygon → set of bounding veins from segment keys
-    poly_veins: dict[int, set[str]] = {i: set() for i in range(len(polygons))}
-    for vein_id, mp in vein_map.items():
-        for seg_key in mp.segment_keys:
-            idx_a, idx_b = seg_key
-            if 0 <= idx_a < len(polygons):
-                poly_veins[idx_a].add(vein_id)
-            if 0 <= idx_b < len(polygons):
-                poly_veins[idx_b].add(vein_id)
+    # Build polygon → set of bounding veins
+    if poly_veins is None:
+        poly_veins = {i: set() for i in range(len(polygons))}
+        for vein_id, mp in vein_map.items():
+            for seg_key in mp.segment_keys:
+                idx_a, idx_b = seg_key
+                if 0 <= idx_a < len(polygons):
+                    poly_veins[idx_a].add(vein_id)
+                if 0 <= idx_b < len(polygons):
+                    poly_veins[idx_b].add(vein_id)
 
     poly_names: dict[int, str] = {}
     total_area = sum(p.area for p in polygons)
@@ -1755,7 +1828,7 @@ def name_regions_from_veins(
             )
 
     # Resolve conflicts: if two polygons got the same name, use area/position
-    _resolve_name_conflicts(poly_names, polygons, vein_map, wing_bbox)
+    _resolve_name_conflicts(poly_names, polygons, vein_map, wing_bbox, poly_veins=poly_veins)
 
     # Validate and correct region positions
     _validate_and_correct_region_positions(poly_names, polygons, wing_bbox)
@@ -1861,20 +1934,22 @@ def _resolve_name_conflicts(
     polygons: list[Polygon],
     vein_map: dict[str, MergedPath],
     wing_bbox: tuple[float, float, float, float],
+    poly_veins: dict[int, set[str]] | None = None,
 ) -> None:
     """If two polygons got the same region name, resolve by area match and reassign."""
     min_x, min_y, max_x, max_y = wing_bbox
     bbox_h = max_y - min_y
 
     # Build polygon → bounding veins for reassignment attempts
-    poly_veins: dict[int, set[str]] = {i: set() for i in range(len(polygons))}
-    for vein_id, mp in vein_map.items():
-        for seg_key in mp.segment_keys:
-            idx_a, idx_b = seg_key
-            if 0 <= idx_a < len(polygons):
-                poly_veins[idx_a].add(vein_id)
-            if 0 <= idx_b < len(polygons):
-                poly_veins[idx_b].add(vein_id)
+    if poly_veins is None:
+        poly_veins = {i: set() for i in range(len(polygons))}
+        for vein_id, mp in vein_map.items():
+            for seg_key in mp.segment_keys:
+                idx_a, idx_b = seg_key
+                if 0 <= idx_a < len(polygons):
+                    poly_veins[idx_a].add(vein_id)
+                if 0 <= idx_b < len(polygons):
+                    poly_veins[idx_b].add(vein_id)
 
     # Iterate until no conflicts remain (max 3 rounds)
     for _ in range(3):
@@ -2161,7 +2236,7 @@ def split_merged_polygons(
 
 def _detect_bottleneck(poly: Polygon, min_part_frac: float = 0.15) -> bool:
     """Check if polygon has a thin neck that splits on erosion."""
-    for amount in [10, 15, 20, 30]:
+    for amount in [um_to_px(e) for e in BOTTLENECK_EROSION_UM]:
         eroded = poly.buffer(-amount)
         if eroded.geom_type == 'MultiPolygon':
             parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
@@ -2189,7 +2264,7 @@ def _split_polygon_by_erosion(
     # 1. Find erosion amount that separates into 2+ large parts
     erode_amount = None
     parts: list[Polygon] = []
-    for amount in [10, 15, 20, 30, 50]:
+    for amount in [um_to_px(e) for e in SPLIT_EROSION_UM]:
         eroded = poly.buffer(-amount)
         if eroded.geom_type == 'MultiPolygon':
             parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
@@ -2229,7 +2304,7 @@ def _split_polygon_by_erosion(
             coords = [(float(pt[0][0]), float(pt[0][1])) for pt in largest]
             if len(coords) >= 4:
                 p = Polygon(coords)
-                if p.is_valid and p.area > 100:
+                if p.is_valid and p.area > um2_to_px2(MIN_POLY_AREA_UM2):
                     piece_polys.append(p)
     if len(piece_polys) < 2:
         return None
@@ -2247,42 +2322,68 @@ def cross_validate(
     centerlines: dict[tuple[int, int], LineString],
     polygons: list[Polygon],
     wing_bbox: tuple[float, float, float, float],
+    poly_veins: dict[int, set[str]] | None = None,
 ) -> ValidationReport:
     """Cross-validate vein and region assignments for consistency."""
     report = ValidationReport()
     min_x, min_y, max_x, max_y = wing_bbox
     bbox_h = max_y - min_y
 
-    # 1. Boundary consistency: for each centerline segment, check if the vein
-    # it belongs to matches VEIN_BOUNDARIES for the named regions
-    # Build reverse lookup: which vein does each segment belong to?
-    seg_to_vein: dict[tuple[int, int], str] = {}
-    for vein_id, mp in vein_map.items():
-        for seg_key in mp.segment_keys:
-            seg_to_vein[seg_key] = vein_id
+    # 1. Boundary consistency: for each vein, check if the named regions
+    # it borders match VEIN_BOUNDARIES
+    if poly_veins is not None:
+        # Vein-centric check using spatial poly_veins
+        for vein_id, expected_pairs in VEIN_BOUNDARIES.items():
+            if vein_id not in vein_map:
+                continue
+            # Find which named regions this vein borders
+            bordering_names = set()
+            for idx, veins in poly_veins.items():
+                if vein_id in veins and idx in poly_names:
+                    bordering_names.add(poly_names[idx])
+            # Check if at least one expected pair is satisfied
+            if len(bordering_names) < 2:
+                continue
+            found_valid = False
+            for ant, post in expected_pairs:
+                if ant in bordering_names and post in bordering_names:
+                    found_valid = True
+                    break
+            if not found_valid:
+                msg = (
+                    f"Boundary mismatch: {vein_id} borders "
+                    f"{bordering_names}, expected one of {expected_pairs}"
+                )
+                report.boundary_mismatches.append(msg)
+                report.warnings.append(msg)
+    else:
+        # Segment-key-based check (Voronoi polygons)
+        seg_to_vein: dict[tuple[int, int], str] = {}
+        for vein_id, mp in vein_map.items():
+            for seg_key in mp.segment_keys:
+                seg_to_vein[seg_key] = vein_id
 
-    for (idx_a, idx_b), line in centerlines.items():
-        name_a = poly_names.get(idx_a)
-        name_b = poly_names.get(idx_b)
-        if name_a is None or name_b is None:
-            continue
+        for (idx_a, idx_b), line in centerlines.items():
+            name_a = poly_names.get(idx_a)
+            name_b = poly_names.get(idx_b)
+            if name_a is None or name_b is None:
+                continue
 
-        assigned_vein = seg_to_vein.get((idx_a, idx_b))
-        if assigned_vein is None:
-            continue
+            assigned_vein = seg_to_vein.get((idx_a, idx_b))
+            if assigned_vein is None:
+                continue
 
-        # Check if this pair matches VEIN_BOUNDARIES for the assigned vein
-        expected_pairs = VEIN_BOUNDARIES.get(assigned_vein, [])
-        pair = (name_a, name_b)
-        pair_rev = (name_b, name_a)
-        if not any(pair == ep or pair_rev == ep for ep in expected_pairs):
-            msg = (
-                f"Boundary mismatch: segment ({idx_a},{idx_b}) = "
-                f"{name_a}↔{name_b} assigned to {assigned_vein}, "
-                f"but expected {expected_pairs}"
-            )
-            report.boundary_mismatches.append(msg)
-            report.warnings.append(msg)
+            expected_pairs = VEIN_BOUNDARIES.get(assigned_vein, [])
+            pair = (name_a, name_b)
+            pair_rev = (name_b, name_a)
+            if not any(pair == ep or pair_rev == ep for ep in expected_pairs):
+                msg = (
+                    f"Boundary mismatch: segment ({idx_a},{idx_b}) = "
+                    f"{name_a}↔{name_b} assigned to {assigned_vein}, "
+                    f"but expected {expected_pairs}"
+                )
+                report.boundary_mismatches.append(msg)
+                report.warnings.append(msg)
 
     # 2. Full VEIN_Y_ORDER check using line-based median Y and Y-extents
     prev_median_y = -float("inf")
@@ -2323,7 +2424,7 @@ def cross_validate(
         prev_extent = (y_min_norm, y_max_norm)
 
     # 2b. Crossvein connectivity: verify crossveins are near their expected longitudinals
-    cv_proximity_threshold = 50.0  # pixels
+    cv_proximity_threshold = um_to_px(CV_CONNECTIVITY_UM)
     for cv_name, (long_a, long_b) in CROSSVEIN_CONNECTIONS.items():
         if cv_name not in vein_map:
             continue
@@ -2378,8 +2479,14 @@ def identify_veins_and_regions(
     image_shape: tuple[int, int],
     wing_bbox: tuple[float, float, float, float],
     midline=None,
+    original_polygons: list[Polygon] | None = None,
 ) -> IdentificationResult:
-    """Identify veins and regions independently using geometry, then cross-validate."""
+    """Identify veins and regions independently using geometry, then cross-validate.
+
+    If original_polygons is provided, names them directly using spatial proximity
+    instead of Voronoi segment_keys, skipping the match_names_to_original_polygons
+    transfer step.
+    """
     result = IdentificationResult()
 
     if not centerlines:
@@ -2387,7 +2494,7 @@ def identify_veins_and_regions(
         return result
 
     # 3a. Find triple junctions
-    junctions = find_triple_junctions(centerlines, snap_radius=30.0)
+    junctions = find_triple_junctions(centerlines)
 
     # 3b. Merge segments at junctions
     paths, merge_decisions = merge_segments_at_junctions(centerlines, junctions)
@@ -2412,16 +2519,28 @@ def identify_veins_and_regions(
         for w in warns:
             logger.warning("Shape: %s — %s", vein_id, w)
 
+    # Decide which polygons to name: original annotations (spatial) or Voronoi (segment_keys)
+    if original_polygons is not None:
+        naming_polygons = original_polygons
+        spatial_pv = _build_poly_veins_spatial(naming_polygons, vein_map)
+    else:
+        naming_polygons = intervein_polygons
+        spatial_pv = None
+
     # 3e. Name regions from bounding veins
     poly_names = name_regions_from_veins(
-        intervein_polygons, vein_map, wing_bbox,
+        naming_polygons, vein_map, wing_bbox, poly_veins=spatial_pv,
     )
 
     # 3e''. Split merged polygons where pixel classifier merged regions
-    poly_names, intervein_polygons, split_infos = split_merged_polygons(
-        poly_names, intervein_polygons, vein_map, wing_bbox,
+    poly_names, naming_polygons, split_infos = split_merged_polygons(
+        poly_names, naming_polygons, vein_map, wing_bbox,
         image_shape=image_shape,
     )
+
+    # Rebuild spatial poly_veins after splits if any occurred
+    if spatial_pv is not None and split_infos:
+        spatial_pv = _build_poly_veins_spatial(naming_polygons, vein_map)
 
     # 3e'''. Post-split centerline extraction
     # For each split, extract the missing centerline between the two new pieces
@@ -2433,8 +2552,8 @@ def identify_veins_and_regions(
             continue
 
         new_line = extract_centerline_between_polygons(
-            intervein_polygons[si.orig_idx],
-            intervein_polygons[si.new_idx],
+            naming_polygons[si.orig_idx],
+            naming_polygons[si.new_idx],
             vein_polygons,
             image_shape,
         )
@@ -2463,7 +2582,8 @@ def identify_veins_and_regions(
 
     # 3f. Cross-validate
     validation = cross_validate(
-        vein_map, poly_names, centerlines, intervein_polygons, wing_bbox,
+        vein_map, poly_names, centerlines, naming_polygons, wing_bbox,
+        poly_veins=spatial_pv,
     )
     # Add shape warnings to validation report
     for vein_id, warns in shape_warnings.items():
@@ -2471,7 +2591,7 @@ def identify_veins_and_regions(
             validation.warnings.append(f"Shape/{vein_id}: {w}")
 
     result.poly_names = poly_names
-    result.polygons = intervein_polygons
+    result.polygons = naming_polygons
     result.validation_report = validation
     result.vein_map = vein_map
 
@@ -2510,323 +2630,7 @@ def identify_veins_and_regions(
     return result
 
 
-# ---------------------------------------------------------------------------
-# 3g'. Transfer Region Names to Original Polygons
-# ---------------------------------------------------------------------------
 
-
-def _find_separating_vein(
-    name_a: str,
-    name_b: str,
-    vein_map: dict[str, MergedPath],
-) -> Optional[LineString]:
-    """Find the vein LineString that separates two named regions."""
-    for vein_id, boundaries in VEIN_BOUNDARIES.items():
-        for ant, post in boundaries:
-            if {ant, post} == {name_a, name_b}:
-                if vein_id in vein_map and vein_map[vein_id].line is not None:
-                    return vein_map[vein_id].line
-    return None
-
-
-def match_names_to_original_polygons(
-    voronoi_polygons: list[Polygon],
-    voronoi_names: dict[int, str],
-    original_polygons: list[Polygon],
-    vein_map: dict[str, MergedPath],
-    wing_bbox: tuple[float, float, float, float],
-) -> tuple[dict[int, str], list[Polygon]]:
-    """Transfer region names from Voronoi polygons to original annotation polygons.
-
-    Uses greedy bipartite matching (highest overlap first) to ensure each name
-    is assigned to at most one original polygon.  Originals spanning two Voronoi
-    regions are split along the separating vein.
-
-    Returns (poly_names, polygons) using original shapes with transferred names.
-    """
-    from shapely.ops import split as shapely_split
-
-    result_polys: list[Polygon] = list(original_polygons)
-
-    # Build name → Voronoi polygon lookup (merge polygons with same name)
-    name_to_vpoly: dict[str, Polygon] = {}
-    for vi, vpoly in enumerate(voronoi_polygons):
-        if vi in voronoi_names and not vpoly.is_empty:
-            name = voronoi_names[vi]
-            if name in name_to_vpoly:
-                name_to_vpoly[name] = name_to_vpoly[name].union(vpoly)
-            else:
-                name_to_vpoly[name] = vpoly
-
-    available_names = set(name_to_vpoly.keys())
-
-    # --- Pass 1: Build overlap matrix ---
-    # overlap_matrix[oi] = [(name, overlap_area, frac_of_orig), ...]
-    overlap_matrix: dict[int, list[tuple[str, float, float]]] = {}
-    for oi, opoly in enumerate(original_polygons):
-        if opoly.is_empty:
-            continue
-        overlaps: list[tuple[str, float, float]] = []
-        for name, vpoly in name_to_vpoly.items():
-            try:
-                inter = opoly.intersection(vpoly)
-                area = inter.area
-            except Exception:
-                area = 0.0
-            if area > 0:
-                overlaps.append((name, area, area / opoly.area))
-        overlaps.sort(key=lambda x: x[1], reverse=True)
-        if overlaps:
-            overlap_matrix[oi] = overlaps
-
-    # --- Pass 2: Greedy one-to-one matching ---
-    # Build flat list of (overlap_area, orig_idx, name) sorted descending
-    candidates: list[tuple[float, int, str]] = []
-    for oi, overlaps in overlap_matrix.items():
-        for name, area, frac in overlaps:
-            candidates.append((area, oi, name))
-    candidates.sort(reverse=True)
-
-    result_names: dict[int, str] = {}
-    assigned_originals: set[int] = set()
-    assigned_names: set[str] = set()
-
-    for _area, oi, name in candidates:
-        if oi in assigned_originals or name in assigned_names:
-            continue
-        result_names[oi] = name
-        assigned_originals.add(oi)
-        assigned_names.add(name)
-
-    logger.info(
-        "Name transfer: %d/%d originals matched, %d/%d names used",
-        len(assigned_originals), len(original_polygons),
-        len(assigned_names), len(available_names),
-    )
-
-    # --- Pass 3: Split originals that span two unassigned Voronoi names ---
-    unassigned_names = available_names - assigned_names
-    if unassigned_names:
-        for oi in range(len(original_polygons)):
-            if oi in assigned_originals:
-                continue
-            if oi not in overlap_matrix:
-                continue
-
-            overlaps = overlap_matrix[oi]
-            # Find the two best overlaps with still-available names
-            avail_overlaps = [
-                (n, a, f) for n, a, f in overlaps if n not in assigned_names
-            ]
-            if not avail_overlaps:
-                continue
-
-            # Single available name → assign
-            if len(avail_overlaps) == 1:
-                name = avail_overlaps[0][0]
-                result_names[oi] = name
-                assigned_originals.add(oi)
-                assigned_names.add(name)
-                unassigned_names.discard(name)
-                continue
-
-            # Already assigned with a different name in pass 2? Check...
-            # This orig was unassigned, so try to split if two significant overlaps
-            first_name, first_area, first_frac = avail_overlaps[0]
-            second_name, second_area, second_frac = avail_overlaps[1]
-
-            # Just assign the best if second overlap is tiny
-            total = first_area + second_area
-            if total == 0:
-                continue
-            if second_area / total < 0.15:
-                result_names[oi] = first_name
-                assigned_originals.add(oi)
-                assigned_names.add(first_name)
-                unassigned_names.discard(first_name)
-                continue
-
-            # Attempt split
-            split_result = _split_original_polygon(
-                result_polys[oi], first_name, second_name,
-                name_to_vpoly, vein_map,
-            )
-            if split_result is None:
-                result_names[oi] = first_name
-                assigned_originals.add(oi)
-                assigned_names.add(first_name)
-                unassigned_names.discard(first_name)
-                continue
-
-            piece_a, name_a, piece_b, name_b = split_result
-            result_polys[oi] = piece_a
-            result_names[oi] = name_a
-            assigned_originals.add(oi)
-            assigned_names.add(name_a)
-            unassigned_names.discard(name_a)
-
-            new_idx = len(result_polys)
-            result_polys.append(piece_b)
-            result_names[new_idx] = name_b
-            assigned_names.add(name_b)
-            unassigned_names.discard(name_b)
-
-            logger.info(
-                "Original P%d split → %s (%.0f px²) + P%d:%s (%.0f px²)",
-                oi, name_a, piece_a.area, new_idx, name_b, piece_b.area,
-            )
-
-    # --- Pass 4: Handle already-assigned originals that span a missing name ---
-    # An assigned original might be large enough to cover its own region plus
-    # an unassigned one.  Check for this and split if beneficial.
-    if unassigned_names:
-        for oi in list(assigned_originals):
-            if not unassigned_names:
-                break
-            if oi not in overlap_matrix:
-                continue
-
-            overlaps = overlap_matrix[oi]
-            current_name = result_names[oi]
-
-            for name, area, frac in overlaps:
-                if name == current_name or name not in unassigned_names:
-                    continue
-                if frac < 0.10:
-                    continue
-
-                split_result = _split_original_polygon(
-                    result_polys[oi], current_name, name,
-                    name_to_vpoly, vein_map,
-                )
-                if split_result is None:
-                    continue
-
-                piece_a, name_a, piece_b, name_b = split_result
-                result_polys[oi] = piece_a
-                result_names[oi] = name_a
-
-                new_idx = len(result_polys)
-                result_polys.append(piece_b)
-                result_names[new_idx] = name_b
-                assigned_names.add(name_b)
-                unassigned_names.discard(name_b)
-
-                logger.info(
-                    "Original P%d split (pass 4) → %s (%.0f px²) + P%d:%s (%.0f px²)",
-                    oi, name_a, piece_a.area, new_idx, name_b, piece_b.area,
-                )
-                break  # only one split per original
-
-    # Log unmatched
-    for oi in range(len(original_polygons)):
-        if oi not in assigned_originals and oi not in result_names:
-            logger.warning(
-                "Original P%d (area=%.0f) has no name after transfer",
-                oi, original_polygons[oi].area,
-            )
-
-    return result_names, result_polys
-
-
-def _split_original_polygon(
-    opoly: Polygon,
-    name_a: str,
-    name_b: str,
-    name_to_vpoly: dict[str, Polygon],
-    vein_map: dict[str, MergedPath],
-) -> Optional[tuple[Polygon, str, Polygon, str]]:
-    """Split an original polygon into two pieces using Voronoi region intersection.
-
-    Primary method: intersect the original polygon with each Voronoi region to
-    produce two pieces.  Fallback: split along the separating vein LineString.
-
-    Returns (piece_a, name_a, piece_b, name_b) or None on failure.
-    """
-    min_frac = 0.05  # minimum piece size as fraction of original
-
-    # --- Primary: Voronoi-based intersection ---
-    vpoly_a = name_to_vpoly.get(name_a)
-    vpoly_b = name_to_vpoly.get(name_b)
-
-    if vpoly_a is not None and vpoly_b is not None:
-        try:
-            piece_a = opoly.intersection(vpoly_a)
-            piece_b = opoly.intersection(vpoly_b)
-            # Extract largest polygon from potential MultiPolygon results
-            piece_a = _largest_polygon(piece_a)
-            piece_b = _largest_polygon(piece_b)
-            if (piece_a is not None and piece_b is not None
-                    and piece_a.area > opoly.area * min_frac
-                    and piece_b.area > opoly.area * min_frac):
-                return piece_a, name_a, piece_b, name_b
-        except Exception:
-            pass
-
-    # --- Fallback: split along separating vein LineString ---
-    from shapely.ops import split as shapely_split
-
-    sep_line = _find_separating_vein(name_a, name_b, vein_map)
-    if sep_line is None:
-        return None
-
-    # Extend the vein line to ensure it fully crosses the polygon
-    coords = list(sep_line.coords)
-    dx = coords[-1][0] - coords[0][0]
-    dy = coords[-1][1] - coords[0][1]
-    length = math.sqrt(dx * dx + dy * dy)
-    if length > 0:
-        ext = 50.0
-        ux, uy = dx / length, dy / length
-        extended_coords = [
-            (coords[0][0] - ux * ext, coords[0][1] - uy * ext),
-        ] + coords + [
-            (coords[-1][0] + ux * ext, coords[-1][1] + uy * ext),
-        ]
-        split_line = LineString(extended_coords)
-    else:
-        split_line = sep_line
-
-    try:
-        pieces = shapely_split(opoly, split_line)
-        geoms = [g for g in pieces.geoms if g.area > opoly.area * min_frac]
-    except Exception:
-        geoms = []
-
-    if len(geoms) < 2:
-        return None
-
-    geoms.sort(key=lambda g: g.area, reverse=True)
-
-    # Assign each piece to the Voronoi region it overlaps most
-    if vpoly_a is not None:
-        try:
-            ov0 = geoms[0].intersection(vpoly_a).area
-            ov1 = geoms[1].intersection(vpoly_a).area
-        except Exception:
-            ov0, ov1 = geoms[0].area, 0
-        if ov0 >= ov1:
-            return geoms[0], name_a, geoms[1], name_b
-        else:
-            return geoms[0], name_b, geoms[1], name_a
-    return geoms[0], name_a, geoms[1], name_b
-
-
-def _largest_polygon(geom) -> Optional[Polygon]:
-    """Extract the largest Polygon from a geometry (handles MultiPolygon)."""
-    if geom is None or geom.is_empty:
-        return None
-    if geom.geom_type == 'Polygon':
-        return geom if geom.is_valid and geom.area > 0 else None
-    if geom.geom_type == 'MultiPolygon':
-        polys = [g for g in geom.geoms if g.is_valid and g.area > 0]
-        return max(polys, key=lambda g: g.area) if polys else None
-    # GeometryCollection — extract polygons
-    if hasattr(geom, 'geoms'):
-        polys = [g for g in geom.geoms
-                 if g.geom_type == 'Polygon' and g.is_valid and g.area > 0]
-        return max(polys, key=lambda g: g.area) if polys else None
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2962,7 +2766,7 @@ def validate_regions_against_ground_truth(
 def validate_veins_against_ground_truth(
     assignments: list[VeinAssignment],
     expected_geojson_path: Path,
-    tolerance_px: float = 25.0,
+    tolerance_px: float | None = None,
     n_samples: int = 200,
 ) -> VeinValidationReport:
     """Compare predicted vein centerlines against ground-truth skeleton lines.
@@ -2976,6 +2780,8 @@ def validate_veins_against_ground_truth(
     - P95 lateral deviation: 95th percentile of those distances
     - Coverage ratio: fraction of n_samples GT points within tolerance_px of predicted
     """
+    if tolerance_px is None:
+        tolerance_px = um_to_px(GT_TOLERANCE_UM)
     report = VeinValidationReport()
 
     # Load GT skeleton

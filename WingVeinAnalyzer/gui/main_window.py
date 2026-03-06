@@ -12,6 +12,7 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -238,6 +239,23 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        # Scale (µm/px) input
+        scale_label = QLabel("  \u00b5m/px: ")
+        scale_label.setFont(QFont("Menlo", 11))
+        toolbar.addWidget(scale_label)
+
+        self._scale_spin = QDoubleSpinBox()
+        self._scale_spin.setRange(0.001, 100.0)
+        self._scale_spin.setDecimals(3)
+        self._scale_spin.setValue(0.483)
+        self._scale_spin.setSingleStep(0.01)
+        self._scale_spin.setFixedWidth(90)
+        self._scale_spin.setToolTip("Micrometers per pixel — used for all distance/area thresholds and output calibration")
+        self._scale_spin.valueChanged.connect(self._on_scale_changed)
+        toolbar.addWidget(self._scale_spin)
+
+        toolbar.addSeparator()
+
         # Batch
         self._batch_action = QAction("Run All (Batch)", self)
         self._batch_action.triggered.connect(self._on_batch)
@@ -304,6 +322,13 @@ class MainWindow(QMainWindow):
         if self._current_step == NUM_STEPS - 1 and self._current_pair is not None:
             self._runner.invalidate_from(NUM_STEPS - 1)
             self._run_step_async(NUM_STEPS - 1)
+
+    def _on_scale_changed(self, value: float) -> None:
+        """Handle µm/px scale change."""
+        self._runner.um_per_px = value
+        # Invalidate all steps since scale affects all distance thresholds
+        if self._current_pair is not None:
+            self._runner.invalidate_from(0)
 
     def _update_nav_buttons(self) -> None:
         """Enable/disable navigation based on current state."""
@@ -569,5 +594,9 @@ class MainWindow(QMainWindow):
             self._file_pairs = pairs
 
         from WingVeinAnalyzer.gui.batch_dialog import BatchDialog
-        dialog = BatchDialog(self._file_pairs, self, smooth_sigma=self._runner.smooth_sigma)
+        dialog = BatchDialog(
+            self._file_pairs, self,
+            smooth_sigma=self._runner.smooth_sigma,
+            um_per_px=self._runner.um_per_px,
+        )
         dialog.exec_()

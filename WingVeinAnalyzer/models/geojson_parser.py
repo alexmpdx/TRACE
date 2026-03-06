@@ -10,6 +10,13 @@ from typing import Optional
 import numpy as np
 from shapely.geometry import LineString, MultiPolygon, Polygon, shape
 
+from WingVeinAnalyzer.models.vein_map import (
+    um_to_px,
+    MIN_POLY_WIDTH_UM,
+    MIN_CROSS_WIDTH_UM,
+    CUT_EXTENSION_UM,
+)
+
 
 @dataclass
 class ParsedVein:
@@ -144,7 +151,7 @@ def _try_split_at_constriction(
     min_x, min_y, max_x, max_y = bounds
     width = max_x - min_x
 
-    if width < 100:
+    if width < um_to_px(MIN_POLY_WIDTH_UM):
         return [poly]
 
     # Sweep vertical cross-sections
@@ -164,7 +171,7 @@ def _try_split_at_constriction(
         return [poly]
 
     max_cross_width = max(w for _, w in cross_widths)
-    if max_cross_width < 20:
+    if max_cross_width < um_to_px(MIN_CROSS_WIDTH_UM):
         return [poly]
 
     # Find narrowest point (skip outer 20% on each side)
@@ -179,7 +186,8 @@ def _try_split_at_constriction(
         return [poly]
 
     # Split at narrowest X using a thin vertical cut
-    cut_line = LineString([(narrowest_x, min_y - 10), (narrowest_x, max_y + 10)])
+    _cext = um_to_px(CUT_EXTENSION_UM)
+    cut_line = LineString([(narrowest_x, min_y - _cext), (narrowest_x, max_y + _cext)])
     try:
         from shapely.ops import split
         parts = split(poly, cut_line)

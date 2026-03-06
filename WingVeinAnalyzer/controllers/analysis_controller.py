@@ -30,7 +30,6 @@ from WingVeinAnalyzer.models.vein_labeler import (
 from WingVeinAnalyzer.models.vein_identifier import (
     VeinValidationReport,
     identify_veins_and_regions,
-    match_names_to_original_polygons,
     validate_regions_against_ground_truth,
     validate_veins_against_ground_truth,
 )
@@ -47,6 +46,18 @@ from WingVeinAnalyzer.models.wing_geometry import (
     detect_hinge_landmarks,
     partition_intervein_spaces,
     remove_hinge,
+)
+from WingVeinAnalyzer.models.vein_map import (
+    set_scale,
+    um_to_px,
+    GRAPH_SNAP_VEINS_UM,
+    MAX_GAP_UM,
+    SMOOTH_SPACING_UM,
+    SMOOTH_SPACING_FINE_UM,
+    L1_MIN_GAP_UM,
+    L1_MARGIN_UM,
+    L1_MIN_LENGTH_UM,
+    L1_SIMPLIFY_UM,
 )
 from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
@@ -75,11 +86,16 @@ def run_pipeline(
     geojson_path: Path,
     output_dir: Optional[Path] = None,
     microns_per_pixel: Optional[float] = None,
-    snap_tolerance: float = 50.0,
-    max_gap: float = 80.0,
+    snap_tolerance: float | None = None,
+    max_gap: float | None = None,
     smooth_sigma: float = 3.0,
 ) -> PipelineResult:
     """Run the full vein analysis pipeline on a TIFF image + GeoJSON annotations."""
+    set_scale(microns_per_pixel)
+    if snap_tolerance is None:
+        snap_tolerance = um_to_px(GRAPH_SNAP_VEINS_UM)
+    if max_gap is None:
+        max_gap = um_to_px(MAX_GAP_UM)
     result = PipelineResult()
 
     # Setup output directory
@@ -192,6 +208,7 @@ def _run_polygon_pipeline(
         id_result = identify_veins_and_regions(
             centerlines, polygons, annotations.vein_polygons,
             image.shape[:2], wing_bbox, midline=midline,
+            original_polygons=list(annotations.intervein_polygons),
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -199,14 +216,6 @@ def _run_polygon_pipeline(
             polygons = id_result.polygons  # may have been updated by splitting
         for w in id_result.validation_report.warnings:
             logger.warning("Validation: %s", w)
-
-        # Transfer names from Voronoi polygons to original annotation polygons
-        if annotations.intervein_polygons and id_result.vein_map:
-            poly_names, polygons = match_names_to_original_polygons(
-                polygons, poly_names,
-                list(annotations.intervein_polygons),
-                id_result.vein_map, wing_bbox,
-            )
 
         # L1 recovery: when no costal cell exists, the Voronoi approach can't
         # find L1 (no costal↔marginal boundary).  Extract it from the anterior
@@ -442,9 +451,9 @@ def _smooth_vein_assignments(
         if a.line is None:
             continue
         if a.vein_id in _CROSSVEIN_IDS:
-            a.line = smooth_line(a.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=3.0)
+            a.line = smooth_line(a.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=um_to_px(SMOOTH_SPACING_FINE_UM))
         else:
-            a.line = smooth_line(a.line, sigma=sigma, sample_spacing=5.0)
+            a.line = smooth_line(a.line, sigma=sigma, sample_spacing=um_to_px(SMOOTH_SPACING_UM))
         a.length_px = a.line.length
 
 
@@ -553,8 +562,8 @@ def _recover_l1_from_marginal_cell(
         col_start, col_end = max(int(x_limit), 0), w
 
     l1_trace: list[tuple[float, float]] = []
-    min_gap_px = 5  # minimum gap to consider as intervein space
-    margin = 30  # must be anterior to L2 by this margin
+    min_gap_px = um_to_px(L1_MIN_GAP_UM)  # minimum gap to consider as intervein space
+    margin = int(um_to_px(L1_MARGIN_UM))  # must be anterior to L2 by this margin
     for col in range(col_start, col_end):
         if l2_y_at_col[col] <= 0:
             continue
@@ -579,7 +588,7 @@ def _recover_l1_from_marginal_cell(
         logger.debug("L1 recovery: traced too few columns (%d)", len(l1_trace))
         return
 
-    l1_line = LineString(l1_trace).simplify(10.0)
+    l1_line = LineString(l1_trace).simplify(um_to_px(L1_SIMPLIFY_UM))
 
     # --- Trim to max L1 length, keeping the distal portion ---
     # L1 runs from the hinge to the subcostal break.  The trace may
@@ -592,7 +601,7 @@ def _recover_l1_from_marginal_cell(
         l1_line = substring(l1_line, l1_line.length - max_l1, l1_line.length)
     new_length = l1_line.length
 
-    if new_length < 50:
+    if new_length < um_to_px(L1_MIN_LENGTH_UM):
         logger.debug("L1 recovery: simplified line too short (%.0fpx)", new_length)
         return
 

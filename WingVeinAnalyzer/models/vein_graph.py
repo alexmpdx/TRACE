@@ -9,6 +9,15 @@ import networkx as nx
 import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 
+from WingVeinAnalyzer.models.vein_map import (
+    um_to_px,
+    MAX_GAP_UM,
+    SNAP_RADIUS_UM,
+    MIN_SEGMENT_LENGTH_UM,
+    GRAPH_SNAP_VEINS_UM,
+    SIMPLIFY_UM,
+)
+
 
 @dataclass
 class VeinNode:
@@ -34,10 +43,12 @@ class VeinEdge:
 
 def build_graph_from_polygons(
     polygons: list[Polygon],
-    max_gap: float = 80.0,
+    max_gap: float | None = None,
     num_samples: int = 800,
 ) -> tuple[nx.Graph, list[VeinEdge]]:
     """Build a vein graph by extracting midlines between adjacent polygon pairs."""
+    if max_gap is None:
+        max_gap = um_to_px(MAX_GAP_UM)
     n = len(polygons)
     edges: list[VeinEdge] = []
     all_midlines: list[tuple[int, int, LineString]] = []
@@ -50,13 +61,13 @@ def build_graph_from_polygons(
             midline = _extract_midline(
                 polygons[i], polygons[j], max_gap=max_gap, num_samples=num_samples
             )
-            if midline is not None and midline.length > 10:
+            if midline is not None and midline.length > um_to_px(MIN_SEGMENT_LENGTH_UM):
                 all_midlines.append((i, j, midline))
 
     graph = nx.Graph()
     node_coords: list[tuple[float, float]] = []
     node_map: dict[tuple[float, float], int] = {}
-    snap_tol = 30.0
+    snap_tol = um_to_px(SNAP_RADIUS_UM)
 
     def _get_or_create_node(x: float, y: float) -> int:
         for (nx_, ny_), nid in node_map.items():
@@ -103,9 +114,11 @@ def build_graph_from_polygons(
 
 def build_graph_from_veins(
     veins: list,
-    snap_tolerance: float = 50.0,
+    snap_tolerance: float | None = None,
 ) -> tuple[nx.Graph, dict[int, VeinNode]]:
     """Build a vein graph from pre-traced vein LineStrings."""
+    if snap_tolerance is None:
+        snap_tolerance = um_to_px(GRAPH_SNAP_VEINS_UM)
     graph = nx.Graph()
     nodes: dict[int, VeinNode] = {}
     junction_points: list[tuple[float, float]] = []
@@ -184,10 +197,12 @@ def build_graph_from_veins(
 def _extract_midline(
     poly_a: Polygon,
     poly_b: Polygon,
-    max_gap: float = 80.0,
+    max_gap: float | None = None,
     num_samples: int = 800,
 ) -> Optional[LineString]:
     """Extract the midline between facing boundary segments of two polygons."""
+    if max_gap is None:
+        max_gap = um_to_px(MAX_GAP_UM)
     ring_a = poly_a.exterior
     ring_b = poly_b.exterior
     min_dist = poly_a.distance(poly_b)
@@ -216,4 +231,4 @@ def _extract_midline(
         return None
 
     line = LineString(filtered)
-    return line.simplify(3.0)
+    return line.simplify(um_to_px(SIMPLIFY_UM))

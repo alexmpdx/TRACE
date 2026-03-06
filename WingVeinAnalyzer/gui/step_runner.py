@@ -24,7 +24,6 @@ from WingVeinAnalyzer.models.vein_identifier import (
     ValidationReport,
     find_triple_junctions,
     identify_veins_and_regions,
-    match_names_to_original_polygons,
     merge_segments_at_junctions,
     classify_merged_paths,
     name_regions_from_veins,
@@ -49,6 +48,13 @@ from WingVeinAnalyzer.models.wing_geometry import (
     detect_hinge_landmarks,
     partition_intervein_spaces,
     remove_hinge,
+)
+from WingVeinAnalyzer.models.vein_map import (
+    set_scale,
+    um_to_px,
+    SNAP_RADIUS_UM,
+    SMOOTH_SPACING_UM,
+    SMOOTH_SPACING_FINE_UM,
 )
 from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
@@ -119,6 +125,7 @@ class StepRunner:
         self._geojson_path: Optional[Path] = None
         self._last_completed: int = -1
         self._smooth_sigma: float = 3.0
+        self._um_per_px: float = 0.483
 
     @property
     def image_path(self) -> Optional[Path]:
@@ -139,6 +146,14 @@ class StepRunner:
     @smooth_sigma.setter
     def smooth_sigma(self, value: float) -> None:
         self._smooth_sigma = value
+
+    @property
+    def um_per_px(self) -> float:
+        return self._um_per_px
+
+    @um_per_px.setter
+    def um_per_px(self, value: float) -> None:
+        self._um_per_px = value
 
     def load_inputs(self, image_path: Path, geojson_path: Path) -> None:
         """Reset and set new input files."""
@@ -221,6 +236,7 @@ class StepRunner:
 
     def _step_load(self, prev: StepState) -> StepState:
         """Step 0: Load image and parse GeoJSON."""
+        set_scale(self._um_per_px if self._um_per_px else None)
         state = StepState()
 
         image = cv2.imread(str(self._image_path))
@@ -366,6 +382,7 @@ class StepRunner:
             state.centerlines, state.polygons, state.vein_polygons or [],
             state.image.shape[:2], state.wing_bbox,
             midline=state.wing_midline,
+            original_polygons=list(state.original_polygons) if state.original_polygons else None,
         )
         state.id_result = id_result
         state.assignments = list(id_result.assignments)
@@ -375,7 +392,7 @@ class StepRunner:
 
         # Extract sub-results for visualization steps
         # Re-run sub-steps to capture intermediate data
-        junctions = find_triple_junctions(state.centerlines, snap_radius=30.0)
+        junctions = find_triple_junctions(state.centerlines, snap_radius=um_to_px(SNAP_RADIUS_UM))
         state.junctions = junctions
 
         merged_paths, _merge_decisions = merge_segments_at_junctions(state.centerlines, junctions)
@@ -383,16 +400,6 @@ class StepRunner:
 
         # Use the real vein_map from identification (preserves segment_keys)
         state.vein_map = dict(id_result.vein_map) if id_result.vein_map else {}
-
-        # Transfer names from Voronoi polygons to original annotation polygons
-        if state.original_polygons is not None and state.vein_map:
-            orig_names, orig_polys = match_names_to_original_polygons(
-                state.polygons, state.poly_names,
-                list(state.original_polygons),
-                state.vein_map, state.wing_bbox,
-            )
-            state.polygons = orig_polys
-            state.poly_names = orig_names
 
         state.params_used = {"snap_radius": "30 px"}
         return state
@@ -527,8 +534,8 @@ class StepRunner:
             )
             state.params_used = {"status": "Absent (no costal region)"}
 
-        # Apply scale calibration (pixels only since GUI doesn't take scale input)
-        compile_results(state.assignments, None)
+        # Apply scale calibration
+        compile_results(state.assignments, self._um_per_px or None)
 
         return state
 
@@ -599,7 +606,7 @@ class StepRunner:
             intervein_regions=state.intervein_regions,
             anterior_compartment=state.anterior_compartment,
             posterior_compartment=state.posterior_compartment,
-            microns_per_pixel=None,
+            microns_per_pixel=self._um_per_px or None,
         )
         state.measurements = measurements
         state.params_used = {
@@ -621,9 +628,9 @@ class StepRunner:
             if a.line is not None and sigma > 0:
                 sa = copy(a)
                 if sa.vein_id in ("ACV", "PCV"):
-                    sa.line = smooth_line(sa.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=3.0)
+                    sa.line = smooth_line(sa.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=um_to_px(SMOOTH_SPACING_FINE_UM))
                 else:
-                    sa.line = smooth_line(sa.line, sigma=sigma, sample_spacing=5.0)
+                    sa.line = smooth_line(sa.line, sigma=sigma, sample_spacing=um_to_px(SMOOTH_SPACING_UM))
                 smoothed_assignments.append(sa)
             else:
                 smoothed_assignments.append(a)

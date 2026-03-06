@@ -11,6 +11,20 @@ from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, P
 from shapely.ops import linemerge, split, unary_union
 from scipy.ndimage import gaussian_filter1d
 
+from WingVeinAnalyzer.models.vein_map import (
+    um_to_px,
+    BUFFER_OUTLINE_UM,
+    BUFFER_VEIN_UM,
+    BUFFER_SMOOTH_UM,
+    MIDLINE_SPACING_UM,
+    MIDLINE_SIGMA_UM,
+    VLINE_EXTENSION_UM,
+    MIN_HALF_HEIGHT_UM,
+    HINGE_EXTENSION_UM,
+    COMPARTMENT_SIMPLIFY_UM,
+    COMPARTMENT_EXTENSION_UM,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +48,7 @@ class HingeLandmarks:
 
 def build_wing_outline(
     polygons: list[Polygon],
-    buffer_dist: float = 20.0,
+    buffer_dist: float | None = None,
     vein_polygons: Optional[list[Polygon]] = None,
 ) -> WingOutline:
     """Build a wing outline from the union of intervein + vein polygons.
@@ -44,6 +58,8 @@ def build_wing_outline(
     provided, they are included with a smaller buffer to extend the
     outline to the full wing tip where vein tissue exists.
     """
+    if buffer_dist is None:
+        buffer_dist = um_to_px(BUFFER_OUTLINE_UM)
     if not polygons:
         return WingOutline(polygon=Polygon())
 
@@ -52,7 +68,7 @@ def build_wing_outline(
     # Include vein polygons with smaller buffer to capture distal wing tip
     if vein_polygons:
         for vp in vein_polygons:
-            buffered.append(vp.buffer(5.0))
+            buffered.append(vp.buffer(um_to_px(BUFFER_VEIN_UM)))
 
     union = unary_union(buffered)
 
@@ -63,7 +79,8 @@ def build_wing_outline(
         outline_poly = union
 
     # Smooth the outline
-    outline_poly = outline_poly.buffer(5).buffer(-5)
+    _sb = um_to_px(BUFFER_SMOOTH_UM)
+    outline_poly = outline_poly.buffer(_sb).buffer(-_sb)
 
     return WingOutline(polygon=outline_poly)
 
@@ -79,8 +96,8 @@ class WingMidline:
 def compute_wing_midline(
     polygons: list[Polygon],
     wing_bbox: tuple[float, float, float, float],
-    sample_spacing: float = 5.0,
-    smooth_sigma: float = 30.0,
+    sample_spacing: float | None = None,
+    smooth_sigma: float | None = None,
 ) -> Optional[WingMidline]:
     """Compute the anterior-posterior midline of the wing.
 
@@ -89,11 +106,15 @@ def compute_wing_midline(
     smoothed LineString and an array of local half-heights (for normalizing
     signed distances during vein scoring).
     """
+    if sample_spacing is None:
+        sample_spacing = um_to_px(MIDLINE_SPACING_UM)
+    if smooth_sigma is None:
+        smooth_sigma = um_to_px(MIDLINE_SIGMA_UM)
     if not polygons:
         return None
 
     # Build wing shape from buffered polygon union (same as build_wing_outline)
-    buffered = [p.buffer(20.0) for p in polygons]
+    buffered = [p.buffer(um_to_px(BUFFER_OUTLINE_UM)) for p in polygons]
     union = unary_union(buffered)
     if isinstance(union, MultiPolygon):
         wing_shape = max(union.geoms, key=lambda p: p.area)
@@ -110,7 +131,8 @@ def compute_wing_midline(
 
     x = min_x
     while x <= max_x:
-        vline = LineString([(x, min_y - 100), (x, max_y + 100)])
+        _vext = um_to_px(VLINE_EXTENSION_UM)
+        vline = LineString([(x, min_y - _vext), (x, max_y + _vext)])
         inter = wing_shape.intersection(vline)
 
         if inter.is_empty:
@@ -142,7 +164,7 @@ def compute_wing_midline(
         mid_y = (y_min_local + y_max_local) / 2.0
         half_h = (y_max_local - y_min_local) / 2.0
 
-        if half_h < 5.0:  # skip degenerate slices
+        if half_h < um_to_px(MIN_HALF_HEIGHT_UM):  # skip degenerate slices
             x += sample_spacing
             continue
 
@@ -339,8 +361,9 @@ def remove_hinge(
     direction = p2 - p1
     direction = direction / (np.linalg.norm(direction) + 1e-9)
 
-    extended_start = p1 - direction * 100
-    extended_end = p2 + direction * 100
+    _hext = um_to_px(HINGE_EXTENSION_UM)
+    extended_start = p1 - direction * _hext
+    extended_end = p2 + direction * _hext
     cut_line = LineString([extended_start.tolist(), extended_end.tolist()])
 
     try:
@@ -416,13 +439,13 @@ def compute_compartments(
         return None, None
 
     # Simplify the L4 line to remove noise, then extend endpoints
-    simplified = l4_line.simplify(10.0)
+    simplified = l4_line.simplify(um_to_px(COMPARTMENT_SIMPLIFY_UM))
     s_coords = np.array(simplified.coords)
     if len(s_coords) < 2:
         return None, None
 
     # Extend the line endpoints along their local direction
-    ext = 500  # extend well beyond wing boundary
+    ext = um_to_px(COMPARTMENT_EXTENSION_UM)  # extend well beyond wing boundary
 
     # Start direction (from 2nd point to 1st point)
     start_dir = s_coords[0] - s_coords[min(1, len(s_coords) - 1)]

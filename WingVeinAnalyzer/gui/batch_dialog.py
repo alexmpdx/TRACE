@@ -11,6 +11,7 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QCheckBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -81,11 +82,12 @@ class BatchWorker(QThread):
     file_done = pyqtSignal(int, bool, str)  # file index, success, message
     all_done = pyqtSignal()
 
-    def __init__(self, pairs: list[FilePair], output_dir: Path, smooth_sigma: float = 3.0, parent=None):
+    def __init__(self, pairs: list[FilePair], output_dir: Path, smooth_sigma: float = 3.0, um_per_px: float = 0.483, parent=None):
         super().__init__(parent)
         self._pairs = pairs
         self._output_dir = output_dir
         self._smooth_sigma = smooth_sigma
+        self._um_per_px = um_per_px
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -105,6 +107,7 @@ class BatchWorker(QThread):
                     image_path=pair.image_path,
                     geojson_path=pair.geojson_path,
                     output_dir=self._output_dir / pair.display_name,
+                    microns_per_pixel=self._um_per_px,
                     smooth_sigma=self._smooth_sigma,
                 )
                 self.file_done.emit(i, True, f"{pair.display_name}: OK")
@@ -120,15 +123,30 @@ class BatchWorker(QThread):
 class BatchDialog(QDialog):
     """Batch processing dialog with file checkboxes and progress."""
 
-    def __init__(self, pairs: list[FilePair], parent=None, smooth_sigma: float = 3.0):
+    def __init__(self, pairs: list[FilePair], parent=None, smooth_sigma: float = 3.0, um_per_px: float = 0.483):
         super().__init__(parent)
         self.setWindowTitle("Batch Processing")
         self.resize(700, 500)
         self._pairs = pairs
         self._smooth_sigma = smooth_sigma
+        self._um_per_px = um_per_px
         self._worker: Optional[BatchWorker] = None
 
         layout = QVBoxLayout(self)
+
+        # Scale input
+        scale_layout = QHBoxLayout()
+        scale_layout.addWidget(QLabel("\u00b5m/px:"))
+        self._scale_spin = QDoubleSpinBox()
+        self._scale_spin.setRange(0.001, 100.0)
+        self._scale_spin.setDecimals(3)
+        self._scale_spin.setValue(um_per_px)
+        self._scale_spin.setSingleStep(0.01)
+        self._scale_spin.setFixedWidth(90)
+        self._scale_spin.setToolTip("Micrometers per pixel")
+        scale_layout.addWidget(self._scale_spin)
+        scale_layout.addStretch()
+        layout.addLayout(scale_layout)
 
         # File list with checkboxes
         layout.addWidget(QLabel("Files to process:"))
@@ -204,7 +222,7 @@ class BatchDialog(QDialog):
         for cb in self._checkboxes:
             cb.setEnabled(False)
 
-        self._worker = BatchWorker(selected, output_dir, self._smooth_sigma, self)
+        self._worker = BatchWorker(selected, output_dir, self._smooth_sigma, self._scale_spin.value(), self)
         self._worker.progress.connect(self._on_progress)
         self._worker.file_done.connect(self._on_file_done)
         self._worker.all_done.connect(self._on_all_done)

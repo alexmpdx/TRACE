@@ -12,6 +12,31 @@ from scipy import ndimage
 from shapely.geometry import LineString, MultiPoint, Polygon
 from shapely.ops import unary_union
 
+from WingVeinAnalyzer.models.vein_map import (
+    um_to_px,
+    um2_to_px2,
+    MIN_SEED_AREA_UM2,
+    MIN_SEGMENT_LENGTH_UM,
+    BRIDGE_THRESHOLD_UM,
+    MIN_CENTERLINE_EXTRACT_UM,
+    PAD_CENTERLINE_UM,
+    MIN_POLY_AREA_UM2,
+    MIN_EDGE_LENGTH_UM,
+    MAX_EDGE_LENGTH_UM,
+    MAX_BAND_WIDTH_UM,
+    EDGE_PROXIMITY_UM,
+    MIN_ANT_BOUNDARY_UM,
+    SIMPLIFY_UM,
+    SIMPLIFY_DARKBAND_UM,
+    PRE_VORONOI_EROSION_UM,
+    PAD_EROSION_UM,
+    PAD_RIDGE_UM,
+    DARK_BAND_SIZE_UM,
+    MIN_DARK_BAND_HALF_UM,
+    FIND_POLY_BUFFER_UM,
+    MIN_SPLIT_BUFFER_UM,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +55,7 @@ def extract_veins_from_mask(
     vein_polygons: list[Polygon],
     image_shape: tuple[int, int],
     closing_kernel_size: int = 11,
-    min_seed_area: int = 10000,
+    min_seed_area: int | None = None,
     intervein_polygons: list[Polygon] | None = None,
 ) -> VoronoiResult:
     """Extract vein centerlines using Voronoi partition of vein mask.
@@ -57,6 +82,8 @@ def extract_veins_from_mask(
         centerlines, voronoi_polygons, nearest_labels, vein_mask,
         hull_mask, seed_labels.
     """
+    if min_seed_area is None:
+        min_seed_area = int(um2_to_px2(MIN_SEED_AREA_UM2))
     h, w = image_shape
 
     # 1. Rasterize vein mask to binary
@@ -160,14 +187,14 @@ def extract_veins_from_mask(
             continue
 
         line = _trace_pixels_to_line(pixels)
-        if line is not None and line.length > 10:
+        if line is not None and line.length > um_to_px(MIN_SEGMENT_LENGTH_UM):
             pair = (min(idx_a, idx_b), max(idx_a, idx_b))
             centerlines[pair] = line
 
     logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
 
     # 8. Bridge dangling endpoints
-    centerlines = bridge_dangling_endpoints(centerlines, bridge_threshold=30.0)
+    centerlines = bridge_dangling_endpoints(centerlines)
 
     # 9. Vectorize Voronoi regions into polygons
     voronoi_polygons = _vectorize_voronoi_regions(
@@ -186,7 +213,7 @@ def extract_veins_from_mask(
 
 def bridge_dangling_endpoints(
     centerlines: dict[tuple[int, int], LineString],
-    bridge_threshold: float = 30.0,
+    bridge_threshold: float | None = None,
 ) -> dict[tuple[int, int], LineString]:
     """Bridge dangling endpoints by extending the shorter segment.
 
@@ -195,6 +222,8 @@ def bridge_dangling_endpoints(
     endpoint finds the nearest dangling endpoint from a different segment
     within bridge_threshold.  Extends the shorter segment to close the gap.
     """
+    if bridge_threshold is None:
+        bridge_threshold = um_to_px(BRIDGE_THRESHOLD_UM)
     if not centerlines:
         return centerlines
 
@@ -294,7 +323,7 @@ def _vectorize_voronoi_regions(
             coords = [(float(pt[0][0]), float(pt[0][1])) for pt in largest]
             if len(coords) >= 4:
                 p = Polygon(coords)
-                if p.is_valid and p.area > 100:
+                if p.is_valid and p.area > um2_to_px2(MIN_POLY_AREA_UM2):
                     polygons.append(p)
                     continue
         # Placeholder for invalid/empty regions
@@ -322,7 +351,7 @@ def extract_centerline_between_polygons(
     poly_b: Polygon,
     vein_polygons: list[Polygon],
     image_shape: tuple[int, int],
-    min_length: float = 50.0,
+    min_length: float | None = None,
 ) -> Optional[LineString]:
     """Extract a centerline between two adjacent polygons via local Voronoi partition.
 
@@ -333,8 +362,10 @@ def extract_centerline_between_polygons(
     Works in a local bounding box (poly_a ∪ poly_b + padding) for efficiency.
     Returns a LineString in global image coordinates, or None if too short.
     """
+    if min_length is None:
+        min_length = um_to_px(MIN_CENTERLINE_EXTRACT_UM)
     h, w = image_shape
-    pad = 20
+    pad = int(um_to_px(PAD_CENTERLINE_UM))
 
     # 1. Bounding box of poly_a ∪ poly_b + padding, clipped to image bounds
     combined = unary_union([poly_a, poly_b])
@@ -500,7 +531,7 @@ def extract_anterior_boundary(
     pixels = list(zip(skel_ys.tolist(), skel_xs.tolist()))
     line = _trace_pixels_to_line(pixels)
 
-    if line is None or line.length < 50:
+    if line is None or line.length < um_to_px(MIN_ANT_BOUNDARY_UM):
         return None
 
     logger.info(
@@ -517,8 +548,8 @@ def extract_edge_boundary_veins(
     nearest_labels: np.ndarray,
     vein_mask: np.ndarray,
     existing_centerlines: dict[tuple[int, int], LineString],
-    min_length: float = 100.0,
-    max_length: float = 4000.0,
+    min_length: float | None = None,
+    max_length: float | None = None,
 ) -> dict[tuple[int, int], LineString]:
     """Extract vein segments at the edge of the vein mask.
 
@@ -537,6 +568,11 @@ def extract_edge_boundary_veins(
 
     Returns dict keyed as (poly_idx, -1) where -1 = background.
     """
+    if min_length is None:
+        min_length = um_to_px(MIN_EDGE_LENGTH_UM)
+    if max_length is None:
+        max_length = um_to_px(MAX_EDGE_LENGTH_UM)
+
     if not vein_polygons or not intervein_polygons:
         return {}
 
@@ -599,7 +635,7 @@ def extract_edge_boundary_veins(
 
         # Skip wide bands (these are wing perimeter, not veins)
         # Vein edges are typically 2-10 pixels wide
-        if band_width > 30:
+        if band_width > um_to_px(MAX_BAND_WIDTH_UM):
             continue
 
         pixels = list(zip(cc_ys.tolist(), cc_xs.tolist()))
@@ -617,7 +653,7 @@ def extract_edge_boundary_veins(
         # (should be a continuation of an existing vein)
         near_existing = False
         for cl in existing_centerlines.values():
-            if line.distance(cl) < 50:
+            if line.distance(cl) < um_to_px(EDGE_PROXIMITY_UM):
                 near_existing = True
                 break
 
@@ -708,7 +744,7 @@ def _extract_boundary_pixels(
 
 def _trace_pixels_to_line(
     pixels: list[tuple[int, int]],
-    simplify_tolerance: float = 3.0,
+    simplify_tolerance: float | None = None,
 ) -> Optional[LineString]:
     """Convert boundary pixels into an ordered LineString using scan-median.
 
@@ -716,6 +752,8 @@ def _trace_pixels_to_line(
     it to a 1-pixel-wide centerline by taking the median position along the
     perpendicular axis at each scan position.
     """
+    if simplify_tolerance is None:
+        simplify_tolerance = um_to_px(SIMPLIFY_UM)
     if len(pixels) < 2:
         return None
 
@@ -879,7 +917,7 @@ def _pre_split_by_erosion(
     erode_amount = None
     parts: list[Polygon] = []
 
-    for amount in [20, 40, 60, 80, 100, 150]:
+    for amount in [um_to_px(e) for e in PRE_VORONOI_EROSION_UM]:
         eroded = poly.buffer(-amount)
         if eroded.is_empty:
             continue
@@ -899,7 +937,7 @@ def _pre_split_by_erosion(
 
     # Watershed fill: rasterize polygon and seeds, distance-transform fill
     bounds = poly.bounds  # (minx, miny, maxx, maxy)
-    pad = 10
+    pad = int(um_to_px(PAD_EROSION_UM))
     x0 = int(bounds[0]) - pad
     y0 = int(bounds[1]) - pad
     x1 = int(bounds[2]) + pad + 1
@@ -956,7 +994,7 @@ def _pre_split_by_ridge(
 
     h, w = image_shape
     bounds = poly.bounds  # (minx, miny, maxx, maxy)
-    pad = 5
+    pad = int(um_to_px(PAD_RIDGE_UM))
     x0 = max(0, int(bounds[0]) - pad)
     y0 = max(0, int(bounds[1]) - pad)
     x1 = min(w, int(bounds[2]) + pad + 1)
@@ -1012,7 +1050,7 @@ def _pre_split_by_ridge(
         return None, None
 
     # Split the polygon using the dark band line
-    split_zone = split_line.buffer(max(band_width / 2, 5.0))
+    split_zone = split_line.buffer(max(band_width / 2, um_to_px(MIN_SPLIT_BUFFER_UM)))
     remainder = poly.difference(split_zone)
 
     if remainder.is_empty:
@@ -1033,7 +1071,7 @@ def _find_dark_band(
     local_h: int,
     local_w: int,
     scan_axis: str,
-    band_size: int = 10,
+    band_size: int | None = None,
 ) -> Optional[tuple[int, float, int]]:
     """Find the darkest band along a given axis within the polygon.
 
@@ -1041,6 +1079,8 @@ def _find_dark_band(
     and finds the deepest valley. Returns (valley_pos, valley_depth, band_width)
     or None if no clear valley.
     """
+    if band_size is None:
+        band_size = int(um_to_px(DARK_BAND_SIZE_UM))
     if scan_axis == "y":
         n_positions = local_h
     else:
@@ -1129,7 +1169,7 @@ def _trace_dark_band_line(
     within the band width centered on valley_pos along the scan axis.
     """
     local_h, local_w = gray.shape
-    half_band = max(band_width, 20)
+    half_band = max(band_width, int(um_to_px(MIN_DARK_BAND_HALF_UM)))
 
     points: list[tuple[float, float]] = []
 
@@ -1166,7 +1206,7 @@ def _trace_dark_band_line(
     if len(points) < 5:
         return None
 
-    line = LineString(points).simplify(5.0)
+    line = LineString(points).simplify(um_to_px(SIMPLIFY_DARKBAND_UM))
     return line if line.length > 0 else None
 
 
@@ -1226,7 +1266,7 @@ def _filled_to_polygons(
             ]
             if len(coords) >= 4:
                 p = Polygon(coords)
-                if p.is_valid and p.area > 100:
+                if p.is_valid and p.area > um2_to_px2(MIN_POLY_AREA_UM2):
                     piece_polys.append(p)
 
     if len(piece_polys) < 2:
@@ -1239,9 +1279,11 @@ def _filled_to_polygons(
 def find_poly_pair_for_line(
     syn_line: LineString,
     polygons: list[Polygon],
-    buffer_dist: float = 15.0,
+    buffer_dist: float | None = None,
 ) -> Optional[tuple[int, int]]:
     """Find which two polygons a synthetic centerline separates."""
+    if buffer_dist is None:
+        buffer_dist = um_to_px(FIND_POLY_BUFFER_UM)
     buffered = syn_line.buffer(buffer_dist)
     touching: list[int] = []
 
