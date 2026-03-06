@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
+import cv2
 import numpy as np
+from scipy import ndimage
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.ops import linemerge, split, unary_union
 from scipy.ndimage import gaussian_filter1d
@@ -91,6 +94,7 @@ class WingMidline:
 
     line: LineString
     half_heights: np.ndarray  # parallel array of (max_y - min_y) / 2 at each sample X
+    ref_point: Optional[tuple[float, float]] = None  # 3/4-span reference point for vein scoring
 
 
 def compute_wing_midline(
@@ -98,28 +102,35 @@ def compute_wing_midline(
     wing_bbox: tuple[float, float, float, float],
     sample_spacing: float | None = None,
     smooth_sigma: float | None = None,
+    wing_polygon: Optional[Polygon] = None,
 ) -> Optional[WingMidline]:
     """Compute the anterior-posterior midline of the wing.
 
     For each X position across the wing, intersects a vertical line with the
-    wing outline to find the Y extent, then takes the midpoint.  Returns a
-    smoothed LineString and an array of local half-heights (for normalizing
-    signed distances during vein scoring).
+    wing shape to find the Y extent, then takes the midpoint.  The midline
+    Y values are Gaussian-smoothed to follow the wing's curvature.
+
+    When *wing_polygon* is provided (from the GeoJSON "wing" annotation),
+    it is used directly as the wing shape.  Otherwise falls back to building
+    a shape from buffered intervein + vein polygons.
     """
     if sample_spacing is None:
         sample_spacing = um_to_px(MIDLINE_SPACING_UM)
     if smooth_sigma is None:
         smooth_sigma = um_to_px(MIDLINE_SIGMA_UM)
-    if not polygons:
-        return None
 
-    # Build wing shape from buffered polygon union (same as build_wing_outline)
-    buffered = [p.buffer(um_to_px(BUFFER_OUTLINE_UM)) for p in polygons]
-    union = unary_union(buffered)
-    if isinstance(union, MultiPolygon):
-        wing_shape = max(union.geoms, key=lambda p: p.area)
+    # Determine wing shape
+    if wing_polygon is not None and not wing_polygon.is_empty:
+        wing_shape = wing_polygon
+    elif polygons:
+        buffered = [p.buffer(um_to_px(BUFFER_OUTLINE_UM)) for p in polygons]
+        union = unary_union(buffered)
+        if isinstance(union, MultiPolygon):
+            wing_shape = max(union.geoms, key=lambda p: p.area)
+        else:
+            wing_shape = union
     else:
-        wing_shape = union
+        return None
 
     if wing_shape.is_empty:
         return None
@@ -182,25 +193,36 @@ def compute_wing_midline(
     ys_arr = np.array(ys)
     hhs_arr = np.array(hhs)
 
-    # Smooth half-heights for scoring normalization
+    # Smooth both midline Y and half-heights
     sigma_samples = smooth_sigma / sample_spacing
+    ys_smooth = gaussian_filter1d(ys_arr, sigma=sigma_samples)
     hhs_smooth = gaussian_filter1d(hhs_arr, sigma=sigma_samples)
 
-    # Straight line from first to last sampled midpoint
-    x0, y0 = float(xs_arr[0]), float(ys_arr[0])
-    x1, y1 = float(xs_arr[-1]), float(ys_arr[-1])
-    # Resample at the same X positions so half_heights stay aligned
-    ys_line = np.interp(xs_arr, [x0, x1], [y0, y1])
-
-    coords = list(zip(xs_arr.tolist(), ys_line.tolist()))
+    coords = list(zip(xs_arr.tolist(), ys_smooth.tolist()))
     midline = LineString(coords)
 
     logger.info(
-        "Wing midline: straight line (%.0f,%.0f)→(%.0f,%.0f), %d samples, mean half-height=%.0fpx",
-        x0, y0, x1, y1, len(xs), hhs_smooth.mean(),
+        "Wing midline: %d samples, mean half-height=%.0fpx, source=%s",
+        len(xs), hhs_smooth.mean(),
+        "wing annotation" if wing_polygon is not None else "buffered polygons",
     )
 
-    return WingMidline(line=midline, half_heights=hhs_smooth)
+    # Reference point at 3/4 span toward the distal (narrow) end.
+    # Determine distal direction from half-heights: the tapered end is distal.
+    quarter = max(1, len(hhs_smooth) // 4)
+    hh_low = float(hhs_smooth[:quarter].mean())   # mean half-height near min_x
+    hh_high = float(hhs_smooth[-quarter:].mean())  # mean half-height near max_x
+    # The narrower end is proximal (hinge), the broader end is distal (wing blade)
+    if hh_low < hh_high:
+        # min_x side is proximal → distal is max_x → ref at 0.75
+        ref_frac = 0.75
+    else:
+        # max_x side is proximal → distal is min_x → ref at 0.25
+        ref_frac = 0.25
+    ref_x = float(xs_arr[0] + (xs_arr[-1] - xs_arr[0]) * ref_frac)
+    ref_y = float(np.interp(ref_x, xs_arr, ys_smooth))
+
+    return WingMidline(line=midline, half_heights=hhs_smooth, ref_point=(ref_x, ref_y))
 
 
 def _detect_hinge_side(
@@ -421,6 +443,190 @@ def partition_intervein_spaces(
                 regions[name] = largest
 
     return regions
+
+
+def partition_by_vein_extension(
+    wing_polygon: Polygon,
+    vein_lines: dict[str, LineString],
+    image_shape: tuple[int, int],
+    line_width: int = 2,
+    touch_dist: float = 5.0,
+    tangent_points: int = 10,
+    min_area_frac: float = 0.01,
+) -> tuple[list[Polygon], dict[int, set[str]], dict[str, list[LineString]]]:
+    """Partition wing into intervein regions by extending vein centerlines.
+
+    Returns (polygons, poly_veins, extension_lines) where poly_veins maps
+    polygon index to the set of vein names that border it, and
+    extension_lines maps vein_id to the LineStrings grown from endpoints.
+    """
+    H, W = image_shape
+
+    # --- 1. Rasterize wing as filled mask; outside = barrier ---
+    barrier = np.zeros((H, W), dtype=np.int32)
+    wing_coords = np.array(wing_polygon.exterior.coords, dtype=np.int32)
+    cv2.fillPoly(barrier, [wing_coords], 0)
+    # Mark outside wing as barrier (-1)
+    wing_mask = np.zeros((H, W), dtype=np.uint8)
+    cv2.fillPoly(wing_mask, [wing_coords], 1)
+    barrier[wing_mask == 0] = -1
+    # Mark wing boundary pixels as barrier (-1)
+    cv2.polylines(barrier, [wing_coords], isClosed=True, color=-1, thickness=2)
+
+    # --- 2. Draw vein centerlines as barriers with unique labels ---
+    vein_label_map: dict[int, str] = {}  # label → vein_id
+    label_counter = 1
+    for vein_id, line in vein_lines.items():
+        coords = np.array(line.coords, dtype=np.int32)
+        if len(coords) < 2:
+            continue
+        lbl = label_counter
+        vein_label_map[lbl] = vein_id
+        label_counter += 1
+        # Draw polyline with unique label
+        for i in range(len(coords) - 1):
+            cv2.line(barrier, tuple(coords[i]), tuple(coords[i + 1]),
+                     int(lbl), thickness=line_width)
+
+    # --- 3. Identify endpoints needing extension ---
+    wing_boundary = wing_polygon.exterior
+    active_extensions: list[dict] = []  # {pos, direction, label, trace}
+
+    for vein_id, line in vein_lines.items():
+        coords = list(line.coords)
+        n = len(coords)
+        if n < 2:
+            continue
+        # Find this vein's label
+        lbl = None
+        for l, vid in vein_label_map.items():
+            if vid == vein_id:
+                lbl = l
+                break
+        if lbl is None:
+            continue
+
+        for ep_idx in (0, -1):
+            ep = Point(coords[ep_idx])
+            # Skip if already near wing boundary or another vein
+            dist_to_boundary = wing_boundary.distance(ep)
+            near_other = False
+            for other_id, other_line in vein_lines.items():
+                if other_id == vein_id:
+                    continue
+                if other_line.distance(ep) < touch_dist:
+                    near_other = True
+                    break
+            if dist_to_boundary < touch_dist or near_other:
+                continue
+
+            # Compute tangent direction
+            if ep_idx == 0:
+                end_idx = min(tangent_points, n - 1)
+                dx = coords[0][0] - coords[end_idx][0]
+                dy = coords[0][1] - coords[end_idx][1]
+            else:
+                start_idx = max(-tangent_points - 1, -n)
+                dx = coords[-1][0] - coords[start_idx][0]
+                dy = coords[-1][1] - coords[start_idx][1]
+
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            dx /= length
+            dy /= length
+
+            start_pt = (float(coords[ep_idx][0]), float(coords[ep_idx][1]))
+            active_extensions.append({
+                "x": start_pt[0],
+                "y": start_pt[1],
+                "dx": dx,
+                "dy": dy,
+                "label": lbl,
+                "trace": [start_pt],
+            })
+
+    # Keep references to all extension dicts for trace collection after growth
+    all_extensions = list(active_extensions)
+
+    # --- 4. Simultaneous growth loop ---
+    max_iter = max(H, W)
+    for _ in range(max_iter):
+        if not active_extensions:
+            break
+        still_active = []
+        for ext in active_extensions:
+            nx = ext["x"] + ext["dx"]
+            ny = ext["y"] + ext["dy"]
+            ix, iy = int(round(nx)), int(round(ny))
+            # Bounds check
+            if ix < 0 or ix >= W or iy < 0 or iy >= H:
+                continue  # out of image
+            val = barrier[iy, ix]
+            if val != 0:
+                # Hit something (boundary, another vein, or another extension)
+                continue
+            # Mark as barrier with this vein's label
+            barrier[iy, ix] = ext["label"]
+            ext["x"] = nx
+            ext["y"] = ny
+            ext["trace"].append((nx, ny))
+            still_active.append(ext)
+        active_extensions = still_active
+
+    # Collect extension traces as LineStrings keyed by vein_id
+    extension_lines: dict[str, list[LineString]] = {}
+    for ext in all_extensions:
+        trace = ext["trace"]
+        if len(trace) >= 2:
+            vid = vein_label_map.get(ext["label"], "?")
+            extension_lines.setdefault(vid, []).append(LineString(trace))
+
+    # --- 5. Connected components on free pixels ---
+    free_mask = (barrier == 0).astype(np.uint8)
+    labeled, num_labels = ndimage.label(free_mask)
+
+    # --- 6. Vectorize → Shapely polygons ---
+    wing_area = wing_polygon.area
+    result_polys: list[Polygon] = []
+    result_poly_veins: dict[int, set[str]] = {}
+
+    for comp_label in range(1, num_labels + 1):
+        comp_mask = (labeled == comp_label).astype(np.uint8)
+        contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        # Take largest contour
+        cnt = max(contours, key=cv2.contourArea)
+        if len(cnt) < 4:
+            continue
+        pts = cnt.squeeze()
+        if pts.ndim != 2 or pts.shape[0] < 4:
+            continue
+        poly = Polygon(pts).simplify(1.0)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty or poly.area < wing_area * min_area_frac:
+            continue
+
+        idx = len(result_polys)
+        result_polys.append(poly)
+
+        # --- 7. Find adjacent vein labels ---
+        dilated = ndimage.binary_dilation(comp_mask, structure=np.ones((3, 3)))
+        neighbor_labels = barrier[dilated > 0]
+        unique_labels = set(int(v) for v in np.unique(neighbor_labels) if v > 0)
+        veins = set()
+        for lbl in unique_labels:
+            if lbl in vein_label_map:
+                veins.add(vein_label_map[lbl])
+        result_poly_veins[idx] = veins
+
+    logger.info("Vein-extension partition: %d regions from %d veins, %d extensions grown",
+                len(result_polys), len(vein_lines), len(all_extensions))
+
+    return result_polys, result_poly_veins, extension_lines
 
 
 def compute_compartments(

@@ -236,6 +236,15 @@ def _render_midline(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
                 (int(pts[mid_idx, 0]) - 40, int(pts[mid_idx, 1]) - 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA,
             )
+            # Draw 3/4-span reference point
+            if state.wing_midline.ref_point is not None:
+                rx, ry = state.wing_midline.ref_point
+                cv2.circle(right, (int(rx), int(ry)), 10, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.putText(
+                    right, "ref 3/4",
+                    (int(rx) + 14, int(ry) + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA,
+                )
 
     return left, right
 
@@ -429,29 +438,43 @@ def _render_regions(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
 
 
 def _render_poly_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 11: Pre-split → post-split regions."""
-    # Left: regions as they were before splitting (use prev state if available)
+    """Step 11: Left = veins + extension lines, Right = clipped regions."""
     left = state.image.copy()
     right = state.image.copy()
 
-    # Both show the current (post-split) state; the user can compare with step 9
+    # Left: draw veins + dashed extension lines
+    if state.assignments:
+        for a in state.assignments:
+            if a.line is None:
+                continue
+            color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
+            _draw_linestring(left, a.line, color, thickness=4)
+            coords = list(a.line.coords)
+            mid = coords[len(coords) // 2]
+            cv2.putText(
+                left, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA,
+            )
+    # Draw extension lines as dashed white
+    if state.extension_lines:
+        for vein_id, lines in state.extension_lines.items():
+            color = VEIN_COLORS.get(vein_id, (200, 200, 200))
+            for line in lines:
+                _draw_dashed_linestring(left, line, color, thickness=3, dash_len=12)
+
+    # Right: clipped regions with labels
     if state.poly_names and state.polygons:
         for idx, name in state.poly_names.items():
             if idx >= len(state.polygons):
                 continue
             poly = state.polygons[idx]
             color = INTERVEIN_COLORS.get(name, (180, 180, 180))
-            _fill_polygon_alpha(left, poly, color, alpha=0.4)
             _fill_polygon_alpha(right, poly, color, alpha=0.4)
             cx, cy = int(poly.centroid.x), int(poly.centroid.y)
             label = f"P{idx}: {name.replace('_cell', '')}"
             cv2.putText(
                 right, label, (cx - 80, cy),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA,
-            )
-            cv2.putText(
-                left, f"P{idx}", (cx - 15, cy),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA,
             )
 
     return left, right
@@ -761,6 +784,27 @@ def _draw_linestring(
     pts = np.array(line.coords, dtype=np.int32)
     if len(pts) >= 2:
         cv2.polylines(image, [pts], isClosed=False, color=color, thickness=thickness)
+
+
+def _draw_dashed_linestring(
+    image: np.ndarray,
+    line: LineString,
+    color: tuple[int, int, int],
+    thickness: int = 2,
+    dash_len: int = 10,
+) -> None:
+    """Draw a dashed Shapely LineString on a BGR image."""
+    pts = np.array(line.coords, dtype=np.int32)
+    if len(pts) < 2:
+        return
+    # Draw alternating dash segments
+    draw = True
+    for i in range(len(pts) - 1):
+        if draw:
+            cv2.line(image, tuple(pts[i]), tuple(pts[i + 1]), color, thickness)
+        # Toggle every dash_len points
+        if (i + 1) % dash_len == 0:
+            draw = not draw
 
 
 def _draw_polygon_outline(

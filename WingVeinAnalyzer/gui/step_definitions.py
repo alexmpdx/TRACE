@@ -1,4 +1,4 @@
-"""Step metadata: names, descriptions, parameter specs for all 19 pipeline steps."""
+"""Step metadata: names, descriptions, parameter specs for all 20 pipeline steps."""
 
 from __future__ import annotations
 
@@ -35,16 +35,20 @@ STEP_DEFS: list[StepDef] = [
             "Load the TIFF image and parse the GeoJSON annotation file. "
             "Extracts intervein polygons (8 distinct regions) and vein mask polygons "
             "(defining where vein tissue exists). Computes the wing bounding box from "
-            "polygon extents."
+            "polygon extents. Calls set_scale(um_per_px) to configure the global "
+            "micrometer-to-pixel conversion used by all downstream constants."
         ),
         pseudocode=(
+            "set_scale(um_per_px)  # configure µm↔px conversion\n"
             "image = cv2.imread(tiff_path)\n"
             "annotations = parse_geojson(geojson_path)\n"
             "polygons = annotations.intervein_polygons\n"
             "vein_polygons = annotations.vein_polygons\n"
             "wing_bbox = bounding_box(polygons)"
         ),
-        params=[],
+        params=[
+            StepParam("um_per_px", "0.483", "Micrometer-per-pixel scale factor"),
+        ],
         runs_computation=True,
     ),
     # 1: Wing Midline
@@ -64,15 +68,15 @@ STEP_DEFS: list[StepDef] = [
             "annotation_polys = intervein_polygons + vein_polygons\n"
             "annotation_bbox = bounding_box(annotation_polys)\n"
             "wing_shape = unary_union([p.buffer(20) for p in annotation_polys])\n"
-            "for x in range(min_x, max_x, 5px):\n"
-            "  slice = wing_shape.intersection(vertical_line(x))\n"
+            "for x in range(min_x, max_x, 2.4µm):\n"
+            "  slice = wing_shape ∩ vertical_line(x)\n"
             "  midline_y[x] = (slice.min_y + slice.max_y) / 2\n"
             "  half_height[x] = (slice.max_y - slice.min_y) / 2\n"
-            "midline = smooth(midline_y, sigma=30px)"
+            "midline = smooth(midline_y, sigma=14.5µm)"
         ),
         params=[
-            StepParam("sample_spacing", "5 px", "Horizontal sampling interval"),
-            StepParam("smooth_sigma", "30 px", "Gaussian smoothing sigma"),
+            StepParam("sample_spacing", "2.4 µm", "Horizontal sampling interval"),
+            StepParam("smooth_sigma", "14.5 µm", "Gaussian smoothing sigma"),
         ],
         runs_computation=True,
     ),
@@ -104,7 +108,7 @@ STEP_DEFS: list[StepDef] = [
         ),
         params=[
             StepParam("closing_kernel_size", "11", "Morphological closing kernel for vein mask"),
-            StepParam("min_seed_area", "10000 px", "Minimum component area to use as seed"),
+            StepParam("min_seed_area", "2333 µm²", "Minimum component area to use as seed"),
         ],
         runs_computation=True,
     ),
@@ -153,8 +157,8 @@ STEP_DEFS: list[StepDef] = [
             "    centerlines[(i,j)] = LineString(pixels)"
         ),
         params=[
-            StepParam("min_line_length", "10 px", "Minimum centerline segment length"),
-            StepParam("bridge_threshold", "30 px", "Max gap to bridge nearby endpoints"),
+            StepParam("min_line_length", "4.8 µm", "Minimum centerline segment length"),
+            StepParam("bridge_threshold", "14.5 µm", "Max gap to bridge nearby endpoints"),
         ],
         runs_computation=False,  # cached from step 2
     ),
@@ -172,7 +176,7 @@ STEP_DEFS: list[StepDef] = [
             "using spatial proximity to classified veins. Steps 6-12 visualize cached sub-results."
         ),
         pseudocode=(
-            "junctions = find_triple_junctions(centerlines, snap=30px)\n"
+            "junctions = find_triple_junctions(centerlines, snap=14.5µm)\n"
             "merged = merge_segments_at_junctions(centerlines, junctions)\n"
             "split = split_sharp_turns(merged, angle=70°)\n"
             "longitudinals = assign_longitudinals(split, midline)\n"
@@ -183,7 +187,7 @@ STEP_DEFS: list[StepDef] = [
             "validation = cross_validate(assignments, poly_names, poly_veins)"
         ),
         params=[
-            StepParam("snap_radius", "30 px", "Max distance to cluster endpoints"),
+            StepParam("snap_radius", "14.5 µm", "Max distance to cluster endpoints"),
         ],
         runs_computation=True,  # runs identify_veins_and_regions() (full)
     ),
@@ -229,16 +233,16 @@ STEP_DEFS: list[StepDef] = [
         pseudocode=(
             "for path in merged_paths:\n"
             "  if path.length < min_path_length: skip\n"
-            "  for point along path (step=50px):\n"
+            "  for point along path (step=24.2µm):\n"
             "    angle_change = direction_at(point+step) - direction_at(point-step)\n"
             "    if angle_change > 70°:\n"
             "      split path at point"
         ),
         params=[
             StepParam("angle_threshold", "70°", "Direction change to trigger split"),
-            StepParam("step_dist", "50 px", "Window size for direction estimation"),
-            StepParam("min_path_length", "500 px", "Only split paths longer than this"),
-            StepParam("min_split_length", "200 px", "Both halves must exceed this"),
+            StepParam("step_dist", "24.2 µm", "Window size for direction estimation"),
+            StepParam("min_path_length", "241.5 µm", "Only split paths longer than this"),
+            StepParam("min_split_length", "96.6 µm", "Both halves must exceed this"),
         ],
         runs_computation=False,  # cached from step 5
     ),
@@ -284,14 +288,14 @@ STEP_DEFS: list[StepDef] = [
             "candidates = [p for p in paths\n"
             "  if p.orientation > 60° and p.length < 0.15 * wing_span]\n"
             "for each candidate:\n"
-            "  acv_score = 1 - (dist_to_L3 + dist_to_L4) / (2 * 200px)\n"
-            "  pcv_score = 1 - (dist_to_L4 + dist_to_L5) / (2 * 200px)\n"
+            "  acv_score = 1 - (dist_to_L3 + dist_to_L4) / (2 * 96.6µm)\n"
+            "  pcv_score = 1 - (dist_to_L4 + dist_to_L5) / (2 * 96.6µm)\n"
             "best_pairing = argmax(acv_score[i] + pcv_score[j])"
         ),
         params=[
             StepParam("max_crossvein_len", "15% wing span", "Maximum crossvein length"),
             StepParam("orientation_cutoff", "60°", "Minimum orientation from horizontal"),
-            StepParam("norm_dist", "200 px", "Normalization distance for proximity scoring"),
+            StepParam("norm_dist", "96.6 µm", "Normalization distance for proximity scoring"),
         ],
         runs_computation=False,  # cached from step 5
     ),
@@ -322,29 +326,29 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 5
     ),
-    # 11: Split Merged Polygons
+    # 11: Vein-Extension Clipping
     StepDef(
         index=11,
-        name="Split Merged Polygons",
-        short_name="Poly Split",
+        name="Vein-Extension Clipping",
+        short_name="Vein Clip",
         description=(
-            "Detect polygons that are too large (area > expected_max x 1.5) and likely "
-            "represent two merged regions from the pixel classifier. Split them using the "
-            "identified vein centerline as a dividing line. This creates a new polygon and "
-            "re-assigns region names. Skipped if no oversized polygons found."
+            "Clip existing intervein regions using vein-extension boundaries. Extends vein "
+            "lines to the wing outline to create ideal region boundaries, then intersects "
+            "each original polygon with its matching vein-extension region. This only makes "
+            "regions smaller — trimming areas that extend beyond the vein lines. Polygons "
+            "and poly_names are updated for all downstream steps."
         ),
         pseudocode=(
-            "for idx, polygon in poly_names.items():\n"
-            "  if polygon.area > expected_area * 1.5:\n"
-            "    dividing_vein = find_separating_vein(polygon)\n"
-            "    upper, lower = split_along_vein(polygon, dividing_vein)\n"
-            "    polygons.append(lower)\n"
-            "    reassign_names(upper, lower)"
+            "ext_polys = partition_by_vein_extension(outline, vein_lines)\n"
+            "ext_names = name_regions_from_veins(ext_polys, vein_map)\n"
+            "ext_by_name = {name: union(ext_polys) for name}\n"
+            "for i, name in poly_names.items():\n"
+            "  polygons[i] = polygons[i].intersection(ext_by_name[name])"
         ),
         params=[
-            StepParam("area_threshold", "1.5x expected max", "Threshold for oversized detection"),
+            StepParam("method", "vein_extension_clip", "Clip regions to vein boundaries"),
         ],
-        runs_computation=False,  # cached from step 5
+        runs_computation=True,
     ),
     # 12: Cross-Validation
     StepDef(
@@ -377,22 +381,28 @@ STEP_DEFS: list[StepDef] = [
         short_name="L1 Recovery",
         description=(
             "When no costal cell exists, the Voronoi approach can't find L1 (no "
-            "costal-marginal boundary). This step skeletonizes the vein mask region "
-            "anterior to L2 in the distal wing to extract L1's centerline directly. "
-            "Takes the most distal sufficiently-long skeleton component. Skipped when "
-            "costal cell is present."
+            "costal-marginal boundary). This step performs column-by-column scanning "
+            "of the vein mask anterior to L2, detecting the posterior edge of the first "
+            "vein band (costa/L1 tissue) via gap detection. The resulting trace is "
+            "simplified, then trimmed to the maximum L1 length keeping the distal end "
+            "(nearest the subcostal break). Skipped when costal cell is present."
         ),
         pseudocode=(
             "if costal_cell present: SKIP\n"
-            "roi = vein_mask pixels anterior to L2 in distal wing\n"
-            "skeleton = skeletonize(roi)\n"
-            "components = connected_components(skeleton)\n"
-            "l1_line = most_distal_long_component\n"
-            "if l1_line.length > existing_l1 + 100px:\n"
+            "for x_col in wing columns:\n"
+            "  scan vein_mask anterior to L2 - margin\n"
+            "  find first gap > min_gap in vein band\n"
+            "  l1_y[x] = posterior edge of first band\n"
+            "l1_trace = simplify(LineString(l1_y), tolerance)\n"
+            "l1_trace = trim_to_max_l1_length(l1_trace, keep='distal')\n"
+            "if l1_trace.length > min_length:\n"
             "  update L1 assignment"
         ),
         params=[
-            StepParam("min_improvement", "100 px", "New L1 must exceed existing by this much"),
+            StepParam("min_gap", "2.4 µm", "Min gap to detect end of vein band"),
+            StepParam("margin", "14.5 µm", "Margin from L2 to restrict scan area"),
+            StepParam("min_length", "24.2 µm", "Min L1 trace length to accept"),
+            StepParam("simplify", "4.8 µm", "Line simplification tolerance"),
         ],
         runs_computation=True,
     ),
@@ -404,7 +414,8 @@ STEP_DEFS: list[StepDef] = [
         description=(
             "Extract the costa (leading edge vein) as the anterior margin of the marginal "
             "cell polygon. The costa runs along the wing's anterior edge from the hinge "
-            "region to where L1 meets the margin. Skipped when no costal region exists."
+            "region to where L1 meets the margin. Marks costa ABSENT when no costal "
+            "region exists."
         ),
         pseudocode=(
             "if not costal_cell in poly_names: mark costa ABSENT\n"
@@ -422,19 +433,19 @@ STEP_DEFS: list[StepDef] = [
         short_name="Outline",
         description=(
             "Build the wing outline from the union of all polygons. Each intervein polygon "
-            "is buffered by 20px to bridge the vein gaps, then the union is computed. Vein "
-            "polygons are included with a smaller 5px buffer to extend the outline to the "
+            "is buffered by 9.7 µm to bridge the vein gaps, then the union is computed. Vein "
+            "polygons are included with a smaller 2.4 µm buffer to extend the outline to the "
             "full wing tip. The outer boundary of the union becomes the wing outline."
         ),
         pseudocode=(
-            "buffered = [poly.buffer(20px) for poly in polygons]\n"
-            "buffered += [vp.buffer(5px) for vp in vein_polygons]\n"
+            "buffered = [poly.buffer(9.7µm) for poly in polygons]\n"
+            "buffered += [vp.buffer(2.4µm) for vp in vein_polygons]\n"
             "union = unary_union(buffered)\n"
             "outline = largest_polygon(union).exterior"
         ),
         params=[
-            StepParam("buffer_dist", "20 px", "Buffer for intervein polygons"),
-            StepParam("vein_buffer", "5 px", "Buffer for vein polygons"),
+            StepParam("buffer_dist", "9.7 µm", "Buffer for intervein polygons"),
+            StepParam("vein_buffer", "2.4 µm", "Buffer for vein polygons"),
         ],
         runs_computation=True,
     ),
@@ -454,11 +465,11 @@ STEP_DEFS: list[StepDef] = [
             "hinge_side = detect_hinge_side(polygons, poly_names)\n"
             "subcostal = find_subcostal_break(outline)\n"
             "alula = find_alula_notch(outline)\n"
-            "cut_line = extend(LineString(subcostal, alula), 100px)\n"
+            "cut_line = extend(LineString(subcostal, alula), 48.3µm)\n"
             "wing_blade = split(outline, cut_line).distal_piece"
         ),
         params=[
-            StepParam("extend", "100 px", "Cut line extension beyond outline"),
+            StepParam("extend", "48.3 µm", "Cut line extension beyond outline"),
             StepParam("min_fragment", "5%", "Minimum fragment size to keep"),
         ],
         runs_computation=True,
@@ -477,13 +488,13 @@ STEP_DEFS: list[StepDef] = [
         ),
         pseudocode=(
             "l4_line = assignments['L4'].line\n"
-            "l4_extended = extend_to_boundary(l4_line, wing_blade, 500px)\n"
-            "l4_simplified = l4_extended.simplify(10px)\n"
+            "l4_extended = extend_to_boundary(l4_line, wing_blade, 241.5µm)\n"
+            "l4_simplified = l4_extended.simplify(4.8µm)\n"
             "anterior, posterior = split(wing_blade, l4_simplified)"
         ),
         params=[
-            StepParam("simplify", "10 px", "Simplification tolerance for L4"),
-            StepParam("extend", "500 px", "Extension distance to reach outline"),
+            StepParam("simplify", "4.8 µm", "Simplification tolerance for L4"),
+            StepParam("extend", "241.5 µm", "Extension distance to reach outline"),
         ],
         runs_computation=True,
     ),
@@ -495,8 +506,8 @@ STEP_DEFS: list[StepDef] = [
         description=(
             "Compute all wing measurements: per-vein lengths, crossvein distance, wing "
             "length and width, total wing area, per-region intervein areas, and anterior/"
-            "posterior compartment areas. All measurements in pixels; micron values are NaN "
-            "if no scale calibration provided."
+            "posterior compartment areas. Scale calibration from the GUI µm/px input "
+            "provides both pixel and micrometer columns."
         ),
         pseudocode=(
             "for vein in assignments:\n"

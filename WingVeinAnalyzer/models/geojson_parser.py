@@ -48,6 +48,7 @@ class ParsedAnnotations:
     wing_outline_segments: list[ParsedOutline] = field(default_factory=list)
     intervein_polygons: list[Polygon] = field(default_factory=list)
     vein_polygons: list[Polygon] = field(default_factory=list)
+    wing_polygon: Optional[Polygon] = None
 
 
 def parse_geojson(path: Path) -> ParsedAnnotations:
@@ -108,6 +109,11 @@ def parse_geojson(path: Path) -> ParsedAnnotations:
                     annotations.vein_polygons.extend(list(geom.geoms))
                 else:
                     annotations.vein_polygons.append(geom)
+            elif cls_name == "wing":
+                if isinstance(geom, MultiPolygon):
+                    annotations.wing_polygon = max(geom.geoms, key=lambda p: p.area)
+                else:
+                    annotations.wing_polygon = geom
 
     # Split polygons with narrow constrictions into separate regions
     annotations.intervein_polygons = _split_and_clean_regions(

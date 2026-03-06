@@ -59,6 +59,7 @@ from WingVeinAnalyzer.models.vein_map import (
     SPLIT_EROSION_UM,
     MIN_HALF_HEIGHT_UM,
     GT_TOLERANCE_UM,
+    BRIDGE_THRESHOLD_UM,
 )
 
 logger = logging.getLogger(__name__)
@@ -1232,7 +1233,8 @@ def _anchor_l3_l4_from_midline(
     mid_coords = list(midline.line.coords)
     mid_xs = [c[0] for c in mid_coords]
     wing_span = mid_xs[-1] - mid_xs[0]
-    center_x = (mid_xs[0] + mid_xs[-1]) / 2.0
+    # Use the midline's distal-aware reference point
+    ref_x = midline.ref_point[0] if midline.ref_point else mid_xs[0] + wing_span * 0.75
 
     # L3/L4 are the longest veins in the wing — require >=30% of wing span
     min_length = wing_span * 0.30
@@ -1300,9 +1302,9 @@ def _assign_remaining_longitudinals(
     mid_coords = list(midline.line.coords)
     mid_xs = [c[0] for c in mid_coords]
     mid_ys = [c[1] for c in mid_coords]
-    center_x = (mid_xs[0] + mid_xs[-1]) / 2.0
-    center_y = float(np.interp(center_x, mid_xs, mid_ys))
     wing_span = mid_xs[-1] - mid_xs[0]
+    # Use the midline's distal-aware reference point
+    ref_x = midline.ref_point[0] if midline.ref_point else mid_xs[0] + wing_span * 0.75
 
     # Get L3/L4 mean signed distances as reference
     l3 = vein_map.get("L3")
@@ -1331,13 +1333,13 @@ def _assign_remaining_longitudinals(
             vein_map["L2"] = best
             rest = anterior[1:]
             if rest:
-                candidate = min(rest, key=lambda p: _path_y_at_x(p, center_x))
+                candidate = min(rest, key=lambda p: _path_y_at_x(p, ref_x))
                 if candidate.length_px <= l1_max:
                     vein_map["L1"] = candidate
         elif best.length_px <= l1_max:
-            vein_map["L1"] = min(anterior, key=lambda p: _path_y_at_x(p, center_x))
+            vein_map["L1"] = min(anterior, key=lambda p: _path_y_at_x(p, ref_x))
         else:
-            anterior.sort(key=lambda p: _path_y_at_x(p, center_x))
+            anterior.sort(key=lambda p: _path_y_at_x(p, ref_x))
             for i, p in enumerate(anterior[:2]):
                 vein_map[["L1", "L2"][i]] = p
 
@@ -1350,8 +1352,8 @@ def _assign_remaining_longitudinals(
         if name in vein_map and id(vein_map[name]) not in assigned:
             p = vein_map[name]
             logger.debug(
-                "Remaining longitudinal: %s → Y_at_center=%.0f, len=%.0fpx",
-                name, _path_y_at_x(p, center_x), p.length_px,
+                "Remaining longitudinal: %s → Y_at_ref=%.0f, len=%.0fpx",
+                name, _path_y_at_x(p, ref_x), p.length_px,
             )
 
 
@@ -2564,8 +2566,29 @@ def identify_veins_and_regions(
             )
             continue
 
-        # Merge into the existing vein
+        # Only merge if the new segment connects near an endpoint of the
+        # existing vein (not a distant jump that would double back)
         mp = vein_map[si.separating_vein]
+        existing_coords = list(mp.line.coords)
+        ep_start = np.array(existing_coords[0])
+        ep_end = np.array(existing_coords[-1])
+        new_coords = list(new_line.coords)
+        new_start = np.array(new_coords[0])
+        new_end = np.array(new_coords[-1])
+        min_gap = min(
+            float(np.linalg.norm(ep_start - new_start)),
+            float(np.linalg.norm(ep_start - new_end)),
+            float(np.linalg.norm(ep_end - new_start)),
+            float(np.linalg.norm(ep_end - new_end)),
+        )
+        max_gap = um_to_px(BRIDGE_THRESHOLD_UM)
+        if min_gap > max_gap:
+            logger.info(
+                "  Skipping post-split centerline for %s: nearest endpoint %.0fpx away (max %.0fpx)",
+                si.separating_vein, min_gap, max_gap,
+            )
+            continue
+
         merged = _merge_vein_lines([mp.line, new_line])
         if merged is not None and merged.length > mp.length_px:
             old_len = mp.length_px

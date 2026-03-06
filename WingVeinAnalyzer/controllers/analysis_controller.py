@@ -30,6 +30,7 @@ from WingVeinAnalyzer.models.vein_labeler import (
 from WingVeinAnalyzer.models.vein_identifier import (
     VeinValidationReport,
     identify_veins_and_regions,
+    name_regions_from_veins,
     validate_regions_against_ground_truth,
     validate_veins_against_ground_truth,
 )
@@ -44,6 +45,7 @@ from WingVeinAnalyzer.models.wing_geometry import (
     compute_compartments,
     compute_wing_midline,
     detect_hinge_landmarks,
+    partition_by_vein_extension,
     partition_intervein_spaces,
     remove_hinge,
 )
@@ -167,9 +169,11 @@ def _run_polygon_pipeline(
         max(b[3] for b in all_bounds),
     )
 
-    # Compute wing midline from original annotation polygons (before hull/Voronoi)
+    # Compute wing midline — prefer "wing" annotation polygon when available
     original_polys = annotations.intervein_polygons + annotations.vein_polygons
-    midline = compute_wing_midline(original_polys, wing_bbox) if original_polys else None
+    midline = compute_wing_midline(
+        original_polys, wing_bbox, wing_polygon=annotations.wing_polygon,
+    ) if original_polys else None
 
     # Initialize variables shared across both pipeline paths
     hull_mask = None
@@ -216,6 +220,29 @@ def _run_polygon_pipeline(
             polygons = id_result.polygons  # may have been updated by splitting
         for w in id_result.validation_report.warnings:
             logger.warning("Validation: %s", w)
+
+        # Vein-extension clipping: intersect each named polygon with its
+        # matching vein-extension region to trim oversized areas
+        vein_lines_for_ext = {
+            a.vein_id: a.line for a in assignments
+            if a.line is not None and a.vein_id != "costa"
+            and a.status != VeinStatus.ABSENT
+        }
+        if vein_lines_for_ext:
+            outline_temp = build_wing_outline(
+                polygons, vein_polygons=annotations.vein_polygons or None,
+            )
+            ext_polys, ext_poly_veins, _ext_lines = partition_by_vein_extension(
+                outline_temp.polygon, vein_lines_for_ext, image.shape[:2],
+            )
+            ext_poly_names = name_regions_from_veins(
+                ext_polys, id_result.vein_map, wing_bbox,
+                poly_veins=ext_poly_veins,
+            )
+            if ext_poly_names:
+                polygons, poly_names = _clip_regions_by_extension(
+                    polygons, poly_names, ext_polys, ext_poly_names,
+                )
 
         # L1 recovery: when no costal cell exists, the Voronoi approach can't
         # find L1 (no costal↔marginal boundary).  Extract it from the anterior
@@ -289,7 +316,9 @@ def _run_polygon_pipeline(
         }
 
         # Compute wing midline for crossvein-independent identification
-        midline = compute_wing_midline(polygons, wing_bbox)
+        midline = compute_wing_midline(
+            polygons, wing_bbox, wing_polygon=annotations.wing_polygon,
+        )
 
         id_result = identify_veins_and_regions(
             centerlines, polygons, [],
@@ -366,7 +395,7 @@ def _run_polygon_pipeline(
         wing_blade = outline.polygon
     result.wing_blade = wing_blade
 
-    # Partition intervein spaces
+    # Partition intervein spaces (polygons already updated by vein-extension above)
     all_regions = partition_intervein_spaces(wing_blade, polygons, poly_names)
     # Exclude costal cell from output regions
     regions = {k: v for k, v in all_regions.items() if k != "costal_cell"}
@@ -458,6 +487,46 @@ def _smooth_vein_assignments(
 
 
 # ---------------------------------------------------------------------------
+# Vein-extension clipping
+# ---------------------------------------------------------------------------
+
+def _clip_regions_by_extension(
+    polygons: list[Polygon],
+    poly_names: dict[int, str],
+    ext_polys: list[Polygon],
+    ext_names: dict[int, str],
+) -> tuple[list[Polygon], dict[int, str]]:
+    """Intersect each named polygon with its matching vein-extension region.
+
+    Only makes regions smaller — clips the original polygon to the
+    vein-extension boundary for the same region name.
+    """
+    from shapely.geometry import MultiPolygon
+
+    # Build name → union of vein-extension polygons
+    ext_by_name: dict[str, Polygon] = {}
+    for i, name in ext_names.items():
+        if name in ext_by_name:
+            ext_by_name[name] = ext_by_name[name].union(ext_polys[i])
+        else:
+            ext_by_name[name] = ext_polys[i]
+
+    new_polygons = list(polygons)
+    new_names = dict(poly_names)
+    for i, name in poly_names.items():
+        if name not in ext_by_name or i >= len(new_polygons):
+            continue
+        clipped = new_polygons[i].intersection(ext_by_name[name])
+        if clipped.is_empty or clipped.area < 100:
+            continue
+        if isinstance(clipped, MultiPolygon):
+            clipped = max(clipped.geoms, key=lambda g: g.area)
+        if isinstance(clipped, Polygon):
+            new_polygons[i] = clipped
+
+    return new_polygons, new_names
+
+
 # L1 recovery from marginal cell boundary
 # ---------------------------------------------------------------------------
 

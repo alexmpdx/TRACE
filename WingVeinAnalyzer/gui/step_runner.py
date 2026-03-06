@@ -46,6 +46,7 @@ from WingVeinAnalyzer.models.wing_geometry import (
     compute_compartments,
     compute_wing_midline,
     detect_hinge_landmarks,
+    partition_by_vein_extension,
     partition_intervein_spaces,
     remove_hinge,
 )
@@ -55,6 +56,18 @@ from WingVeinAnalyzer.models.vein_map import (
     SNAP_RADIUS_UM,
     SMOOTH_SPACING_UM,
     SMOOTH_SPACING_FINE_UM,
+    MIN_SEGMENT_LENGTH_UM,
+    BRIDGE_THRESHOLD_UM,
+    STEP_DIST_UM,
+    MIN_PATH_LENGTH_UM,
+    MIN_SPLIT_LENGTH_UM,
+    CV_NORM_DIST_UM,
+    BUFFER_OUTLINE_UM,
+    BUFFER_VEIN_UM,
+    COMPARTMENT_SIMPLIFY_UM,
+    COMPARTMENT_EXTENSION_UM,
+    MIDLINE_SPACING_UM,
+    MIDLINE_SIGMA_UM,
 )
 from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
@@ -93,6 +106,9 @@ class StepState:
     split_paths: Optional[list[MergedPath]] = None
     vein_map: Optional[dict[str, MergedPath]] = None
     poly_names: Optional[dict[int, str]] = None
+
+    # Vein-extension lines (from step 11)
+    extension_lines: Optional[dict[str, list[LineString]]] = None
 
     # Assignments (from steps 13-14)
     assignments: Optional[list[VeinAssignment]] = None
@@ -328,8 +344,8 @@ class StepRunner:
         """Step 4: Viz-only — centerlines already extracted in step 2."""
         state = self._copy_forward(prev)
         state.params_used = {
-            "min_line_length": "10 px",
-            "bridge_threshold": "30 px",
+            "min_line_length": f"{um_to_px(MIN_SEGMENT_LENGTH_UM):.0f} px ({MIN_SEGMENT_LENGTH_UM} µm)",
+            "bridge_threshold": f"{um_to_px(BRIDGE_THRESHOLD_UM):.0f} px ({BRIDGE_THRESHOLD_UM} µm)",
             "num_centerlines": str(len(state.centerlines or {})),
         }
         return state
@@ -339,6 +355,12 @@ class StepRunner:
         state = self._copy_forward(prev)
 
         if state.polygons and state.wing_bbox:
+            # Prefer "wing" annotation polygon for midline shape
+            wing_poly = (
+                state.annotations.wing_polygon
+                if state.annotations else None
+            )
+
             # Use original annotation polygons + bbox for midline (not hull-derived Voronoi)
             if state.annotations and state.annotations.intervein_polygons:
                 midline_polys = (
@@ -355,12 +377,14 @@ class StepRunner:
             else:
                 midline_polys = state.polygons
                 midline_bbox = state.wing_bbox
-            midline = compute_wing_midline(midline_polys, midline_bbox)
+            midline = compute_wing_midline(
+                midline_polys, midline_bbox, wing_polygon=wing_poly,
+            )
             state.wing_midline = midline
             if midline is not None:
                 state.params_used = {
-                    "sample_spacing": "5 px",
-                    "smooth_sigma": "30 px",
+                    "sample_spacing": f"{um_to_px(MIDLINE_SPACING_UM):.0f} px ({MIDLINE_SPACING_UM} µm)",
+                    "smooth_sigma": f"{um_to_px(MIDLINE_SIGMA_UM):.0f} px ({MIDLINE_SIGMA_UM} µm)",
                     "num_samples": str(len(midline.line.coords)),
                 }
             else:
@@ -401,7 +425,7 @@ class StepRunner:
         # Use the real vein_map from identification (preserves segment_keys)
         state.vein_map = dict(id_result.vein_map) if id_result.vein_map else {}
 
-        state.params_used = {"snap_radius": "30 px"}
+        state.params_used = {"snap_radius": f"{um_to_px(SNAP_RADIUS_UM):.0f} px ({SNAP_RADIUS_UM} µm)"}
         return state
 
     def _step_merge_viz(self, prev: StepState) -> StepState:
@@ -420,9 +444,9 @@ class StepRunner:
         state = self._copy_forward(prev)
         state.params_used = {
             "angle_threshold": "70°",
-            "step_dist": "50 px",
-            "min_path_length": "500 px",
-            "min_split_length": "200 px",
+            "step_dist": f"{um_to_px(STEP_DIST_UM):.0f} px ({STEP_DIST_UM} µm)",
+            "min_path_length": f"{um_to_px(MIN_PATH_LENGTH_UM):.0f} px ({MIN_PATH_LENGTH_UM} µm)",
+            "min_split_length": f"{um_to_px(MIN_SPLIT_LENGTH_UM):.0f} px ({MIN_SPLIT_LENGTH_UM} µm)",
         }
         return state
 
@@ -432,7 +456,7 @@ class StepRunner:
         state.params_used = {
             "max_crossvein_len": "15% wing span",
             "orientation_cutoff": "60°",
-            "proximity_threshold": "100 px",
+            "proximity_threshold": f"{um_to_px(CV_NORM_DIST_UM):.0f} px ({CV_NORM_DIST_UM} µm)",
         }
         return state
 
@@ -461,9 +485,46 @@ class StepRunner:
         return state
 
     def _step_poly_split_viz(self, prev: StepState) -> StepState:
-        """Step 11: Visualization-only — show polygon split results."""
+        """Step 11: Clip intervein regions using vein-extension boundaries."""
         state = self._copy_forward(prev)
-        state.params_used = {"area_threshold": "1.5x expected max"}
+
+        vein_lines = {
+            a.vein_id: a.line for a in (state.assignments or [])
+            if a.line is not None and a.vein_id != "costa"
+            and a.status != VeinStatus.ABSENT
+        }
+        if vein_lines and state.polygons and state.poly_names:
+            # Build temporary wing outline (wing_blade not available until step 16)
+            outline = build_wing_outline(
+                state.polygons, vein_polygons=state.vein_polygons or None,
+            )
+            image_shape = state.image.shape[:2] if state.image is not None else (1, 1)
+            ext_polys, ext_poly_veins, ext_lines = partition_by_vein_extension(
+                outline.polygon, vein_lines, image_shape,
+            )
+            ext_names = name_regions_from_veins(
+                ext_polys, state.vein_map or {}, state.wing_bbox,
+                poly_veins=ext_poly_veins,
+            )
+            if ext_names:
+                state.polygons, state.poly_names = _clip_regions_by_extension(
+                    state.polygons, state.poly_names, ext_polys, ext_names,
+                )
+                state.extension_lines = ext_lines
+                state.params_used = {
+                    "method": "vein_extension_clip",
+                    "num_regions": str(len(state.poly_names)),
+                }
+            else:
+                state.params_used = {
+                    "method": "vein_extension_failed",
+                    "num_regions": str(len(state.poly_names or {})),
+                }
+        else:
+            state.params_used = {
+                "method": "skipped (no vein lines)",
+                "num_regions": str(len(state.poly_names or {})),
+            }
         return state
 
     def _step_validate_viz(self, prev: StepState) -> StepState:
@@ -547,7 +608,10 @@ class StepRunner:
             state.polygons, vein_polygons=state.vein_polygons or None,
         )
         state.outline = outline
-        state.params_used = {"buffer_dist": "20 px", "vein_buffer": "5 px"}
+        state.params_used = {
+            "buffer_dist": f"{um_to_px(BUFFER_OUTLINE_UM):.0f} px ({BUFFER_OUTLINE_UM} µm)",
+            "vein_buffer": f"{um_to_px(BUFFER_VEIN_UM):.0f} px ({BUFFER_VEIN_UM} µm)",
+        }
         return state
 
     def _step_hinge(self, prev: StepState) -> StepState:
@@ -573,7 +637,7 @@ class StepRunner:
         """Step 17: Compute compartments and partition intervein spaces."""
         state = self._copy_forward(prev)
 
-        # Partition intervein spaces
+        # Partition intervein spaces (polygons may have been updated by step 11)
         all_regions = partition_intervein_spaces(
             state.wing_blade, state.polygons, state.poly_names or {},
         )
@@ -590,8 +654,8 @@ class StepRunner:
         state.posterior_compartment = posterior
 
         state.params_used = {
-            "simplify": "10 px",
-            "extend": "500 px",
+            "simplify": f"{um_to_px(COMPARTMENT_SIMPLIFY_UM):.0f} px ({COMPARTMENT_SIMPLIFY_UM} µm)",
+            "extend": f"{um_to_px(COMPARTMENT_EXTENSION_UM):.0f} px ({COMPARTMENT_EXTENSION_UM} µm)",
             "num_regions": str(len(regions)),
         }
         return state
@@ -691,6 +755,7 @@ class StepRunner:
         state.split_paths = prev.split_paths
         state.vein_map = prev.vein_map
         state.poly_names = prev.poly_names
+        state.extension_lines = prev.extension_lines
         state.assignments = list(prev.assignments) if prev.assignments else prev.assignments
         state.outline = prev.outline
         state.hinge_landmarks = prev.hinge_landmarks
@@ -702,3 +767,41 @@ class StepRunner:
         state.skeleton_overlay = prev.skeleton_overlay
         state.rainbow_overlay = prev.rainbow_overlay
         return state
+
+
+def _clip_regions_by_extension(
+    polygons: list[Polygon],
+    poly_names: dict[int, str],
+    ext_polys: list[Polygon],
+    ext_names: dict[int, str],
+) -> tuple[list[Polygon], dict[int, str]]:
+    """Intersect each named polygon with its matching vein-extension region.
+
+    This only makes regions smaller — the original polygon is clipped to the
+    vein-extension boundary for the same region name.
+    """
+    from shapely.geometry import MultiPolygon
+
+    # Build name → union of vein-extension polygons
+    ext_by_name: dict[str, Polygon] = {}
+    for i, name in ext_names.items():
+        if name in ext_by_name:
+            ext_by_name[name] = ext_by_name[name].union(ext_polys[i])
+        else:
+            ext_by_name[name] = ext_polys[i]
+
+    new_polygons = list(polygons)
+    new_names = dict(poly_names)
+    for i, name in poly_names.items():
+        if name not in ext_by_name or i >= len(new_polygons):
+            continue
+        clipped = new_polygons[i].intersection(ext_by_name[name])
+        if clipped.is_empty or clipped.area < 100:
+            continue
+        # Extract largest polygon from multi-geometry results
+        if isinstance(clipped, MultiPolygon):
+            clipped = max(clipped.geoms, key=lambda g: g.area)
+        if isinstance(clipped, Polygon):
+            new_polygons[i] = clipped
+
+    return new_polygons, new_names
