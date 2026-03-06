@@ -62,7 +62,7 @@ from scripts.visualize import (
 MODEL_W, MODEL_H = 512, 352
 HEATMAP_SIGMA = 5
 HEATMAP_THUMB_W, HEATMAP_THUMB_H = 240, 165
-IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 
 
 def _make_display_name(internal_name: str) -> str:
