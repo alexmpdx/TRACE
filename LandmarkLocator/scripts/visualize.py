@@ -22,10 +22,12 @@ from inference.predict import LandmarkPredictor
 
 def generate_landmark_colors(names: list[str]) -> dict[str, tuple[int, int, int]]:
     """Generate distinct BGR colors for an arbitrary list of landmark names."""
+    # Hand-picked hues that maximise perceptual distance; avoids adjacent greens
+    _BASE_HUES = [0.0, 0.08, 0.17, 0.35, 0.55, 0.72, 0.85]
     colors = {}
     n = max(len(names), 1)
     for i, name in enumerate(names):
-        hue = i / n
+        hue = _BASE_HUES[i] if i < len(_BASE_HUES) else (i / n)
         r, g, b = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
         colors[name] = (int(b * 255), int(g * 255), int(r * 255))  # BGR
     return colors
