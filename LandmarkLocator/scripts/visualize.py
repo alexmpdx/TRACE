@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import colorsys
 import json
 import sys
 from pathlib import Path
@@ -15,17 +16,19 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from data.dataset import GEOJSON_TO_LANDMARK, LANDMARK_ORDER
+from data.dataset import _normalize_name
 from inference.predict import LandmarkPredictor
 
-# Colors per landmark (BGR for OpenCV)
-LANDMARK_COLORS = {
-    "subcostal_break": (0, 165, 255),   # orange
-    "alula_notch": (214, 51, 65),       # blue-ish
-    "l1_rs_junction": (147, 160, 229),  # salmon
-    "l4_l5_junction": (242, 210, 7),    # cyan
-    "wing_tip": (46, 11, 135),          # dark red
-}
+
+def generate_landmark_colors(names: list[str]) -> dict[str, tuple[int, int, int]]:
+    """Generate distinct BGR colors for an arbitrary list of landmark names."""
+    colors = {}
+    n = max(len(names), 1)
+    for i, name in enumerate(names):
+        hue = i / n
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
+        colors[name] = (int(b * 255), int(g * 255), int(r * 255))  # BGR
+    return colors
 
 
 def load_ground_truth(geojson_path: Path) -> dict[str, tuple[float, float]]:
@@ -35,14 +38,18 @@ def load_ground_truth(geojson_path: Path) -> dict[str, tuple[float, float]]:
 
     landmarks = {}
     for feature in data["features"]:
-        geom = feature["geometry"]
-        class_name = feature["properties"]["classification"]["name"]
-        internal_name = GEOJSON_TO_LANDMARK.get(class_name)
-        if internal_name is None:
+        geom = feature.get("geometry", {})
+        props = feature.get("properties", {})
+        classification = props.get("classification")
+        if not isinstance(classification, dict):
             continue
-        if geom["type"] == "Point":
+        class_name = classification.get("name")
+        if not class_name:
+            continue
+        internal_name = _normalize_name(class_name)
+        if geom.get("type") == "Point":
             x, y = geom["coordinates"]
-        elif geom["type"] == "MultiPoint":
+        elif geom.get("type") == "MultiPoint":
             x, y = geom["coordinates"][0]
         else:
             continue
@@ -51,17 +58,40 @@ def load_ground_truth(geojson_path: Path) -> dict[str, tuple[float, float]]:
     return landmarks
 
 
+# Default colors (generated on first use or overridden per-model)
+LANDMARK_COLORS: dict[str, tuple[int, int, int]] = {}
+
+
+def _ensure_colors(names: list[str]) -> dict[str, tuple[int, int, int]]:
+    """Ensure LANDMARK_COLORS has entries for all names."""
+    global LANDMARK_COLORS
+    missing = [n for n in names if n not in LANDMARK_COLORS]
+    if missing:
+        new_colors = generate_landmark_colors(names)
+        LANDMARK_COLORS.update(new_colors)
+    return LANDMARK_COLORS
+
+
 def draw_landmarks_on_image(
     image: np.ndarray,
     predictions: dict[str, tuple[float, float]],
     ground_truth: dict[str, tuple[float, float]] | None = None,
     radius: int = 15,
+    landmark_order: list[str] | None = None,
 ) -> np.ndarray:
     """Draw predicted landmarks (circles) and ground truth (crosses) on image."""
     vis = image.copy()
 
-    for name in LANDMARK_ORDER:
-        color = LANDMARK_COLORS.get(name, (255, 255, 255))
+    # Determine which landmarks to draw
+    if landmark_order is None:
+        all_names = sorted(set(list(predictions.keys()) + (list(ground_truth.keys()) if ground_truth else [])))
+    else:
+        all_names = landmark_order
+
+    colors = _ensure_colors(all_names)
+
+    for name in all_names:
+        color = colors.get(name, (255, 255, 255))
 
         # Ground truth: cross
         if ground_truth and name in ground_truth:
@@ -87,6 +117,7 @@ def draw_landmarks_on_image(
 def visualize_heatmaps(
     heatmaps: np.ndarray,
     image: np.ndarray | None = None,
+    landmark_order: list[str] | None = None,
 ) -> plt.Figure:
     """Plot per-channel heatmaps in a grid."""
     n_channels = heatmaps.shape[0]
@@ -102,7 +133,10 @@ def visualize_heatmaps(
 
     for i in range(n_channels):
         axes[i + 1].imshow(heatmaps[i], cmap="hot", vmin=0)
-        axes[i + 1].set_title(LANDMARK_ORDER[i].replace("_", " "))
+        if landmark_order and i < len(landmark_order):
+            axes[i + 1].set_title(landmark_order[i].replace("_", " "))
+        else:
+            axes[i + 1].set_title(f"Channel {i}")
 
     for ax in axes:
         ax.axis("off")
@@ -124,6 +158,8 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     predictor = LandmarkPredictor(args.checkpoint, args.device)
+    landmark_order = predictor.landmark_order
+    _ensure_colors(landmark_order)
 
     for img_path in args.images:
         image = cv2.imread(str(img_path))
@@ -141,14 +177,14 @@ def main() -> None:
                 gt = load_ground_truth(gt_path)
 
         # Draw overlay
-        vis = draw_landmarks_on_image(image, result["landmarks"], gt)
+        vis = draw_landmarks_on_image(image, result["landmarks"], gt, landmark_order=landmark_order)
         out_path = args.output_dir / f"{img_path.stem}_landmarks.jpg"
         cv2.imwrite(str(out_path), vis)
         print(f"Saved: {out_path}")
 
         # Heatmap visualization
         if args.heatmaps:
-            fig = visualize_heatmaps(result["heatmaps"], image)
+            fig = visualize_heatmaps(result["heatmaps"], image, landmark_order=landmark_order)
             hm_path = args.output_dir / f"{img_path.stem}_heatmaps.png"
             fig.savefig(str(hm_path), dpi=100)
             plt.close(fig)
@@ -156,7 +192,7 @@ def main() -> None:
 
         # Print results
         print(f"\n{img_path.name}:")
-        for name in LANDMARK_ORDER:
+        for name in landmark_order:
             x, y = result["landmarks"][name]
             conf = result["confidences"][name]
             line = f"  {name:20s}: ({x:7.1f}, {y:7.1f})  conf={conf:.3f}"

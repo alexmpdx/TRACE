@@ -13,7 +13,7 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from data.dataset import IMAGENET_MEAN, IMAGENET_STD, LANDMARK_ORDER
+from data.dataset import IMAGENET_MEAN, IMAGENET_STD
 from models.unet import LandmarkUNet
 from training.train import extract_landmarks_from_heatmaps
 
@@ -39,6 +39,8 @@ class LandmarkPredictor:
         cfg = checkpoint["config"]
         self.input_w = cfg["input"]["width"]
         self.input_h = cfg["input"]["height"]
+        self.landmark_order: list[str] = cfg["heatmap"]["landmark_order"]
+        self.geojson_to_landmark: dict[str, str] = cfg["heatmap"].get("geojson_to_landmark", {})
 
         self.model = LandmarkUNet(
             num_landmarks=cfg["heatmap"]["num_landmarks"],
@@ -84,7 +86,7 @@ class LandmarkPredictor:
 
         landmarks = {}
         confidences = {}
-        for i, name in enumerate(LANDMARK_ORDER):
+        for i, name in enumerate(self.landmark_order):
             mx, my = model_coords[i]
             landmarks[name] = (mx * scale_x, my * scale_y)
             confidences[name] = float(heatmaps[i].max())
@@ -110,6 +112,7 @@ def predict_ensemble(
 ) -> dict:
     """Average heatmaps from multiple fold models before extracting coords."""
     predictors = [LandmarkPredictor(p, device) for p in checkpoint_paths]
+    landmark_order = predictors[0].landmark_order
 
     all_heatmaps = []
     scale_x = scale_y = None
@@ -128,7 +131,7 @@ def predict_ensemble(
 
     landmarks = {}
     confidences = {}
-    for i, name in enumerate(LANDMARK_ORDER):
+    for i, name in enumerate(landmark_order):
         mx, my = model_coords[i]
         landmarks[name] = (mx * scale_x, my * scale_y)
         confidences[name] = float(avg_heatmaps[i].max())

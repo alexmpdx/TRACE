@@ -14,7 +14,8 @@ input:
 # Landmark heatmap settings
 heatmap:
   sigma: 5  # Gaussian sigma in pixels at model resolution
-  num_landmarks: 5
+  # num_landmarks, landmark_order, and geojson_to_landmark are
+  # auto-discovered from the annotation files at training time
 
 # Model architecture
 model:

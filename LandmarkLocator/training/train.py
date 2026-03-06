@@ -16,7 +16,7 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from data.dataset import LANDMARK_ORDER, LandmarkDataset, extract_genotype
+from data.dataset import LandmarkDataset, discover_landmarks, extract_genotype
 from models.unet import LandmarkUNet
 from training.losses import HeatmapMSELoss
 
@@ -30,6 +30,17 @@ def get_device(requested: Optional[str] = None) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def _populate_landmark_config(cfg: dict, annotation_dir: Path) -> None:
+    """Discover landmarks from annotations and inject into config dict."""
+    landmark_order, geojson_to_landmark = discover_landmarks(annotation_dir)
+    if not landmark_order:
+        raise ValueError(f"No landmarks found in {annotation_dir}")
+    cfg["heatmap"]["landmark_order"] = landmark_order
+    cfg["heatmap"]["geojson_to_landmark"] = geojson_to_landmark
+    cfg["heatmap"]["num_landmarks"] = len(landmark_order)
+    print(f"Discovered {len(landmark_order)} landmarks: {landmark_order}")
 
 
 def extract_landmarks_from_heatmaps(heatmaps: np.ndarray) -> list[tuple[float, float]]:
@@ -123,6 +134,8 @@ def train_fold(
         pin_memory=False,
     )
 
+    landmark_order = cfg["heatmap"]["landmark_order"]
+
     # Model
     model = LandmarkUNet(
         num_landmarks=cfg["heatmap"]["num_landmarks"],
@@ -206,7 +219,7 @@ def train_fold(
             for batch in val_loader:
                 images = batch["image"].to(device)
                 targets = batch["heatmaps"].to(device)
-                gt_landmarks = batch["landmarks"]  # (B, 5, 2) at model resolution
+                gt_landmarks = batch["landmarks"]  # (B, N, 2) at model resolution
                 scale_x = batch["scale_x"]  # (B,)
                 scale_y = batch["scale_y"]  # (B,)
 
@@ -222,18 +235,18 @@ def train_fold(
                     sx = scale_x[b].item()
                     sy = scale_y[b].item()
 
-                    for i in range(len(LANDMARK_ORDER)):
+                    for i in range(len(landmark_order)):
                         px, py = pred_coords[i]
                         gx, gy = gt_coords[i]
                         # Error in original image pixels
                         err = np.sqrt(((px - gx) * sx) ** 2 + ((py - gy) * sy) ** 2)
-                        all_errors.append((LANDMARK_ORDER[i], err))
+                        all_errors.append((landmark_order[i], err))
 
         val_loss /= len(val_ds)
 
         # Compute per-landmark mean error
         landmark_errors = {}
-        for name in LANDMARK_ORDER:
+        for name in landmark_order:
             errs = [e for n, e in all_errors if n == name]
             landmark_errors[name] = np.mean(errs) if errs else 0.0
 
@@ -305,6 +318,9 @@ def run_training(
     project_root = Path(__file__).resolve().parent.parent
     annotation_dir = project_root / cfg["data"]["annotation_dir"]
 
+    # Auto-discover landmarks from annotation files
+    _populate_landmark_config(cfg, annotation_dir)
+
     splits = create_cv_splits(annotation_dir, cfg["cv"]["n_folds"])
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -330,6 +346,6 @@ def run_training(
         mean_errors = [m["mean_pixel_error"] for m in all_metrics.values()]
         print(f"\n{'='*60}")
         print(f"CV Summary: mean_error={np.mean(mean_errors):.1f} ± {np.std(mean_errors):.1f}px")
-        for name in LANDMARK_ORDER:
+        for name in cfg["heatmap"]["landmark_order"]:
             errs = [m["per_landmark_error"][name] for m in all_metrics.values()]
             print(f"  {name}: {np.mean(errs):.1f} ± {np.std(errs):.1f}px")

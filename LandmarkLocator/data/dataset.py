@@ -1,6 +1,7 @@
 """Core dataset for landmark heatmap regression."""
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -11,27 +12,47 @@ from torch.utils.data import Dataset
 
 from data.augmentation import get_train_transform, get_val_transform
 
-# GeoJSON classification name → internal landmark name
-GEOJSON_TO_LANDMARK = {
-    "subcostal break": "subcostal_break",
-    "alula notch": "alula_notch",
-    "L1-Rs": "l1_rs_junction",
-    "L4-L5": "l4_l5_junction",
-    "DTip": "wing_tip",
-}
-
-# Canonical channel order for heatmap output
-LANDMARK_ORDER = [
-    "subcostal_break",
-    "alula_notch",
-    "l1_rs_junction",
-    "l4_l5_junction",
-    "wing_tip",
-]
-
 # ImageNet normalization stats
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def _normalize_name(geojson_name: str) -> str:
+    """Convert a GeoJSON classification name to a snake_case internal name."""
+    name = geojson_name.strip()
+    # Replace dots, hyphens, spaces with underscores
+    name = re.sub(r"[\s.\-]+", "_", name)
+    return name.lower()
+
+
+def discover_landmarks(annotation_dir: Path) -> tuple[list[str], dict[str, str]]:
+    """Scan GeoJSON files to discover all landmark names.
+
+    Returns:
+        (landmark_order, geojson_to_landmark) where landmark_order is the
+        sorted canonical list of internal names and geojson_to_landmark maps
+        GeoJSON classification names to internal names.
+    """
+    geojson_to_landmark: dict[str, str] = {}
+    for path in sorted(annotation_dir.glob("*.geojson")):
+        with open(path) as f:
+            data = json.load(f)
+        for feature in data["features"]:
+            props = feature.get("properties", {})
+            classification = props.get("classification")
+            if not isinstance(classification, dict):
+                continue
+            geojson_name = classification.get("name")
+            if not geojson_name:
+                continue
+            geom = feature.get("geometry", {})
+            if geom.get("type") not in ("Point", "MultiPoint"):
+                continue
+            if geojson_name not in geojson_to_landmark:
+                geojson_to_landmark[geojson_name] = _normalize_name(geojson_name)
+
+    landmark_order = sorted(set(geojson_to_landmark.values()))
+    return landmark_order, geojson_to_landmark
 
 
 def extract_genotype(filename: str) -> str:
@@ -65,6 +86,10 @@ class LandmarkDataset(Dataset):
         self.input_h = cfg["input"]["height"]
         self.input_w = cfg["input"]["width"]
         self.sigma = cfg["heatmap"]["sigma"]
+
+        # Load landmark definitions from config (set during training setup)
+        self.landmark_order: list[str] = cfg["heatmap"]["landmark_order"]
+        self.geojson_to_landmark: dict[str, str] = cfg["heatmap"]["geojson_to_landmark"]
 
         # Collect all geojson files, sorted for reproducibility
         all_files = sorted(self.annotation_dir.glob("*.geojson"))
@@ -104,10 +129,16 @@ class LandmarkDataset(Dataset):
 
         landmarks = {}
         for feature in data["features"]:
-            geom = feature["geometry"]
-            class_name = feature["properties"]["classification"]["name"]
+            geom = feature.get("geometry", {})
+            props = feature.get("properties", {})
+            classification = props.get("classification")
+            if not isinstance(classification, dict):
+                continue
+            class_name = classification.get("name")
+            if not class_name:
+                continue
 
-            internal_name = GEOJSON_TO_LANDMARK.get(class_name)
+            internal_name = self.geojson_to_landmark.get(class_name)
             if internal_name is None:
                 continue
 
@@ -121,8 +152,8 @@ class LandmarkDataset(Dataset):
 
             landmarks[internal_name] = (float(x), float(y))
 
-        # Validate all 5 landmarks present
-        missing = set(LANDMARK_ORDER) - set(landmarks.keys())
+        # Validate all expected landmarks present
+        missing = set(self.landmark_order) - set(landmarks.keys())
         if missing:
             raise ValueError(f"Missing landmarks in {path}: {missing}")
 
@@ -176,7 +207,7 @@ class LandmarkDataset(Dataset):
         # Build keypoint list in canonical order
         keypoints = []
         landmark_names = []
-        for name in LANDMARK_ORDER:
+        for name in self.landmark_order:
             x, y = landmarks_dict[name]
             keypoints.append((x, y))
             landmark_names.append(name)
@@ -196,7 +227,7 @@ class LandmarkDataset(Dataset):
 
         # Reorder keypoints back to canonical order (albumentations may reorder)
         kp_dict = dict(zip(aug_names, aug_keypoints))
-        ordered_kps = [kp_dict[name] for name in LANDMARK_ORDER]
+        ordered_kps = [kp_dict[name] for name in self.landmark_order]
 
         # Generate heatmaps from transformed keypoints
         heatmaps = self._generate_heatmap(ordered_kps, self.input_h, self.input_w)

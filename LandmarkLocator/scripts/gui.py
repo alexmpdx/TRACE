@@ -51,8 +51,10 @@ from PyQt5.QtWidgets import (
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
-from data.dataset import LANDMARK_ORDER
-from scripts.visualize import LANDMARK_COLORS, draw_landmarks_on_image, load_ground_truth
+from data.dataset import discover_landmarks, _normalize_name
+from scripts.visualize import (
+    draw_landmarks_on_image, generate_landmark_colors, load_ground_truth, _ensure_colors,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -62,28 +64,16 @@ HEATMAP_SIGMA = 5
 HEATMAP_THUMB_W, HEATMAP_THUMB_H = 240, 165
 IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 
-# Internal name → GeoJSON classification name (reverse of GEOJSON_TO_LANDMARK)
-LANDMARK_TO_GEOJSON = {
-    "subcostal_break": "subcostal break",
-    "alula_notch": "alula notch",
-    "l1_rs_junction": "L1-Rs",
-    "l4_l5_junction": "L4-L5",
-    "wing_tip": "DTip",
-}
 
-# Pretty display names for landmarks
-LANDMARK_DISPLAY = {
-    "subcostal_break": "Subcostal Break",
-    "alula_notch": "Alula Notch",
-    "l1_rs_junction": "L1-Rs Junction",
-    "l4_l5_junction": "L4-L5 Junction",
-    "wing_tip": "Wing Tip",
-}
+def _make_display_name(internal_name: str) -> str:
+    """Convert an internal snake_case name to a human-readable title."""
+    return internal_name.replace("_", " ").title()
 
-# BGR → QColor (RGB)
-LANDMARK_QCOLORS: dict[str, QColor] = {
-    name: QColor(bgr[2], bgr[1], bgr[0]) for name, bgr in LANDMARK_COLORS.items()
-}
+
+def _make_qcolors(names: list[str]) -> dict[str, QColor]:
+    """Generate QColor map for a list of landmark names."""
+    bgr_colors = generate_landmark_colors(names)
+    return {name: QColor(bgr[2], bgr[1], bgr[0]) for name, bgr in bgr_colors.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +87,7 @@ class ImageEntry:
     geojson_path: Optional[Path] = None
     prediction: Optional[dict] = None  # result from LandmarkPredictor.predict()
     gt: Optional[dict[str, tuple[float, float]]] = None
-    gt_heatmaps: Optional[np.ndarray] = None  # (5, MODEL_H, MODEL_W)
+    gt_heatmaps: Optional[np.ndarray] = None  # (N, MODEL_H, MODEL_W)
     _gt_loaded: bool = field(default=False, repr=False)
 
     def load_gt(self) -> None:
@@ -107,7 +97,6 @@ class ImageEntry:
         self._gt_loaded = True
         if self.geojson_path and self.geojson_path.exists():
             self.gt = load_ground_truth(self.geojson_path)
-            self.gt_heatmaps = generate_gt_heatmaps(self.gt)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +104,7 @@ class ImageEntry:
 # ---------------------------------------------------------------------------
 def generate_gt_heatmaps(
     gt: dict[str, tuple[float, float]],
+    landmark_order: list[str],
     width: int = MODEL_W,
     height: int = MODEL_H,
     sigma: float = HEATMAP_SIGMA,
@@ -122,8 +112,8 @@ def generate_gt_heatmaps(
     orig_h: Optional[int] = None,
 ) -> np.ndarray:
     """Render Gaussian heatmaps from ground-truth coordinates at model resolution."""
-    heatmaps = np.zeros((len(LANDMARK_ORDER), height, width), dtype=np.float32)
-    for i, name in enumerate(LANDMARK_ORDER):
+    heatmaps = np.zeros((len(landmark_order), height, width), dtype=np.float32)
+    for i, name in enumerate(landmark_order):
         if name not in gt:
             continue
         kx, ky = gt[name]
@@ -240,7 +230,16 @@ class LegendWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(len(LANDMARK_ORDER) * 22 + 50)
+        self._landmark_order: list[str] = []
+        self._qcolors: dict[str, QColor] = {}
+        self.setFixedHeight(50)
+
+    def set_landmarks(self, landmark_order: list[str]) -> None:
+        """Update the legend with a new set of landmarks."""
+        self._landmark_order = landmark_order
+        self._qcolors = _make_qcolors(landmark_order)
+        self.setFixedHeight(len(landmark_order) * 22 + 50)
+        self.update()
 
     def paintEvent(self, event) -> None:
         """Draw colored swatches and labels."""
@@ -262,13 +261,13 @@ class LegendWidget(QWidget):
         p.drawText(10, y + 12, "\u2716 Cross = Ground Truth")
         y += 22
 
-        for name in LANDMARK_ORDER:
-            color = LANDMARK_QCOLORS.get(name, QColor(200, 200, 200))
+        for name in self._landmark_order:
+            color = self._qcolors.get(name, QColor(200, 200, 200))
             p.setBrush(color)
             p.setPen(Qt.NoPen)
             p.drawRect(10, y, 14, 14)
             p.setPen(Qt.lightGray)
-            p.drawText(30, y + 12, LANDMARK_DISPLAY.get(name, name))
+            p.drawText(30, y + 12, _make_display_name(name))
             y += 20
         p.end()
 
@@ -338,15 +337,40 @@ class HeatmapPanel(QScrollArea):
         self._layout.addLayout(bar_row)
 
         self._pred_labels: dict[str, _ClickableLabel] = {}
+        self._headers: dict[str, QLabel] = {}
         self._selected: Optional[str] = None
+        self._landmark_order: list[str] = []
+        self._qcolors: dict[str, QColor] = {}
+        self._stretch_item = self._layout.addStretch()
 
-        for name in LANDMARK_ORDER:
-            display = LANDMARK_DISPLAY.get(name, name)
-            color = LANDMARK_QCOLORS.get(name, QColor(200, 200, 200))
+        # Cached state for refresh on toggle
+        self._cur_pred_heatmaps: Optional[np.ndarray] = None
+        self._cur_gt_coords: Optional[dict[str, tuple[float, float]]] = None
+
+    def set_landmarks(self, landmark_order: list[str]) -> None:
+        """Rebuild heatmap thumbnail slots for a new set of landmarks."""
+        # Remove old widgets
+        for name in self._landmark_order:
+            self._headers[name].deleteLater()
+            self._pred_labels[name].deleteLater()
+        self._headers.clear()
+        self._pred_labels.clear()
+        self._selected = None
+
+        self._landmark_order = landmark_order
+        self._qcolors = _make_qcolors(landmark_order)
+
+        # Insert new widgets before the stretch
+        insert_idx = self._layout.count() - 1  # before stretch
+        for name in landmark_order:
+            display = _make_display_name(name)
+            color = self._qcolors.get(name, QColor(200, 200, 200))
 
             header = QLabel(f"<b style='color:{color.name()}'>{display}</b>")
             header.setStyleSheet("padding-top: 6px;")
-            self._layout.addWidget(header)
+            self._layout.insertWidget(insert_idx, header)
+            self._headers[name] = header
+            insert_idx += 1
 
             lbl = _ClickableLabel(name)
             lbl.setText("No model")
@@ -354,14 +378,9 @@ class HeatmapPanel(QScrollArea):
             lbl.setFixedSize(HEATMAP_THUMB_W, HEATMAP_THUMB_H)
             lbl.setStyleSheet(self._STYLE_NORMAL)
             lbl.clicked.connect(self._on_label_clicked)
-            self._layout.addWidget(lbl)
+            self._layout.insertWidget(insert_idx, lbl)
             self._pred_labels[name] = lbl
-
-        self._layout.addStretch()
-
-        # Cached state for refresh on toggle
-        self._cur_pred_heatmaps: Optional[np.ndarray] = None
-        self._cur_gt_coords: Optional[dict[str, tuple[float, float]]] = None
+            insert_idx += 1
 
     def _on_label_clicked(self, name: str) -> None:
         """Handle click on a heatmap thumbnail — toggle selection."""
@@ -398,16 +417,18 @@ class HeatmapPanel(QScrollArea):
         self._cur_pred_heatmaps = pred_heatmaps
         self._cur_gt_coords = gt_coords
 
-        for i, name in enumerate(LANDMARK_ORDER):
+        for i, name in enumerate(self._landmark_order):
+            if name not in self._pred_labels:
+                continue
             lbl = self._pred_labels[name]
-            if pred_heatmaps is not None:
+            if pred_heatmaps is not None and i < pred_heatmaps.shape[0]:
                 pm = heatmap_to_pixmap(pred_heatmaps[i])
                 # Draw GT cross if enabled and available
                 if self._show_gt.isChecked() and gt_coords and name in gt_coords:
                     gx, gy = gt_coords[name]
                     tx = int(gx * HEATMAP_THUMB_W / MODEL_W)
                     ty = int(gy * HEATMAP_THUMB_H / MODEL_H)
-                    color = LANDMARK_QCOLORS.get(name, QColor(255, 255, 255))
+                    color = self._qcolors.get(name, QColor(255, 255, 255))
                     pm = self._draw_cross(pm, tx, ty, color)
                 lbl.setPixmap(pm)
                 lbl.setText("")
@@ -444,9 +465,10 @@ class TrainingThread(QThread):
     finished_training = pyqtSignal(str)  # checkpoint path
     error = pyqtSignal(str)
 
-    def __init__(self, model_name: str, parent=None):
+    def __init__(self, model_name: str, gt_dir: Optional[Path] = None, parent=None):
         super().__init__(parent)
         self._model_name = model_name
+        self._gt_dir = gt_dir
 
     def run(self) -> None:
         """Execute training fold 0."""
@@ -454,7 +476,7 @@ class TrainingThread(QThread):
         old_stdout = sys.stdout
         sys.stdout = capture
         try:
-            from training.train import create_cv_splits, get_device, train_fold
+            from training.train import _populate_landmark_config, create_cv_splits, get_device, train_fold
 
             config_path = _project_root / "configs" / "default.yaml"
             with open(config_path) as f:
@@ -466,7 +488,13 @@ class TrainingThread(QThread):
             device = get_device()
             print(f"Using device: {device}")
 
-            annotation_dir = _project_root / cfg["data"]["annotation_dir"]
+            if self._gt_dir:
+                annotation_dir = self._gt_dir
+                cfg["data"]["annotation_dir"] = str(annotation_dir)
+            else:
+                annotation_dir = _project_root / cfg["data"]["annotation_dir"]
+
+            _populate_landmark_config(cfg, annotation_dir)
             splits = create_cv_splits(annotation_dir, cfg["cv"]["n_folds"])
             train_idx, val_idx = splits[0]
             print(f"Fold 0: {len(train_idx)} train, {len(val_idx)} val")
@@ -494,25 +522,19 @@ class TrainingThread(QThread):
 class TrainingDialog(QDialog):
     """Modal dialog showing live training log output and error chart."""
 
-    # Map landmark names to RGB hex colors (from LANDMARK_COLORS BGR)
-    _CHART_COLORS = {
-        "subcostal_break": "#ffa500",
-        "alula_notch": "#4133d6",
-        "l1_rs_junction": "#e5a093",
-        "l4_l5_junction": "#07d2f2",
-        "wing_tip": "#870b2e",
-    }
-
-    def __init__(self, model_name: str = "", parent=None):
+    def __init__(self, model_name: str = "", landmark_order: list[str] | None = None, parent=None):
         super().__init__(parent)
         title = f"Training — {model_name}" if model_name else "Training"
         self.setWindowTitle(title)
         self.resize(820, 600)
         layout = QVBoxLayout(self)
 
+        self._landmark_order = landmark_order or []
+        self._qcolors = _make_qcolors(self._landmark_order)
+
         # Per-landmark data series (must init before _setup_chart)
         self._epochs: list[int] = []
-        self._series: dict[str, list[float]] = {name: [] for name in LANDMARK_ORDER}
+        self._series: dict[str, list[float]] = {name: [] for name in self._landmark_order}
         self._mean_series: list[float] = []
         self._lines: dict[str, object] = {}
 
@@ -551,9 +573,10 @@ class TrainingDialog(QDialog):
         ax.grid(True, color="#333", linewidth=0.5)
 
         # Create lines for each landmark + mean
-        for name in LANDMARK_ORDER:
-            color = self._CHART_COLORS.get(name, "#ffffff")
-            display = LANDMARK_DISPLAY.get(name, name)
+        for name in self._landmark_order:
+            qc = self._qcolors.get(name, QColor(200, 200, 200))
+            color = qc.name()
+            display = _make_display_name(name)
             line, = ax.plot([], [], color=color, linewidth=1.2, label=display)
             self._lines[name] = line
         mean_line, = ax.plot([], [], color="#ffffff", linewidth=2, linestyle="--", label="Mean")
@@ -571,11 +594,13 @@ class TrainingDialog(QDialog):
         epoch = data["epoch"]
         self._epochs.append(epoch)
         self._mean_series.append(data["mean_error"])
-        for name in LANDMARK_ORDER:
+        for name in self._landmark_order:
+            if name not in self._series:
+                self._series[name] = []
             self._series[name].append(data["landmark_errors"].get(name, 0.0))
 
         # Update line data
-        for name in LANDMARK_ORDER:
+        for name in self._landmark_order:
             self._lines[name].set_data(self._epochs, self._series[name])
         self._lines["_mean"].set_data(self._epochs, self._mean_series)
 
@@ -623,10 +648,14 @@ class LandmarkGUI(QMainWindow):
         self._current_idx: int = -1
         self._predictor = None  # LandmarkPredictor or None
         self._output_dir: Optional[Path] = None
+        self._gt_dir: Optional[Path] = None
+        self._img_dir: Optional[Path] = None
+        self._landmark_order: list[str] = []
+        self._geojson_to_landmark: dict[str, str] = {}
 
         # Heatmap overlay state
         self._base_vis: Optional[np.ndarray] = None  # BGR image without heatmap overlay
-        self._overlay_heatmaps: Optional[np.ndarray] = None  # (5, MODEL_H, MODEL_W)
+        self._overlay_heatmaps: Optional[np.ndarray] = None  # (N, MODEL_H, MODEL_W)
         self._overlay_orig_shape: Optional[tuple[int, int]] = None  # (orig_h, orig_w)
         self._selected_heatmap: Optional[str] = None
 
@@ -652,6 +681,10 @@ class LandmarkGUI(QMainWindow):
         act_images = QAction("Load Images", self)
         act_images.triggered.connect(self._on_load_folder)
         tb.addAction(act_images)
+
+        act_gt = QAction("Set GT Dir", self)
+        act_gt.triggered.connect(self._on_set_gt_dir)
+        tb.addAction(act_gt)
 
         act_output = QAction("Set Output", self)
         act_output.triggered.connect(self._on_set_output)
@@ -716,19 +749,13 @@ class LandmarkGUI(QMainWindow):
         slider_row.addWidget(self._opacity_label)
         center_layout.addLayout(slider_row)
 
-        self._info_table = QTableWidget(len(LANDMARK_ORDER), 6)
+        self._info_table = QTableWidget(0, 6)
         self._info_table.setHorizontalHeaderLabels(
             ["Landmark", "Pred X", "Pred Y", "GT X", "GT Y", "Error (px)"]
         )
         self._info_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._info_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._info_table.setMaximumHeight(180)
-        # Pre-fill landmark names
-        for i, name in enumerate(LANDMARK_ORDER):
-            item = QTableWidgetItem(LANDMARK_DISPLAY.get(name, name))
-            color = LANDMARK_QCOLORS.get(name, QColor(200, 200, 200))
-            item.setForeground(color)
-            self._info_table.setItem(i, 0, item)
         center_layout.addWidget(self._info_table, stretch=0)
         splitter.addWidget(center)
 
@@ -739,13 +766,43 @@ class LandmarkGUI(QMainWindow):
 
         splitter.setSizes([220, 800, 300])
 
+    # ---- Landmark order management ----
+    def _set_landmark_order(self, landmark_order: list[str], geojson_to_landmark: dict[str, str] | None = None) -> None:
+        """Update the active landmark set and rebuild dependent widgets."""
+        if landmark_order == self._landmark_order:
+            return
+        self._landmark_order = landmark_order
+        if geojson_to_landmark is not None:
+            self._geojson_to_landmark = geojson_to_landmark
+        _ensure_colors(landmark_order)
+        qcolors = _make_qcolors(landmark_order)
+
+        # Rebuild info table rows
+        self._info_table.setRowCount(len(landmark_order))
+        for i, name in enumerate(landmark_order):
+            item = QTableWidgetItem(_make_display_name(name))
+            color = qcolors.get(name, QColor(200, 200, 200))
+            item.setForeground(color)
+            self._info_table.setItem(i, 0, item)
+
+        # Update legend and heatmap panel
+        self._legend.set_landmarks(landmark_order)
+        self._heatmap_panel.set_landmarks(landmark_order)
+
     # ---- Auto-load ----
     def _auto_load(self) -> None:
         """Auto-load training_data_pics + training_data if they exist."""
         img_dir = _project_root / "training_data_pics"
         gt_dir = _project_root / "training_data"
         if img_dir.is_dir():
-            self._load_image_folder(img_dir, gt_dir if gt_dir.is_dir() else None)
+            self._img_dir = img_dir
+            # Discover landmarks from annotations
+            if gt_dir.is_dir():
+                self._gt_dir = gt_dir
+                landmark_order, geojson_to_landmark = discover_landmarks(gt_dir)
+                if landmark_order:
+                    self._set_landmark_order(landmark_order, geojson_to_landmark)
+            self._load_image_folder(img_dir, self._gt_dir)
             self.statusBar().showMessage(
                 f"Auto-loaded {len(self._entries)} images from training_data_pics/"
             )
@@ -762,6 +819,11 @@ class LandmarkGUI(QMainWindow):
             from inference.predict import LandmarkPredictor
 
             self._predictor = LandmarkPredictor(Path(path))
+            # Update landmark order from the loaded model
+            self._set_landmark_order(
+                self._predictor.landmark_order,
+                self._predictor.geojson_to_landmark,
+            )
             self.statusBar().showMessage(f"Model loaded: {Path(path).name}")
             # Clear cached predictions so they re-run
             for entry in self._entries:
@@ -778,17 +840,56 @@ class LandmarkGUI(QMainWindow):
         if not folder:
             return
         folder = Path(folder)
+        self._img_dir = folder
         # Look for GT annotations: sibling training_data/ or same folder
         gt_dir = None
-        candidate = folder.parent / "training_data"
-        if candidate.is_dir():
-            gt_dir = candidate
-        else:
-            # Check if geojson files exist alongside images
-            if list(folder.glob("*.geojson")):
-                gt_dir = folder
-        self._load_image_folder(folder, gt_dir)
+        for name in ("training_data", "training_data_new"):
+            candidate = folder.parent / name
+            if candidate.is_dir():
+                gt_dir = candidate
+                break
+        if gt_dir is None and list(folder.glob("*.geojson")):
+            gt_dir = folder
+        self._gt_dir = gt_dir
+        self._apply_gt_dir()
+        self._load_image_folder(folder, self._gt_dir)
         self.statusBar().showMessage(f"Loaded {len(self._entries)} images from {folder.name}/")
+
+    def _on_set_gt_dir(self) -> None:
+        """Let the user pick a ground-truth annotation folder."""
+        start = str(self._gt_dir) if self._gt_dir else str(_project_root)
+        folder = QFileDialog.getExistingDirectory(self, "Select GT Annotation Folder", start)
+        if not folder:
+            return
+        self._gt_dir = Path(folder)
+        self._apply_gt_dir()
+        # Re-match GT paths to existing image entries
+        for entry in self._entries:
+            entry.geojson_path = None
+            entry.gt = None
+            entry.gt_heatmaps = None
+            entry._gt_loaded = False
+            candidate = self._gt_dir / (entry.path.name + ".geojson")
+            if candidate.exists():
+                entry.geojson_path = candidate
+        gt_count = sum(1 for e in self._entries if e.geojson_path)
+        self.statusBar().showMessage(
+            f"GT dir: {self._gt_dir.name}/ — matched {gt_count}/{len(self._entries)} images"
+        )
+        # Refresh current view
+        if self._current_idx >= 0:
+            self._on_image_selected(self._current_idx)
+
+    def _apply_gt_dir(self) -> None:
+        """Discover landmarks from the current GT dir and update the UI."""
+        if not self._gt_dir:
+            return
+        try:
+            landmark_order, geojson_to_landmark = discover_landmarks(self._gt_dir)
+            if landmark_order:
+                self._set_landmark_order(landmark_order, geojson_to_landmark)
+        except Exception as e:
+            self.statusBar().showMessage(f"Warning: could not discover landmarks: {e}")
 
     def _on_set_output(self) -> None:
         """Set the output directory for Save All."""
@@ -833,7 +934,7 @@ class LandmarkGUI(QMainWindow):
                 except Exception:
                     pass
 
-            vis = draw_landmarks_on_image(image, preds, entry.gt)
+            vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
             out_path = self._output_dir / f"{entry.path.stem}_landmarks.jpg"
             cv2.imwrite(str(out_path), vis)
 
@@ -841,7 +942,9 @@ class LandmarkGUI(QMainWindow):
             if preds:
                 features = []
                 for name, (x, y) in preds.items():
-                    geojson_name = LANDMARK_TO_GEOJSON.get(name, name)
+                    # Reverse lookup: internal name → GeoJSON name
+                    reverse_map = {v: k for k, v in self._geojson_to_landmark.items()}
+                    geojson_name = reverse_map.get(name, name)
                     features.append({
                         "type": "Feature",
                         "geometry": {"type": "Point", "coordinates": [x, y]},
@@ -874,8 +977,8 @@ class LandmarkGUI(QMainWindow):
             return
         model_name = name.strip()
 
-        self._train_dialog = TrainingDialog(model_name, self)
-        self._train_thread = TrainingThread(model_name)
+        self._train_dialog = TrainingDialog(model_name, self._landmark_order, self)
+        self._train_thread = TrainingThread(model_name, self._gt_dir)
         self._train_thread.progress.connect(self._train_dialog.append_log)
         self._train_thread.epoch_data.connect(self._train_dialog.update_chart)
         self._train_thread.finished_training.connect(self._on_training_finished)
@@ -902,6 +1005,10 @@ class LandmarkGUI(QMainWindow):
             from inference.predict import LandmarkPredictor
 
             self._predictor = LandmarkPredictor(Path(ckpt_path))
+            self._set_landmark_order(
+                self._predictor.landmark_order,
+                self._predictor.geojson_to_landmark,
+            )
             for entry in self._entries:
                 entry.prediction = None
             if self._current_idx >= 0:
@@ -936,7 +1043,9 @@ class LandmarkGUI(QMainWindow):
             self._image_widget.set_image(self._base_vis)
             return
 
-        idx = LANDMARK_ORDER.index(self._selected_heatmap)
+        if self._selected_heatmap not in self._landmark_order:
+            return
+        idx = self._landmark_order.index(self._selected_heatmap)
         hm = self._overlay_heatmaps[idx]  # (MODEL_H, MODEL_W)
         orig_h, orig_w = self._overlay_orig_shape
 
@@ -1000,8 +1109,10 @@ class LandmarkGUI(QMainWindow):
 
         # Load ground truth
         entry.load_gt()
-        if entry.gt and entry.gt_heatmaps is None:
-            entry.gt_heatmaps = generate_gt_heatmaps(entry.gt, orig_w=orig_w, orig_h=orig_h)
+        if entry.gt and entry.gt_heatmaps is None and self._landmark_order:
+            entry.gt_heatmaps = generate_gt_heatmaps(
+                entry.gt, self._landmark_order, orig_w=orig_w, orig_h=orig_h
+            )
 
         # Run prediction if model available and not cached
         if self._predictor and entry.prediction is None:
@@ -1012,7 +1123,7 @@ class LandmarkGUI(QMainWindow):
 
         # Draw overlay and cache base visualization
         preds = entry.prediction["landmarks"] if entry.prediction else {}
-        vis = draw_landmarks_on_image(image, preds, entry.gt)
+        vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
         self._base_vis = vis.copy()
         self._overlay_heatmaps = entry.prediction["heatmaps"] if entry.prediction else None
         self._overlay_orig_shape = (orig_h, orig_w)
@@ -1039,13 +1150,13 @@ class LandmarkGUI(QMainWindow):
         gt_count = len(entry.gt) if entry.gt else 0
         pred_str = "yes" if entry.prediction else "no"
         self.statusBar().showMessage(
-            f"{entry.path.name} — {orig_w}x{orig_h} — GT: {gt_count}/5 — Prediction: {pred_str}"
+            f"{entry.path.name} — {orig_w}x{orig_h} — GT: {gt_count}/{len(self._landmark_order)} — Prediction: {pred_str}"
         )
 
     # ---- Info table ----
     def _update_info_table(self, entry: ImageEntry) -> None:
         """Populate the per-landmark info table."""
-        for i, name in enumerate(LANDMARK_ORDER):
+        for i, name in enumerate(self._landmark_order):
             # Pred coords
             if entry.prediction and name in entry.prediction["landmarks"]:
                 px, py = entry.prediction["landmarks"][name]
