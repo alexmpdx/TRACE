@@ -804,11 +804,14 @@ def _clip_regions_by_extension(
     poly_names: dict[int, str],
     ext_polys: list[Polygon],
     ext_names: dict[int, str],
+    min_area: float = 1000,
 ) -> tuple[list[Polygon], dict[int, str]]:
-    """Intersect each named polygon with its matching vein-extension region.
+    """Split each polygon along vein-extension boundaries.
 
-    This only makes regions smaller — the original polygon is clipped to the
-    vein-extension boundary for the same region name.
+    For each original polygon, intersect with every vein-extension region.
+    Significant overlaps become separate polygons with the extension region's
+    name.  This divides oversized polygons into proper compartments while
+    only making individual pieces smaller.
     """
     from shapely.geometry import MultiPolygon
 
@@ -820,18 +823,35 @@ def _clip_regions_by_extension(
         else:
             ext_by_name[name] = ext_polys[i]
 
-    new_polygons = list(polygons)
-    new_names = dict(poly_names)
-    for i, name in poly_names.items():
-        if name not in ext_by_name or i >= len(new_polygons):
+    new_polygons: list[Polygon] = []
+    new_names: dict[int, str] = {}
+
+    for i, orig_poly in enumerate(polygons):
+        if i not in poly_names:
+            new_polygons.append(orig_poly)
             continue
-        clipped = new_polygons[i].intersection(ext_by_name[name])
-        if clipped.is_empty or clipped.area < 100:
-            continue
-        # Extract largest polygon from multi-geometry results
-        if isinstance(clipped, MultiPolygon):
-            clipped = max(clipped.geoms, key=lambda g: g.area)
-        if isinstance(clipped, Polygon):
-            new_polygons[i] = clipped
+
+        # Intersect with every extension region
+        pieces: list[tuple[str, Polygon]] = []
+        for ext_name, ext_poly in ext_by_name.items():
+            inter = orig_poly.intersection(ext_poly)
+            if inter.is_empty or inter.area < min_area:
+                continue
+            # Extract largest polygon from multi-geometry results
+            if isinstance(inter, MultiPolygon):
+                inter = max(inter.geoms, key=lambda g: g.area)
+            if isinstance(inter, Polygon) and inter.area >= min_area:
+                pieces.append((ext_name, inter))
+
+        if pieces:
+            for ext_name, piece in pieces:
+                idx = len(new_polygons)
+                new_polygons.append(piece)
+                new_names[idx] = ext_name
+        else:
+            # No significant overlaps — keep original
+            idx = len(new_polygons)
+            new_polygons.append(orig_poly)
+            new_names[idx] = poly_names[i]
 
     return new_polygons, new_names
