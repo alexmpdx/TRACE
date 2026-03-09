@@ -844,10 +844,23 @@ def _clip_regions_by_extension(
                 pieces.append((ext_name, inter))
 
         if pieces:
-            for ext_name, piece in pieces:
+            if len(pieces) == 1:
+                # Not split — keep original name
                 idx = len(new_polygons)
-                new_polygons.append(piece)
-                new_names[idx] = ext_name
+                new_polygons.append(pieces[0][1])
+                new_names[idx] = poly_names[i]
+            else:
+                # Split into multiple pieces — largest keeps original name,
+                # smaller pieces get extension names only if substantial
+                orig_name = poly_names[i]
+                pieces.sort(key=lambda p: p[1].area, reverse=True)
+                main_area = pieces[0][1].area
+                for j, (ext_name, piece) in enumerate(pieces):
+                    if j > 0 and piece.area < main_area * 0.15:
+                        continue  # discard tiny edge slivers
+                    idx = len(new_polygons)
+                    new_polygons.append(piece)
+                    new_names[idx] = orig_name if j == 0 else ext_name
         else:
             # No significant overlaps — keep original
             idx = len(new_polygons)

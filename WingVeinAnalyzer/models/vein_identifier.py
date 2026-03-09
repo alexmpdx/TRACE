@@ -2135,10 +2135,28 @@ def _validate_and_correct_region_positions(
             name_to_idx[name_a] = idx_b
             name_to_idx[name_b] = idx_a
 
-    # X-ordering checks removed: proximal/distal disambiguation is now
-    # handled by area-based logic in _region_from_bounding_veins(), which
-    # is orientation-independent. X-position checks were breaking for wings
-    # with hinge on the right (high X) side.
+    # Costal/marginal area check: costal_cell is always much smaller than
+    # marginal_cell.  Swap if costal is significantly larger.
+    costal_idx = name_to_idx.get("costal_cell")
+    marginal_idx = name_to_idx.get("marginal_cell")
+    if (
+        costal_idx is not None
+        and marginal_idx is not None
+        and costal_idx < len(polygons)
+        and marginal_idx < len(polygons)
+    ):
+        costal_area = polygons[costal_idx].area
+        marginal_area = polygons[marginal_idx].area
+        if costal_area > marginal_area * 2.0:
+            logger.warning(
+                "Costal/marginal area violation: costal (%.0f) > marginal (%.0f) × 2, swapping",
+                costal_area,
+                marginal_area,
+            )
+            poly_names[costal_idx] = "marginal_cell"
+            poly_names[marginal_idx] = "costal_cell"
+            name_to_idx["costal_cell"] = marginal_idx
+            name_to_idx["marginal_cell"] = costal_idx
 
 
 # ---------------------------------------------------------------------------
@@ -2675,6 +2693,42 @@ def identify_veins_and_regions(
                 max_gap,
             )
             continue
+
+        # Direction check: verify appending won't create a U-turn.
+        # Find which existing endpoint is nearest the new segment and
+        # check that the new segment continues in roughly the same
+        # direction (not doubling back >120°).
+        gaps = [
+            (float(np.linalg.norm(ep_end - new_start)), "end", "start"),
+            (float(np.linalg.norm(ep_end - new_end)), "end", "end"),
+            (float(np.linalg.norm(ep_start - new_start)), "start", "start"),
+            (float(np.linalg.norm(ep_start - new_end)), "start", "end"),
+        ]
+        _, attach_side, new_side = min(gaps, key=lambda x: x[0])
+        # Tangent of existing vein at the attachment point
+        tangent_len = min(50, len(existing_coords) // 4, len(new_coords) // 4)
+        if tangent_len >= 2:
+            if attach_side == "end":
+                ev = np.array(existing_coords[-1]) - np.array(existing_coords[-tangent_len])
+            else:
+                ev = np.array(existing_coords[0]) - np.array(existing_coords[tangent_len - 1])
+            if new_side == "start":
+                nv = np.array(new_coords[tangent_len - 1]) - np.array(new_coords[0])
+            else:
+                nv = np.array(new_coords[-tangent_len]) - np.array(new_coords[-1])
+            ev_norm = np.linalg.norm(ev)
+            nv_norm = np.linalg.norm(nv)
+            if ev_norm > 0 and nv_norm > 0:
+                cos_angle = float(np.dot(ev, nv) / (ev_norm * nv_norm))
+                cos_angle = max(-1.0, min(1.0, cos_angle))
+                angle_deg = np.degrees(np.arccos(cos_angle))
+                if angle_deg > 120:
+                    logger.info(
+                        "  Skipping post-split centerline for %s: direction change %.0f° (U-turn)",
+                        si.separating_vein,
+                        angle_deg,
+                    )
+                    continue
 
         merged = _merge_vein_lines([mp.line, new_line])
         if merged is not None and merged.length > mp.length_px:
