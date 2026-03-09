@@ -50,8 +50,11 @@ augmentation:
   rotation_limit: 30
   horizontal_flip_p: 0.5
   scale_limit: 0.15
-  brightness_limit: 0.2
-  contrast_limit: 0.2
+  color_jitter_brightness: 0.2
+  color_jitter_contrast: 0.2
+  color_jitter_saturation: 0.3
+  color_jitter_hue: 0.05
+  color_jitter_p: 0.7
   blur_limit: 5
   blur_p: 0.3
   coarse_dropout_max_holes: 4

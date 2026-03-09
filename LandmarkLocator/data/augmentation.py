@@ -21,10 +21,12 @@ def get_train_transform(cfg: dict) -> Compose:
                 border_mode=0,
             ),
             A.CenterCrop(input_cfg["height"], input_cfg["width"]),
-            A.RandomBrightnessContrast(
-                brightness_limit=aug_cfg["brightness_limit"],
-                contrast_limit=aug_cfg["contrast_limit"],
-                p=0.5,
+            A.ColorJitter(
+                brightness=aug_cfg.get("color_jitter_brightness", 0.2),
+                contrast=aug_cfg.get("color_jitter_contrast", 0.2),
+                saturation=aug_cfg.get("color_jitter_saturation", 0.3),
+                hue=aug_cfg.get("color_jitter_hue", 0.05),
+                p=aug_cfg.get("color_jitter_p", 0.7),
             ),
             A.GaussianBlur(
                 blur_limit=(3, aug_cfg["blur_limit"]),
