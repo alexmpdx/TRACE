@@ -570,8 +570,14 @@ def partition_by_vein_extension(
             if ix < 0 or ix >= W or iy < 0 or iy >= H:
                 continue  # out of image
             val = barrier[iy, ix]
-            if val != 0:
+            if val != 0 and val != ext["label"]:
                 # Hit something (boundary, another vein, or another extension)
+                continue
+            if val == ext["label"]:
+                # Walking over own vein pixels — advance but don't re-mark
+                ext["x"] = nx
+                ext["y"] = ny
+                still_active.append(ext)
                 continue
             # Mark as barrier with this vein's label
             barrier[iy, ix] = ext["label"]

@@ -512,11 +512,11 @@ def _render_regions(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
 
 
 def _render_poly_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 11: Left = veins + extension lines, Right = clipped regions."""
+    """Step 11: Left = original veins (solid), Right = veins + extensions (dashed) + clipped regions."""
     left = state.image.copy()
     right = state.image.copy()
 
-    # Left: draw veins + dashed extension lines
+    # Left: original veins as solid lines with labels + endpoint markers
     if state.assignments:
         for a in state.assignments:
             if a.line is None:
@@ -535,33 +535,66 @@ def _render_poly_split(state: StepState, prev: Optional[StepState]) -> tuple[np.
                 2,
                 cv2.LINE_AA,
             )
-    # Draw extension lines as dashed white
-    if state.extension_lines:
-        for vein_id, lines in state.extension_lines.items():
-            color = VEIN_COLORS.get(vein_id, (200, 200, 200))
-            for line in lines:
-                _draw_dashed_linestring(left, line, color, thickness=3, dash_len=12)
+            # Mark endpoints with circles
+            for ep in (coords[0], coords[-1]):
+                cv2.circle(left, (int(ep[0]), int(ep[1])), 8, color, 2)
 
-    # Right: clipped regions with labels
+    # Right: veins (solid) + extension lines (dashed) + clipped regions underneath
+    # Draw clipped regions first (underneath)
     if state.poly_names and state.polygons:
         for idx, name in state.poly_names.items():
             if idx >= len(state.polygons):
                 continue
             poly = state.polygons[idx]
             color = INTERVEIN_COLORS.get(name, (180, 180, 180))
-            _fill_polygon_alpha(right, poly, color, alpha=0.4)
+            _fill_polygon_alpha(right, poly, color, alpha=0.3)
             cx, cy = int(poly.centroid.x), int(poly.centroid.y)
-            label = f"P{idx}: {name.replace('_cell', '')}"
+            label = name.replace("_cell", "")
             cv2.putText(
                 right,
                 label,
                 (cx - 80, cy),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                0.5,
                 (255, 255, 255),
                 2,
                 cv2.LINE_AA,
             )
+
+    # Draw veins on top
+    if state.assignments:
+        for a in state.assignments:
+            if a.line is None:
+                continue
+            color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
+            _draw_linestring(right, a.line, color, thickness=4)
+            coords = list(a.line.coords)
+            mid = coords[len(coords) // 2]
+            cv2.putText(
+                right,
+                a.vein_id,
+                (int(mid[0]) - 20, int(mid[1]) - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+
+    # Draw extension lines as dashed lines with bright markers at start/end
+    if state.extension_lines:
+        for vein_id, lines in state.extension_lines.items():
+            color = VEIN_COLORS.get(vein_id, (200, 200, 200))
+            for line in lines:
+                _draw_dashed_linestring(right, line, (255, 255, 255), thickness=3, dash_len=8)
+                ext_coords = list(line.coords)
+                if ext_coords:
+                    # Bright circle at extension start (vein endpoint)
+                    sp = ext_coords[0]
+                    cv2.circle(right, (int(sp[0]), int(sp[1])), 10, (0, 255, 0), -1)
+                    # Arrow at extension end
+                    ep = ext_coords[-1]
+                    cv2.circle(right, (int(ep[0]), int(ep[1])), 10, (0, 0, 255), -1)
 
     return left, right
 

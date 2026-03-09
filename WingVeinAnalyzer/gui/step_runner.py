@@ -517,9 +517,15 @@ class StepRunner:
                     ext_names,
                 )
                 state.extension_lines = ext_lines
+                n_ext = sum(len(v) for v in ext_lines.values())
+                ext_summary = ", ".join(
+                    f"{vid}: {sum(ln.length for ln in lns):.0f}px" for vid, lns in ext_lines.items()
+                )
                 state.params_used = {
                     "method": "vein_extension_clip",
                     "num_regions": str(len(state.poly_names)),
+                    "ext_regions": str(len(ext_names)),
+                    "extensions": f"{n_ext} lines ({ext_summary})" if ext_summary else "0",
                 }
             else:
                 state.params_used = {
