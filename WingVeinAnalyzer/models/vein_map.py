@@ -54,14 +54,14 @@ CROSSVEIN_CONNECTIONS: dict[str, tuple[str, str]] = {
 
 # All intervein space names ordered anterior to posterior (used internally)
 _ALL_INTERVEIN_SPACE_NAMES = [
-    "costal_cell",          # between costa and L1 (excluded from output)
-    "marginal_cell",        # between L1 and L2
-    "submarginal_cell",     # between L2 and L3
-    "1st_basal_cell",       # between L3 and L4, proximal to ACV
-    "1st_posterior_cell",   # between L3 and L4, distal to ACV
-    "discal_cell",          # between L4 and L5, proximal to PCV
-    "2nd_posterior_cell",   # between L4 and L5, distal to PCV
-    "3rd_posterior_cell",   # posterior to L5
+    "costal_cell",  # between costa and L1 (excluded from output)
+    "marginal_cell",  # between L1 and L2
+    "submarginal_cell",  # between L2 and L3
+    "1st_basal_cell",  # between L3 and L4, proximal to ACV
+    "1st_posterior_cell",  # between L3 and L4, distal to ACV
+    "discal_cell",  # between L4 and L5, proximal to PCV
+    "2nd_posterior_cell",  # between L4 and L5, distal to PCV
+    "3rd_posterior_cell",  # posterior to L5
 ]
 
 # Intervein spaces included in measurements and overlays (costal cell excluded)
@@ -77,26 +77,26 @@ INTERVEIN_SPACE_NAMES = [
 
 # Colors for intervein spaces (BGR for OpenCV, matching ground-truth overlay)
 INTERVEIN_COLORS: dict[str, tuple[int, int, int]] = {
-    "costal_cell":         (0, 200, 200),    # yellow (no GT; distinct neutral)
-    "marginal_cell":       (0, 0, 255),      # red
-    "submarginal_cell":    (0, 94, 255),     # orange
-    "1st_basal_cell":      (0, 191, 219),    # gold
-    "1st_posterior_cell":  (0, 128, 0),      # green
-    "discal_cell":         (255, 0, 0),      # blue
-    "2nd_posterior_cell":  (255, 187, 0),    # cyan
-    "3rd_posterior_cell":  (255, 0, 147),    # purple
+    "costal_cell": (0, 200, 200),  # yellow (no GT; distinct neutral)
+    "marginal_cell": (0, 0, 255),  # red
+    "submarginal_cell": (0, 94, 255),  # orange
+    "1st_basal_cell": (0, 191, 219),  # gold
+    "1st_posterior_cell": (0, 128, 0),  # green
+    "discal_cell": (255, 0, 0),  # blue
+    "2nd_posterior_cell": (255, 187, 0),  # cyan
+    "3rd_posterior_cell": (255, 0, 147),  # purple
 }
 
 # Colors for individual veins on skeleton overlay (BGR for OpenCV, matching ground-truth)
 VEIN_COLORS: dict[str, tuple[int, int, int]] = {
-    "costa":  (0, 0, 0),        # black (matches wing outline)
-    "L1":     (0, 0, 255),      # red
-    "L2":     (0, 94, 255),     # orange
-    "L3":     (0, 191, 219),    # gold
-    "L4":     (255, 0, 0),      # blue
-    "L5":     (255, 0, 147),    # purple
-    "ACV":    (0, 128, 0),      # green
-    "PCV":    (255, 187, 0),    # cyan
+    "costa": (0, 0, 0),  # black (matches wing outline)
+    "L1": (0, 0, 255),  # red
+    "L2": (0, 94, 255),  # orange
+    "L3": (0, 191, 219),  # gold
+    "L4": (255, 0, 0),  # blue
+    "L5": (255, 0, 147),  # purple
+    "ACV": (0, 128, 0),  # green
+    "PCV": (255, 187, 0),  # cyan
 }
 
 # Vein boundary definitions: which intervein pair each vein separates
@@ -214,7 +214,7 @@ def um_to_px(um: float) -> float:
 
 def um2_to_px2(um2: float) -> float:
     """Convert an area in µm² to pixels²."""
-    return um2 / (_um_per_px ** 2)
+    return um2 / (_um_per_px**2)
 
 
 # ---------------------------------------------------------------------------
@@ -222,90 +222,90 @@ def um2_to_px2(um2: float) -> float:
 # ---------------------------------------------------------------------------
 
 # -- Junction / node snapping --
-SNAP_RADIUS_UM = 14.49            # 30 px — junction clustering / node snapping
-SNAP_RADIUS_LARGE_UM = 19.32      # 40 px — junction endpoint proximity check
+SNAP_RADIUS_UM = 14.49  # 30 px — junction clustering / node snapping
+SNAP_RADIUS_LARGE_UM = 19.32  # 40 px — junction endpoint proximity check
 
 # -- Tangent / angle sampling --
-TANGENT_DIST_UM = 38.64           # 80 px — tangent vector distance from junction
-STEP_DIST_UM = 24.15              # 50 px — walk step for angle-change sampling
+TANGENT_DIST_UM = 38.64  # 80 px — tangent vector distance from junction
+STEP_DIST_UM = 24.15  # 50 px — walk step for angle-change sampling
 
 # -- Path length thresholds --
-MIN_SEGMENT_LENGTH_UM = 4.83      # 10 px — minimum merged/centerline segment
-MIN_SPLIT_LENGTH_UM = 96.6        # 200 px — minimum piece after sharp-turn split
-MIN_PATH_LENGTH_UM = 241.5        # 500 px — minimum path length to attempt split
+MIN_SEGMENT_LENGTH_UM = 4.83  # 10 px — minimum merged/centerline segment
+MIN_SPLIT_LENGTH_UM = 96.6  # 200 px — minimum piece after sharp-turn split
+MIN_PATH_LENGTH_UM = 241.5  # 500 px — minimum path length to attempt split
 
 # -- Smoothing parameters --
-SMOOTH_SIGMA_SPLIT_UM = 24.15     # 50 px — sigma for path-splitting smoothing
-SMOOTH_SPACING_UM = 2.415         # 5 px — general smooth sample spacing
-SMOOTH_SPACING_FINE_UM = 1.449    # 3 px — fine smooth sample spacing (crossveins)
-SIMPLIFY_UM = 1.449               # 3 px — general simplification tolerance
-SIMPLIFY_DARKBAND_UM = 2.415      # 5 px — dark band line simplification
+SMOOTH_SIGMA_SPLIT_UM = 24.15  # 50 px — sigma for path-splitting smoothing
+SMOOTH_SPACING_UM = 2.415  # 5 px — general smooth sample spacing
+SMOOTH_SPACING_FINE_UM = 1.449  # 3 px — fine smooth sample spacing (crossveins)
+SIMPLIFY_UM = 1.449  # 3 px — general simplification tolerance
+SIMPLIFY_DARKBAND_UM = 2.415  # 5 px — dark band line simplification
 
 # -- Crossvein thresholds --
-MAX_CROSSVEIN_FLOOR_UM = 193.2    # 400 px — floor for max crossvein length
-SHORT_CROSSVEIN_UM = 144.9        # 300 px — short crossvein threshold
+MAX_CROSSVEIN_FLOOR_UM = 193.2  # 400 px — floor for max crossvein length
+SHORT_CROSSVEIN_UM = 144.9  # 300 px — short crossvein threshold
 MAX_CROSSVEIN_DEFAULT_UM = 289.8  # 600 px — default max crossvein (no bbox)
-CV_PROXIMITY_UM = 48.3            # 100 px — crossvein validation proximity
-CV_NORM_DIST_UM = 96.6            # 200 px — crossvein scoring normalization distance
-CV_CONNECTIVITY_UM = 24.15        # 50 px — crossvein connectivity / L4-L5 swap
+CV_PROXIMITY_UM = 48.3  # 100 px — crossvein validation proximity
+CV_NORM_DIST_UM = 96.6  # 200 px — crossvein scoring normalization distance
+CV_CONNECTIVITY_UM = 24.15  # 50 px — crossvein connectivity / L4-L5 swap
 
 # -- Buffers --
-BUFFER_OUTLINE_UM = 9.66          # 20 px — wing outline / midline polygon buffer
-BUFFER_VEIN_UM = 2.415            # 5 px — vein polygon buffer in outline
-BUFFER_SMOOTH_UM = 2.415          # 5 px — outline smooth buffer
-BUFFER_SPATIAL_UM = 12.075        # 25 px — spatial proximity for poly-vein mapping
-MIN_SPATIAL_LENGTH_UM = 14.49     # 30 px — min intersection length for poly-vein
+BUFFER_OUTLINE_UM = 9.66  # 20 px — wing outline / midline polygon buffer
+BUFFER_VEIN_UM = 2.415  # 5 px — vein polygon buffer in outline
+BUFFER_SMOOTH_UM = 2.415  # 5 px — outline smooth buffer
+BUFFER_SPATIAL_UM = 12.075  # 25 px — spatial proximity for poly-vein mapping
+MIN_SPATIAL_LENGTH_UM = 14.49  # 30 px — min intersection length for poly-vein
 
 # -- Voronoi / skeleton --
-MIN_SEED_AREA_UM2 = 2332.89       # 10 000 px² — min Voronoi seed area
-BRIDGE_THRESHOLD_UM = 14.49       # 30 px — bridge dangling endpoints
-MIN_CENTERLINE_EXTRACT_UM = 24.15 # 50 px — min centerline between polygons
-PAD_CENTERLINE_UM = 9.66          # 20 px — padding around polygon bbox
-MIN_POLY_AREA_UM2 = 23.33         # 100 px² — min polygon area (Voronoi / erosion)
+MIN_SEED_AREA_UM2 = 2332.89  # 10 000 px² — min Voronoi seed area
+BRIDGE_THRESHOLD_UM = 14.49  # 30 px — bridge dangling endpoints
+MIN_CENTERLINE_EXTRACT_UM = 24.15  # 50 px — min centerline between polygons
+PAD_CENTERLINE_UM = 9.66  # 20 px — padding around polygon bbox
+MIN_POLY_AREA_UM2 = 23.33  # 100 px² — min polygon area (Voronoi / erosion)
 
 # -- Edge boundary veins --
-MIN_EDGE_LENGTH_UM = 48.3         # 100 px — min edge boundary vein length
-MAX_EDGE_LENGTH_UM = 1932.0       # 4 000 px — max edge boundary vein length
-MAX_BAND_WIDTH_UM = 14.49         # 30 px — max band width for edge veins
-EDGE_PROXIMITY_UM = 24.15         # 50 px — distance to existing centerline
-MIN_ANT_BOUNDARY_UM = 24.15       # 50 px — min anterior boundary line length
+MIN_EDGE_LENGTH_UM = 48.3  # 100 px — min edge boundary vein length
+MAX_EDGE_LENGTH_UM = 1932.0  # 4 000 px — max edge boundary vein length
+MAX_BAND_WIDTH_UM = 14.49  # 30 px — max band width for edge veins
+EDGE_PROXIMITY_UM = 24.15  # 50 px — distance to existing centerline
+MIN_ANT_BOUNDARY_UM = 24.15  # 50 px — min anterior boundary line length
 
 # -- Wing geometry --
-MIDLINE_SPACING_UM = 2.415        # 5 px — midline sampling spacing
-MIDLINE_SIGMA_UM = 14.49          # 30 px — midline smoothing sigma
-VLINE_EXTENSION_UM = 48.3         # 100 px — vertical line extension for midline
-MIN_HALF_HEIGHT_UM = 2.415        # 5 px — min half-height for midline
-HINGE_EXTENSION_UM = 48.3         # 100 px — hinge line extension
-COMPARTMENT_SIMPLIFY_UM = 4.83    # 10 px — L4 simplification for compartments
+MIDLINE_SPACING_UM = 2.415  # 5 px — midline sampling spacing
+MIDLINE_SIGMA_UM = 14.49  # 30 px — midline smoothing sigma
+VLINE_EXTENSION_UM = 48.3  # 100 px — vertical line extension for midline
+MIN_HALF_HEIGHT_UM = 2.415  # 5 px — min half-height for midline
+HINGE_EXTENSION_UM = 48.3  # 100 px — hinge line extension
+COMPARTMENT_SIMPLIFY_UM = 4.83  # 10 px — L4 simplification for compartments
 COMPARTMENT_EXTENSION_UM = 241.5  # 500 px — L4 extension beyond wing boundary
 
 # -- Graph --
-MAX_GAP_UM = 38.64                # 80 px — max polygon gap for graph building
-GRAPH_SNAP_VEINS_UM = 24.15       # 50 px — snap tolerance for vein LineStrings
+MAX_GAP_UM = 38.64  # 80 px — max polygon gap for graph building
+GRAPH_SNAP_VEINS_UM = 24.15  # 50 px — snap tolerance for vein LineStrings
 
 # -- GeoJSON parser --
-MIN_POLY_WIDTH_UM = 48.3          # 100 px — min polygon width for constriction
-MIN_CROSS_WIDTH_UM = 9.66         # 20 px — min cross-section width
-CUT_EXTENSION_UM = 4.83           # 10 px — cut line extension beyond polygon
+MIN_POLY_WIDTH_UM = 48.3  # 100 px — min polygon width for constriction
+MIN_CROSS_WIDTH_UM = 9.66  # 20 px — min cross-section width
+CUT_EXTENSION_UM = 4.83  # 10 px — cut line extension beyond polygon
 
 # -- L1 recovery --
-L1_MIN_GAP_UM = 2.415             # 5 px — min gap for L1 recovery
-L1_MARGIN_UM = 14.49              # 30 px — margin from L2 for L1 trace
-L1_MIN_LENGTH_UM = 24.15          # 50 px — min L1 line length
-L1_SIMPLIFY_UM = 4.83             # 10 px — L1 trace simplification
+L1_MIN_GAP_UM = 2.415  # 5 px — min gap for L1 recovery
+L1_MARGIN_UM = 14.49  # 30 px — margin from L2 for L1 trace
+L1_MIN_LENGTH_UM = 24.15  # 50 px — min L1 line length
+L1_SIMPLIFY_UM = 4.83  # 10 px — L1 trace simplification
 
 # -- Erosion amount lists --
-BOTTLENECK_EROSION_UM = [4.83, 7.245, 9.66, 14.49]             # [10,15,20,30] px
-SPLIT_EROSION_UM = [4.83, 7.245, 9.66, 14.49, 24.15]           # [10,15,20,30,50] px
+BOTTLENECK_EROSION_UM = [4.83, 7.245, 9.66, 14.49]  # [10,15,20,30] px
+SPLIT_EROSION_UM = [4.83, 7.245, 9.66, 14.49, 24.15]  # [10,15,20,30,50] px
 PRE_VORONOI_EROSION_UM = [9.66, 19.32, 28.98, 38.64, 48.3, 72.45]  # [20..150] px
 
 # -- Dark band detection --
-DARK_BAND_SIZE_UM = 4.83          # 10 px — band size for dark band detection
-MIN_DARK_BAND_HALF_UM = 9.66      # 20 px — min half-band width
+DARK_BAND_SIZE_UM = 4.83  # 10 px — band size for dark band detection
+MIN_DARK_BAND_HALF_UM = 9.66  # 20 px — min half-band width
 
 # -- Misc --
-FIND_POLY_BUFFER_UM = 7.245       # 15 px — buffer for find_poly_pair_for_line
-GT_TOLERANCE_UM = 12.075          # 25 px — ground truth validation tolerance
-PAD_EROSION_UM = 4.83             # 10 px — padding for erosion watershed
-PAD_RIDGE_UM = 2.415              # 5 px — padding for ridge detection
-MIN_SPLIT_BUFFER_UM = 2.415       # 5 px — min buffer for split zone
+FIND_POLY_BUFFER_UM = 7.245  # 15 px — buffer for find_poly_pair_for_line
+GT_TOLERANCE_UM = 12.075  # 25 px — ground truth validation tolerance
+PAD_EROSION_UM = 4.83  # 10 px — padding for erosion watershed
+PAD_RIDGE_UM = 2.415  # 5 px — padding for ridge detection
+MIN_SPLIT_BUFFER_UM = 2.415  # 5 px — min buffer for split zone

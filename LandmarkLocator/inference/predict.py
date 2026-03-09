@@ -30,9 +30,7 @@ class LandmarkPredictor:
         self.device = torch.device(
             device
             if device
-            else "mps" if torch.backends.mps.is_available()
-            else "cuda" if torch.cuda.is_available()
-            else "cpu"
+            else "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
         )
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)

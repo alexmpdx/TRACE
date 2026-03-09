@@ -55,8 +55,11 @@ def render_skeleton_overlay(
     if outline_polygon is not None and not outline_polygon.is_empty:
         pts = np.array(outline_polygon.exterior.coords, dtype=np.int32)
         cv2.polylines(
-            overlay, [pts], isClosed=True,
-            color=OUTLINE_COLOR, thickness=OUTLINE_THICKNESS,
+            overlay,
+            [pts],
+            isClosed=True,
+            color=OUTLINE_COLOR,
+            thickness=OUTLINE_THICKNESS,
             lineType=cv2.LINE_AA,
         )
 
@@ -65,8 +68,11 @@ def render_skeleton_overlay(
         mid_pts = np.array(midline.coords, dtype=np.int32)
         if len(mid_pts) >= 2:
             cv2.polylines(
-                overlay, [mid_pts], isClosed=False,
-                color=(160, 160, 160), thickness=2,
+                overlay,
+                [mid_pts],
+                isClosed=False,
+                color=(160, 160, 160),
+                thickness=2,
                 lineType=cv2.LINE_AA,
             )
 
@@ -80,8 +86,11 @@ def render_skeleton_overlay(
             continue
         color = VEIN_COLORS.get(a.vein_id, (40, 40, 40))
         cv2.polylines(
-            overlay, [pts], isClosed=False,
-            color=color, thickness=VEIN_THICKNESS,
+            overlay,
+            [pts],
+            isClosed=False,
+            color=color,
+            thickness=VEIN_THICKNESS,
             lineType=cv2.LINE_AA,
         )
         legend_entries.append((color, a.vein_id))
@@ -132,8 +141,9 @@ def render_rainbow_overlay(
     for c in range(3):
         result[:, :, c] = np.where(
             mask_bool,
-            (image[:, :, c].astype(np.float32) * (1 - opacity)
-             + color_overlay[:, :, c].astype(np.float32) * opacity).astype(np.uint8),
+            (
+                image[:, :, c].astype(np.float32) * (1 - opacity) + color_overlay[:, :, c].astype(np.float32) * opacity
+            ).astype(np.uint8),
             image[:, :, c],
         )
 
@@ -163,9 +173,7 @@ def _draw_legend(
     # Compute legend dimensions
     max_text_width = 0
     for _, label in entries:
-        (tw, _), _ = cv2.getTextSize(
-            label, LEGEND_FONT, LEGEND_FONT_SCALE, LEGEND_FONT_THICKNESS
-        )
+        (tw, _), _ = cv2.getTextSize(label, LEGEND_FONT, LEGEND_FONT_SCALE, LEGEND_FONT_THICKNESS)
         max_text_width = max(max_text_width, tw)
 
     box_w = LEGEND_PADDING * 3 + LEGEND_SWATCH_SIZE + max_text_width
@@ -206,20 +214,27 @@ def _draw_legend(
             image,
             (sx, sy),
             (sx + LEGEND_SWATCH_SIZE, sy + LEGEND_SWATCH_SIZE),
-            color, -1,
+            color,
+            -1,
         )
         cv2.rectangle(
             image,
             (sx, sy),
             (sx + LEGEND_SWATCH_SIZE, sy + LEGEND_SWATCH_SIZE),
-            (100, 100, 100), 1,
+            (100, 100, 100),
+            1,
         )
 
         # Label text
         tx = sx + LEGEND_SWATCH_SIZE + LEGEND_PADDING
         ty = sy + LEGEND_SWATCH_SIZE - 3
         cv2.putText(
-            image, label, (tx, ty),
-            LEGEND_FONT, LEGEND_FONT_SCALE, LEGEND_TEXT_COLOR,
-            LEGEND_FONT_THICKNESS, cv2.LINE_AA,
+            image,
+            label,
+            (tx, ty),
+            LEGEND_FONT,
+            LEGEND_FONT_SCALE,
+            LEGEND_TEXT_COLOR,
+            LEGEND_FONT_THICKNESS,
+            cv2.LINE_AA,
         )

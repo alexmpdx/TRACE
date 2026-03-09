@@ -28,12 +28,8 @@ def main() -> None:
         required=False,
         help="Directory with fold checkpoints for ensemble prediction",
     )
-    parser.add_argument(
-        "--device", type=str, default=None, help="Device: mps, cuda, cpu"
-    )
-    parser.add_argument(
-        "--output", type=Path, default=None, help="Output JSON path"
-    )
+    parser.add_argument("--device", type=str, default=None, help="Device: mps, cuda, cpu")
+    parser.add_argument("--output", type=Path, default=None, help="Output JSON path")
     args = parser.parse_args()
 
     if not args.checkpoint and not args.checkpoint_dir:
@@ -47,6 +43,7 @@ def main() -> None:
             parser.error(f"No checkpoints found in {args.checkpoint_dir}")
 
         import cv2
+
         for img_path in args.images:
             image = cv2.imread(str(img_path))
             if image is None:

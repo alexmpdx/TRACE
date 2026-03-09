@@ -450,7 +450,9 @@ def _merge_vein_lines(lines: list[LineString]) -> Optional[LineString]:
         if jump > 500:
             logger.warning(
                 "Large jump %.0fpx between points %d and %d in merged vein",
-                jump, i - 1, i,
+                jump,
+                i - 1,
+                i,
             )
 
     return result

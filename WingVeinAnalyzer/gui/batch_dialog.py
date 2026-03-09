@@ -82,7 +82,9 @@ class BatchWorker(QThread):
     file_done = pyqtSignal(int, bool, str)  # file index, success, message
     all_done = pyqtSignal()
 
-    def __init__(self, pairs: list[FilePair], output_dir: Path, smooth_sigma: float = 3.0, um_per_px: float = 0.483, parent=None):
+    def __init__(
+        self, pairs: list[FilePair], output_dir: Path, smooth_sigma: float = 3.0, um_per_px: float = 0.483, parent=None
+    ):
         super().__init__(parent)
         self._pairs = pairs
         self._output_dir = output_dir
@@ -113,9 +115,7 @@ class BatchWorker(QThread):
                 self.file_done.emit(i, True, f"{pair.display_name}: OK")
             except Exception:
                 tb = traceback.format_exc()
-                self.file_done.emit(
-                    i, False, f"{pair.display_name}: ERROR\n{tb[:500]}"
-                )
+                self.file_done.emit(i, False, f"{pair.display_name}: ERROR\n{tb[:500]}")
 
         self.all_done.emit()
 
@@ -204,10 +204,7 @@ class BatchDialog(QDialog):
 
     def _on_run(self) -> None:
         """Start batch processing."""
-        selected = [
-            pair for pair, cb in zip(self._pairs, self._checkboxes)
-            if cb.isChecked()
-        ]
+        selected = [pair for pair, cb in zip(self._pairs, self._checkboxes) if cb.isChecked()]
         if not selected:
             return
 

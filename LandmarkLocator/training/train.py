@@ -84,9 +84,7 @@ def extract_landmarks_from_heatmaps(heatmaps: np.ndarray) -> list[tuple[float, f
     return coords
 
 
-def create_cv_splits(
-    annotation_dir: Path, n_folds: int = 5
-) -> list[tuple[list[int], list[int]]]:
+def create_cv_splits(annotation_dir: Path, n_folds: int = 5) -> list[tuple[list[int], list[int]]]:
     """Create stratified K-fold splits by genotype."""
     geojson_files = sorted(annotation_dir.glob("*.geojson"))
     genotypes = [extract_genotype(f.stem) for f in geojson_files]
@@ -177,9 +175,7 @@ def train_fold(
         if epoch == freeze_epochs:
             model.unfreeze_encoder()
             # Rebuild optimizer with differential LR
-            param_groups = model.get_param_groups(
-                opt_cfg["lr"], train_cfg["encoder_lr_factor"]
-            )
+            param_groups = model.get_param_groups(opt_cfg["lr"], train_cfg["encoder_lr_factor"])
             optimizer = torch.optim.AdamW(
                 param_groups,
                 weight_decay=opt_cfg["weight_decay"],
@@ -294,8 +290,7 @@ def train_fold(
                 print(f"  Fold {fold}: early stopping at epoch {epoch}")
                 break
 
-    print(f"  Fold {fold} best: epoch={best_metrics['epoch']}, "
-          f"mean_error={best_metrics['mean_pixel_error']:.1f}px")
+    print(f"  Fold {fold} best: epoch={best_metrics['epoch']}, " f"mean_error={best_metrics['mean_pixel_error']:.1f}px")
     for name, err in best_metrics["per_landmark_error"].items():
         print(f"    {name}: {err:.1f}px")
 

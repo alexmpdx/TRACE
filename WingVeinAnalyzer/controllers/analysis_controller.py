@@ -21,18 +21,30 @@ from WingVeinAnalyzer.models.vein_graph import (
     build_graph_from_polygons,
     build_graph_from_veins,
 )
-from WingVeinAnalyzer.models.vein_labeler import (
-    VeinAssignment,
-    VeinStatus,
-    assign_veins,
-    _extract_costa,
-)
 from WingVeinAnalyzer.models.vein_identifier import (
     VeinValidationReport,
     identify_veins_and_regions,
     name_regions_from_veins,
     validate_regions_against_ground_truth,
     validate_veins_against_ground_truth,
+)
+from WingVeinAnalyzer.models.vein_labeler import (
+    VeinAssignment,
+    VeinStatus,
+    _extract_costa,
+    assign_veins,
+)
+from WingVeinAnalyzer.models.vein_map import (
+    GRAPH_SNAP_VEINS_UM,
+    L1_MARGIN_UM,
+    L1_MIN_GAP_UM,
+    L1_MIN_LENGTH_UM,
+    L1_SIMPLIFY_UM,
+    MAX_GAP_UM,
+    SMOOTH_SPACING_FINE_UM,
+    SMOOTH_SPACING_UM,
+    set_scale,
+    um_to_px,
 )
 from WingVeinAnalyzer.models.vein_skeleton import (
     VoronoiResult,
@@ -48,18 +60,6 @@ from WingVeinAnalyzer.models.wing_geometry import (
     partition_by_vein_extension,
     partition_intervein_spaces,
     remove_hinge,
-)
-from WingVeinAnalyzer.models.vein_map import (
-    set_scale,
-    um_to_px,
-    GRAPH_SNAP_VEINS_UM,
-    MAX_GAP_UM,
-    SMOOTH_SPACING_UM,
-    SMOOTH_SPACING_FINE_UM,
-    L1_MIN_GAP_UM,
-    L1_MARGIN_UM,
-    L1_MIN_LENGTH_UM,
-    L1_SIMPLIFY_UM,
 )
 from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
@@ -117,13 +117,17 @@ def run_pipeline(
     # Route based on annotation type
     if annotations.intervein_polygons:
         result = _run_polygon_pipeline(
-            image, annotations, output_dir, stem, microns_per_pixel, max_gap,
-            geojson_path, smooth_sigma=smooth_sigma,
+            image,
+            annotations,
+            output_dir,
+            stem,
+            microns_per_pixel,
+            max_gap,
+            geojson_path,
+            smooth_sigma=smooth_sigma,
         )
     elif annotations.veins:
-        result = _run_vein_pipeline(
-            image, annotations, output_dir, stem, microns_per_pixel, snap_tolerance
-        )
+        result = _run_vein_pipeline(image, annotations, output_dir, stem, microns_per_pixel, snap_tolerance)
     else:
         raise ValueError("GeoJSON contains no vein or intervein annotations")
 
@@ -145,6 +149,7 @@ def _run_polygon_pipeline(
     polygons = annotations.intervein_polygons
 
     import logging
+
     logger = logging.getLogger(__name__)
 
     # Set up file handler to capture pipeline log
@@ -153,9 +158,7 @@ def _run_polygon_pipeline(
     log_path = diag_dir / "pipeline.log"
     file_handler = logging.FileHandler(str(log_path), mode="w")
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
-    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     root_logger = logging.getLogger()
     root_logger.addHandler(file_handler)
     logger.info("Pipeline log: %s", log_path)
@@ -171,9 +174,15 @@ def _run_polygon_pipeline(
 
     # Compute wing midline — prefer "wing" annotation polygon when available
     original_polys = annotations.intervein_polygons + annotations.vein_polygons
-    midline = compute_wing_midline(
-        original_polys, wing_bbox, wing_polygon=annotations.wing_polygon,
-    ) if original_polys else None
+    midline = (
+        compute_wing_midline(
+            original_polys,
+            wing_bbox,
+            wing_polygon=annotations.wing_polygon,
+        )
+        if original_polys
+        else None
+    )
 
     # Initialize variables shared across both pipeline paths
     hull_mask = None
@@ -187,7 +196,8 @@ def _run_polygon_pipeline(
 
         # Extract centerlines from vein mask via hull-component Voronoi
         voronoi_result = extract_veins_from_mask(
-            annotations.vein_polygons, image.shape[:2],
+            annotations.vein_polygons,
+            image.shape[:2],
             intervein_polygons=annotations.intervein_polygons,
         )
         centerlines = voronoi_result.centerlines
@@ -210,8 +220,12 @@ def _run_polygon_pipeline(
 
         # Identify veins and regions independently via geometry
         id_result = identify_veins_and_regions(
-            centerlines, polygons, annotations.vein_polygons,
-            image.shape[:2], wing_bbox, midline=midline,
+            centerlines,
+            polygons,
+            annotations.vein_polygons,
+            image.shape[:2],
+            wing_bbox,
+            midline=midline,
             original_polygons=list(annotations.intervein_polygons),
         )
         assignments = id_result.assignments
@@ -224,24 +238,32 @@ def _run_polygon_pipeline(
         # Vein-extension clipping: intersect each named polygon with its
         # matching vein-extension region to trim oversized areas
         vein_lines_for_ext = {
-            a.vein_id: a.line for a in assignments
-            if a.line is not None and a.vein_id != "costa"
-            and a.status != VeinStatus.ABSENT
+            a.vein_id: a.line
+            for a in assignments
+            if a.line is not None and a.vein_id != "costa" and a.status != VeinStatus.ABSENT
         }
         if vein_lines_for_ext:
             outline_temp = build_wing_outline(
-                polygons, vein_polygons=annotations.vein_polygons or None,
+                polygons,
+                vein_polygons=annotations.vein_polygons or None,
             )
             ext_polys, ext_poly_veins, _ext_lines = partition_by_vein_extension(
-                outline_temp.polygon, vein_lines_for_ext, image.shape[:2],
+                outline_temp.polygon,
+                vein_lines_for_ext,
+                image.shape[:2],
             )
             ext_poly_names = name_regions_from_veins(
-                ext_polys, id_result.vein_map, wing_bbox,
+                ext_polys,
+                id_result.vein_map,
+                wing_bbox,
                 poly_veins=ext_poly_veins,
             )
             if ext_poly_names:
                 polygons, poly_names = _clip_regions_by_extension(
-                    polygons, poly_names, ext_polys, ext_poly_names,
+                    polygons,
+                    poly_names,
+                    ext_polys,
+                    ext_poly_names,
                 )
 
         # L1 recovery: when no costal cell exists, the Voronoi approach can't
@@ -250,15 +272,23 @@ def _run_polygon_pipeline(
         has_costal = "costal_cell" in poly_names.values()
         if not has_costal:
             _recover_l1_from_marginal_cell(
-                assignments, polygons, poly_names, wing_bbox, logger,
+                assignments,
+                polygons,
+                poly_names,
+                wing_bbox,
+                logger,
                 vein_polygons=annotations.vein_polygons,
                 image_shape=image.shape[:2],
             )
 
         # Ground-truth validation (if expected overlay file exists)
         _run_ground_truth_validation(
-            geojson_path, poly_names, polygons, logger,
-            image_shape=image.shape, output_dir=output_dir,
+            geojson_path,
+            poly_names,
+            polygons,
+            logger,
+            image_shape=image.shape,
+            output_dir=output_dir,
             assignments=assignments,
         )
 
@@ -303,26 +333,34 @@ def _run_polygon_pipeline(
 
         # Save diagnostics (vein-mask path)
         _save_diagnostics_voronoi(
-            image, polygons, annotations.vein_polygons,
-            poly_names, assignments, output_dir,
+            image,
+            polygons,
+            annotations.vein_polygons,
+            poly_names,
+            assignments,
+            output_dir,
         )
     else:
         # --- Fallback: midline-only path (also uses new identifier) ---
         logger.info("Using midline-only fallback pipeline")
 
         graph, edges = build_graph_from_polygons(polygons, max_gap=max_gap)
-        centerlines = {
-            e.poly_pair: e.line for e in edges if e.poly_pair
-        }
+        centerlines = {e.poly_pair: e.line for e in edges if e.poly_pair}
 
         # Compute wing midline for crossvein-independent identification
         midline = compute_wing_midline(
-            polygons, wing_bbox, wing_polygon=annotations.wing_polygon,
+            polygons,
+            wing_bbox,
+            wing_polygon=annotations.wing_polygon,
         )
 
         id_result = identify_veins_and_regions(
-            centerlines, polygons, [],
-            image.shape[:2], wing_bbox, midline=midline,
+            centerlines,
+            polygons,
+            [],
+            image.shape[:2],
+            wing_bbox,
+            midline=midline,
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -333,8 +371,12 @@ def _run_polygon_pipeline(
 
         # Ground-truth validation (if expected overlay file exists)
         _run_ground_truth_validation(
-            geojson_path, poly_names, polygons, logger,
-            image_shape=image.shape, output_dir=output_dir,
+            geojson_path,
+            poly_names,
+            polygons,
+            logger,
+            image_shape=image.shape,
+            output_dir=output_dir,
             assignments=assignments,
         )
 
@@ -383,7 +425,8 @@ def _run_polygon_pipeline(
 
     # Build wing outline (include vein polygons for full wing tip coverage)
     outline = build_wing_outline(
-        polygons, vein_polygons=annotations.vein_polygons or None,
+        polygons,
+        vein_polygons=annotations.vein_polygons or None,
     )
     result.wing_outline = outline
 
@@ -426,7 +469,10 @@ def _run_polygon_pipeline(
     outline_smooth = smooth_polygon(outline.polygon, sigma=smooth_sigma * 1.67) if smooth_sigma > 0 else outline.polygon
     skel_path = output_dir / f"{stem}_skeleton_overlay.jpg"
     render_skeleton_overlay(
-        image, assignments, outline_polygon=outline_smooth, output_path=skel_path,
+        image,
+        assignments,
+        outline_polygon=outline_smooth,
+        output_path=skel_path,
         midline=midline.line if midline else None,
     )
     result.skeleton_overlay_path = skel_path
@@ -437,16 +483,23 @@ def _run_polygon_pipeline(
 
     # Export CSV
     csv_path = output_dir / f"{stem}_measurements.csv"
-    export_csv(
-        assignments, csv_path, image_name=stem, measurements=measurements
-    )
+    export_csv(assignments, csv_path, image_name=stem, measurements=measurements)
     result.csv_path = csv_path
 
     # Write step-by-step logic summary
     _write_step_summary(
-        output_dir, image, annotations, polygons, poly_names,
-        assignments, measurements, outline, wing_blade,
-        regions, anterior, posterior,
+        output_dir,
+        image,
+        annotations,
+        polygons,
+        poly_names,
+        assignments,
+        measurements,
+        outline,
+        wing_blade,
+        regions,
+        anterior,
+        posterior,
         hull_mask=hull_mask if annotations.vein_polygons else None,
         seed_labels_arr=seed_labels_arr if annotations.vein_polygons else None,
         vein_mask_arr=vein_mask_arr if annotations.vein_polygons else None,
@@ -490,6 +543,7 @@ def _smooth_vein_assignments(
 # Vein-extension clipping
 # ---------------------------------------------------------------------------
 
+
 def _clip_regions_by_extension(
     polygons: list[Polygon],
     poly_names: dict[int, str],
@@ -530,6 +584,7 @@ def _clip_regions_by_extension(
 # L1 recovery from marginal cell boundary
 # ---------------------------------------------------------------------------
 
+
 def _recover_l1_from_marginal_cell(
     assignments: list[VeinAssignment],
     polygons: list[Polygon],
@@ -548,6 +603,7 @@ def _recover_l1_from_marginal_cell(
     approach searched.
     """
     from shapely.geometry import LineString, Point
+
     from WingVeinAnalyzer.models.vein_map import VEIN_LENGTH_PRIORS
     from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
 
@@ -667,6 +723,7 @@ def _recover_l1_from_marginal_cell(
     max_l1 = VEIN_LENGTH_PRIORS["L1"][1] * wing_span  # 25% of wing span
     if l1_line.length > max_l1:
         from shapely.ops import substring
+
         l1_line = substring(l1_line, l1_line.length - max_l1, l1_line.length)
     new_length = l1_line.length
 
@@ -678,7 +735,8 @@ def _recover_l1_from_marginal_cell(
     if existing_length > 0 and new_length <= existing_length * 0.8:
         logger.debug(
             "L1 recovery: marginal boundary (%.0fpx) not better than existing (%.0fpx), skipping",
-            new_length, existing_length,
+            new_length,
+            existing_length,
         )
         return
 
@@ -692,13 +750,15 @@ def _recover_l1_from_marginal_cell(
 
     logger.info(
         "L1 recovered from marginal cell boundary: %.0fpx → %.0fpx",
-        existing_length, new_length,
+        existing_length,
+        new_length,
     )
 
 
 # ---------------------------------------------------------------------------
 # Ground-truth validation helper
 # ---------------------------------------------------------------------------
+
 
 def _run_ground_truth_validation(
     geojson_path: Optional[Path],
@@ -723,7 +783,9 @@ def _run_ground_truth_validation(
     if expected_path.exists():
         logger.info("Found ground-truth overlay: %s", expected_path.name)
         region_report = validate_regions_against_ground_truth(
-            poly_names, polygons, expected_path,
+            poly_names,
+            polygons,
+            expected_path,
         )
 
         accuracy = region_report.get("accuracy", 0.0)
@@ -732,25 +794,35 @@ def _run_ground_truth_validation(
         total = region_report.get("total", 0)
         logger.info(
             "Ground-truth accuracy: %d/%d validated (%.0f%%), %d total polygons",
-            correct, validated, accuracy * 100, total,
+            correct,
+            validated,
+            accuracy * 100,
+            total,
         )
 
         for idx, info in sorted(region_report.get("per_polygon", {}).items()):
             if info["match"] is None:
                 logger.info(
                     "  P%d: %s — no GT region found (not validated)",
-                    idx, info["our_name"],
+                    idx,
+                    info["our_name"],
                 )
             elif info["match"]:
                 logger.info(
                     "  P%d: %s ✓ (IoU=%.3f, area=%.0fpx²)",
-                    idx, info["our_name"], info["iou"], info["area"],
+                    idx,
+                    info["our_name"],
+                    info["iou"],
+                    info["area"],
                 )
             else:
                 logger.warning(
                     "  P%d: %s ✗ expected %s (IoU=%.3f, area=%.0fpx²)",
-                    idx, info["our_name"], info["expected_name"],
-                    info["iou"], info["area"],
+                    idx,
+                    info["our_name"],
+                    info["expected_name"],
+                    info["iou"],
+                    info["area"],
                 )
 
         # Save mask PNGs if we have image dimensions
@@ -759,10 +831,15 @@ def _run_ground_truth_validation(
             diag_dir.mkdir(parents=True, exist_ok=True)
             h, w = image_shape[:2]
             _save_region_mask(
-                poly_names, polygons, (h, w), diag_dir / "region_mask.png",
+                poly_names,
+                polygons,
+                (h, w),
+                diag_dir / "region_mask.png",
             )
             _save_ground_truth_mask(
-                expected_path, (h, w), diag_dir / "ground_truth_mask.png",
+                expected_path,
+                (h, w),
+                diag_dir / "ground_truth_mask.png",
             )
 
     # --- Vein skeleton validation ---
@@ -772,22 +849,30 @@ def _run_ground_truth_validation(
     if skeleton_path.exists() and assignments is not None:
         logger.info("Found ground-truth skeleton: %s", skeleton_path.name)
         vein_report = validate_veins_against_ground_truth(
-            assignments, skeleton_path,
+            assignments,
+            skeleton_path,
         )
 
         for m in vein_report.per_vein:
             logger.info(
-                "  %s: Hausdorff=%.1fpx, mean_dev=%.1fpx, P95=%.1fpx, "
-                "coverage=%.1f%%, GT=%.0fpx, pred=%.0fpx",
-                m.vein_name, m.hausdorff_px, m.mean_deviation_px,
-                m.p95_deviation_px, m.coverage_ratio * 100,
-                m.gt_length_px, m.pred_length_px,
+                "  %s: Hausdorff=%.1fpx, mean_dev=%.1fpx, P95=%.1fpx, " "coverage=%.1f%%, GT=%.0fpx, pred=%.0fpx",
+                m.vein_name,
+                m.hausdorff_px,
+                m.mean_deviation_px,
+                m.p95_deviation_px,
+                m.coverage_ratio * 100,
+                m.gt_length_px,
+                m.pred_length_px,
             )
 
     # --- Write combined validation report ---
     if output_dir is not None and (region_report is not None or vein_report is not None):
         _write_validation_report(
-            output_dir, region_report, vein_report, poly_names, polygons,
+            output_dir,
+            region_report,
+            vein_report,
+            poly_names,
+            polygons,
         )
 
 
@@ -886,8 +971,14 @@ def _save_region_mask(
         cy = int(polygons[idx].centroid.y)
         label = f"P{idx}: {name}"
         cv2.putText(
-            mask, label, (cx - 80, cy),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
+            mask,
+            label,
+            (cx - 80, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
         )
 
     cv2.imwrite(str(output_path), mask)
@@ -900,6 +991,7 @@ def _save_ground_truth_mask(
 ) -> None:
     """Render a solid-color mask PNG from ground-truth expected overlay GeoJSON."""
     import json
+
     from WingVeinAnalyzer.models.vein_identifier import _normalize_region_name
     from WingVeinAnalyzer.models.vein_map import INTERVEIN_COLORS
     from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
@@ -959,8 +1051,14 @@ def _save_ground_truth_mask(
         cx = int(largest.centroid.x)
         cy = int(largest.centroid.y)
         cv2.putText(
-            mask, norm_name, (cx - 80, cy),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
+            mask,
+            norm_name,
+            (cx - 80, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
         )
 
     cv2.imwrite(str(output_path), mask)
@@ -972,9 +1070,9 @@ def _save_ground_truth_mask(
 
 # Distinct colors for segment visualization (BGR)
 _DIAG_COLORS = [
-    (0, 0, 255),    # red
-    (0, 200, 0),    # green
-    (255, 0, 0),    # blue
+    (0, 0, 255),  # red
+    (0, 200, 0),  # green
+    (255, 0, 0),  # blue
     (0, 200, 255),  # yellow
     (255, 0, 255),  # magenta
     (255, 255, 0),  # cyan
@@ -1009,8 +1107,14 @@ def _save_diagnostics(
         name = poly_names.get(i, f"P{i}")
         label = f"P{i}: {name}"
         cv2.putText(
-            poly_img, label, (cx - 80, cy),
-            cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA,
+            poly_img,
+            label,
+            (cx - 80, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            color,
+            2,
+            cv2.LINE_AA,
         )
     cv2.imwrite(str(diag_dir / "polygon_map.jpg"), poly_img)
 
@@ -1026,8 +1130,14 @@ def _save_diagnostics(
         nj = poly_names.get(pj, f"P{pj}")
         label = f"E{edge.edge_id}: {ni}<->{nj}"
         cv2.putText(
-            mid_img, label, (int(mid_pt[0]) - 60, int(mid_pt[1]) - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA,
+            mid_img,
+            label,
+            (int(mid_pt[0]) - 60, int(mid_pt[1]) - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            color,
+            2,
+            cv2.LINE_AA,
         )
     cv2.imwrite(str(diag_dir / "all_midlines.jpg"), mid_img)
 
@@ -1056,9 +1166,14 @@ def _save_diagnostics(
                 cv2.rectangle(seg_img, (ex - 10, ey - 10), (ex + 10, ey + 10), color, -1)
                 # Label
                 cv2.putText(
-                    seg_img, f"seg{seg_idx} (E{eid})",
+                    seg_img,
+                    f"seg{seg_idx} (E{eid})",
                     (int(pts[0][0]) + 15, int(pts[0][1]) - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA,
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    color,
+                    2,
+                    cv2.LINE_AA,
                 )
             cv2.imwrite(str(diag_dir / f"vein_{vein_id}_segments.jpg"), seg_img)
 
@@ -1071,8 +1186,14 @@ def _save_diagnostics(
             cv2.circle(merge_img, (int(pts[0][0]), int(pts[0][1])), 14, (0, 255, 0), -1)
             cv2.circle(merge_img, (int(pts[-1][0]), int(pts[-1][1])), 14, (0, 0, 255), -1)
             cv2.putText(
-                merge_img, f"{vein_id} merged ({len(pts)} pts, {assignment.length_px:.0f}px)",
-                (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, vein_color, 2, cv2.LINE_AA,
+                merge_img,
+                f"{vein_id} merged ({len(pts)} pts, {assignment.length_px:.0f}px)",
+                (50, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                vein_color,
+                2,
+                cv2.LINE_AA,
             )
             cv2.imwrite(str(diag_dir / f"vein_{vein_id}_merged.jpg"), merge_img)
 
@@ -1089,9 +1210,7 @@ def _save_diagnostics(
         ni = poly_names.get(pi, f"P{pi}")
         nj = poly_names.get(pj, f"P{pj}")
         vein = edge_to_vein.get(edge.edge_id, "unassigned")
-        log_lines.append(
-            f"{edge.edge_id}\t{pi}\t{pj}\t{ni}\t{nj}\t{vein}\t{edge.length_px:.1f}\n"
-        )
+        log_lines.append(f"{edge.edge_id}\t{pi}\t{pj}\t{ni}\t{nj}\t{vein}\t{edge.length_px:.1f}\n")
     (diag_dir / "edge_assignments.txt").write_text("".join(log_lines))
 
 
@@ -1107,9 +1226,10 @@ def _save_diagnostics_voronoi(
     diag_dir = output_dir / "diagnostics"
     diag_dir.mkdir(parents=True, exist_ok=True)
 
+    from scipy import ndimage
+
     from WingVeinAnalyzer.models.vein_map import VEIN_COLORS
     from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
-    from scipy import ndimage
 
     h, w = image.shape[:2]
 
@@ -1123,8 +1243,14 @@ def _save_diagnostics_voronoi(
         name = poly_names.get(i, f"P{i}")
         label = f"P{i}: {name}"
         cv2.putText(
-            poly_img, label, (cx - 80, cy),
-            cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA,
+            poly_img,
+            label,
+            (cx - 80, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            color,
+            2,
+            cv2.LINE_AA,
         )
     cv2.imwrite(str(diag_dir / "polygon_map.jpg"), poly_img)
 
@@ -1142,22 +1268,19 @@ def _save_diagnostics_voronoi(
     label_map = np.zeros((h, w), dtype=np.int32)
     for i, poly in enumerate(polygons):
         _fill_polygon(label_map, poly, i + 1)
-    background = (label_map == 0)
-    _, nearest_indices = ndimage.distance_transform_edt(
-        background, return_distances=True, return_indices=True
-    )
+    background = label_map == 0
+    _, nearest_indices = ndimage.distance_transform_edt(background, return_distances=True, return_indices=True)
     nearest_labels = label_map[nearest_indices[0], nearest_indices[1]]
     nearest_labels[~background] = label_map[~background]
 
     # Color-code Voronoi regions within vein mask
     voronoi_img = image.copy()
-    vein_pixels = (vein_mask > 0)
+    vein_pixels = vein_mask > 0
     for i in range(len(polygons)):
         region_mask = (nearest_labels == i + 1) & vein_pixels
         color = _DIAG_COLORS[i % len(_DIAG_COLORS)]
         voronoi_img[region_mask] = (
-            np.array(voronoi_img[region_mask], dtype=np.float32) * 0.4
-            + np.array(color, dtype=np.float32) * 0.6
+            np.array(voronoi_img[region_mask], dtype=np.float32) * 0.4 + np.array(color, dtype=np.float32) * 0.6
         ).astype(np.uint8)
     cv2.imwrite(str(diag_dir / "voronoi_partition.jpg"), voronoi_img)
 
@@ -1173,8 +1296,14 @@ def _save_diagnostics_voronoi(
             cv2.circle(merge_img, (int(pts[0][0]), int(pts[0][1])), 14, (0, 255, 0), -1)
             cv2.circle(merge_img, (int(pts[-1][0]), int(pts[-1][1])), 14, (0, 0, 255), -1)
             cv2.putText(
-                merge_img, f"{vein_id} ({len(pts)} pts, {assignment.length_px:.0f}px)",
-                (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, vein_color, 2, cv2.LINE_AA,
+                merge_img,
+                f"{vein_id} ({len(pts)} pts, {assignment.length_px:.0f}px)",
+                (50, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                vein_color,
+                2,
+                cv2.LINE_AA,
             )
             cv2.imwrite(str(diag_dir / f"vein_{vein_id}_merged.jpg"), merge_img)
 
@@ -1188,9 +1317,14 @@ def _save_diagnostics_voronoi(
             cv2.polylines(all_veins_img, [pts], isClosed=False, color=vein_color, thickness=4)
             mid_pt = pts[len(pts) // 2]
             cv2.putText(
-                all_veins_img, vein_id,
+                all_veins_img,
+                vein_id,
                 (int(mid_pt[0]) - 20, int(mid_pt[1]) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, vein_color, 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                vein_color,
+                2,
+                cv2.LINE_AA,
             )
     cv2.imwrite(str(diag_dir / "all_veins_classified.jpg"), all_veins_img)
 
@@ -1213,8 +1347,8 @@ def _write_step_summary(
     polygons: list[Polygon],
     poly_names: dict[int, str],
     assignments: list[VeinAssignment],
-    measurements: Optional['WingMeasurements'],
-    outline: Optional['WingOutline'],
+    measurements: Optional["WingMeasurements"],
+    outline: Optional["WingOutline"],
     wing_blade: Optional[Polygon],
     regions: dict[str, Polygon],
     anterior: Optional[Polygon],
@@ -1227,6 +1361,7 @@ def _write_step_summary(
 ) -> None:
     """Write a step-by-step logic summary to diagnostics/pipeline_steps.txt."""
     import logging
+
     logger = logging.getLogger(__name__)
 
     diag_dir = output_dir / "diagnostics"
@@ -1243,7 +1378,7 @@ def _write_step_summary(
     def section(title: str) -> None:
         lines.append(f"\n{'=' * 60}")
         lines.append(title)
-        lines.append('=' * 60)
+        lines.append("=" * 60)
 
     def step(num: int, name: str) -> None:
         lines.append(f"\n--- Step {num}: {name} ---")
@@ -1292,7 +1427,9 @@ def _write_step_summary(
         lines.append(f"  Voronoi polygons: {n_final_polys} regions vectorized from Voronoi partition")
         for i, poly in enumerate(polygons):
             if not poly.is_empty:
-                lines.append(f"    V{i}: area={poly.area:.0f} px², centroid=({poly.centroid.x:.0f}, {poly.centroid.y:.0f})")
+                lines.append(
+                    f"    V{i}: area={poly.area:.0f} px², centroid=({poly.centroid.x:.0f}, {poly.centroid.y:.0f})"
+                )
 
         lines.append(f"  Voronoi: distance_transform_edt from seed_labels")
         lines.append(f"    → each pixel assigned to nearest seed label")
@@ -1326,7 +1463,9 @@ def _write_step_summary(
     lines.append(f"\n  Classified veins:")
     for a in assignments:
         if a.line is not None:
-            lines.append(f"    {a.vein_id}: {a.length_px:.0f} px, status={a.status.value}, confidence={a.confidence:.2f}")
+            lines.append(
+                f"    {a.vein_id}: {a.length_px:.0f} px, status={a.status.value}, confidence={a.confidence:.2f}"
+            )
         else:
             lines.append(f"    {a.vein_id}: ABSENT")
 
@@ -1383,9 +1522,19 @@ def _write_step_summary(
     # Step 18: Compute Measurements
     step(18, "Compute Measurements")
     if measurements:
-        lines.append(f"  Wing length: {measurements.wing_length_px:.0f} px" if measurements.wing_length_px else "  Wing length: N/A")
-        lines.append(f"  Wing width: {measurements.wing_width_px:.0f} px" if measurements.wing_width_px else "  Wing width: N/A")
-        lines.append(f"  Wing area: {measurements.total_wing_area_px2:.0f} px²" if measurements.total_wing_area_px2 else "  Wing area: N/A")
+        lines.append(
+            f"  Wing length: {measurements.wing_length_px:.0f} px"
+            if measurements.wing_length_px
+            else "  Wing length: N/A"
+        )
+        lines.append(
+            f"  Wing width: {measurements.wing_width_px:.0f} px" if measurements.wing_width_px else "  Wing width: N/A"
+        )
+        lines.append(
+            f"  Wing area: {measurements.total_wing_area_px2:.0f} px²"
+            if measurements.total_wing_area_px2
+            else "  Wing area: N/A"
+        )
         if measurements.crossvein_distance_px:
             lines.append(f"  ACV-PCV distance: {measurements.crossvein_distance_px:.0f} px")
         lines.append(f"  Region areas:")
@@ -1414,9 +1563,7 @@ def _run_vein_pipeline(
     result = PipelineResult()
 
     # Build graph from vein intersections
-    graph, nodes = build_graph_from_veins(
-        annotations.veins, snap_tolerance=snap_tolerance
-    )
+    graph, nodes = build_graph_from_veins(annotations.veins, snap_tolerance=snap_tolerance)
 
     # Compute wing bounding box
     all_coords = []

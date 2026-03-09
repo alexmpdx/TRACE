@@ -8,9 +8,8 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset
-
 from data.augmentation import get_train_transform, get_val_transform
+from torch.utils.data import Dataset
 
 # ImageNet normalization stats
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -103,9 +102,7 @@ class LandmarkDataset(Dataset):
             image_name = geojson_path.stem  # foo.tif
             image_path = self.image_dir / image_name
             if not image_path.exists():
-                raise FileNotFoundError(
-                    f"Image not found: {image_path} for annotation {geojson_path}"
-                )
+                raise FileNotFoundError(f"Image not found: {image_path} for annotation {geojson_path}")
             self.samples.append((geojson_path, image_path))
 
         # Subset by indices if provided (for CV splits)
@@ -159,9 +156,7 @@ class LandmarkDataset(Dataset):
 
         return landmarks
 
-    def _generate_heatmap(
-        self, keypoints: list[tuple[float, float]], h: int, w: int
-    ) -> np.ndarray:
+    def _generate_heatmap(self, keypoints: list[tuple[float, float]], h: int, w: int) -> np.ndarray:
         """Render Gaussian heatmaps from keypoint coordinates."""
         num_landmarks = len(keypoints)
         heatmaps = np.zeros((num_landmarks, h, w), dtype=np.float32)
@@ -186,7 +181,7 @@ class LandmarkDataset(Dataset):
             ys = np.arange(y0, y1, dtype=np.float32)
             xx, yy = np.meshgrid(xs, ys)
 
-            gaussian = np.exp(-((xx - kx) ** 2 + (yy - ky) ** 2) / (2 * sigma ** 2))
+            gaussian = np.exp(-((xx - kx) ** 2 + (yy - ky) ** 2) / (2 * sigma**2))
             heatmaps[i, y0:y1, x0:x1] = gaussian
 
         return heatmaps

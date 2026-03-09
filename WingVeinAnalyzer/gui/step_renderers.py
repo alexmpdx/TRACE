@@ -16,9 +16,9 @@ from WingVeinAnalyzer.models.vein_map import (
 
 # Distinct colors for polygon/segment visualization (BGR)
 SEGMENT_COLORS = [
-    (0, 0, 255),    # red
-    (0, 200, 0),    # green
-    (255, 0, 0),    # blue
+    (0, 0, 255),  # red
+    (0, 200, 0),  # green
+    (255, 0, 0),  # blue
     (0, 200, 255),  # yellow
     (255, 0, 255),  # magenta
     (255, 255, 0),  # cyan
@@ -71,6 +71,7 @@ def render_step(
 # Individual step renderers
 # ------------------------------------------------------------------
 
+
 def _render_load(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
     """Step 0: Raw image → image + polygon outlines + vein mask."""
     left = state.image.copy() if state.image is not None else _blank(state)
@@ -84,13 +85,20 @@ def _render_load(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarra
             _draw_polygon_outline(right, poly, color, thickness=3)
             cx, cy = int(poly.centroid.x), int(poly.centroid.y)
             cv2.putText(
-                right, f"P{i}", (cx - 20, cy),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA,
+                right,
+                f"P{i}",
+                (cx - 20, cy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                color,
+                2,
+                cv2.LINE_AA,
             )
 
     # Draw vein mask overlay (semi-transparent red)
     if state.vein_polygons:
         from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
+
         h, w = right.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         for poly in state.vein_polygons:
@@ -120,8 +128,7 @@ def _render_voronoi(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
             region_mask = (state.nearest_labels == i) & vein_pixels
             color = SEGMENT_COLORS[(i - 1) % len(SEGMENT_COLORS)]
             right[region_mask] = (
-                np.array(right[region_mask], dtype=np.float32) * 0.4
-                + np.array(color, dtype=np.float32) * 0.6
+                np.array(right[region_mask], dtype=np.float32) * 0.4 + np.array(color, dtype=np.float32) * 0.6
             ).astype(np.uint8)
 
     return left, right
@@ -138,7 +145,9 @@ def _render_hull_seeds(state: StepState, prev: Optional[StepState]) -> tuple[np.
     if state.hull_mask is not None:
         # Draw hull outline in white
         hull_contours, _ = cv2.findContours(
-            state.hull_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            state.hull_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
         )
         cv2.drawContours(left, hull_contours, -1, (255, 255, 255), 3)
 
@@ -152,13 +161,14 @@ def _render_hull_seeds(state: StepState, prev: Optional[StepState]) -> tuple[np.
                 continue
             color = SEGMENT_COLORS[(i - 1) % len(SEGMENT_COLORS)]
             right[region_mask] = (
-                np.array(right[region_mask], dtype=np.float32) * 0.3
-                + np.array(color, dtype=np.float32) * 0.7
+                np.array(right[region_mask], dtype=np.float32) * 0.3 + np.array(color, dtype=np.float32) * 0.7
             ).astype(np.uint8)
         # Draw vein mask outline on top so boundaries are visible
         if state.vein_mask is not None:
             vein_contours, _ = cv2.findContours(
-                state.vein_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                state.vein_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
             )
             cv2.drawContours(right, vein_contours, -1, (200, 200, 200), 1)
         # Label each seed region
@@ -171,8 +181,14 @@ def _render_hull_seeds(state: StepState, prev: Optional[StepState]) -> tuple[np.
                 cx, cy = int(xs.mean()), int(ys.mean())
                 color = SEGMENT_COLORS[(i - 1) % len(SEGMENT_COLORS)]
                 cv2.putText(
-                    right, f"S{i}", (cx - 15, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA,
+                    right,
+                    f"S{i}",
+                    (cx - 15, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
                 )
 
     return left, right
@@ -189,8 +205,7 @@ def _render_centerlines(state: StepState, prev: Optional[StepState]) -> tuple[np
             region_mask = (state.nearest_labels == i) & vein_pixels
             color = SEGMENT_COLORS[(i - 1) % len(SEGMENT_COLORS)]
             left[region_mask] = (
-                np.array(left[region_mask], dtype=np.float32) * 0.4
-                + np.array(color, dtype=np.float32) * 0.6
+                np.array(left[region_mask], dtype=np.float32) * 0.4 + np.array(color, dtype=np.float32) * 0.6
             ).astype(np.uint8)
 
     # Right: traced centerlines
@@ -203,8 +218,14 @@ def _render_centerlines(state: StepState, prev: Optional[StepState]) -> tuple[np
             coords = list(line.coords)
             mid = coords[len(coords) // 2]
             cv2.putText(
-                right, f"{key}", (int(mid[0]) - 30, int(mid[1]) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
+                right,
+                f"{key}",
+                (int(mid[0]) - 30, int(mid[1]) - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+                cv2.LINE_AA,
             )
 
     return left, right
@@ -225,25 +246,38 @@ def _render_midline(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
         pts = np.array(state.wing_midline.line.coords, dtype=np.int32)
         if len(pts) >= 2:
             cv2.polylines(
-                right, [pts], isClosed=False,
-                color=(255, 255, 255), thickness=3,
+                right,
+                [pts],
+                isClosed=False,
+                color=(255, 255, 255),
+                thickness=3,
                 lineType=cv2.LINE_AA,
             )
             # Label
             mid_idx = len(pts) // 2
             cv2.putText(
-                right, "midline",
+                right,
+                "midline",
                 (int(pts[mid_idx, 0]) - 40, int(pts[mid_idx, 1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
             )
             # Draw 3/4-span reference point
             if state.wing_midline.ref_point is not None:
                 rx, ry = state.wing_midline.ref_point
                 cv2.circle(right, (int(rx), int(ry)), 10, (0, 0, 255), -1, cv2.LINE_AA)
                 cv2.putText(
-                    right, "ref 3/4",
+                    right,
+                    "ref 3/4",
                     (int(rx) + 14, int(ry) + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA,
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
                 )
 
     return left, right
@@ -263,18 +297,30 @@ def _render_junctions(state: StepState, prev: Optional[StepState]) -> tuple[np.n
     if state.junctions:
         for junc in state.junctions:
             cv2.circle(
-                right, (int(junc.x), int(junc.y)), 15,
-                (0, 255, 255), -1,  # filled yellow circle
+                right,
+                (int(junc.x), int(junc.y)),
+                15,
+                (0, 255, 255),
+                -1,  # filled yellow circle
             )
             cv2.circle(
-                right, (int(junc.x), int(junc.y)), 15,
-                (0, 0, 0), 2,  # black border
+                right,
+                (int(junc.x), int(junc.y)),
+                15,
+                (0, 0, 0),
+                2,  # black border
             )
             # Show number of converging segments
             n = len(junc.segment_keys)
             cv2.putText(
-                right, str(n), (int(junc.x) - 6, int(junc.y) + 6),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2, cv2.LINE_AA,
+                right,
+                str(n),
+                (int(junc.x) - 6, int(junc.y) + 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                2,
+                cv2.LINE_AA,
             )
 
     return left, right
@@ -299,8 +345,14 @@ def _render_merge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
             mid = coords[len(coords) // 2]
             label = f"M{idx} ({mp.line.length:.0f}px)"
             cv2.putText(
-                right, label, (int(mid[0]) - 40, int(mid[1]) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
+                right,
+                label,
+                (int(mid[0]) - 40, int(mid[1]) - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+                cv2.LINE_AA,
             )
 
     return left, right
@@ -326,9 +378,14 @@ def _render_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
             coords = list(a.line.coords)
             mid = coords[len(coords) // 2]
             cv2.putText(
-                right, f"{a.vein_id} ({a.length_px:.0f}px)",
+                right,
+                f"{a.vein_id} ({a.length_px:.0f}px)",
                 (int(mid[0]) - 40, int(mid[1]) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+                cv2.LINE_AA,
             )
 
     return left, right
@@ -361,8 +418,14 @@ def _render_crossveins(state: StepState, prev: Optional[StepState]) -> tuple[np.
                 coords = list(a.line.coords)
                 mid = coords[len(coords) // 2]
                 cv2.putText(
-                    right, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3, cv2.LINE_AA,
+                    right,
+                    a.vein_id,
+                    (int(mid[0]) - 20, int(mid[1]) - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    color,
+                    3,
+                    cv2.LINE_AA,
                 )
 
     return left, right
@@ -392,8 +455,14 @@ def _render_longitudinals(state: StepState, prev: Optional[StepState]) -> tuple[
                 coords = list(a.line.coords)
                 mid = coords[len(coords) // 2]
                 cv2.putText(
-                    right, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA,
+                    right,
+                    a.vein_id,
+                    (int(mid[0]) - 20, int(mid[1]) - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    color,
+                    2,
+                    cv2.LINE_AA,
                 )
 
     return left, right
@@ -422,9 +491,14 @@ def _render_regions(state: StepState, prev: Optional[StepState]) -> tuple[np.nda
             _fill_polygon_alpha(right, poly, color, alpha=0.4)
             cx, cy = int(poly.centroid.x), int(poly.centroid.y)
             cv2.putText(
-                right, name.replace("_cell", "").replace("_", " "),
+                right,
+                name.replace("_cell", "").replace("_", " "),
                 (cx - 80, cy),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
             )
         # Draw veins on top
         if state.assignments:
@@ -452,8 +526,14 @@ def _render_poly_split(state: StepState, prev: Optional[StepState]) -> tuple[np.
             coords = list(a.line.coords)
             mid = coords[len(coords) // 2]
             cv2.putText(
-                left, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA,
+                left,
+                a.vein_id,
+                (int(mid[0]) - 20, int(mid[1]) - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2,
+                cv2.LINE_AA,
             )
     # Draw extension lines as dashed white
     if state.extension_lines:
@@ -473,8 +553,14 @@ def _render_poly_split(state: StepState, prev: Optional[StepState]) -> tuple[np.
             cx, cy = int(poly.centroid.x), int(poly.centroid.y)
             label = f"P{idx}: {name.replace('_cell', '')}"
             cv2.putText(
-                right, label, (cx - 80, cy),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA,
+                right,
+                label,
+                (cx - 80, cy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
             )
 
     return left, right
@@ -493,8 +579,14 @@ def _render_validation(state: StepState, prev: Optional[StepState]) -> tuple[np.
             coords = list(a.line.coords)
             mid = coords[len(coords) // 2]
             cv2.putText(
-                left, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA,
+                left,
+                a.vein_id,
+                (int(mid[0]) - 20, int(mid[1]) - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2,
+                cv2.LINE_AA,
             )
 
     # Right: same but with warnings text
@@ -507,14 +599,26 @@ def _render_validation(state: StepState, prev: Optional[StepState]) -> tuple[np.
         y_pos = 40
         for w in warnings[:15]:  # max 15 warnings
             cv2.putText(
-                right, f"! {w[:80]}", (30, y_pos),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA,
+                right,
+                f"! {w[:80]}",
+                (30, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
             )
             y_pos += 30
     else:
         cv2.putText(
-            right, "No validation warnings", (30, 50),
-            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 0), 2, cv2.LINE_AA,
+            right,
+            "No validation warnings",
+            (30, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 200, 0),
+            2,
+            cv2.LINE_AA,
         )
 
     return left, right
@@ -534,8 +638,14 @@ def _render_l1_recovery(state: StepState, prev: Optional[StepState]) -> tuple[np
             coords = list(a.line.coords)
             mid = coords[len(coords) // 2]
             cv2.putText(
-                left, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA,
+                left,
+                a.vein_id,
+                (int(mid[0]) - 20, int(mid[1]) - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2,
+                cv2.LINE_AA,
             )
 
     # Right: veins after L1 recovery
@@ -550,8 +660,14 @@ def _render_l1_recovery(state: StepState, prev: Optional[StepState]) -> tuple[np
             coords = list(a.line.coords)
             mid = coords[len(coords) // 2]
             cv2.putText(
-                right, a.vein_id, (int(mid[0]) - 20, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA,
+                right,
+                a.vein_id,
+                (int(mid[0]) - 20, int(mid[1]) - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2,
+                cv2.LINE_AA,
             )
 
     return left, right
@@ -575,21 +691,33 @@ def _render_costa(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
         costa = next((a for a in state.assignments if a.vein_id == "costa"), None)
         if costa and costa.line is not None:
             _draw_linestring(
-                right, costa.line, VEIN_COLORS.get("costa", (130, 100, 40)),
+                right,
+                costa.line,
+                VEIN_COLORS.get("costa", (130, 100, 40)),
                 thickness=5,
             )
             coords = list(costa.line.coords)
             mid = coords[len(coords) // 2]
             cv2.putText(
-                right, f"costa ({costa.length_px:.0f}px)",
+                right,
+                f"costa ({costa.length_px:.0f}px)",
                 (int(mid[0]) - 40, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                VEIN_COLORS.get("costa", (130, 100, 40)), 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                VEIN_COLORS.get("costa", (130, 100, 40)),
+                2,
+                cv2.LINE_AA,
             )
         else:
             cv2.putText(
-                right, "Costa: ABSENT", (30, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 200), 2, cv2.LINE_AA,
+                right,
+                "Costa: ABSENT",
+                (30, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 0, 200),
+                2,
+                cv2.LINE_AA,
             )
 
     return left, right
@@ -626,10 +754,8 @@ def _render_hinge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
         al = (int(lm.alula_notch[0]), int(lm.alula_notch[1]))
         cv2.circle(left, sc, 20, (0, 0, 255), -1)
         cv2.circle(left, al, 20, (255, 0, 0), -1)
-        cv2.putText(left, "Subcostal", (sc[0] + 25, sc[1]),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        cv2.putText(left, "Alula", (al[0] + 25, al[1]),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        cv2.putText(left, "Subcostal", (sc[0] + 25, sc[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(left, "Alula", (al[0] + 25, al[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
         # Draw hinge line
         hl_pts = np.array(lm.hinge_line.coords, dtype=np.int32)
         cv2.polylines(left, [hl_pts], isClosed=False, color=(0, 165, 255), thickness=3)
@@ -666,14 +792,12 @@ def _render_compartments(state: StepState, prev: Optional[StepState]) -> tuple[n
         _fill_polygon_alpha(right, state.anterior_compartment, (255, 200, 100), alpha=0.35)
         cx = int(state.anterior_compartment.centroid.x)
         cy = int(state.anterior_compartment.centroid.y)
-        cv2.putText(right, "Anterior", (cx - 60, cy),
-                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 200, 100), 3, cv2.LINE_AA)
+        cv2.putText(right, "Anterior", (cx - 60, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 200, 100), 3, cv2.LINE_AA)
     if state.posterior_compartment and not state.posterior_compartment.is_empty:
         _fill_polygon_alpha(right, state.posterior_compartment, (100, 200, 255), alpha=0.35)
         cx = int(state.posterior_compartment.centroid.x)
         cy = int(state.posterior_compartment.centroid.y)
-        cv2.putText(right, "Posterior", (cx - 60, cy),
-                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (100, 200, 255), 3, cv2.LINE_AA)
+        cv2.putText(right, "Posterior", (cx - 60, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (100, 200, 255), 3, cv2.LINE_AA)
 
     return left, right
 
@@ -702,56 +826,105 @@ def _render_measurements(state: StepState, prev: Optional[StepState]) -> tuple[n
 
     if state.measurements:
         m = state.measurements
-        cv2.putText(right, "=== Measurements ===", (20, y_pos),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, text_color, 2, cv2.LINE_AA)
+        cv2.putText(
+            right, "=== Measurements ===", (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, text_color, 2, cv2.LINE_AA
+        )
         y_pos += 35
 
         # Vein lengths
         for vein_id in ["L1", "L2", "L3", "L4", "L5", "ACV", "PCV", "costa"]:
             length = m.vein_lengths_px.get(vein_id)
             if length is not None:
-                cv2.putText(right, f"{vein_id}: {length:.0f} px", (30, y_pos),
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1, cv2.LINE_AA)
+                cv2.putText(
+                    right,
+                    f"{vein_id}: {length:.0f} px",
+                    (30, y_pos),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    text_color,
+                    1,
+                    cv2.LINE_AA,
+                )
                 y_pos += 25
 
         y_pos += 10
         if m.crossvein_distance_px:
-            cv2.putText(right, f"Crossvein distance: {m.crossvein_distance_px:.0f} px",
-                         (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+            cv2.putText(
+                right,
+                f"Crossvein distance: {m.crossvein_distance_px:.0f} px",
+                (30, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                text_color,
+                1,
+            )
             y_pos += 25
         if m.wing_length_px:
-            cv2.putText(right, f"Wing length: {m.wing_length_px:.0f} px",
-                         (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+            cv2.putText(
+                right,
+                f"Wing length: {m.wing_length_px:.0f} px",
+                (30, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                text_color,
+                1,
+            )
             y_pos += 25
         if m.wing_width_px:
-            cv2.putText(right, f"Wing width: {m.wing_width_px:.0f} px",
-                         (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+            cv2.putText(
+                right,
+                f"Wing width: {m.wing_width_px:.0f} px",
+                (30, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                text_color,
+                1,
+            )
             y_pos += 25
         if m.total_wing_area_px2:
-            cv2.putText(right, f"Wing area: {m.total_wing_area_px2:.0f} px^2",
-                         (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+            cv2.putText(
+                right,
+                f"Wing area: {m.total_wing_area_px2:.0f} px^2",
+                (30, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                text_color,
+                1,
+            )
             y_pos += 25
 
         y_pos += 10
         if m.anterior_compartment_area_px2:
-            cv2.putText(right, f"Anterior: {m.anterior_compartment_area_px2:.0f} px^2",
-                         (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+            cv2.putText(
+                right,
+                f"Anterior: {m.anterior_compartment_area_px2:.0f} px^2",
+                (30, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                text_color,
+                1,
+            )
             y_pos += 25
         if m.posterior_compartment_area_px2:
-            cv2.putText(right, f"Posterior: {m.posterior_compartment_area_px2:.0f} px^2",
-                         (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+            cv2.putText(
+                right,
+                f"Posterior: {m.posterior_compartment_area_px2:.0f} px^2",
+                (30, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                text_color,
+                1,
+            )
             y_pos += 25
 
         # Region areas
         y_pos += 10
         for name, area in m.intervein_areas_px2.items():
             short = name.replace("_cell", "").replace("_", " ")
-            cv2.putText(right, f"{short}: {area:.0f} px^2",
-                         (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1)
+            cv2.putText(right, f"{short}: {area:.0f} px^2", (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1)
             y_pos += 22
     else:
-        cv2.putText(right, "No measurements computed", (30, y_pos),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 200), 2)
+        cv2.putText(right, "No measurements computed", (30, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 200), 2)
 
     return left, right
 
@@ -766,6 +939,7 @@ def _render_overlays(state: StepState, prev: Optional[StepState]) -> tuple[np.nd
 # ------------------------------------------------------------------
 # Drawing helpers
 # ------------------------------------------------------------------
+
 
 def _blank(state: StepState) -> np.ndarray:
     """Return a blank image sized to the loaded image, or 800x600 default."""
@@ -839,6 +1013,4 @@ def _fill_polygon_alpha(
         hole_pts = np.array(interior.coords, dtype=np.int32)
         cv2.fillPoly(mask, [hole_pts], 0)
     mask_bool = mask > 0
-    image[mask_bool] = cv2.addWeighted(
-        image, 1 - alpha, overlay, alpha, 0
-    )[mask_bool]
+    image[mask_bool] = cv2.addWeighted(image, 1 - alpha, overlay, alpha, 0)[mask_bool]

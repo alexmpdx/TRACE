@@ -34,10 +34,8 @@ def get_train_transform(cfg: dict) -> Compose:
             ),
             A.CoarseDropout(
                 num_holes_range=(1, aug_cfg["coarse_dropout_max_holes"]),
-                hole_height_range=(aug_cfg["coarse_dropout_max_height"],
-                                   aug_cfg["coarse_dropout_max_height"]),
-                hole_width_range=(aug_cfg["coarse_dropout_max_width"],
-                                  aug_cfg["coarse_dropout_max_width"]),
+                hole_height_range=(aug_cfg["coarse_dropout_max_height"], aug_cfg["coarse_dropout_max_height"]),
+                hole_width_range=(aug_cfg["coarse_dropout_max_width"], aug_cfg["coarse_dropout_max_width"]),
                 p=aug_cfg["coarse_dropout_p"],
             ),
         ],

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 @dataclass
 class StepParam:
     """A single read-only parameter displayed in the parameter bar."""
+
     name: str
     value: str
     tooltip: str = ""
@@ -16,6 +17,7 @@ class StepParam:
 @dataclass
 class StepDef:
     """Metadata for one pipeline step."""
+
     index: int
     name: str
     short_name: str

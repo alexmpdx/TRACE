@@ -43,8 +43,8 @@ logger = logging.getLogger(__name__)
 class StepWorker(QThread):
     """Run a step in a background thread to keep the UI responsive."""
 
-    finished = pyqtSignal(int)       # step index
-    error = pyqtSignal(str, str)     # step name, traceback
+    finished = pyqtSignal(int)  # step index
+    error = pyqtSignal(str, str)  # step name, traceback
 
     def __init__(self, runner: StepRunner, step_index: int, parent=None):
         super().__init__(parent)
@@ -99,9 +99,7 @@ class MainWindow(QMainWindow):
         self._step_list.blockSignals(True)
         for sdef in STEP_DEFS:
             item = QListWidgetItem(f"  {sdef.index:2d}. {sdef.short_name}")
-            item.setFlags(
-                (item.flags() & ~Qt.ItemIsSelectable) | Qt.ItemIsEnabled
-            )
+            item.setFlags((item.flags() & ~Qt.ItemIsSelectable) | Qt.ItemIsEnabled)
             self._step_list.addItem(item)
         self._step_list.setCurrentRow(-1)
         self._step_list.blockSignals(False)
@@ -224,9 +222,9 @@ class MainWindow(QMainWindow):
 
         self._smooth_slider = QSlider(Qt.Horizontal)
         self._smooth_slider.setRange(0, 100)  # 0.0 – 10.0 in 0.1 steps
-        self._smooth_slider.setValue(30)       # default sigma = 3.0
-        self._smooth_slider.setSingleStep(5)   # 0.5 increments
-        self._smooth_slider.setPageStep(10)    # 1.0 increments
+        self._smooth_slider.setValue(30)  # default sigma = 3.0
+        self._smooth_slider.setSingleStep(5)  # 0.5 increments
+        self._smooth_slider.setPageStep(10)  # 1.0 increments
         self._smooth_slider.setFixedWidth(140)
         self._smooth_slider.setToolTip("Gaussian smoothing sigma for vein lines and region boundaries")
         self._smooth_slider.valueChanged.connect(self._on_smooth_changed)
@@ -250,7 +248,9 @@ class MainWindow(QMainWindow):
         self._scale_spin.setValue(0.483)
         self._scale_spin.setSingleStep(0.01)
         self._scale_spin.setFixedWidth(90)
-        self._scale_spin.setToolTip("Micrometers per pixel — used for all distance/area thresholds and output calibration")
+        self._scale_spin.setToolTip(
+            "Micrometers per pixel — used for all distance/area thresholds and output calibration"
+        )
         self._scale_spin.valueChanged.connect(self._on_scale_changed)
         toolbar.addWidget(self._scale_spin)
 
@@ -410,7 +410,8 @@ class MainWindow(QMainWindow):
         self._set_ui_busy(False)
         self._statusbar.showMessage(f"Error in {step_name}")
         QMessageBox.critical(
-            self, f"Error in {step_name}",
+            self,
+            f"Error in {step_name}",
             f"Step '{step_name}' failed:\n\n{tb[:1000]}",
         )
 
@@ -467,9 +468,7 @@ class MainWindow(QMainWindow):
         for param in sdef.params:
             label = QLabel(f"{param.name}: {param.value}")
             label.setFont(QFont("Menlo", 10))
-            label.setStyleSheet(
-                "background: #e8e8e8; padding: 2px 8px; border-radius: 3px; margin: 2px;"
-            )
+            label.setStyleSheet("background: #e8e8e8; padding: 2px 8px; border-radius: 3px; margin: 2px;")
             if param.tooltip:
                 label.setToolTip(param.tooltip)
             self._param_layout.addWidget(label)
@@ -479,9 +478,7 @@ class MainWindow(QMainWindow):
             for key, val in state.params_used.items():
                 label = QLabel(f"{key}: {val}")
                 label.setFont(QFont("Menlo", 10))
-                label.setStyleSheet(
-                    "background: #d8e8f8; padding: 2px 8px; border-radius: 3px; margin: 2px;"
-                )
+                label.setStyleSheet("background: #d8e8f8; padding: 2px 8px; border-radius: 3px; margin: 2px;")
                 self._param_layout.addWidget(label)
 
         self._param_layout.addStretch()
@@ -511,7 +508,8 @@ class MainWindow(QMainWindow):
     def _on_open_folder(self) -> None:
         """Open a folder and discover TIFF+GeoJSON pairs."""
         folder = QFileDialog.getExistingDirectory(
-            self, "Open Wing Data Folder",
+            self,
+            "Open Wing Data Folder",
         )
         if not folder:
             return
@@ -522,7 +520,8 @@ class MainWindow(QMainWindow):
 
         if not pairs:
             QMessageBox.information(
-                self, "No Files Found",
+                self,
+                "No Files Found",
                 f"No TIFF+GeoJSON pairs found in:\n{folder_path}",
             )
             return
@@ -533,6 +532,7 @@ class MainWindow(QMainWindow):
         # If multiple pairs, let user choose
         if len(pairs) > 1:
             from WingVeinAnalyzer.gui.batch_dialog import FileChooserDialog
+
             dialog = FileChooserDialog(pairs, self)
             if dialog.exec_():
                 selected = dialog.selected_pair()
@@ -580,22 +580,26 @@ class MainWindow(QMainWindow):
         if not self._file_pairs:
             # Ask for folder first
             folder = QFileDialog.getExistingDirectory(
-                self, "Select Folder for Batch Processing",
+                self,
+                "Select Folder for Batch Processing",
             )
             if not folder:
                 return
             pairs = discover_file_pairs(Path(folder))
             if not pairs:
                 QMessageBox.information(
-                    self, "No Files Found",
+                    self,
+                    "No Files Found",
                     "No TIFF+GeoJSON pairs found in the selected folder.",
                 )
                 return
             self._file_pairs = pairs
 
         from WingVeinAnalyzer.gui.batch_dialog import BatchDialog
+
         dialog = BatchDialog(
-            self._file_pairs, self,
+            self._file_pairs,
+            self,
             smooth_sigma=self._runner.smooth_sigma,
             um_per_px=self._runner.um_per_px,
         )

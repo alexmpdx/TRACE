@@ -51,10 +51,10 @@ class LandmarkUNet(nn.Module):
         self.enc4 = resnet.layer4
 
         # Decoder blocks (bottom-up)
-        self.dec4 = DecoderBlock(512, 256, 256)   # stride 32 → 16
-        self.dec3 = DecoderBlock(256, 128, 128)   # stride 16 → 8
-        self.dec2 = DecoderBlock(128, 64, 64)     # stride 8 → 4
-        self.dec1 = DecoderBlock(64, 64, 32)      # stride 4 → 2
+        self.dec4 = DecoderBlock(512, 256, 256)  # stride 32 → 16
+        self.dec3 = DecoderBlock(256, 128, 128)  # stride 16 → 8
+        self.dec2 = DecoderBlock(128, 64, 64)  # stride 8 → 4
+        self.dec1 = DecoderBlock(64, 64, 32)  # stride 4 → 2
 
         # Final upsample to full resolution + 1×1 conv
         self.final_conv = nn.Conv2d(32, num_landmarks, 1)
@@ -62,7 +62,7 @@ class LandmarkUNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass: encoder → decoder → heatmaps."""
         # Encoder
-        e0 = self.enc0(x)   # stride 2, 64ch
+        e0 = self.enc0(x)  # stride 2, 64ch
         e1 = self.enc1(e0)  # stride 4, 64ch
         e2 = self.enc2(e1)  # stride 8, 128ch
         e3 = self.enc3(e2)  # stride 16, 256ch
@@ -92,9 +92,7 @@ class LandmarkUNet(nn.Module):
             for param in module.parameters():
                 param.requires_grad = True
 
-    def get_param_groups(
-        self, base_lr: float, encoder_lr_factor: float = 0.1
-    ) -> list[dict]:
+    def get_param_groups(self, base_lr: float, encoder_lr_factor: float = 0.1) -> list[dict]:
         """Return param groups with differential LR for encoder vs decoder."""
         encoder_params = []
         for module in [self.enc0, self.enc1, self.enc2, self.enc3, self.enc4]:

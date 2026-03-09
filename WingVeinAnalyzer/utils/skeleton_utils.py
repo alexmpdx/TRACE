@@ -143,10 +143,12 @@ def smooth_polygon(
         y_smooth = gaussian_filter1d(y_resampled, sigma=sigma, mode="wrap")
 
         # Close the ring
-        return np.vstack([
-            np.column_stack([x_smooth, y_smooth]),
-            [[x_smooth[0], y_smooth[0]]],
-        ])
+        return np.vstack(
+            [
+                np.column_stack([x_smooth, y_smooth]),
+                [[x_smooth[0], y_smooth[0]]],
+            ]
+        )
 
     # Smooth exterior
     ext_coords = np.array(poly.exterior.coords)

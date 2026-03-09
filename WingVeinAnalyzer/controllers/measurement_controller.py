@@ -85,7 +85,7 @@ def compute_measurements(
 
         bounds = wing_polygon.bounds
         m.wing_length_px = bounds[2] - bounds[0]  # max_x - min_x
-        m.wing_width_px = bounds[3] - bounds[1]   # max_y - min_y
+        m.wing_width_px = bounds[3] - bounds[1]  # max_y - min_y
         if scale:
             m.wing_length_um = m.wing_length_px * scale
             m.wing_width_um = m.wing_width_px * scale

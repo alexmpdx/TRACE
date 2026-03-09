@@ -20,47 +20,47 @@ from WingVeinAnalyzer.models.vein_labeler import (
     _extract_costa,
     _merge_vein_lines,
 )
-from WingVeinAnalyzer.models.vein_skeleton import extract_centerline_between_polygons
-from WingVeinAnalyzer.utils.skeleton_utils import smooth_line
 from WingVeinAnalyzer.models.vein_map import (
+    BOTTLENECK_EROSION_UM,
+    BRIDGE_THRESHOLD_UM,
+    BUFFER_SPATIAL_UM,
     CROSSVEIN_CONNECTIONS,
+    CV_CONNECTIVITY_UM,
+    CV_NORM_DIST_UM,
+    CV_PROXIMITY_UM,
+    GT_TOLERANCE_UM,
     MAX_ANGLE_CHANGE_DEG,
+    MAX_CROSSVEIN_DEFAULT_UM,
+    MAX_CROSSVEIN_FLOOR_UM,
     MIDLINE_PRIORS,
+    MIN_HALF_HEIGHT_UM,
+    MIN_PATH_LENGTH_UM,
+    MIN_POLY_AREA_UM2,
+    MIN_SEGMENT_LENGTH_UM,
+    MIN_SPATIAL_LENGTH_UM,
+    MIN_SPLIT_LENGTH_UM,
     REGION_AREA_PRIORS,
     REGION_EXPECTED_VEINS,
     REGION_Y_ORDER,
+    SHORT_CROSSVEIN_UM,
+    SMOOTH_SIGMA_SPLIT_UM,
+    SMOOTH_SPACING_UM,
+    SNAP_RADIUS_LARGE_UM,
+    SNAP_RADIUS_UM,
+    SPATIAL_PRIORS_Y,
+    SPLIT_EROSION_UM,
+    STEP_DIST_UM,
     STRAIGHTNESS_THRESHOLD,
+    TANGENT_DIST_UM,
     VEIN_BOUNDARIES,
     VEIN_LENGTH_PRIORS,
     VEIN_ORIENTATION_PRIORS,
     VEIN_Y_ORDER,
-    SPATIAL_PRIORS_Y,
-    um_to_px,
     um2_to_px2,
-    SNAP_RADIUS_UM,
-    SNAP_RADIUS_LARGE_UM,
-    TANGENT_DIST_UM,
-    STEP_DIST_UM,
-    MIN_SEGMENT_LENGTH_UM,
-    MIN_SPLIT_LENGTH_UM,
-    MIN_PATH_LENGTH_UM,
-    SMOOTH_SIGMA_SPLIT_UM,
-    SMOOTH_SPACING_UM,
-    MAX_CROSSVEIN_FLOOR_UM,
-    SHORT_CROSSVEIN_UM,
-    MAX_CROSSVEIN_DEFAULT_UM,
-    CV_PROXIMITY_UM,
-    CV_NORM_DIST_UM,
-    CV_CONNECTIVITY_UM,
-    BUFFER_SPATIAL_UM,
-    MIN_SPATIAL_LENGTH_UM,
-    MIN_POLY_AREA_UM2,
-    BOTTLENECK_EROSION_UM,
-    SPLIT_EROSION_UM,
-    MIN_HALF_HEIGHT_UM,
-    GT_TOLERANCE_UM,
-    BRIDGE_THRESHOLD_UM,
+    um_to_px,
 )
+from WingVeinAnalyzer.models.vein_skeleton import extract_centerline_between_polygons
+from WingVeinAnalyzer.utils.skeleton_utils import smooth_line
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,11 @@ logger = logging.getLogger(__name__)
 # Data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class JunctionPoint:
     """A triple (or higher) junction where vein segments converge."""
+
     x: float
     y: float
     segment_keys: list[tuple[int, int]]  # which centerline segments arrive here
@@ -81,6 +83,7 @@ class JunctionPoint:
 @dataclass
 class MergedPath:
     """A merged vein path composed of one or more chained centerline segments."""
+
     segment_keys: list[tuple[int, int]]
     line: LineString
     orientation_deg: float = 0.0
@@ -100,6 +103,7 @@ class MergedPath:
 @dataclass
 class VeinMetrics:
     """Per-vein accuracy metrics against ground truth."""
+
     vein_name: str
     hausdorff_px: float
     mean_deviation_px: float
@@ -112,6 +116,7 @@ class VeinMetrics:
 @dataclass
 class VeinValidationReport:
     """Results of vein centerline validation against ground truth."""
+
     per_vein: list[VeinMetrics] = field(default_factory=list)
     matched_count: int = 0
     total_gt_veins: int = 0
@@ -123,16 +128,18 @@ class VeinValidationReport:
 @dataclass
 class SplitInfo:
     """Metadata about a polygon split performed by split_merged_polygons()."""
-    orig_idx: int       # index of the original (oversized) polygon
-    new_idx: int        # index of the newly appended polygon
-    orig_name: str      # region name kept by the original polygon
-    new_name: str       # region name assigned to the new polygon
+
+    orig_idx: int  # index of the original (oversized) polygon
+    new_idx: int  # index of the newly appended polygon
+    orig_name: str  # region name kept by the original polygon
+    new_name: str  # region name assigned to the new polygon
     separating_vein: str  # vein that separates these two regions
 
 
 @dataclass
 class ValidationReport:
     """Results of cross-validation checks."""
+
     warnings: list[str] = field(default_factory=list)
     boundary_mismatches: list[str] = field(default_factory=list)
     area_flags: list[str] = field(default_factory=list)
@@ -142,6 +149,7 @@ class ValidationReport:
 @dataclass
 class IdentificationResult:
     """Complete output from identify_veins_and_regions()."""
+
     assignments: list[VeinAssignment] = field(default_factory=list)
     poly_names: dict[int, str] = field(default_factory=dict)
     polygons: list[Polygon] = field(default_factory=list)  # possibly updated by splitting
@@ -152,6 +160,7 @@ class IdentificationResult:
 # ---------------------------------------------------------------------------
 # 3a. Junction Detection
 # ---------------------------------------------------------------------------
+
 
 def find_triple_junctions(
     centerlines: dict[tuple[int, int], LineString],
@@ -183,7 +192,7 @@ def find_triple_junctions(
             if used[j]:
                 continue
             xj, yj = endpoints[j][0], endpoints[j][1]
-            if (xi - xj) ** 2 + (yi - yj) ** 2 < snap_radius ** 2:
+            if (xi - xj) ** 2 + (yi - yj) ** 2 < snap_radius**2:
                 cluster_indices.append(j)
                 used[j] = True
 
@@ -197,11 +206,14 @@ def find_triple_junctions(
         seg_keys = [endpoints[k][2] for k in cluster_indices]
         ep_indices = [endpoints[k][3] for k in cluster_indices]
 
-        junctions.append(JunctionPoint(
-            x=float(cx), y=float(cy),
-            segment_keys=seg_keys,
-            endpoint_indices=ep_indices,
-        ))
+        junctions.append(
+            JunctionPoint(
+                x=float(cx),
+                y=float(cy),
+                segment_keys=seg_keys,
+                endpoint_indices=ep_indices,
+            )
+        )
 
     logger.info("Found %d triple junctions", len(junctions))
     return junctions
@@ -211,8 +223,11 @@ def find_triple_junctions(
 # 3b. Segment Merging at Junctions
 # ---------------------------------------------------------------------------
 
+
 def _get_tangent_away_from_junction(
-    line: LineString, endpoint_idx: int, tangent_dist: float | None = None,
+    line: LineString,
+    endpoint_idx: int,
+    tangent_dist: float | None = None,
 ) -> np.ndarray:
     """Compute tangent vector pointing AWAY from a junction endpoint."""
     if tangent_dist is None:
@@ -301,9 +316,7 @@ def merge_segments_at_junctions(
             if seg_key not in centerlines:
                 continue
             seen_keys.add(seg_key)
-            tangent = _get_tangent_away_from_junction(
-                centerlines[seg_key], ep_idx
-            )
+            tangent = _get_tangent_away_from_junction(centerlines[seg_key], ep_idx)
             arrivals.append((seg_key, ep_idx, tangent))
 
         if len(arrivals) < 3:
@@ -328,9 +341,7 @@ def merge_segments_at_junctions(
         key_b = arrivals[bj][0]
         ori_a = _line_orientation(centerlines[key_a])
         ori_b = _line_orientation(centerlines[key_b])
-        orientation_mismatch = (
-            (ori_a < 25 and ori_b > 60) or (ori_b < 25 and ori_a > 60)
-        )
+        orientation_mismatch = (ori_a < 25 and ori_b > 60) or (ori_b < 25 and ori_a > 60)
 
         # Determine the second-best pair for storing as alternative
         si, sj = pair_scores[1][1], pair_scores[1][2] if len(pair_scores) > 1 else (0, 0)
@@ -342,9 +353,12 @@ def merge_segments_at_junctions(
         if best_score >= collinearity_threshold_deg or orientation_mismatch:
             reason = "orientation mismatch" if orientation_mismatch else "above threshold"
             logger.debug(
-                "Skipped merge at junction (%.0f, %.0f): "
-                "best=%.1f°, gap=%.1f°, reason=%s",
-                junc.x, junc.y, best_score, gap, reason,
+                "Skipped merge at junction (%.0f, %.0f): " "best=%.1f°, gap=%.1f°, reason=%s",
+                junc.x,
+                junc.y,
+                best_score,
+                gap,
+                reason,
             )
             continue
 
@@ -357,19 +371,19 @@ def merge_segments_at_junctions(
                 "arrivals": [(a[0], a[1]) for a in arrivals],
             }
             logger.debug(
-                "Merged %s + %s at junction (%.0f, %.0f), "
-                "collinearity=%.1f°, gap=%.1f°",
-                key_a, key_b, junc.x, junc.y,
-                best_score, gap,
+                "Merged %s + %s at junction (%.0f, %.0f), " "collinearity=%.1f°, gap=%.1f°",
+                key_a,
+                key_b,
+                junc.x,
+                junc.y,
+                best_score,
+                gap,
             )
         else:
             # Close angles — use fragment length as tiebreaker
             # The shortest fragment is likely the crossvein; the two
             # longer fragments should be merged
-            lengths = [
-                (k, centerlines[arrivals[k][0]].length)
-                for k in range(len(arrivals))
-            ]
+            lengths = [(k, centerlines[arrivals[k][0]].length) for k in range(len(arrivals))]
             shortest_idx = min(range(len(arrivals)), key=lambda k: lengths[k][1])
             non_shortest = [k for k in range(len(arrivals)) if k != shortest_idx]
             length_pair = tuple(sorted(non_shortest))
@@ -384,10 +398,13 @@ def merge_segments_at_junctions(
                     "arrivals": [(a[0], a[1]) for a in arrivals],
                 }
                 logger.info(
-                    "Merged %s + %s at junction (%.0f, %.0f), "
-                    "collinearity=%.1f°, gap=%.1f° (length agrees)",
-                    key_a, key_b, junc.x, junc.y,
-                    best_score, gap,
+                    "Merged %s + %s at junction (%.0f, %.0f), " "collinearity=%.1f°, gap=%.1f° (length agrees)",
+                    key_a,
+                    key_b,
+                    junc.x,
+                    junc.y,
+                    best_score,
+                    gap,
                 )
             else:
                 # Disagreement — prefer length-based pair (shortest is
@@ -397,10 +414,7 @@ def merge_segments_at_junctions(
                 # Check orientation guard for the length-based pair too
                 len_ori_a = _line_orientation(centerlines[len_key_a])
                 len_ori_b = _line_orientation(centerlines[len_key_b])
-                len_mismatch = (
-                    (len_ori_a < 25 and len_ori_b > 55)
-                    or (len_ori_b < 25 and len_ori_a > 55)
-                )
+                len_mismatch = (len_ori_a < 25 and len_ori_b > 55) or (len_ori_b < 25 and len_ori_a > 55)
                 if not len_mismatch:
                     union(len_key_a, len_key_b)
                     merge_decisions[junc_coord] = {
@@ -412,8 +426,13 @@ def merge_segments_at_junctions(
                         "Merged %s + %s at junction (%.0f, %.0f), "
                         "collinearity=%.1f°, gap=%.1f° "
                         "(length tiebreak: shortest=%s)",
-                        len_key_a, len_key_b, junc.x, junc.y,
-                        best_score, gap, arrivals[shortest_idx][0],
+                        len_key_a,
+                        len_key_b,
+                        junc.x,
+                        junc.y,
+                        best_score,
+                        gap,
+                        arrivals[shortest_idx][0],
                     )
                 else:
                     # Length pair has orientation mismatch — fall back to angle
@@ -427,8 +446,12 @@ def merge_segments_at_junctions(
                         "Merged %s + %s at junction (%.0f, %.0f), "
                         "collinearity=%.1f°, gap=%.1f° "
                         "(length pair had orientation mismatch)",
-                        key_a, key_b, junc.x, junc.y,
-                        best_score, gap,
+                        key_a,
+                        key_b,
+                        junc.x,
+                        junc.y,
+                        best_score,
+                        gap,
                     )
 
     # Collect connected components
@@ -447,14 +470,18 @@ def merge_segments_at_junctions(
         if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
             continue
 
-        paths.append(MergedPath(
-            segment_keys=seg_keys,
-            line=merged,
-            length_px=merged.length,
-        ))
+        paths.append(
+            MergedPath(
+                segment_keys=seg_keys,
+                line=merged,
+                length_px=merged.length,
+            )
+        )
 
     logger.info(
-        "Merged %d segments into %d paths", len(centerlines), len(paths),
+        "Merged %d segments into %d paths",
+        len(centerlines),
+        len(paths),
     )
     return paths, merge_decisions
 
@@ -462,6 +489,7 @@ def merge_segments_at_junctions(
 # ---------------------------------------------------------------------------
 # 3b'. Post-Merge Sharp Turn Splitting
 # ---------------------------------------------------------------------------
+
 
 def _split_on_sharp_turns(
     paths: list[MergedPath],
@@ -492,15 +520,20 @@ def _split_on_sharp_turns(
             result.append(path)
             continue
         split_paths = _try_split_path(
-            path, centerlines, angle_threshold_deg, step_dist,
-            min_path_length, min_split_length,
+            path,
+            centerlines,
+            angle_threshold_deg,
+            step_dist,
+            min_path_length,
+            min_split_length,
         )
         result.extend(split_paths)
 
     if len(result) != len(paths):
         logger.info(
             "Sharp-turn splitting: %d paths → %d paths",
-            len(paths), len(result),
+            len(paths),
+            len(result),
         )
     return result
 
@@ -526,10 +559,7 @@ def _try_split_path(
     n_steps = max(2, int(line.length / step_dist))
 
     # Sample points along the merged line
-    sample_pts = [
-        line.interpolate(i / n_steps, normalized=True)
-        for i in range(n_steps + 1)
-    ]
+    sample_pts = [line.interpolate(i / n_steps, normalized=True) for i in range(n_steps + 1)]
 
     # Find the sharpest turn at a position that can produce a valid split
     # (both resulting pieces must be >= min_split_length)
@@ -590,10 +620,12 @@ def _try_split_path(
             return [path]
 
         logger.info(
-            "Split single segment %s at %.0f° turn (dist=%.0f): "
-            "%.0fpx + %.0fpx",
-            seg_keys[0], max_angle, max_angle_dist,
-            line_a.length, line_b.length,
+            "Split single segment %s at %.0f° turn (dist=%.0f): " "%.0fpx + %.0fpx",
+            seg_keys[0],
+            max_angle,
+            max_angle_dist,
+            line_a.length,
+            line_b.length,
         )
 
         result_paths = [
@@ -613,10 +645,16 @@ def _try_split_path(
         final: list[MergedPath] = []
         for p in result_paths:
             if p.length_px >= min_path_length:
-                final.extend(_try_split_path(
-                    p, centerlines, angle_threshold_deg, step_dist,
-                    min_path_length, min_split_length,
-                ))
+                final.extend(
+                    _try_split_path(
+                        p,
+                        centerlines,
+                        angle_threshold_deg,
+                        step_dist,
+                        min_path_length,
+                        min_split_length,
+                    )
+                )
             else:
                 final.append(p)
         return final
@@ -648,7 +686,11 @@ def _try_split_path(
 
     logger.info(
         "Split path at %.0f° turn (dist=%.0f): %s → %s + %s",
-        max_angle, max_angle_dist, seg_keys, group_a, group_b,
+        max_angle,
+        max_angle_dist,
+        seg_keys,
+        group_a,
+        group_b,
     )
 
     # Build new MergedPaths from each group
@@ -658,11 +700,13 @@ def _try_split_path(
         merged = _merge_vein_lines(lines)
         if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
             continue
-        result_paths.append(MergedPath(
-            segment_keys=list(group),
-            line=merged,
-            length_px=merged.length,
-        ))
+        result_paths.append(
+            MergedPath(
+                segment_keys=list(group),
+                line=merged,
+                length_px=merged.length,
+            )
+        )
 
     if not result_paths:
         return [path]
@@ -671,10 +715,16 @@ def _try_split_path(
     final = []
     for p in result_paths:
         if p.length_px >= min_path_length:
-            final.extend(_try_split_path(
-                p, centerlines, angle_threshold_deg, step_dist,
-                min_path_length, min_split_length,
-            ))
+            final.extend(
+                _try_split_path(
+                    p,
+                    centerlines,
+                    angle_threshold_deg,
+                    step_dist,
+                    min_path_length,
+                    min_split_length,
+                )
+            )
         else:
             final.append(p)
 
@@ -684,6 +734,7 @@ def _try_split_path(
 # ---------------------------------------------------------------------------
 # 3c. Geometry-Based Vein Classification
 # ---------------------------------------------------------------------------
+
 
 def _compute_path_features(
     path: MergedPath,
@@ -750,7 +801,7 @@ def classify_merged_paths(
     max_crossvein_len = max(max_crossvein_len, um_to_px(MAX_CROSSVEIN_FLOOR_UM))
 
     for p in paths:
-        jn = (_count_junction_endpoints(p, junctions) if junctions else 0)
+        jn = _count_junction_endpoints(p, junctions) if junctions else 0
         if p.orientation_deg > 60 and p.length_px < max_crossvein_len:
             crossveins.append(p)
         elif p.orientation_deg < 30:
@@ -759,13 +810,15 @@ def classify_merged_paths(
             # Steep but too long for crossvein — likely an artifact, skip
             logger.info(
                 "Skipping steep long path (%.0f°, %.0fpx) — too long for crossvein",
-                p.orientation_deg, p.length_px,
+                p.orientation_deg,
+                p.length_px,
             )
         elif jn == 2 and p.orientation_deg > 40 and p.length_px < max_crossvein_len:
             # Both endpoints at triple junctions — strong crossvein signal
             logger.info(
                 "Junction-promoted crossvein (%.0f°, %.0fpx, 2 junction endpoints)",
-                p.orientation_deg, p.length_px,
+                p.orientation_deg,
+                p.length_px,
             )
             crossveins.append(p)
         elif p.orientation_deg >= 50 and p.length_px <= um_to_px(SHORT_CROSSVEIN_UM):
@@ -788,11 +841,8 @@ def classify_merged_paths(
     # Pre-validate crossvein candidates: demote those too far from any
     # longitudinal back to the longitudinal pool before assignment
     _assign_crossveins(crossveins, vein_map)
-    known_for_precheck = longitudinals + [
-        vein_map[k] for k in ("L3", "L4") if k in vein_map
-    ]
-    demoted = _validate_crossveins(vein_map, known_for_precheck, crossveins,
-                                   junctions=junctions)
+    known_for_precheck = longitudinals + [vein_map[k] for k in ("L3", "L4") if k in vein_map]
+    demoted = _validate_crossveins(vein_map, known_for_precheck, crossveins, junctions=junctions)
     longitudinals.extend(demoted)
     # Clear provisional crossveins — will be reassigned from longitudinals
     for k in list(vein_map.keys()):
@@ -805,7 +855,9 @@ def classify_merged_paths(
     else:
         # No midline or no anchors — fall back to scored assignment
         long_map = _assign_longitudinals_scored(
-            longitudinals, bbox_w, midline=midline,
+            longitudinals,
+            bbox_w,
+            midline=midline,
         )
         vein_map.update(long_map)
 
@@ -815,11 +867,8 @@ def classify_merged_paths(
     _assign_crossveins_from_longitudinals(valid_crossveins, vein_map)
 
     # Final crossvein validation
-    all_longitudinals = [
-        vein_map[k] for k in ("L1", "L2", "L3", "L4", "L5") if k in vein_map
-    ]
-    _validate_crossveins(vein_map, all_longitudinals, valid_crossveins,
-                         junctions=junctions)
+    all_longitudinals = [vein_map[k] for k in ("L1", "L2", "L3", "L4", "L5") if k in vein_map]
+    _validate_crossveins(vein_map, all_longitudinals, valid_crossveins, junctions=junctions)
 
     # Post-assignment L4/L5 swap check using now-known crossveins
     _swap_l4_l5_if_needed(vein_map, vein_map.get("ACV"), vein_map.get("PCV"))
@@ -845,7 +894,7 @@ def _count_junction_endpoints(
     count = 0
     for pt in (start, end):
         for j in junctions:
-            if (pt[0] - j.x) ** 2 + (pt[1] - j.y) ** 2 <= snap_radius ** 2:
+            if (pt[0] - j.x) ** 2 + (pt[1] - j.y) ** 2 <= snap_radius**2:
                 count += 1
                 break
     return count
@@ -967,18 +1016,19 @@ def _validate_crossveins(
 
     for cv_name in cv_names_to_check:
         cv_path = vein_map[cv_name]
-        nearby = sum(
-            1 for lp in longitudinals
-            if cv_path.line.distance(lp.line) < proximity_threshold
-        )
+        nearby = sum(1 for lp in longitudinals if cv_path.line.distance(lp.line) < proximity_threshold)
         # Relax threshold if both endpoints sit at triple junctions
-        jn = (_count_junction_endpoints(cv_path, junctions) if junctions else 0)
+        jn = _count_junction_endpoints(cv_path, junctions) if junctions else 0
         required = 1 if jn == 2 else min_nearby_longitudinals
         if nearby < required:
             logger.info(
                 "Crossvein %s only near %d longitudinal(s) (need %d, "
                 "threshold=%.0fpx, jn_endpoints=%d) — demoting to longitudinal pool",
-                cv_name, nearby, required, proximity_threshold, jn,
+                cv_name,
+                nearby,
+                required,
+                proximity_threshold,
+                jn,
             )
             demoted.append(cv_path)
             del vein_map[cv_name]
@@ -986,10 +1036,7 @@ def _validate_crossveins(
     # If any were demoted, reassign only the lost slot(s) from remaining candidates
     if demoted:
         remaining_cv = [
-            p for p in crossveins
-            if p not in demoted and not any(
-                p is vein_map.get(n) for n in ("ACV", "PCV")
-            )
+            p for p in crossveins if p not in demoted and not any(p is vein_map.get(n) for n in ("ACV", "PCV"))
         ]
         if remaining_cv:
             # Only reassign the slot(s) that were demoted — keep valid ones
@@ -1080,19 +1127,19 @@ def _validate_junction_orientations(
             continue
 
         logger.info(
-            "Junction (%.0f, %.0f): wrong topology (veins: %s) — "
-            "trying alternative merge %s → %s",
-            junc_coord[0], junc_coord[1],
-            vein_names_at_junction, chosen, alternative,
+            "Junction (%.0f, %.0f): wrong topology (veins: %s) — " "trying alternative merge %s → %s",
+            junc_coord[0],
+            junc_coord[1],
+            vein_names_at_junction,
+            chosen,
+            alternative,
         )
 
         # Re-merge: undo the chosen merge and apply the alternative
         # Build new groups from scratch using all merge decisions except
         # this junction's, then apply the alternative for this junction
         # This is expensive but junctions are few (typically 2-4)
-        parent: dict[tuple[int, int], tuple[int, int]] = {
-            k: k for k in centerlines
-        }
+        parent: dict[tuple[int, int], tuple[int, int]] = {k: k for k in centerlines}
 
         def find(k: tuple[int, int]) -> tuple[int, int]:
             while parent.get(k, k) != k:
@@ -1130,16 +1177,21 @@ def _validate_junction_orientations(
             merged = _merge_vein_lines(lines)
             if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
                 continue
-            new_paths.append(MergedPath(
-                segment_keys=seg_keys,
-                line=merged,
-                length_px=merged.length,
-            ))
+            new_paths.append(
+                MergedPath(
+                    segment_keys=seg_keys,
+                    line=merged,
+                    length_px=merged.length,
+                )
+            )
 
         # Re-split and re-classify
         new_paths = _split_on_sharp_turns(new_paths, centerlines, angle_threshold_deg=70.0)
         new_vein_map = classify_merged_paths(
-            new_paths, wing_bbox, midline=midline, junctions=junctions,
+            new_paths,
+            wing_bbox,
+            midline=midline,
+            junctions=junctions,
         )
 
         # Check if the new topology is better at this junction
@@ -1268,13 +1320,15 @@ def _anchor_l3_l4_from_midline(
         d = _mean_signed_distance_from_midline(l3, midline)
         logger.info(
             "Midline anchor: L3 → mean_dist=%.0fpx above midline, len=%.0fpx",
-            -d, l3.length_px,
+            -d,
+            l3.length_px,
         )
     if l4:
         d = _mean_signed_distance_from_midline(l4, midline)
         logger.info(
             "Midline anchor: L4 → mean_dist=%.0fpx below midline, len=%.0fpx",
-            d, l4.length_px,
+            d,
+            l4.length_px,
         )
 
     return l3, l4
@@ -1353,7 +1407,9 @@ def _assign_remaining_longitudinals(
             p = vein_map[name]
             logger.debug(
                 "Remaining longitudinal: %s → Y_at_ref=%.0f, len=%.0fpx",
-                name, _path_y_at_x(p, ref_x), p.length_px,
+                name,
+                _path_y_at_x(p, ref_x),
+                p.length_px,
             )
 
 
@@ -1420,7 +1476,11 @@ def _assign_longitudinals_scored(
     for pi, path in enumerate(sorted_paths):
         for name in long_names:
             score_matrix[(pi, name)] = _longitudinal_match_score(
-                path, name, wing_span_px, acv_path, pcv_path,
+                path,
+                name,
+                wing_span_px,
+                acv_path,
+                pcv_path,
                 midline=midline,
             )
 
@@ -1439,10 +1499,7 @@ def _assign_longitudinals_scored(
                 # Try all permutations of name assignment (not just Y-ordered)
                 # Adjacent veins (e.g. L1/L2) can have overlapping Y centroids
                 for name_perm in permutations(name_subset):
-                    scores = [
-                        score_matrix[(path_indices[i], long_names[name_perm[i]])]
-                        for i in range(k)
-                    ]
+                    scores = [score_matrix[(path_indices[i], long_names[name_perm[i]])] for i in range(k)]
                     # Skip if any single assignment is terrible
                     if min(scores) < min_per_vein:
                         continue
@@ -1451,10 +1508,7 @@ def _assign_longitudinals_scored(
                     norm = total / k + 0.08 * k
                     if norm > best_norm_score:
                         best_norm_score = norm
-                        best_assignment = [
-                            (path_indices[i], long_names[name_perm[i]])
-                            for i in range(k)
-                        ]
+                        best_assignment = [(path_indices[i], long_names[name_perm[i]]) for i in range(k)]
 
     used_paths: set[int] = set()
     for pi, name in best_assignment:
@@ -1462,7 +1516,8 @@ def _assign_longitudinals_scored(
         used_paths.add(pi)
         logger.debug(
             "Longitudinal: %s → Y=%.3f, len=%.0fpx, score=%.2f",
-            name, sorted_paths[pi].y_centroid_norm,
+            name,
+            sorted_paths[pi].y_centroid_norm,
             sorted_paths[pi].length_px,
             score_matrix[(pi, name)],
         )
@@ -1472,7 +1527,8 @@ def _assign_longitudinals_scored(
         if i not in used_paths:
             logger.info(
                 "Unassigned longitudinal: len=%.0fpx, Y=%.3f (boundary artifact)",
-                sorted_paths[i].length_px, sorted_paths[i].y_centroid_norm,
+                sorted_paths[i].length_px,
+                sorted_paths[i].y_centroid_norm,
             )
 
     return result
@@ -1506,12 +1562,11 @@ def _swap_l4_l5_if_needed(
     # and (3) the closer vein is actually adjacent to ACV (< 50px).
     # Without check (3), we'd swap when both veins are far from ACV (meaningless).
     _swap_thresh = um_to_px(CV_CONNECTIVITY_UM)
-    if (acv_to_l5 < acv_to_l4
-            and (acv_to_l4 - acv_to_l5) > _swap_thresh
-            and min(acv_to_l5, acv_to_l4) < _swap_thresh):
+    if acv_to_l5 < acv_to_l4 and (acv_to_l4 - acv_to_l5) > _swap_thresh and min(acv_to_l5, acv_to_l4) < _swap_thresh:
         logger.info(
             "Swapping L4/L5: ACV closer to L5 (%.0fpx) than L4 (%.0fpx)",
-            acv_to_l5, acv_to_l4,
+            acv_to_l5,
+            acv_to_l4,
         )
         result["L4"], result["L5"] = result["L5"], result["L4"]
 
@@ -1689,6 +1744,7 @@ def _compute_crossvein_score(
 # 3d. Vein Shape Validation
 # ---------------------------------------------------------------------------
 
+
 def validate_vein_shapes(
     vein_map: dict[str, MergedPath],
 ) -> dict[str, list[str]]:
@@ -1702,18 +1758,13 @@ def validate_vein_shapes(
         # Straightness check
         threshold = 0.5 if is_crossvein else STRAIGHTNESS_THRESHOLD
         if path.straightness < threshold:
-            vein_warnings.append(
-                f"Low straightness: {path.straightness:.2f} (threshold {threshold:.2f})"
-            )
+            vein_warnings.append(f"Low straightness: {path.straightness:.2f} (threshold {threshold:.2f})")
 
         # Angular continuity: walk in ~50px steps
         coords = list(path.line.coords)
         step_dist = um_to_px(STEP_DIST_UM)
         n_steps = max(2, int(path.length_px / step_dist))
-        sample_pts = [
-            path.line.interpolate(i / n_steps, normalized=True)
-            for i in range(n_steps + 1)
-        ]
+        sample_pts = [path.line.interpolate(i / n_steps, normalized=True) for i in range(n_steps + 1)]
 
         for i in range(1, len(sample_pts) - 1):
             dx1 = sample_pts[i].x - sample_pts[i - 1].x
@@ -1726,9 +1777,7 @@ def validate_vein_shapes(
             angle_change = _angle_between_vectors(v1, v2)
 
             if angle_change > MAX_ANGLE_CHANGE_DEG:
-                vein_warnings.append(
-                    f"Abrupt direction change: {angle_change:.0f}° at step {i}"
-                )
+                vein_warnings.append(f"Abrupt direction change: {angle_change:.0f}° at step {i}")
 
         # Monotonicity check for longitudinals (direction-agnostic)
         if not is_crossvein and len(sample_pts) > 2:
@@ -1745,9 +1794,7 @@ def validate_vein_shapes(
                 minority = min(increasing, decreasing)
                 frac_backwards = minority / total_moves
                 if frac_backwards > 0.20:
-                    vein_warnings.append(
-                        f"Non-monotonic X: {frac_backwards:.0%} of steps go backwards"
-                    )
+                    vein_warnings.append(f"Non-monotonic X: {frac_backwards:.0%} of steps go backwards")
 
         if vein_warnings:
             warnings[vein_id] = vein_warnings
@@ -1758,6 +1805,7 @@ def validate_vein_shapes(
 # ---------------------------------------------------------------------------
 # 3e. Region Identification from Veins
 # ---------------------------------------------------------------------------
+
 
 def _build_poly_veins_spatial(
     polygons: list[Polygon],
@@ -1819,14 +1867,21 @@ def name_regions_from_veins(
         y_norm = (cy - min_y) / bbox_h if bbox_h > 0 else 0.5
 
         name = _region_from_bounding_veins(
-            bounding, poly, vein_map, wing_bbox, bbox_h, total_area,
+            bounding,
+            poly,
+            vein_map,
+            wing_bbox,
+            bbox_h,
+            total_area,
         )
         if name:
             poly_names[idx] = name
             logger.debug("P%d → %s (veins: %s)", idx, name, bounding)
         else:
             logger.warning(
-                "P%d: could not identify region (veins: %s)", idx, bounding,
+                "P%d: could not identify region (veins: %s)",
+                idx,
+                bounding,
             )
 
     # Resolve conflicts: if two polygons got the same name, use area/position
@@ -1981,7 +2036,11 @@ def _resolve_name_conflicts(
                 del poly_names[idx]
                 # Try second-best region name
                 alt_name = _region_from_bounding_veins(
-                    poly_veins[idx], polygons[idx], vein_map, wing_bbox, bbox_h,
+                    poly_veins[idx],
+                    polygons[idx],
+                    vein_map,
+                    wing_bbox,
+                    bbox_h,
                     total_area,
                 )
                 # Check the alt_name isn't already taken by exactly one polygon
@@ -2066,7 +2125,10 @@ def _validate_and_correct_region_positions(
             idx_b = name_to_idx[name_b]
             logger.warning(
                 "Region Y-order violation: %s (Y=%.2f) > %s (Y=%.2f), swapping",
-                name_a, ca[0], name_b, cb[0],
+                name_a,
+                ca[0],
+                name_b,
+                cb[0],
             )
             poly_names[idx_a] = name_b
             poly_names[idx_b] = name_a
@@ -2159,9 +2221,11 @@ def split_merged_polygons(
             continue
 
         logger.info(
-            "P%d (%s): area=%.1f%% exceeds expected max %.1f%% — "
-            "possible merged region",
-            idx, name, area_frac * 100, hi * 100,
+            "P%d (%s): area=%.1f%% exceeds expected max %.1f%% — " "possible merged region",
+            idx,
+            name,
+            area_frac * 100,
+            hi * 100,
         )
 
         # Find the best missing region to split off
@@ -2175,7 +2239,8 @@ def split_merged_polygons(
         if best_missing is None:
             logger.info(
                 "  No adjacent missing region found for %s → %s",
-                name, missing_regions,
+                name,
+                missing_regions,
             )
             continue
 
@@ -2215,19 +2280,25 @@ def split_merged_polygons(
 
         # Record split metadata for post-split centerline extraction
         sep_vein = _REGION_SPLIT_VEINS.get((name, best_missing), "")
-        split_infos.append(SplitInfo(
-            orig_idx=idx,
-            new_idx=new_idx,
-            orig_name=name,
-            new_name=best_missing,
-            separating_vein=sep_vein,
-        ))
+        split_infos.append(
+            SplitInfo(
+                orig_idx=idx,
+                new_idx=new_idx,
+                orig_name=name,
+                new_name=best_missing,
+                separating_vein=sep_vein,
+            )
+        )
 
         logger.info(
-            "  Split P%d by erosion: %s (%.0f px²) + P%d:%s (%.0f px²), "
-            "separating vein: %s",
-            idx, name, orig_piece.area,
-            new_idx, best_missing, new_piece.area, sep_vein,
+            "  Split P%d by erosion: %s (%.0f px²) + P%d:%s (%.0f px²), " "separating vein: %s",
+            idx,
+            name,
+            orig_piece.area,
+            new_idx,
+            best_missing,
+            new_piece.area,
+            sep_vein,
         )
 
     if splits_made:
@@ -2240,7 +2311,7 @@ def _detect_bottleneck(poly: Polygon, min_part_frac: float = 0.15) -> bool:
     """Check if polygon has a thin neck that splits on erosion."""
     for amount in [um_to_px(e) for e in BOTTLENECK_EROSION_UM]:
         eroded = poly.buffer(-amount)
-        if eroded.geom_type == 'MultiPolygon':
+        if eroded.geom_type == "MultiPolygon":
             parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
             if len(parts) >= 2:
                 return True
@@ -2268,7 +2339,7 @@ def _split_polygon_by_erosion(
     parts: list[Polygon] = []
     for amount in [um_to_px(e) for e in SPLIT_EROSION_UM]:
         eroded = poly.buffer(-amount)
-        if eroded.geom_type == 'MultiPolygon':
+        if eroded.geom_type == "MultiPolygon":
             parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
             if len(parts) >= 2:
                 erode_amount = amount
@@ -2318,6 +2389,7 @@ def _split_polygon_by_erosion(
 # 3f. Cross-Validation
 # ---------------------------------------------------------------------------
 
+
 def cross_validate(
     vein_map: dict[str, MergedPath],
     poly_names: dict[int, str],
@@ -2352,10 +2424,7 @@ def cross_validate(
                     found_valid = True
                     break
             if not found_valid:
-                msg = (
-                    f"Boundary mismatch: {vein_id} borders "
-                    f"{bordering_names}, expected one of {expected_pairs}"
-                )
+                msg = f"Boundary mismatch: {vein_id} borders " f"{bordering_names}, expected one of {expected_pairs}"
                 report.boundary_mismatches.append(msg)
                 report.warnings.append(msg)
     else:
@@ -2418,7 +2487,10 @@ def cross_validate(
             if overlap_lo < overlap_hi:
                 logger.debug(
                     "Y-extent overlap: %s ↔ %s: %.2f-%.2f",
-                    prev_name, name, overlap_lo, overlap_hi,
+                    prev_name,
+                    name,
+                    overlap_lo,
+                    overlap_hi,
                 )
 
         prev_median_y = median_y
@@ -2465,7 +2537,8 @@ def cross_validate(
 
     logger.info(
         "Cross-validation: %d warnings, coverage=%.0f%%",
-        len(report.warnings), report.coverage_fraction * 100,
+        len(report.warnings),
+        report.coverage_fraction * 100,
     )
     return report
 
@@ -2473,6 +2546,7 @@ def cross_validate(
 # ---------------------------------------------------------------------------
 # 3g. Top-Level Orchestrator
 # ---------------------------------------------------------------------------
+
 
 def identify_veins_and_regions(
     centerlines: dict[tuple[int, int], LineString],
@@ -2505,14 +2579,17 @@ def identify_veins_and_regions(
     paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0)
 
     # 3c. Classify merged paths → named veins
-    vein_map = classify_merged_paths(paths, wing_bbox, midline=midline,
-                                     junctions=junctions)
+    vein_map = classify_merged_paths(paths, wing_bbox, midline=midline, junctions=junctions)
 
     # 3c'. Validate junction topology — retry merges if crossvein/longitudinal
     # orientation is wrong at any triple junction
     vein_map = _validate_junction_orientations(
-        vein_map, junctions, centerlines, merge_decisions,
-        wing_bbox, midline=midline,
+        vein_map,
+        junctions,
+        centerlines,
+        merge_decisions,
+        wing_bbox,
+        midline=midline,
     )
 
     # 3d. Validate vein shapes
@@ -2531,12 +2608,18 @@ def identify_veins_and_regions(
 
     # 3e. Name regions from bounding veins
     poly_names = name_regions_from_veins(
-        naming_polygons, vein_map, wing_bbox, poly_veins=spatial_pv,
+        naming_polygons,
+        vein_map,
+        wing_bbox,
+        poly_veins=spatial_pv,
     )
 
     # 3e''. Split merged polygons where pixel classifier merged regions
     poly_names, naming_polygons, split_infos = split_merged_polygons(
-        poly_names, naming_polygons, vein_map, wing_bbox,
+        poly_names,
+        naming_polygons,
+        vein_map,
+        wing_bbox,
         image_shape=image_shape,
     )
 
@@ -2562,7 +2645,9 @@ def identify_veins_and_regions(
         if new_line is None:
             logger.info(
                 "  No post-split centerline extracted for %s (P%d↔P%d)",
-                si.separating_vein, si.orig_idx, si.new_idx,
+                si.separating_vein,
+                si.orig_idx,
+                si.new_idx,
             )
             continue
 
@@ -2585,7 +2670,9 @@ def identify_veins_and_regions(
         if min_gap > max_gap:
             logger.info(
                 "  Skipping post-split centerline for %s: nearest endpoint %.0fpx away (max %.0fpx)",
-                si.separating_vein, min_gap, max_gap,
+                si.separating_vein,
+                min_gap,
+                max_gap,
             )
             continue
 
@@ -2600,12 +2687,19 @@ def identify_veins_and_regions(
                 mp.segment_keys.append(new_key)
             logger.info(
                 "  Merged post-split centerline into %s: %.0fpx → %.0fpx (+%.0fpx)",
-                si.separating_vein, old_len, mp.length_px, mp.length_px - old_len,
+                si.separating_vein,
+                old_len,
+                mp.length_px,
+                mp.length_px - old_len,
             )
 
     # 3f. Cross-validate
     validation = cross_validate(
-        vein_map, poly_names, centerlines, naming_polygons, wing_bbox,
+        vein_map,
+        poly_names,
+        centerlines,
+        naming_polygons,
+        wing_bbox,
         poly_veins=spatial_pv,
     )
     # Add shape warnings to validation report
@@ -2624,28 +2718,29 @@ def identify_veins_and_regions(
         if vein_id in vein_map:
             mp = vein_map[vein_id]
             coords = list(mp.line.coords)
-            status = (
-                VeinStatus.COMPLETE if len(mp.segment_keys) == 1
-                else VeinStatus.FRAGMENTED
+            status = VeinStatus.COMPLETE if len(mp.segment_keys) == 1 else VeinStatus.FRAGMENTED
+            assignments.append(
+                VeinAssignment(
+                    vein_id=vein_id,
+                    status=status,
+                    edge_ids=[],
+                    confidence=0.85,
+                    evidence=["geometry_classification"],
+                    length_px=mp.length_px,
+                    line=mp.line,
+                    endpoints=[coords[0], coords[-1]],
+                )
             )
-            assignments.append(VeinAssignment(
-                vein_id=vein_id,
-                status=status,
-                edge_ids=[],
-                confidence=0.85,
-                evidence=["geometry_classification"],
-                length_px=mp.length_px,
-                line=mp.line,
-                endpoints=[coords[0], coords[-1]],
-            ))
         else:
-            assignments.append(VeinAssignment(
-                vein_id=vein_id,
-                status=VeinStatus.ABSENT,
-                edge_ids=[],
-                confidence=0.0,
-                evidence=["not_found_in_geometry"],
-            ))
+            assignments.append(
+                VeinAssignment(
+                    vein_id=vein_id,
+                    status=VeinStatus.ABSENT,
+                    edge_ids=[],
+                    confidence=0.0,
+                    evidence=["not_found_in_geometry"],
+                )
+            )
 
     # Costa is added by the caller (extracted separately)
     result.assignments = assignments
@@ -2653,12 +2748,10 @@ def identify_veins_and_regions(
     return result
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # 3h. Ground-Truth Diagnostic Validation
 # ---------------------------------------------------------------------------
+
 
 def _normalize_region_name(name: str) -> str:
     """Normalize a ground-truth region name to internal format."""
@@ -2762,7 +2855,7 @@ def validate_regions_against_ground_truth(
                 "area": poly.area,
             }
         else:
-            match = (our_name == best_expected_name)
+            match = our_name == best_expected_name
             validated += 1
             if match:
                 correct += 1
@@ -2834,9 +2927,7 @@ def validate_veins_against_ground_truth(
             continue
 
     report.total_gt_veins = len(gt_veins)
-    report.total_pred_veins = sum(
-        1 for a in assignments if a.line is not None and a.status != VeinStatus.ABSENT
-    )
+    report.total_pred_veins = sum(1 for a in assignments if a.line is not None and a.status != VeinStatus.ABSENT)
 
     if not gt_veins:
         logger.warning("No valid GT vein lines found in %s", expected_geojson_path)
@@ -2892,8 +2983,10 @@ def validate_veins_against_ground_truth(
 
     logger.info(
         "Vein GT validation: %d/%d matched, mean Hausdorff=%.1fpx, mean coverage=%.1f%%",
-        report.matched_count, report.total_gt_veins,
-        report.mean_hausdorff, report.mean_coverage * 100,
+        report.matched_count,
+        report.total_gt_veins,
+        report.mean_hausdorff,
+        report.mean_coverage * 100,
     )
 
     return report

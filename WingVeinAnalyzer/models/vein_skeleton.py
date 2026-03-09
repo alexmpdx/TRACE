@@ -13,28 +13,28 @@ from shapely.geometry import LineString, MultiPoint, Polygon
 from shapely.ops import unary_union
 
 from WingVeinAnalyzer.models.vein_map import (
-    um_to_px,
-    um2_to_px2,
+    BRIDGE_THRESHOLD_UM,
+    DARK_BAND_SIZE_UM,
+    EDGE_PROXIMITY_UM,
+    FIND_POLY_BUFFER_UM,
+    MAX_BAND_WIDTH_UM,
+    MAX_EDGE_LENGTH_UM,
+    MIN_ANT_BOUNDARY_UM,
+    MIN_CENTERLINE_EXTRACT_UM,
+    MIN_DARK_BAND_HALF_UM,
+    MIN_EDGE_LENGTH_UM,
+    MIN_POLY_AREA_UM2,
     MIN_SEED_AREA_UM2,
     MIN_SEGMENT_LENGTH_UM,
-    BRIDGE_THRESHOLD_UM,
-    MIN_CENTERLINE_EXTRACT_UM,
+    MIN_SPLIT_BUFFER_UM,
     PAD_CENTERLINE_UM,
-    MIN_POLY_AREA_UM2,
-    MIN_EDGE_LENGTH_UM,
-    MAX_EDGE_LENGTH_UM,
-    MAX_BAND_WIDTH_UM,
-    EDGE_PROXIMITY_UM,
-    MIN_ANT_BOUNDARY_UM,
-    SIMPLIFY_UM,
-    SIMPLIFY_DARKBAND_UM,
-    PRE_VORONOI_EROSION_UM,
     PAD_EROSION_UM,
     PAD_RIDGE_UM,
-    DARK_BAND_SIZE_UM,
-    MIN_DARK_BAND_HALF_UM,
-    FIND_POLY_BUFFER_UM,
-    MIN_SPLIT_BUFFER_UM,
+    PRE_VORONOI_EROSION_UM,
+    SIMPLIFY_DARKBAND_UM,
+    SIMPLIFY_UM,
+    um2_to_px2,
+    um_to_px,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VoronoiResult:
     """Result of Voronoi-based vein extraction from vein mask."""
+
     centerlines: dict[tuple[int, int], LineString]
     voronoi_polygons: list[Polygon]
     nearest_labels: np.ndarray
@@ -93,17 +94,13 @@ def extract_veins_from_mask(
 
     # 2. Morphological closing to bridge small gaps in vein mask
     if closing_kernel_size > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (closing_kernel_size, closing_kernel_size)
-        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (closing_kernel_size, closing_kernel_size))
         vein_mask = cv2.morphologyEx(vein_mask, cv2.MORPH_CLOSE, kernel)
 
     # 3. Vein-mask hull seeding
     vm_ys, vm_xs = np.where(vein_mask > 0)
     step = max(1, len(vm_ys) // 10000)  # subsample for speed
-    hull = MultiPoint(
-        list(zip(vm_xs[::step].tolist(), vm_ys[::step].tolist()))
-    ).convex_hull
+    hull = MultiPoint(list(zip(vm_xs[::step].tolist(), vm_ys[::step].tolist()))).convex_hull
     hull_mask = np.zeros((h, w), dtype=np.uint8)
     _fill_polygon(hull_mask, hull, 1)
 
@@ -115,14 +112,15 @@ def extract_veins_from_mask(
     # 4. Assign sequential labels 1..M to large components
     seed_labels = np.zeros((h, w), dtype=np.int32)
     comp_sizes = ndimage.sum(
-        np.ones_like(component_labels), component_labels,
+        np.ones_like(component_labels),
+        component_labels,
         range(1, n_components + 1),
     )
     next_label = 1
     for comp_id in range(1, n_components + 1):
         if comp_sizes[comp_id - 1] < min_seed_area:
             continue
-        comp_mask = (component_labels == comp_id)
+        comp_mask = component_labels == comp_id
         seed_labels[comp_mask] = next_label
         next_label += 1
 
@@ -159,20 +157,21 @@ def extract_veins_from_mask(
     n_seeds = next_label - 1
     logger.info(
         "Hull seeding: %d large components from %d total (min_area=%d)",
-        n_seeds, n_components, min_seed_area,
+        n_seeds,
+        n_components,
+        min_seed_area,
     )
 
     # 5. Voronoi partition via EDT
-    background = (seed_labels == 0)
-    _, nearest_indices = ndimage.distance_transform_edt(
-        background, return_distances=True, return_indices=True
-    )
+    background = seed_labels == 0
+    _, nearest_indices = ndimage.distance_transform_edt(background, return_distances=True, return_indices=True)
     nearest_labels = seed_labels[nearest_indices[0], nearest_indices[1]]
     nearest_labels[~background] = seed_labels[~background]
 
     logger.info(
         "Voronoi partition: %d unique labels, vein mask covers %d pixels",
-        len(np.unique(nearest_labels)), int(vein_mask.sum()),
+        len(np.unique(nearest_labels)),
+        int(vein_mask.sum()),
     )
 
     # 6. Extract label boundaries within the vein mask
@@ -198,7 +197,9 @@ def extract_veins_from_mask(
 
     # 9. Vectorize Voronoi regions into polygons
     voronoi_polygons = _vectorize_voronoi_regions(
-        nearest_labels, hull_mask, n_seeds,
+        nearest_labels,
+        hull_mask,
+        n_seeds,
     )
 
     return VoronoiResult(
@@ -316,7 +317,9 @@ def _vectorize_voronoi_regions(
     for label in range(1, n_labels + 1):
         region_mask = ((nearest_labels == label) & (hull_mask > 0)).astype(np.uint8) * 255
         contours, _ = cv2.findContours(
-            region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            region_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
         )
         if contours:
             largest = max(contours, key=cv2.contourArea)
@@ -334,7 +337,10 @@ def _vectorize_voronoi_regions(
 
 
 def _extend_line(
-    line: LineString, endpoint_idx: int, target_x: float, target_y: float,
+    line: LineString,
+    endpoint_idx: int,
+    target_x: float,
+    target_y: float,
 ) -> LineString:
     """Extend a LineString by appending/prepending a target coordinate."""
     coords = list(line.coords)
@@ -383,6 +389,7 @@ def extract_centerline_between_polygons(
     seed_map = np.zeros((local_h, local_w), dtype=np.int32)
     # Translate polygons to local coordinates
     from shapely.affinity import translate
+
     local_a = translate(poly_a, xoff=-x0, yoff=-y0)
     local_b = translate(poly_b, xoff=-x0, yoff=-y0)
     _fill_polygon(seed_map, local_a, 1)
@@ -399,17 +406,15 @@ def extract_centerline_between_polygons(
         _fill_polygon(local_vein_mask, local_vpoly, 1)
 
     # 4. Voronoi partition via distance transform
-    background = (seed_map == 0)
+    background = seed_map == 0
     if background.sum() == 0:
         return None
-    _, nearest_indices = ndimage.distance_transform_edt(
-        background, return_distances=True, return_indices=True
-    )
+    _, nearest_indices = ndimage.distance_transform_edt(background, return_distances=True, return_indices=True)
     nearest_labels = seed_map[nearest_indices[0], nearest_indices[1]]
     nearest_labels[~background] = seed_map[~background]
 
     # 5. Extract boundary pixels where label transitions 1↔2, restricted to vein mask
-    padded = np.pad(nearest_labels, 1, mode='constant', constant_values=0)
+    padded = np.pad(nearest_labels, 1, mode="constant", constant_values=0)
     center = padded[1:-1, 1:-1]
     shifts = [
         padded[0:-2, 1:-1],
@@ -425,7 +430,7 @@ def extract_centerline_between_polygons(
         is_boundary |= is_12
 
     # Restrict to vein mask
-    is_boundary &= (local_vein_mask > 0)
+    is_boundary &= local_vein_mask > 0
 
     ys, xs = np.where(is_boundary)
     if len(ys) < 5:
@@ -443,7 +448,8 @@ def extract_centerline_between_polygons(
 
     logger.info(
         "Post-split centerline: %d boundary pixels, length=%.0fpx",
-        len(ys), global_line.length,
+        len(ys),
+        global_line.length,
     )
     return global_line
 
@@ -476,10 +482,8 @@ def extract_anterior_boundary(
         _fill_polygon(vein_mask, poly, 1)
 
     # 2. Voronoi partition
-    background = (label_map == 0)
-    _, nearest_indices = ndimage.distance_transform_edt(
-        background, return_distances=True, return_indices=True
-    )
+    background = label_map == 0
+    _, nearest_indices = ndimage.distance_transform_edt(background, return_distances=True, return_indices=True)
     nearest_labels = label_map[nearest_indices[0], nearest_indices[1]]
     nearest_labels[~background] = label_map[~background]
 
@@ -495,17 +499,17 @@ def extract_anterior_boundary(
     #    boundary by checking which ant-polygon pixels neighbor outside the vein mask)
     is_ant_in_vein = (nearest_labels == ant_label) & (vein_mask > 0)
 
-    padded_vm = np.pad(vein_mask, 1, mode='constant', constant_values=0)
+    padded_vm = np.pad(vein_mask, 1, mode="constant", constant_values=0)
     shifts_vm = [
         padded_vm[0:-2, 1:-1],  # up
-        padded_vm[2:,   1:-1],  # down
+        padded_vm[2:, 1:-1],  # down
         padded_vm[1:-1, 0:-2],  # left
-        padded_vm[1:-1, 2:],    # right
+        padded_vm[1:-1, 2:],  # right
     ]
 
     at_vein_edge = np.zeros((h, w), dtype=bool)
     for sv in shifts_vm:
-        at_vein_edge |= (sv == 0)
+        at_vein_edge |= sv == 0
 
     # 4b. Extract the vein mask anterior to the most-anterior polygon and
     # skeletonize it to get L1's centerline (not just the edge).
@@ -518,10 +522,11 @@ def extract_anterior_boundary(
     # the wing tip where L1 continues past the centroid.
     y_cutoff = ant_centroid_y + (ant_bounds[3] - ant_centroid_y) * 0.5
     roi = is_ant_in_vein.copy()
-    roi[int(y_cutoff):, :] = False
+    roi[int(y_cutoff) :, :] = False
 
     # Skeletonize this region to get the centerline
     from skimage.morphology import skeletonize as sk_skeletonize
+
     skeleton = sk_skeletonize(roi)
 
     skel_ys, skel_xs = np.where(skeleton)
@@ -536,7 +541,9 @@ def extract_anterior_boundary(
 
     logger.info(
         "Anterior boundary: polygon %d, %d skeleton pixels, length=%.0f",
-        ant_idx, len(skel_ys), line.length,
+        ant_idx,
+        len(skel_ys),
+        line.length,
     )
     return (ant_idx, line)
 
@@ -579,28 +586,30 @@ def extract_edge_boundary_veins(
     h, w = image_shape
 
     # Find vein-mask edge pixels: vein_mask pixels whose neighbor is outside vein_mask
-    padded_vm = np.pad(vein_mask, 1, mode='constant', constant_values=0)
+    padded_vm = np.pad(vein_mask, 1, mode="constant", constant_values=0)
     shifts_vm = [
         padded_vm[0:-2, 1:-1],  # up
-        padded_vm[2:,   1:-1],  # down
+        padded_vm[2:, 1:-1],  # down
         padded_vm[1:-1, 0:-2],  # left
-        padded_vm[1:-1, 2:],    # right
+        padded_vm[1:-1, 2:],  # right
     ]
     at_vein_edge = np.zeros((h, w), dtype=bool)
     for sv in shifts_vm:
-        at_vein_edge |= (sv == 0)
-    at_vein_edge &= (vein_mask > 0)
+        at_vein_edge |= sv == 0
+    at_vein_edge &= vein_mask > 0
 
     # Exclude pixels that are at a boundary between two labeled regions
     # (those are already captured by _extract_boundary_pixels)
-    padded_nl = np.pad(nearest_labels, 1, mode='constant', constant_values=0)
+    padded_nl = np.pad(nearest_labels, 1, mode="constant", constant_values=0)
     center_nl = padded_nl[1:-1, 1:-1]
     has_diff_neighbor = np.zeros((h, w), dtype=bool)
     for shift in [
-        padded_nl[0:-2, 1:-1], padded_nl[2:, 1:-1],
-        padded_nl[1:-1, 0:-2], padded_nl[1:-1, 2:],
+        padded_nl[0:-2, 1:-1],
+        padded_nl[2:, 1:-1],
+        padded_nl[1:-1, 0:-2],
+        padded_nl[1:-1, 2:],
     ]:
-        has_diff_neighbor |= ((shift != center_nl) & (shift > 0) & (center_nl > 0))
+        has_diff_neighbor |= (shift != center_nl) & (shift > 0) & (center_nl > 0)
 
     # Edge-only boundary pixels: at vein mask edge AND NOT between two polygons
     edge_boundary = at_vein_edge & ~has_diff_neighbor
@@ -663,18 +672,18 @@ def extract_edge_boundary_veins(
         if key not in result or line.length > result[key].length:
             result[key] = line
             logger.info(
-                "Edge boundary vein: polygon %d, %d pixels, length=%.0f, "
-                "band_width=%.1f",
-                poly_idx, n_pixels, line.length, band_width,
+                "Edge boundary vein: polygon %d, %d pixels, length=%.0f, " "band_width=%.1f",
+                poly_idx,
+                n_pixels,
+                line.length,
+                band_width,
             )
 
     logger.info("Extracted %d edge boundary vein segments", len(result))
     return result
 
 
-def _fill_polygon(
-    raster: np.ndarray, poly: Polygon, value: int
-) -> None:
+def _fill_polygon(raster: np.ndarray, poly: Polygon, value: int) -> None:
     """Fill a shapely Polygon (with holes) into a numpy raster."""
     # Exterior ring
     exterior_pts = np.array(poly.exterior.coords, dtype=np.int32)
@@ -697,16 +706,16 @@ def _extract_boundary_pixels(
     h, w = nearest_labels.shape
 
     # Pad labels to handle boundary checking without conditionals
-    padded = np.pad(nearest_labels, 1, mode='constant', constant_values=0)
+    padded = np.pad(nearest_labels, 1, mode="constant", constant_values=0)
 
     # Check all 4 cardinal shifts (sufficient for boundary detection;
     # 8-connectivity just adds diagonal redundancy)
     center = padded[1:-1, 1:-1]
     shifts = [
         padded[0:-2, 1:-1],  # up
-        padded[2:,   1:-1],  # down
+        padded[2:, 1:-1],  # down
         padded[1:-1, 0:-2],  # left
-        padded[1:-1, 2:],    # right
+        padded[1:-1, 2:],  # right
     ]
 
     # A pixel is a boundary pixel if any neighbor has a different label
@@ -721,7 +730,7 @@ def _extract_boundary_pixels(
         is_boundary |= different
 
     # Restrict to vein mask
-    is_boundary &= (vein_mask > 0)
+    is_boundary &= vein_mask > 0
 
     # Extract boundary pixel coordinates and their label pairs
     ys, xs = np.where(is_boundary)
@@ -866,7 +875,9 @@ def split_oversized_polygons(
 
         logger.info(
             "Pre-Voronoi split: P%d area=%.1f%% exceeds threshold %.0f%%",
-            i, frac * 100, max_single_frac * 100,
+            i,
+            frac * 100,
+            max_single_frac * 100,
         )
 
         # Attempt 1: erosion-based splitting (larger erosion amounts)
@@ -875,20 +886,25 @@ def split_oversized_polygons(
         # Attempt 2: image-guided ridge detection
         if split_line is None:
             split_line, pieces = _pre_split_by_ridge(
-                poly, image, image.shape[:2],
+                poly,
+                image,
+                image.shape[:2],
             )
 
         if split_line is None or pieces is None:
             logger.warning(
-                "  Could not split P%d — continuing with original polygon", i,
+                "  Could not split P%d — continuing with original polygon",
+                i,
             )
             continue
 
         piece_a, piece_b = pieces
         logger.info(
-            "  Split P%d into two pieces: %.0f px² + %.0f px², "
-            "split line length=%.0f px",
-            i, piece_a.area, piece_b.area, split_line.length,
+            "  Split P%d into two pieces: %.0f px² + %.0f px², " "split line length=%.0f px",
+            i,
+            piece_a.area,
+            piece_b.area,
+            split_line.length,
         )
 
         # Replace original polygon with piece_a, append piece_b
@@ -899,7 +915,9 @@ def split_oversized_polygons(
     if len(polygons) != len(intervein_polygons):
         logger.info(
             "Pre-Voronoi split: %d → %d polygons, %d synthetic centerlines",
-            len(intervein_polygons), len(polygons), len(synthetic_centerlines),
+            len(intervein_polygons),
+            len(polygons),
+            len(synthetic_centerlines),
         )
 
     return polygons, synthetic_centerlines
@@ -921,7 +939,7 @@ def _pre_split_by_erosion(
         eroded = poly.buffer(-amount)
         if eroded.is_empty:
             continue
-        if eroded.geom_type == 'MultiPolygon':
+        if eroded.geom_type == "MultiPolygon":
             parts = [g for g in eroded.geoms if g.area > poly.area * min_part_frac]
             if len(parts) >= 2:
                 erode_amount = amount
@@ -1023,7 +1041,11 @@ def _pre_split_by_ridge(
 
     for scan_axis in ("y", "x"):
         result = _find_dark_band(
-            gray, poly_mask, local_h, local_w, scan_axis,
+            gray,
+            poly_mask,
+            local_h,
+            local_w,
+            scan_axis,
         )
         if result is not None:
             valley_pos, valley_depth, band_width = result
@@ -1037,14 +1059,22 @@ def _pre_split_by_ridge(
     scan_axis, valley_pos, band_width = best_result
     logger.info(
         "  Dark band found: axis=%s, pos=%d, depth=%.1f, width=%d",
-        scan_axis, valley_pos, best_valley_depth, band_width,
+        scan_axis,
+        valley_pos,
+        best_valley_depth,
+        band_width,
     )
 
     # Build a split line through the valley position, following the
     # polygon boundary to get the right extent
     split_line = _trace_dark_band_line(
-        gray, poly_mask, scan_axis, valley_pos, band_width,
-        x0, y0,
+        gray,
+        poly_mask,
+        scan_axis,
+        valley_pos,
+        band_width,
+        x0,
+        y0,
     )
     if split_line is None or split_line.length < 50:
         return None, None
@@ -1056,7 +1086,7 @@ def _pre_split_by_ridge(
     if remainder.is_empty:
         return None, None
 
-    if remainder.geom_type == 'MultiPolygon':
+    if remainder.geom_type == "MultiPolygon":
         pieces = sorted(remainder.geoms, key=lambda g: g.area, reverse=True)
         big_pieces = [p for p in pieces if p.area > poly.area * 0.10]
         if len(big_pieces) >= 2:
@@ -1109,7 +1139,9 @@ def _find_dark_band(
         return None
 
     profile_clean = np.interp(
-        np.arange(n_positions), valid_idx, profile[valid_idx],
+        np.arange(n_positions),
+        valid_idx,
+        profile[valid_idx],
     )
 
     # Smooth with a wide kernel to find the broad valley
@@ -1117,12 +1149,14 @@ def _find_dark_band(
     if kernel_size % 2 == 0:
         kernel_size += 1
     smoothed = np.convolve(
-        profile_clean, np.ones(kernel_size) / kernel_size, mode='same',
+        profile_clean,
+        np.ones(kernel_size) / kernel_size,
+        mode="same",
     )
 
     # Find the deepest valley: exclude edges (first/last 15% of range)
     margin = int(n_positions * 0.15)
-    interior = smoothed[margin:n_positions - margin]
+    interior = smoothed[margin : n_positions - margin]
     if len(interior) < 20:
         return None
 
@@ -1131,7 +1165,11 @@ def _find_dark_band(
 
     # Compute depth relative to surrounding peaks
     left_peak = np.max(smoothed[margin:valley_idx]) if valley_idx > margin else smoothed[margin]
-    right_peak = np.max(smoothed[valley_idx:n_positions - margin]) if valley_idx < n_positions - margin else smoothed[n_positions - margin - 1]
+    right_peak = (
+        np.max(smoothed[valley_idx : n_positions - margin])
+        if valley_idx < n_positions - margin
+        else smoothed[n_positions - margin - 1]
+    )
     surrounding = min(left_peak, right_peak)
     depth = surrounding - valley_val
 
@@ -1218,7 +1256,7 @@ def _extract_split_boundary(
     """Extract the boundary line between label 1 and 2 in a filled array."""
     local_h, local_w = filled.shape
 
-    padded = np.pad(filled, 1, mode='constant', constant_values=0)
+    padded = np.pad(filled, 1, mode="constant", constant_values=0)
     center = padded[1:-1, 1:-1]
     shifts = [
         padded[0:-2, 1:-1],
@@ -1256,14 +1294,13 @@ def _filled_to_polygons(
     for lbl in [1, 2]:
         piece_mask = ((filled == lbl) * 255).astype(np.uint8)
         contours, _ = cv2.findContours(
-            piece_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            piece_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
         )
         if contours:
             largest = max(contours, key=cv2.contourArea)
-            coords = [
-                (float(pt[0][0]) + x_offset, float(pt[0][1]) + y_offset)
-                for pt in largest
-            ]
+            coords = [(float(pt[0][0]) + x_offset, float(pt[0][1]) + y_offset) for pt in largest]
             if len(coords) >= 4:
                 p = Polygon(coords)
                 if p.is_valid and p.area > um2_to_px2(MIN_POLY_AREA_UM2):

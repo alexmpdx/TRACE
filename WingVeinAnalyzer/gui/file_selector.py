@@ -10,6 +10,7 @@ from typing import Optional
 @dataclass
 class FilePair:
     """A matched image + annotation pair with optional ground-truth files."""
+
     image_path: Path
     geojson_path: Path
     gt_intervein_path: Optional[Path] = None
@@ -70,10 +71,7 @@ def discover_file_pairs(folder: Path) -> list[FilePair]:
 
         # Strategy 2: only one geojson in the directory
         if matched_gj is None:
-            dir_gjs = [
-                gj for gj in geojson_by_dir.get(img_dir, [])
-                if gj not in matched_geojsons
-            ]
+            dir_gjs = [gj for gj in geojson_by_dir.get(img_dir, []) if gj not in matched_geojsons]
             if len(dir_gjs) == 1:
                 matched_gj = dir_gjs[0]
 
@@ -86,12 +84,14 @@ def discover_file_pairs(folder: Path) -> list[FilePair]:
         gt_intervein = _find_gt_file(matched_gj, "intervein")
         gt_skeleton = _find_gt_file(matched_gj, "skeleton")
 
-        pairs.append(FilePair(
-            image_path=img,
-            geojson_path=matched_gj,
-            gt_intervein_path=gt_intervein,
-            gt_skeleton_path=gt_skeleton,
-        ))
+        pairs.append(
+            FilePair(
+                image_path=img,
+                geojson_path=matched_gj,
+                gt_intervein_path=gt_intervein,
+                gt_skeleton_path=gt_skeleton,
+            )
+        )
 
     return pairs
 

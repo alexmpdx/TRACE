@@ -10,12 +10,12 @@ import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 
 from WingVeinAnalyzer.models.vein_map import (
-    um_to_px,
-    MAX_GAP_UM,
-    SNAP_RADIUS_UM,
-    MIN_SEGMENT_LENGTH_UM,
     GRAPH_SNAP_VEINS_UM,
+    MAX_GAP_UM,
+    MIN_SEGMENT_LENGTH_UM,
     SIMPLIFY_UM,
+    SNAP_RADIUS_UM,
+    um_to_px,
 )
 
 
@@ -58,9 +58,7 @@ def build_graph_from_polygons(
             dist = polygons[i].distance(polygons[j])
             if dist > max_gap:
                 continue
-            midline = _extract_midline(
-                polygons[i], polygons[j], max_gap=max_gap, num_samples=num_samples
-            )
+            midline = _extract_midline(polygons[i], polygons[j], max_gap=max_gap, num_samples=num_samples)
             if midline is not None and midline.length > um_to_px(MIN_SEGMENT_LENGTH_UM):
                 all_midlines.append((i, j, midline))
 

@@ -22,18 +22,37 @@ from WingVeinAnalyzer.models.vein_identifier import (
     JunctionPoint,
     MergedPath,
     ValidationReport,
+    classify_merged_paths,
+    cross_validate,
     find_triple_junctions,
     identify_veins_and_regions,
     merge_segments_at_junctions,
-    classify_merged_paths,
     name_regions_from_veins,
     split_merged_polygons,
-    cross_validate,
 )
 from WingVeinAnalyzer.models.vein_labeler import (
     VeinAssignment,
     VeinStatus,
     _extract_costa,
+)
+from WingVeinAnalyzer.models.vein_map import (
+    BRIDGE_THRESHOLD_UM,
+    BUFFER_OUTLINE_UM,
+    BUFFER_VEIN_UM,
+    COMPARTMENT_EXTENSION_UM,
+    COMPARTMENT_SIMPLIFY_UM,
+    CV_NORM_DIST_UM,
+    MIDLINE_SIGMA_UM,
+    MIDLINE_SPACING_UM,
+    MIN_PATH_LENGTH_UM,
+    MIN_SEGMENT_LENGTH_UM,
+    MIN_SPLIT_LENGTH_UM,
+    SMOOTH_SPACING_FINE_UM,
+    SMOOTH_SPACING_UM,
+    SNAP_RADIUS_UM,
+    STEP_DIST_UM,
+    set_scale,
+    um_to_px,
 )
 from WingVeinAnalyzer.models.vein_skeleton import (
     VoronoiResult,
@@ -49,25 +68,6 @@ from WingVeinAnalyzer.models.wing_geometry import (
     partition_by_vein_extension,
     partition_intervein_spaces,
     remove_hinge,
-)
-from WingVeinAnalyzer.models.vein_map import (
-    set_scale,
-    um_to_px,
-    SNAP_RADIUS_UM,
-    SMOOTH_SPACING_UM,
-    SMOOTH_SPACING_FINE_UM,
-    MIN_SEGMENT_LENGTH_UM,
-    BRIDGE_THRESHOLD_UM,
-    STEP_DIST_UM,
-    MIN_PATH_LENGTH_UM,
-    MIN_SPLIT_LENGTH_UM,
-    CV_NORM_DIST_UM,
-    BUFFER_OUTLINE_UM,
-    BUFFER_VEIN_UM,
-    COMPARTMENT_SIMPLIFY_UM,
-    COMPARTMENT_EXTENSION_UM,
-    MIDLINE_SPACING_UM,
-    MIDLINE_SIGMA_UM,
 )
 from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
@@ -215,6 +215,7 @@ class StepRunner:
     def run_all(self) -> StepState:
         """Run all 20 steps."""
         from WingVeinAnalyzer.gui.step_definitions import NUM_STEPS
+
         return self.run_through(NUM_STEPS - 1)
 
     # ------------------------------------------------------------------
@@ -295,11 +296,9 @@ class StepRunner:
             return state
 
         voronoi_result = extract_veins_from_mask(
-            state.vein_polygons, state.image.shape[:2],
-            intervein_polygons=(
-                list(state.annotations.intervein_polygons)
-                if state.annotations else None
-            ),
+            state.vein_polygons,
+            state.image.shape[:2],
+            intervein_polygons=(list(state.annotations.intervein_polygons) if state.annotations else None),
         )
         state.polygons = voronoi_result.voronoi_polygons
         state.centerlines = voronoi_result.centerlines
@@ -356,17 +355,11 @@ class StepRunner:
 
         if state.polygons and state.wing_bbox:
             # Prefer "wing" annotation polygon for midline shape
-            wing_poly = (
-                state.annotations.wing_polygon
-                if state.annotations else None
-            )
+            wing_poly = state.annotations.wing_polygon if state.annotations else None
 
             # Use original annotation polygons + bbox for midline (not hull-derived Voronoi)
             if state.annotations and state.annotations.intervein_polygons:
-                midline_polys = (
-                    list(state.annotations.intervein_polygons)
-                    + list(state.annotations.vein_polygons)
-                )
+                midline_polys = list(state.annotations.intervein_polygons) + list(state.annotations.vein_polygons)
                 ann_bounds = [p.bounds for p in midline_polys]
                 midline_bbox = (
                     min(b[0] for b in ann_bounds),
@@ -378,7 +371,9 @@ class StepRunner:
                 midline_polys = state.polygons
                 midline_bbox = state.wing_bbox
             midline = compute_wing_midline(
-                midline_polys, midline_bbox, wing_polygon=wing_poly,
+                midline_polys,
+                midline_bbox,
+                wing_polygon=wing_poly,
             )
             state.wing_midline = midline
             if midline is not None:
@@ -403,8 +398,11 @@ class StepRunner:
             return state
 
         id_result = identify_veins_and_regions(
-            state.centerlines, state.polygons, state.vein_polygons or [],
-            state.image.shape[:2], state.wing_bbox,
+            state.centerlines,
+            state.polygons,
+            state.vein_polygons or [],
+            state.image.shape[:2],
+            state.wing_bbox,
             midline=state.wing_midline,
             original_polygons=list(state.original_polygons) if state.original_polygons else None,
         )
@@ -489,26 +487,34 @@ class StepRunner:
         state = self._copy_forward(prev)
 
         vein_lines = {
-            a.vein_id: a.line for a in (state.assignments or [])
-            if a.line is not None and a.vein_id != "costa"
-            and a.status != VeinStatus.ABSENT
+            a.vein_id: a.line
+            for a in (state.assignments or [])
+            if a.line is not None and a.vein_id != "costa" and a.status != VeinStatus.ABSENT
         }
         if vein_lines and state.polygons and state.poly_names:
             # Build temporary wing outline (wing_blade not available until step 16)
             outline = build_wing_outline(
-                state.polygons, vein_polygons=state.vein_polygons or None,
+                state.polygons,
+                vein_polygons=state.vein_polygons or None,
             )
             image_shape = state.image.shape[:2] if state.image is not None else (1, 1)
             ext_polys, ext_poly_veins, ext_lines = partition_by_vein_extension(
-                outline.polygon, vein_lines, image_shape,
+                outline.polygon,
+                vein_lines,
+                image_shape,
             )
             ext_names = name_regions_from_veins(
-                ext_polys, state.vein_map or {}, state.wing_bbox,
+                ext_polys,
+                state.vein_map or {},
+                state.wing_bbox,
                 poly_veins=ext_poly_veins,
             )
             if ext_names:
                 state.polygons, state.poly_names = _clip_regions_by_extension(
-                    state.polygons, state.poly_names, ext_polys, ext_names,
+                    state.polygons,
+                    state.poly_names,
+                    ext_polys,
+                    ext_names,
                 )
                 state.extension_lines = ext_lines
                 state.params_used = {
@@ -545,9 +551,13 @@ class StepRunner:
             from WingVeinAnalyzer.controllers.analysis_controller import (
                 _recover_l1_from_marginal_cell,
             )
+
             _recover_l1_from_marginal_cell(
-                state.assignments, state.polygons, state.poly_names,
-                state.wing_bbox, logger,
+                state.assignments,
+                state.polygons,
+                state.poly_names,
+                state.wing_bbox,
+                logger,
                 vein_polygons=state.vein_polygons,
                 image_shape=state.image.shape[:2] if state.image is not None else None,
             )
@@ -605,7 +615,8 @@ class StepRunner:
         state = self._copy_forward(prev)
 
         outline = build_wing_outline(
-            state.polygons, vein_polygons=state.vein_polygons or None,
+            state.polygons,
+            vein_polygons=state.vein_polygons or None,
         )
         state.outline = outline
         state.params_used = {
@@ -619,12 +630,17 @@ class StepRunner:
         state = self._copy_forward(prev)
 
         landmarks = detect_hinge_landmarks(
-            state.outline, state.polygons, state.poly_names or {},
+            state.outline,
+            state.polygons,
+            state.poly_names or {},
         )
         state.hinge_landmarks = landmarks
         if landmarks:
             wing_blade = remove_hinge(
-                state.outline, landmarks, state.polygons, state.poly_names or {},
+                state.outline,
+                landmarks,
+                state.polygons,
+                state.poly_names or {},
             )
             state.params_used = {"status": "Hinge detected and removed"}
         else:
@@ -639,14 +655,17 @@ class StepRunner:
 
         # Partition intervein spaces (polygons may have been updated by step 11)
         all_regions = partition_intervein_spaces(
-            state.wing_blade, state.polygons, state.poly_names or {},
+            state.wing_blade,
+            state.polygons,
+            state.poly_names or {},
         )
         regions = {k: v for k, v in all_regions.items() if k != "costal_cell"}
         state.intervein_regions = regions
 
         # Compute compartments
         l4_assignment = next(
-            (a for a in (state.assignments or []) if a.vein_id == "L4"), None,
+            (a for a in (state.assignments or []) if a.vein_id == "L4"),
+            None,
         )
         l4_line = l4_assignment.line if l4_assignment else None
         anterior, posterior = compute_compartments(state.wing_blade, l4_line)
@@ -688,11 +707,13 @@ class StepRunner:
 
         # Smooth copies of assignments for rendering
         smoothed_assignments = []
-        for a in (state.assignments or []):
+        for a in state.assignments or []:
             if a.line is not None and sigma > 0:
                 sa = copy(a)
                 if sa.vein_id in ("ACV", "PCV"):
-                    sa.line = smooth_line(sa.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=um_to_px(SMOOTH_SPACING_FINE_UM))
+                    sa.line = smooth_line(
+                        sa.line, sigma=max(sigma * 0.67, 0.5), sample_spacing=um_to_px(SMOOTH_SPACING_FINE_UM)
+                    )
                 else:
                     sa.line = smooth_line(sa.line, sigma=sigma, sample_spacing=um_to_px(SMOOTH_SPACING_UM))
                 smoothed_assignments.append(sa)
@@ -705,7 +726,9 @@ class StepRunner:
             outline_poly = smooth_polygon(outline_poly, sigma=sigma * 1.67)
 
         state.skeleton_overlay = render_skeleton_overlay(
-            state.image, smoothed_assignments, outline_polygon=outline_poly,
+            state.image,
+            smoothed_assignments,
+            outline_polygon=outline_poly,
             midline=state.wing_midline.line if state.wing_midline else None,
         )
 
@@ -718,7 +741,8 @@ class StepRunner:
                 smoothed_regions[k] = v
 
         state.rainbow_overlay = render_rainbow_overlay(
-            state.image, smoothed_regions,
+            state.image,
+            smoothed_regions,
         )
 
         state.params_used = {

@@ -11,10 +11,10 @@ import numpy as np
 from shapely.geometry import LineString, MultiPolygon, Polygon, shape
 
 from WingVeinAnalyzer.models.vein_map import (
-    um_to_px,
-    MIN_POLY_WIDTH_UM,
-    MIN_CROSS_WIDTH_UM,
     CUT_EXTENSION_UM,
+    MIN_CROSS_WIDTH_UM,
+    MIN_POLY_WIDTH_UM,
+    um_to_px,
 )
 
 
@@ -89,9 +89,7 @@ def parse_geojson(path: Path) -> ParsedAnnotations:
                     )
                 )
             elif cls_name in ("posterior outline", "wing outline"):
-                segment = ParsedOutline(
-                    feature_id=str(feat_id), line=geom, coords=coords
-                )
+                segment = ParsedOutline(feature_id=str(feat_id), line=geom, coords=coords)
                 if cls_name == "posterior outline":
                     annotations.posterior_segments.append(segment)
                 else:
@@ -116,9 +114,7 @@ def parse_geojson(path: Path) -> ParsedAnnotations:
                     annotations.wing_polygon = geom
 
     # Split polygons with narrow constrictions into separate regions
-    annotations.intervein_polygons = _split_and_clean_regions(
-        annotations.intervein_polygons
-    )
+    annotations.intervein_polygons = _split_and_clean_regions(annotations.intervein_polygons)
 
     return annotations
 
@@ -196,6 +192,7 @@ def _try_split_at_constriction(
     cut_line = LineString([(narrowest_x, min_y - _cext), (narrowest_x, max_y + _cext)])
     try:
         from shapely.ops import split
+
         parts = split(poly, cut_line)
         # Only accept splits where both pieces are substantial (>10% of original)
         min_area = orig_area * 0.10

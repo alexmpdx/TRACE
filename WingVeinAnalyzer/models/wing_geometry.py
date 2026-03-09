@@ -10,22 +10,22 @@ from typing import Optional
 import cv2
 import numpy as np
 from scipy import ndimage
+from scipy.ndimage import gaussian_filter1d
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.ops import linemerge, split, unary_union
-from scipy.ndimage import gaussian_filter1d
 
 from WingVeinAnalyzer.models.vein_map import (
-    um_to_px,
     BUFFER_OUTLINE_UM,
-    BUFFER_VEIN_UM,
     BUFFER_SMOOTH_UM,
-    MIDLINE_SPACING_UM,
-    MIDLINE_SIGMA_UM,
-    VLINE_EXTENSION_UM,
-    MIN_HALF_HEIGHT_UM,
-    HINGE_EXTENSION_UM,
-    COMPARTMENT_SIMPLIFY_UM,
+    BUFFER_VEIN_UM,
     COMPARTMENT_EXTENSION_UM,
+    COMPARTMENT_SIMPLIFY_UM,
+    HINGE_EXTENSION_UM,
+    MIDLINE_SIGMA_UM,
+    MIDLINE_SPACING_UM,
+    MIN_HALF_HEIGHT_UM,
+    VLINE_EXTENSION_UM,
+    um_to_px,
 )
 
 logger = logging.getLogger(__name__)
@@ -203,14 +203,15 @@ def compute_wing_midline(
 
     logger.info(
         "Wing midline: %d samples, mean half-height=%.0fpx, source=%s",
-        len(xs), hhs_smooth.mean(),
+        len(xs),
+        hhs_smooth.mean(),
         "wing annotation" if wing_polygon is not None else "buffered polygons",
     )
 
     # Reference point at 3/4 span toward the distal (narrow) end.
     # Determine distal direction from half-heights: the tapered end is distal.
     quarter = max(1, len(hhs_smooth) // 4)
-    hh_low = float(hhs_smooth[:quarter].mean())   # mean half-height near min_x
+    hh_low = float(hhs_smooth[:quarter].mean())  # mean half-height near min_x
     hh_high = float(hhs_smooth[-quarter:].mean())  # mean half-height near max_x
     # The narrower end is proximal (hinge), the broader end is distal (wing blade)
     if hh_low < hh_high:
@@ -252,8 +253,7 @@ def _detect_hinge_side(
         prox_mean = np.mean(proximal_xs)
         dist_mean = np.mean(distal_xs)
         side = "left" if prox_mean < dist_mean else "right"
-        logger.info("Hinge side detected: %s (proximal X=%.0f, distal X=%.0f)",
-                     side, prox_mean, dist_mean)
+        logger.info("Hinge side detected: %s (proximal X=%.0f, distal X=%.0f)", side, prox_mean, dist_mean)
         return side
 
     # Fallback: use smallest polygon centroids vs largest
@@ -288,7 +288,7 @@ def detect_hinge_landmarks(
 
     hinge_side = _detect_hinge_side(polygons, poly_names)
     # When hinge is on the right, "proximal" = max-X; otherwise min-X
-    use_max_x = (hinge_side == "right")
+    use_max_x = hinge_side == "right"
 
     def _find_proximal_x(pts: np.ndarray) -> int:
         """Return index of the most proximal (hinge-side) point."""
@@ -350,8 +350,14 @@ def detect_hinge_landmarks(
 
     hinge_line = LineString([subcostal, alula])
 
-    logger.info("Hinge landmarks: subcostal=(%.0f, %.0f), alula=(%.0f, %.0f), side=%s",
-                subcostal[0], subcostal[1], alula[0], alula[1], hinge_side)
+    logger.info(
+        "Hinge landmarks: subcostal=(%.0f, %.0f), alula=(%.0f, %.0f), side=%s",
+        subcostal[0],
+        subcostal[1],
+        alula[0],
+        alula[1],
+        hinge_side,
+    )
 
     return HingeLandmarks(
         subcostal_break=subcostal,
@@ -485,8 +491,7 @@ def partition_by_vein_extension(
         label_counter += 1
         # Draw polyline with unique label
         for i in range(len(coords) - 1):
-            cv2.line(barrier, tuple(coords[i]), tuple(coords[i + 1]),
-                     int(lbl), thickness=line_width)
+            cv2.line(barrier, tuple(coords[i]), tuple(coords[i + 1]), int(lbl), thickness=line_width)
 
     # --- 3. Identify endpoints needing extension ---
     wing_boundary = wing_polygon.exterior
@@ -537,14 +542,16 @@ def partition_by_vein_extension(
             dy /= length
 
             start_pt = (float(coords[ep_idx][0]), float(coords[ep_idx][1]))
-            active_extensions.append({
-                "x": start_pt[0],
-                "y": start_pt[1],
-                "dx": dx,
-                "dy": dy,
-                "label": lbl,
-                "trace": [start_pt],
-            })
+            active_extensions.append(
+                {
+                    "x": start_pt[0],
+                    "y": start_pt[1],
+                    "dx": dx,
+                    "dy": dy,
+                    "label": lbl,
+                    "trace": [start_pt],
+                }
+            )
 
     # Keep references to all extension dicts for trace collection after growth
     all_extensions = list(active_extensions)
@@ -593,8 +600,7 @@ def partition_by_vein_extension(
 
     for comp_label in range(1, num_labels + 1):
         comp_mask = (labeled == comp_label).astype(np.uint8)
-        contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             continue
         # Take largest contour
@@ -623,8 +629,12 @@ def partition_by_vein_extension(
                 veins.add(vein_label_map[lbl])
         result_poly_veins[idx] = veins
 
-    logger.info("Vein-extension partition: %d regions from %d veins, %d extensions grown",
-                len(result_polys), len(vein_lines), len(all_extensions))
+    logger.info(
+        "Vein-extension partition: %d regions from %d veins, %d extensions grown",
+        len(result_polys),
+        len(vein_lines),
+        len(all_extensions),
+    )
 
     return result_polys, result_poly_veins, extension_lines
 
@@ -663,9 +673,7 @@ def compute_compartments(
     end_len = np.linalg.norm(end_dir) + 1e-9
     end_ext = s_coords[-1] + (end_dir / end_len) * ext
 
-    extended = LineString(
-        [start_ext.tolist()] + list(simplified.coords) + [end_ext.tolist()]
-    )
+    extended = LineString([start_ext.tolist()] + list(simplified.coords) + [end_ext.tolist()])
 
     # Use buffer-based splitting which is more robust than split()
     # Create a thin strip along L4 and use it to divide the wing
