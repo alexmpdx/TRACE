@@ -1,6 +1,5 @@
 """Prediction pipeline: load checkpoint, run inference, extract landmarks."""
 
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -9,13 +8,9 @@ import numpy as np
 import torch
 import yaml
 
-_project_root = Path(__file__).resolve().parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-from data.dataset import IMAGENET_MEAN, IMAGENET_STD
-from models.unet import LandmarkUNet
-from training.train import extract_landmarks_from_heatmaps
+from landmark_locator.data.dataset import IMAGENET_MEAN, IMAGENET_STD
+from landmark_locator.models.unet import LandmarkUNet
+from landmark_locator.training.train import extract_landmarks_from_heatmaps
 
 
 class LandmarkPredictor:

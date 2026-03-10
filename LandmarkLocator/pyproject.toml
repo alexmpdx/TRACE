@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "landmark-locator"
+version = "0.1.0"
+description = "Heatmap-based landmark detection for Drosophila wing images"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "opencv-python",
+    "albumentations",
+    "pyyaml",
+    "tqdm",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt5", "matplotlib"]
+dev = ["pandas", "matplotlib", "pre-commit", "black", "isort", "flake8"]
+
+[project.scripts]
+landmark-train = "landmark_locator.scripts.train:main"
+landmark-predict = "landmark_locator.scripts.predict:main"
+landmark-visualize = "landmark_locator.scripts.visualize:main"
+
+[tool.setuptools.packages.find]
+include = ["landmark_locator*"]
+
+[tool.black]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+line_length = 120

@@ -13,11 +13,10 @@ import cv2
 import numpy as np
 import yaml
 
-_project_root = Path(__file__).resolve().parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+from landmark_locator.data.dataset import _normalize_name, discover_landmarks
 
-from data.dataset import _normalize_name, discover_landmarks
+# Project root (LandmarkLocator/) for locating configs and data
+_project_root = Path(__file__).resolve().parent.parent.parent
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -49,7 +48,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from scripts.visualize import (
+
+from landmark_locator.scripts.visualize import (
     _ensure_colors,
     draw_landmarks_on_image,
     generate_landmark_colors,
@@ -476,7 +476,12 @@ class TrainingThread(QThread):
         old_stdout = sys.stdout
         sys.stdout = capture
         try:
-            from training.train import _populate_landmark_config, create_cv_splits, get_device, train_fold
+            from landmark_locator.training.train import (
+                _populate_landmark_config,
+                create_cv_splits,
+                get_device,
+                train_fold,
+            )
 
             config_path = _project_root / "configs" / "default.yaml"
             with open(config_path) as f:
@@ -820,7 +825,7 @@ class LandmarkGUI(QMainWindow):
         if not path:
             return
         try:
-            from inference.predict import LandmarkPredictor
+            from landmark_locator.inference.predict import LandmarkPredictor
 
             self._predictor = LandmarkPredictor(Path(path))
             # Update landmark order from the loaded model
@@ -1007,7 +1012,7 @@ class LandmarkGUI(QMainWindow):
             self._train_dialog.append_log(f"Warning: could not save chart: {e}")
         # Auto-load the trained model
         try:
-            from inference.predict import LandmarkPredictor
+            from landmark_locator.inference.predict import LandmarkPredictor
 
             self._predictor = LandmarkPredictor(Path(ckpt_path))
             self._set_landmark_order(

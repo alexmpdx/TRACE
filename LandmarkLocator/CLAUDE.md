@@ -11,24 +11,29 @@ Single-stage pipeline: full-wing heatmap regression (no canonicalization or crop
 
 ```
 LandmarkLocator/
-├── data/                # Dataset, augmentation, heatmap generation
-│   ├── dataset.py       # LandmarkDataset, GeoJSON parsing, heatmap rendering
-│   └── augmentation.py  # Train/val transform pipelines (albumentations)
-├── models/              # Neural network definitions
-│   └── unet.py          # LandmarkUNet (ResNet18 encoder + decoder)
-├── training/            # Training loops, loss functions
-│   ├── train.py         # CV splits, training orchestrator, evaluation
-│   └── losses.py        # HeatmapMSELoss
-├── inference/           # Prediction pipeline
-│   └── predict.py       # LandmarkPredictor, ensemble prediction
-├── scripts/             # CLI entry points
-│   ├── train.py         # python -m scripts.train --config configs/default.yaml
-│   ├── predict.py       # python -m scripts.predict image.tif --checkpoint best.pt
-│   └── visualize.py     # Overlay landmarks + heatmaps on images
+├── landmark_locator/    # Installable Python package (pip install -e .)
+│   ├── __init__.py      # Public API: LandmarkPredictor, predict_ensemble, etc.
+│   ├── data/            # Dataset, augmentation, heatmap generation
+│   │   ├── dataset.py   # LandmarkDataset, GeoJSON parsing, heatmap rendering
+│   │   └── augmentation.py  # Train/val transform pipelines (albumentations)
+│   ├── models/          # Neural network definitions
+│   │   └── unet.py      # LandmarkUNet (ResNet18 encoder + decoder)
+│   ├── training/        # Training loops, loss functions
+│   │   ├── train.py     # CV splits, training orchestrator, evaluation
+│   │   └── losses.py    # HeatmapMSELoss
+│   ├── inference/       # Prediction pipeline
+│   │   └── predict.py   # LandmarkPredictor, ensemble prediction
+│   └── scripts/         # CLI entry points & GUI
+│       ├── train.py     # landmark-train CLI
+│       ├── predict.py   # landmark-predict CLI
+│       ├── visualize.py # landmark-visualize CLI
+│       └── gui.py       # PyQt5 GUI
 ├── configs/
 │   └── default.yaml     # All hyperparameters
 ├── training_data/       # GeoJSON Point annotations (24 files)
 ├── training_data_pics/  # TIFF images (24 files, 5440×3648)
+├── pyproject.toml       # Package metadata & build config
+├── setup.py             # Editable install shim for older pip
 ├── CLAUDE.md
 └── requirements.txt
 ```

@@ -8,8 +8,9 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-from data.augmentation import get_train_transform, get_val_transform
 from torch.utils.data import Dataset
+
+from landmark_locator.data.augmentation import get_train_transform, get_val_transform
 
 # ImageNet normalization stats
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)

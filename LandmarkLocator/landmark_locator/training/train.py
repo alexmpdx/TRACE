@@ -1,24 +1,17 @@
 """Training orchestrator: CV splits, training loop, evaluation."""
 
-import sys
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
 import yaml
-from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# Add project root to path for imports
-_project_root = Path(__file__).resolve().parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-from data.dataset import LandmarkDataset, discover_landmarks, extract_genotype
-from models.unet import LandmarkUNet
-from training.losses import HeatmapMSELoss
+from landmark_locator.data.dataset import LandmarkDataset, discover_landmarks, extract_genotype
+from landmark_locator.models.unet import LandmarkUNet
+from landmark_locator.training.losses import HeatmapMSELoss
 
 
 def get_device(requested: Optional[str] = None) -> torch.device:
@@ -86,6 +79,8 @@ def extract_landmarks_from_heatmaps(heatmaps: np.ndarray) -> list[tuple[float, f
 
 def create_cv_splits(annotation_dir: Path, n_folds: int = 5) -> list[tuple[list[int], list[int]]]:
     """Create stratified K-fold splits by genotype."""
+    from sklearn.model_selection import StratifiedKFold
+
     geojson_files = sorted(annotation_dir.glob("*.geojson"))
     genotypes = [extract_genotype(f.stem) for f in geojson_files]
 
@@ -109,7 +104,7 @@ def train_fold(
     checkpoint_name: Optional[str] = None,
 ) -> dict:
     """Train one fold and return best validation metrics."""
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(__file__).resolve().parent.parent.parent
     annotation_dir = project_root / cfg["data"]["annotation_dir"]
     image_dir = project_root / cfg["data"]["image_dir"]
 
@@ -310,7 +305,7 @@ def run_training(
     device = get_device(device_str)
     print(f"Using device: {device}")
 
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(__file__).resolve().parent.parent.parent
     annotation_dir = project_root / cfg["data"]["annotation_dir"]
 
     # Auto-discover landmarks from annotation files

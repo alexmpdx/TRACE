@@ -1,15 +1,12 @@
 """CLI entry point for training."""
 
 import argparse
-import sys
 from pathlib import Path
 
-# Add project root to path
-_project_root = Path(__file__).resolve().parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+from landmark_locator.training.train import run_training
 
-from training.train import run_training
+# Project root (LandmarkLocator/) for locating configs and data
+_project_root = Path(__file__).resolve().parent.parent.parent
 
 
 def main() -> None:

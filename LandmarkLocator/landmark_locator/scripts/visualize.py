@@ -5,19 +5,14 @@ from __future__ import annotations
 import argparse
 import colorsys
 import json
-import sys
 from pathlib import Path
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
-_project_root = Path(__file__).resolve().parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-from data.dataset import _normalize_name
-from inference.predict import LandmarkPredictor
+from landmark_locator.data.dataset import _normalize_name
+from landmark_locator.inference.predict import LandmarkPredictor
 
 
 def generate_landmark_colors(names: list[str]) -> dict[str, tuple[int, int, int]]:
