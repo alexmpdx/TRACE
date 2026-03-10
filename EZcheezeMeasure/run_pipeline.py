@@ -2,7 +2,10 @@
 End-to-end pipeline: detect landmarks with LandmarkLocator, then measure distances.
 
 Usage:
-    python run_pipeline.py <image_dir> <checkpoint_path>
+    python run_pipeline.py [<checkpoint_path>]
+
+A folder picker dialog prompts the user to select the input image directory.
+The checkpoint defaults to trained_model/landmark_model_grace.5.pt if not provided.
 
 Outputs to <image_dir>/../output/:
     overlays/          — measurement overlay JPGs (lines between landmarks)
@@ -11,7 +14,9 @@ Outputs to <image_dir>/../output/:
 
 import csv
 import sys
+import tkinter as tk
 from pathlib import Path
+from tkinter import filedialog
 
 import cv2
 from landmark_locator import LandmarkPredictor
@@ -31,19 +36,32 @@ LANDMARK_TO_GEOJSON = {
 IMAGE_SUFFIXES = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".bmp"}
 
 
+def select_image_dir() -> Path:
+    """Open a folder picker dialog and return the selected path."""
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    folder = filedialog.askdirectory(title="Select folder containing wing images")
+    root.destroy()
+    if not folder:
+        print("No folder selected, exiting.")
+        sys.exit(0)
+    return Path(folder)
+
+
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <image_dir> <checkpoint_path>")
+    # Default checkpoint path (relative to this script)
+    default_checkpoint = Path(__file__).parent / "trained_model" / "landmark_model_grace.5.pt"
+
+    checkpoint_path = Path(sys.argv[1]) if len(sys.argv) > 1 else default_checkpoint
+    if not checkpoint_path.exists():
+        print(f"Error: checkpoint not found at {checkpoint_path}")
         sys.exit(1)
 
-    image_dir = Path(sys.argv[1])
-    checkpoint_path = Path(sys.argv[2])
-
+    # Prompt user to select image folder
+    image_dir = select_image_dir()
     if not image_dir.is_dir():
         print(f"Error: {image_dir} is not a directory")
-        sys.exit(1)
-    if not checkpoint_path.exists():
-        print(f"Error: {checkpoint_path} not found")
         sys.exit(1)
 
     # Collect input images
