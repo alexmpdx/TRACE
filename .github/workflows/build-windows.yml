@@ -1,90 +1,75 @@
-  name: Build Windows Executable                                                                                              
-                                                                                                                              
-  on:                                                                                                                         
-    # Manual trigger with optional version tag                                                                                
-    workflow_dispatch:                                                                                                        
-      inputs:                                                                                                                 
-        version:                                                                                                              
-          description: "Version tag (e.g., v1.0.0)"                                                                           
-          required: false                                                                                                     
-          default: "dev"                                                                                                    
-    # Auto-build on release                                                                                                   
-    release:                                                                                                                
-      types: [created]                                                                                                        
-                                                                                                                              
-  jobs:                                                                                                                       
-    build:                                                                                                                    
-      runs-on: windows-latest                                                                                                 
-      defaults:
-        run:                                                                                                                  
-          shell: bash                                                                                                         
-   
-      steps:                                                                                                                  
-        - name: Checkout repository                                                                                         
-          uses: actions/checkout@v4
-
-        - name: Set up Python 3.11
-          uses: actions/setup-python@v5
-          with:                                                                                                               
-            python-version: "3.11"
-                                                                                                                              
-        - name: Install PyTorch (CPU-only for smaller build)                                                                  
-          run: |
-            pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu                                    
-                                                                                                                              
-        - name: Install LandmarkLocator package
-          run: |                                                                                                              
-            pip install -e ./LandmarkLocator                                                                                
-
-        - name: Install remaining dependencies
-          run: |
-            pip install opencv-python numpy pyyaml pyinstaller
-                                                                                                                              
-        - name: Download model checkpoint from latest release                                                                 
-          env:                                                                                                                
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}                                                                             
-          run: |                                                                                                              
+                                                                                                                 
+  name: Build Windows Executable
+                                                                                                                 
+  on:                                                       
+    workflow_dispatch:
+      inputs:                                                                                                    
+        version:
+          description: "Version tag (e.g., v1.0.0)"                                                              
+          required: false                                   
+          default: "dev"                                                                                         
+    release:
+      types: [created]                                                                                           
+                                                            
+  jobs:                                                                                                          
+    build:
+      runs-on: windows-latest                                                                                    
+      if: github.event_name != 'release' || github.event.release.tag_name != 'model'
+      defaults:                                                                                                  
+        run:
+          shell: bash                                                                                            
+                                                            
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v4                                                                              
+  
+        - name: Set up Python 3.11                                                                               
+          uses: actions/setup-python@v5                     
+          with:
+            python-version: "3.11"                                                                               
+                                                                                                                 
+        - name: Install PyTorch (CPU-only for smaller build)                                                     
+          run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu                    
+                                                            
+        - name: Install LandmarkLocator package                                                                  
+          run: pip install -e ./LandmarkLocator
+                                                                                                                 
+        - name: Install remaining dependencies              
+          run: pip install opencv-python numpy pyyaml pyinstaller                                                
+                                                            
+        - name: Download model checkpoint from latest release
+          env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          run: |                                                                                                 
             mkdir -p EZcheezeMeasure/trained_model
-            # Download the model from the 'model' release tag                                                                 
-            gh release download model \                                                                                       
-              --pattern "landmark_model_grace.5.pt" \                                                                         
-              --dir EZcheezeMeasure/trained_model \                                                                           
-              --repo ${{ github.repository }} \                                                                             
-            || {                                                                                                              
-              echo "ERROR: Model checkpoint not found in 'model' release."                                                  
-              echo "Upload it first with:"                                                                                    
-              echo "  gh release create model --title 'Model Checkpoint' --notes 'Trained model for landmark detection'"
-              echo "  gh release upload model /path/to/landmark_model_grace.5.pt"                                             
-              exit 1                                                                                                          
-            }
-                                                                                                                              
-        - name: Build with PyInstaller                                                                                      
-          run: |
+            gh release download "model" --pattern "landmark_model_grace.5.pt" --dir EZcheezeMeasure/trained_model
+   --repo "${{ github.repository }}"                                                                             
+  
+        - name: Build with PyInstaller                                                                           
+          run: |                                            
             cd EZcheezeMeasure
             pyinstaller EZcheezeMeasure.spec --noconfirm
 
-        - name: Verify build output                                                                                           
+        - name: Verify build output                                                                              
           run: |
-            ls -la EZcheezeMeasure/dist/EZcheezeMeasure/                                                                      
-            test -f EZcheezeMeasure/dist/EZcheezeMeasure/EZcheezeMeasure.exe                                                  
-                                                                                                                              
-        - name: Create ZIP archive                                                                                            
-          run: |                                                                                                              
-            cd EZcheezeMeasure/dist                                                                                           
-            7z a -tzip ../../EZcheezeMeasure-windows.zip EZcheezeMeasure/                                                     
-                                                                                                                              
-        - name: Upload build artifact                                                                                         
-          uses: actions/upload-artifact@v4                                                                                    
-          with:                                                                                                               
-            name: EZcheezeMeasure-windows                                                                                   
-            path: EZcheezeMeasure-windows.zip
-            retention-days: 30
-                                                                                                                              
-        - name: Upload to release (if triggered by release)                                                                   
-          if: github.event_name == 'release'                                                                                  
-          env:                                                                                                                
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}                                                                           
-          run: |
-            gh release upload ${{ github.event.release.tag_name }} \
-              EZcheezeMeasure-windows.zip \                                                                                   
-              --repo ${{ github.repository }}
+            ls -la EZcheezeMeasure/dist/EZcheezeMeasure/                                                         
+            test -f EZcheezeMeasure/dist/EZcheezeMeasure/EZcheezeMeasure.exe
+                                                                                                                 
+        - name: Create ZIP archive                          
+          run: |                                                                                                 
+            cd EZcheezeMeasure/dist                                                                              
+            7z a -tzip ../../EZcheezeMeasure-windows.zip EZcheezeMeasure/                                        
+                                                                                                                 
+        - name: Upload build artifact                                                                            
+          uses: actions/upload-artifact@v4                  
+          with:                                                                                                  
+            name: EZcheezeMeasure-windows                   
+            path: EZcheezeMeasure-windows.zip                                                                    
+            retention-days: 30                                                                                   
+                                                                                                                 
+        - name: Upload to release (if triggered by release)                                                      
+          if: github.event_name == 'release'                                                                     
+          env:                                                                                                   
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}           
+          run: gh release upload "${{ github.event.release.tag_name }}" EZcheezeMeasure-windows.zip --repo "${{  
+  github.repository }}" 
