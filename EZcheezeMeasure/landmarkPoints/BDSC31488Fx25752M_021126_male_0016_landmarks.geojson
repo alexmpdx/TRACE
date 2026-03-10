@@ -1,0 +1,110 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          3719.124274261244,
+          1274.19997441857
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "ACV.p"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4612.457197988926,
+          1575.0374281524482
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "alula notch"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          1060.9205768303677,
+          942.8943090417823
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "DTip"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4579.176142520474,
+          1161.5472274705076
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L1-Rs"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4695.552972294522,
+          1327.483569227142
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L4-L5"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          2930.9718384639045,
+          1388.8361862706329
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "PCV.a"
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4091.299615788451,
+          767.7266542115684
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "subcostal break"
+        }
+      }
+    }
+  ]
+}
