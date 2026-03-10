@@ -49,9 +49,16 @@ def select_image_dir() -> Path:
     return Path(folder)
 
 
+def _get_base_dir() -> Path:
+    """Return the base directory — handles both normal Python and PyInstaller frozen exe."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).parent
+
+
 def main():
-    # Default checkpoint path (relative to this script)
-    default_checkpoint = Path(__file__).parent / "trained_model" / "landmark_model_grace.5.pt"
+    # Default checkpoint path (bundled with exe or relative to script)
+    default_checkpoint = _get_base_dir() / "trained_model" / "landmark_model_grace.5.pt"
 
     checkpoint_path = Path(sys.argv[1]) if len(sys.argv) > 1 else default_checkpoint
     if not checkpoint_path.exists():

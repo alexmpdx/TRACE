@@ -9,15 +9,42 @@ Measures distances between ML-detected landmark points on Drosophila (fruit fly)
 ## Running
 
 ```bash
-python3 measure_landmarks.py                    # defaults to landmarkPoints/ folder
-python3 measure_landmarks.py /path/to/folder    # custom input folder
+# Full pipeline: ML landmark detection → measurements (opens folder picker)
+python3 run_pipeline.py                              # uses default checkpoint
+python3 run_pipeline.py /path/to/checkpoint.pt       # custom checkpoint
+
+# Standalone measurement from existing GeoJSON files
+python3 measure_landmarks.py                         # defaults to landmarkPoints/
+python3 measure_landmarks.py /path/to/folder         # custom input folder
 ```
 
 Output goes to `output/` (sibling of input folder): `landmark_measurements.csv` and `overlays/` with annotated JPGs.
 
 ## Dependencies
 
-Python 3.10+, opencv-python, numpy. Standard library: json, csv, math, pathlib.
+Python 3.10+, opencv-python, numpy, torch, torchvision, pyyaml, landmark_locator (local package from `../LandmarkLocator`). Standard library: json, csv, math, pathlib, tkinter.
+
+## Windows Executable
+
+Built via PyInstaller on GitHub Actions CI. The workflow (`.github/workflows/build-windows.yml`) produces a `EZcheezeMeasure-windows.zip` artifact.
+
+### One-time setup: upload the model checkpoint
+
+```bash
+gh release create model --title "Model Checkpoint" --notes "Trained model for landmark detection"
+gh release upload model /path/to/landmark_model_grace.5.pt
+```
+
+### Triggering a build
+
+- **Manual**: Actions → "Build Windows Executable" → Run workflow
+- **On release**: creating a GitHub release auto-triggers the build and attaches the zip
+
+### How it works
+
+- `EZcheezeMeasure.spec` — PyInstaller config, bundles the model checkpoint + all deps into a `dist/EZcheezeMeasure/` folder with `EZcheezeMeasure.exe`
+- Uses CPU-only PyTorch to keep the build size down
+- `_get_base_dir()` in `run_pipeline.py` handles the frozen exe path (`sys._MEIPASS`) vs normal Python
 
 ## Input Data Format
 
@@ -39,11 +66,12 @@ Each wing has two files in the input folder with matching basenames:
 
 ## Architecture
 
-Single-script tool (`measure_landmarks.py`). Key functions:
-- `load_landmarks()` — parses GeoJSON into `{name: (x, y)}` dict
-- `euclidean()` — point-to-point distance
-- `draw_overlay()` — renders measurement lines (cyan=wing length, magenta=CV distance) and landmark labels onto wing JPG using OpenCV
-- `main()` — batch processes all `*_landmarks.geojson` files, writes CSV and overlays
+Two-tier design:
+
+- `run_pipeline.py` — full pipeline: loads LandmarkLocator model, predicts landmarks on input images, computes measurements, writes CSV + overlay JPGs. Entry point for the Windows exe.
+- `measure_landmarks.py` — standalone measurement from pre-existing GeoJSON files. Also provides `draw_overlay()` and `euclidean()` imported by the pipeline.
+
+`LANDMARK_TO_GEOJSON` dict in `run_pipeline.py` maps internal model names (`acv_p`, `dtip`, etc.) to GeoJSON display names (`ACV.p`, `DTip`, etc.).
 
 ## Filename Convention
 
