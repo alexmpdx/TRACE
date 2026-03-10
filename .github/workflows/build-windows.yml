@@ -37,11 +37,10 @@
         - name: Install remaining deps
           run: pip install opencv-python numpy pyyaml pyinstaller                                                
                                                                                                                
-        - name: Download model checkpoint                                                                                                                 
-          env:                                                                                                                                          
+        - name: Download model checkpoint
+          env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          run: mkdir -p EZcheezeMeasure/trained_model && gh release download "model" --pattern "landmark_model_grace.5.pt" --dir                          
-  EZcheezeMeasure/trained_model --repo "${{ github.repository }}"                                                                                    
+          run: mkdir -p EZcheezeMeasure/trained_model && gh release download "model" --pattern "landmark_model_grace.5.pt" --dir EZcheezeMeasure/trained_model --repo "${{ github.repository }}"                                                                            
                                                                                                                  
         - name: Build with PyInstaller                                                                           
           run: |                                                                                                 
