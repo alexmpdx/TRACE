@@ -5,18 +5,16 @@ Usage:
     python run_pipeline.py <image_dir> <checkpoint_path>
 
 Outputs to <image_dir>/../output/:
-    landmarkPoints/   — GeoJSON + landmark overlay JPGs (LandmarkLocator output)
-    overlays/         — measurement overlay JPGs (EZcheezeMeasure output)
+    overlays/          — measurement overlay JPGs (lines between landmarks)
     landmark_measurements.csv
 """
 
-import json
+import csv
 import sys
 from pathlib import Path
 
 import cv2
 from landmark_locator import LandmarkPredictor
-from landmark_locator.scripts.visualize import draw_landmarks_on_image
 from measure_landmarks import draw_overlay, euclidean
 
 # Internal model names → GeoJSON display names (matching EZcheezeMeasure format)
@@ -31,21 +29,6 @@ LANDMARK_TO_GEOJSON = {
 }
 
 IMAGE_SUFFIXES = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".bmp"}
-
-
-def predictions_to_geojson(landmarks: dict[str, tuple[float, float]]) -> dict:
-    """Convert model predictions to GeoJSON FeatureCollection."""
-    features = []
-    for internal_name, (x, y) in sorted(landmarks.items()):
-        geojson_name = LANDMARK_TO_GEOJSON.get(internal_name, internal_name)
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [x, y]},
-                "properties": {"classification": {"name": geojson_name}},
-            }
-        )
-    return {"type": "FeatureCollection", "features": features}
 
 
 def main():
@@ -72,8 +55,6 @@ def main():
     # Set up output directories
     output_dir = image_dir.parent / "output"
     output_dir.mkdir(exist_ok=True)
-    landmark_dir = output_dir / "landmarkPoints"
-    landmark_dir.mkdir(exist_ok=True)
     overlay_dir = output_dir / "overlays"
     overlay_dir.mkdir(exist_ok=True)
 
@@ -83,10 +64,7 @@ def main():
     print(f"  Landmarks: {predictor.landmark_order}")
     print(f"  Device: {predictor.device}\n")
 
-    # Step 1: Predict landmarks and save GeoJSON + landmark JPGs
-    print("=== Step 1: Landmark detection ===")
-    import csv
-
+    print("=== Step 1: Landmark detection & measurement ===")
     rows = []
     for img_path in image_paths:
         image = cv2.imread(str(img_path))
@@ -97,17 +75,7 @@ def main():
         result = predictor.predict(image)
         stem = img_path.stem
 
-        # Save GeoJSON
-        geojson = predictions_to_geojson(result["landmarks"])
-        gj_path = landmark_dir / f"{stem}_landmarks.geojson"
-        gj_path.write_text(json.dumps(geojson, indent=2))
-
-        # Save landmark overlay JPG
-        vis = draw_landmarks_on_image(image, result["landmarks"], landmark_order=predictor.landmark_order)
-        jpg_path = landmark_dir / f"{stem}_landmarks.jpg"
-        cv2.imwrite(str(jpg_path), vis)
-
-        # Step 2: Measure distances using GeoJSON names
+        # Measure distances using GeoJSON names
         geojson_landmarks = {LANDMARK_TO_GEOJSON.get(k, k): v for k, v in result["landmarks"].items()}
 
         missing = {"L1-Rs", "DTip", "ACV.p", "PCV.a"} - geojson_landmarks.keys()
@@ -140,7 +108,7 @@ def main():
         )
 
     # Write CSV
-    print("\n=== Step 2: Measurements ===")
+    print("\n=== Results ===")
     csv_path = output_dir / "landmark_measurements.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["image_id", "wing_length_px", "cv_distance_px", "cv_wl_ratio"])
@@ -148,9 +116,8 @@ def main():
         writer.writerows(rows)
 
     print(f"Processed {len(rows)} wings")
-    print(f"CSV:            {csv_path}")
-    print(f"Landmark files: {landmark_dir}/")
-    print(f"Overlays:       {overlay_dir}/")
+    print(f"CSV:      {csv_path}")
+    print(f"Overlays: {overlay_dir}/")
 
 
 if __name__ == "__main__":
