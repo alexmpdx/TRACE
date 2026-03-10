@@ -1,1 +1,5 @@
 output/
+input pics/
+trained_model/
+landmarkPoints/
+__pycache__/
