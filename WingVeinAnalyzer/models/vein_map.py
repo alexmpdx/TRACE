@@ -288,11 +288,6 @@ MIN_POLY_WIDTH_UM = 48.3  # 100 px — min polygon width for constriction
 MIN_CROSS_WIDTH_UM = 9.66  # 20 px — min cross-section width
 CUT_EXTENSION_UM = 4.83  # 10 px — cut line extension beyond polygon
 
-# -- L1 recovery --
-L1_MIN_GAP_UM = 2.415  # 5 px — min gap for L1 recovery
-L1_MARGIN_UM = 14.49  # 30 px — margin from L2 for L1 trace
-L1_MIN_LENGTH_UM = 24.15  # 50 px — min L1 line length
-L1_SIMPLIFY_UM = 4.83  # 10 px — L1 trace simplification
 
 # -- Erosion amount lists --
 BOTTLENECK_EROSION_UM = [4.83, 7.245, 9.66, 14.49]  # [10,15,20,30] px

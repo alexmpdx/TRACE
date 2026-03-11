@@ -1266,6 +1266,34 @@ def _mean_signed_distance_from_midline(
     return float(np.mean(dists))
 
 
+def _mean_normalized_distance_from_midline(
+    path: MergedPath,
+    midline,
+) -> float:
+    """Compute the mean normalized signed distance of a path from the midline.
+
+    Like ``_mean_signed_distance_from_midline`` but divides each sample by
+    the local half-height so the result is in [-1, +1] (anterior/posterior
+    wing edge).  Comparable to ``MIDLINE_PRIORS`` values.
+    """
+    path_coords = list(path.line.coords)
+    if len(path_coords) < 2:
+        return 0.0
+
+    dists: list[float] = []
+    for px, py in path_coords:
+        pt = Point(px, py)
+        proj_frac = midline.line.project(pt, normalized=True)
+        nearest = midline.line.interpolate(midline.line.project(pt))
+        idx = int(proj_frac * (len(midline.half_heights) - 1))
+        idx = max(0, min(idx, len(midline.half_heights) - 1))
+        hh = midline.half_heights[idx]
+        if hh > 0:
+            dists.append((py - nearest.y) / hh)
+
+    return float(np.mean(dists)) if dists else 0.0
+
+
 def _anchor_l3_l4_from_midline(
     longitudinals: list[MergedPath],
     midline,

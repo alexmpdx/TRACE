@@ -376,41 +376,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=False,  # cached from step 5
     ),
-    # 13: L1 Recovery
+    # 13: Costa Extraction
     StepDef(
         index=13,
-        name="L1 Recovery from Anterior Edge",
-        short_name="L1 Recovery",
-        description=(
-            "When no costal cell exists, the Voronoi approach can't find L1 (no "
-            "costal-marginal boundary). This step performs column-by-column scanning "
-            "of the vein mask anterior to L2, detecting the posterior edge of the first "
-            "vein band (costa/L1 tissue) via gap detection. The resulting trace is "
-            "simplified, then trimmed to the maximum L1 length keeping the distal end "
-            "(nearest the subcostal break). Skipped when costal cell is present."
-        ),
-        pseudocode=(
-            "if costal_cell present: SKIP\n"
-            "for x_col in wing columns:\n"
-            "  scan vein_mask anterior to L2 - margin\n"
-            "  find first gap > min_gap in vein band\n"
-            "  l1_y[x] = posterior edge of first band\n"
-            "l1_trace = simplify(LineString(l1_y), tolerance)\n"
-            "l1_trace = trim_to_max_l1_length(l1_trace, keep='distal')\n"
-            "if l1_trace.length > min_length:\n"
-            "  update L1 assignment"
-        ),
-        params=[
-            StepParam("min_gap", "2.4 µm", "Min gap to detect end of vein band"),
-            StepParam("margin", "14.5 µm", "Margin from L2 to restrict scan area"),
-            StepParam("min_length", "24.2 µm", "Min L1 trace length to accept"),
-            StepParam("simplify", "4.8 µm", "Line simplification tolerance"),
-        ],
-        runs_computation=True,
-    ),
-    # 14: Costa Extraction
-    StepDef(
-        index=14,
         name="Costa Extraction",
         short_name="Costa",
         description=(
@@ -428,9 +396,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 15: Wing Outline
+    # 14: Wing Outline
     StepDef(
-        index=15,
+        index=14,
         name="Build Wing Outline",
         short_name="Outline",
         description=(
@@ -451,9 +419,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 16: Hinge Detection & Removal
+    # 15: Hinge Detection & Removal
     StepDef(
-        index=16,
+        index=15,
         name="Hinge Detection & Removal",
         short_name="Hinge",
         description=(
@@ -476,9 +444,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 17: Compartments
+    # 16: Compartments
     StepDef(
-        index=17,
+        index=16,
         name="Compute Compartments",
         short_name="Compartments",
         description=(
@@ -500,9 +468,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 18: Measurements
+    # 17: Measurements
     StepDef(
-        index=18,
+        index=17,
         name="Compute Measurements",
         short_name="Measurements",
         description=(
@@ -523,9 +491,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 19: Final Overlays
+    # 18: Final Overlays
     StepDef(
-        index=19,
+        index=18,
         name="Final Overlays",
         short_name="Overlays",
         description=(

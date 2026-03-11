@@ -52,13 +52,12 @@ def render_step(
         10: _render_regions,
         11: _render_poly_split,
         12: _render_validation,
-        13: _render_l1_recovery,
-        14: _render_costa,
-        15: _render_outline,
-        16: _render_hinge,
-        17: _render_compartments,
-        18: _render_measurements,
-        19: _render_overlays,
+        13: _render_costa,
+        14: _render_outline,
+        15: _render_hinge,
+        16: _render_compartments,
+        17: _render_measurements,
+        18: _render_overlays,
     }
     renderer = renderers.get(step_index)
     if renderer is None:
@@ -661,55 +660,6 @@ def _render_validation(state: StepState, prev: Optional[StepState]) -> tuple[np.
             2,
             cv2.LINE_AA,
         )
-
-    return left, right
-
-
-def _render_l1_recovery(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 13: Pre-recovery → veins with recovered L1."""
-    # Left: veins before L1 recovery (from prev state)
-    left = state.image.copy()
-    prev_assignments = prev.assignments if prev else state.assignments
-    if prev_assignments:
-        for a in prev_assignments:
-            if a.line is None:
-                continue
-            color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
-            _draw_linestring(left, a.line, color, thickness=4)
-            coords = list(a.line.coords)
-            mid = coords[len(coords) // 2]
-            cv2.putText(
-                left,
-                a.vein_id,
-                (int(mid[0]) - 20, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
-
-    # Right: veins after L1 recovery
-    right = state.image.copy()
-    if state.assignments:
-        for a in state.assignments:
-            if a.line is None:
-                continue
-            color = VEIN_COLORS.get(a.vein_id, (128, 128, 128))
-            thickness = 5 if a.vein_id == "L1" else 3
-            _draw_linestring(right, a.line, color, thickness=thickness)
-            coords = list(a.line.coords)
-            mid = coords[len(coords) // 2]
-            cv2.putText(
-                right,
-                a.vein_id,
-                (int(mid[0]) - 20, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
 
     return left, right
 

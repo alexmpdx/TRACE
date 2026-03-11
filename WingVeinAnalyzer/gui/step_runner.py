@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -111,7 +111,7 @@ class StepState:
     # Vein-extension lines (from step 11)
     extension_lines: Optional[dict[str, list[LineString]]] = None
 
-    # Assignments (from steps 13-14)
+    # Assignments (from steps 8-13)
     assignments: Optional[list[VeinAssignment]] = None
 
     # Geometry (from steps 15-17)
@@ -239,13 +239,12 @@ class StepRunner:
             10: self._step_regions_viz,
             11: self._step_poly_split_viz,
             12: self._step_validate_viz,
-            13: self._step_l1_recovery,
-            14: self._step_costa,
-            15: self._step_outline,
-            16: self._step_hinge,
-            17: self._step_compartments,
-            18: self._step_measurements,
-            19: self._step_overlays,
+            13: self._step_costa,
+            14: self._step_outline,
+            15: self._step_hinge,
+            16: self._step_compartments,
+            17: self._step_measurements,
+            18: self._step_overlays,
         }
         handler = handlers.get(index)
         if handler is None:
@@ -550,33 +549,8 @@ class StepRunner:
         state.params_used = {"num_warnings": str(len(warnings))}
         return state
 
-    def _step_l1_recovery(self, prev: StepState) -> StepState:
-        """Step 13: L1 recovery from marginal cell boundary (if needed)."""
-        state = self._copy_forward(prev)
-
-        has_costal = "costal_cell" in (state.poly_names or {}).values()
-        if not has_costal and state.assignments and state.polygons and state.poly_names:
-            from WingVeinAnalyzer.controllers.analysis_controller import (
-                _recover_l1_from_marginal_cell,
-            )
-
-            _recover_l1_from_marginal_cell(
-                state.assignments,
-                state.polygons,
-                state.poly_names,
-                state.wing_bbox,
-                logger,
-                vein_polygons=state.vein_polygons,
-                image_shape=state.image.shape[:2] if state.image is not None else None,
-            )
-            state.params_used = {"method": "marginal_cell_boundary", "status": "Ran"}
-        else:
-            state.params_used = {"status": "Skipped (costal cell present)"}
-
-        return state
-
     def _step_costa(self, prev: StepState) -> StepState:
-        """Step 14: Extract costa."""
+        """Step 13: Extract costa."""
         state = self._copy_forward(prev)
 
         has_costal = "costal_cell" in (state.poly_names or {}).values()
@@ -789,7 +763,7 @@ class StepRunner:
         state.vein_map = prev.vein_map
         state.poly_names = prev.poly_names
         state.extension_lines = prev.extension_lines
-        state.assignments = list(prev.assignments) if prev.assignments else prev.assignments
+        state.assignments = [replace(a) for a in prev.assignments] if prev.assignments else prev.assignments
         state.outline = prev.outline
         state.hinge_landmarks = prev.hinge_landmarks
         state.wing_blade = prev.wing_blade
