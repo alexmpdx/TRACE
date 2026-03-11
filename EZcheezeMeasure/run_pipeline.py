@@ -12,15 +12,7 @@ Outputs to <image_dir>/../output/:
     landmark_measurements.csv
 """
 
-import csv
 import sys
-import tkinter as tk
-from pathlib import Path
-from tkinter import filedialog
-
-import cv2
-from landmark_locator import LandmarkPredictor
-from measure_landmarks import draw_overlay, euclidean
 
 # Internal model names → GeoJSON display names (matching EZcheezeMeasure format)
 LANDMARK_TO_GEOJSON = {
@@ -36,8 +28,12 @@ LANDMARK_TO_GEOJSON = {
 IMAGE_SUFFIXES = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".bmp"}
 
 
-def select_image_dir() -> Path:
+def select_image_dir():
     """Open a folder picker dialog and return the selected path."""
+    import tkinter as tk
+    from pathlib import Path
+    from tkinter import filedialog
+
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
@@ -49,14 +45,23 @@ def select_image_dir() -> Path:
     return Path(folder)
 
 
-def _get_base_dir() -> Path:
+def _get_base_dir():
     """Return the base directory — handles both normal Python and PyInstaller frozen exe."""
+    from pathlib import Path
+
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS)
     return Path(__file__).parent
 
 
 def main():
+    import csv
+    from pathlib import Path
+
+    import cv2
+    from landmark_locator import LandmarkPredictor
+    from measure_landmarks import draw_overlay, euclidean
+
     # Default checkpoint path (bundled with exe or relative to script)
     default_checkpoint = _get_base_dir() / "trained_model" / "landmark_model_grace.5.pt"
 
