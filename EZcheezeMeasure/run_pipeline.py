@@ -14,6 +14,10 @@ Outputs to <image_dir>/../output/:
 
 import sys
 
+# Ensure bundled packages are importable when running as frozen exe
+if getattr(sys, "frozen", False):
+    sys.path.insert(0, sys._MEIPASS)
+
 # Internal model names → GeoJSON display names (matching EZcheezeMeasure format)
 LANDMARK_TO_GEOJSON = {
     "acv_p": "ACV.p",
