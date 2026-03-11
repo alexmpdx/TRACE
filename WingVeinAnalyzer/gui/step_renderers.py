@@ -210,16 +210,24 @@ def _render_centerlines(state: StepState, prev: Optional[StepState]) -> tuple[np
 
     # Right: traced centerlines
     right = state.image.copy()
+    bridge_keys = set((state.bridge_segments or {}).keys())
     if state.centerlines:
         for idx, (key, line) in enumerate(state.centerlines.items()):
             color = SEGMENT_COLORS[idx % len(SEGMENT_COLORS)]
-            _draw_linestring(right, line, color, thickness=3)
+            if key in bridge_keys:
+                # Draw the original (non-bridged) portion solid, bridge dashed
+                bridge_line = state.bridge_segments[key]
+                _draw_linestring(right, line, color, thickness=3)
+                _draw_dashed_linestring(right, bridge_line, (255, 255, 255), thickness=3, dash_len=3)
+            else:
+                _draw_linestring(right, line, color, thickness=3)
             # Label at midpoint
             coords = list(line.coords)
             mid = coords[len(coords) // 2]
+            label_suffix = " [bridged]" if key in bridge_keys else ""
             cv2.putText(
                 right,
-                f"{key}",
+                f"{key}{label_suffix}",
                 (int(mid[0]) - 30, int(mid[1]) - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,

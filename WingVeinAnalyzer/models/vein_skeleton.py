@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -50,6 +51,7 @@ class VoronoiResult:
     vein_mask: np.ndarray
     hull_mask: np.ndarray
     seed_labels: np.ndarray
+    bridge_segments: dict[tuple[int, int], LineString] = dataclasses.field(default_factory=dict)
 
 
 def extract_veins_from_mask(
@@ -187,13 +189,17 @@ def extract_veins_from_mask(
 
         line = _trace_pixels_to_line(pixels)
         if line is not None and line.length > um_to_px(MIN_SEGMENT_LENGTH_UM):
-            pair = (min(idx_a, idx_b), max(idx_a, idx_b))
-            centerlines[pair] = line
+            # Split at large jumps through non-vein space
+            sub_lines = _split_line_at_vein_gaps(line, vein_mask)
+            best = max(sub_lines, key=lambda l: l.length) if sub_lines else line
+            if best.length > um_to_px(MIN_SEGMENT_LENGTH_UM):
+                pair = (min(idx_a, idx_b), max(idx_a, idx_b))
+                centerlines[pair] = best
 
     logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
 
     # 8. Bridge dangling endpoints
-    centerlines = bridge_dangling_endpoints(centerlines)
+    centerlines, bridge_segments = bridge_dangling_endpoints(centerlines)
 
     # 9. Vectorize Voronoi regions into polygons
     voronoi_polygons = _vectorize_voronoi_regions(
@@ -209,13 +215,14 @@ def extract_veins_from_mask(
         vein_mask=vein_mask,
         hull_mask=hull_mask,
         seed_labels=seed_labels,
+        bridge_segments=bridge_segments,
     )
 
 
 def bridge_dangling_endpoints(
     centerlines: dict[tuple[int, int], LineString],
     bridge_threshold: float | None = None,
-) -> dict[tuple[int, int], LineString]:
+) -> tuple[dict[tuple[int, int], LineString], dict[tuple[int, int], LineString]]:
     """Bridge dangling endpoints by extending the shorter segment.
 
     Collects all segment endpoints, identifies junctions (3+ endpoints from
@@ -258,6 +265,7 @@ def bridge_dangling_endpoints(
     # For each dangling endpoint, find nearest dangling from a different segment
     bridged: set[int] = set()
     result = dict(centerlines)
+    bridge_segments: dict[tuple[int, int], LineString] = {}
     bridges_made = 0
 
     for i in dangling:
@@ -282,14 +290,17 @@ def bridge_dangling_endpoints(
 
         xj, yj, key_j, ep_j = endpoints[best_j]
 
+        # Record the bridge segment (straight line between endpoints)
+        bridge_line = LineString([(xi, yi), (xj, yj)])
+
         # Extend the shorter segment toward the bridge target
         line_i = result[key_i]
         line_j = result[key_j]
         if line_i.length <= line_j.length:
-            # Extend line_i toward (xj, yj)
+            bridge_segments[key_i] = bridge_line
             result[key_i] = _extend_line(line_i, ep_i, xj, yj)
         else:
-            # Extend line_j toward (xi, yi)
+            bridge_segments[key_j] = bridge_line
             result[key_j] = _extend_line(line_j, ep_j, xi, yi)
 
         bridged.add(i)
@@ -299,7 +310,7 @@ def bridge_dangling_endpoints(
     if bridges_made:
         logger.info("Bridged %d dangling endpoint pair(s)", bridges_made)
 
-    return result
+    return result, bridge_segments
 
 
 def _vectorize_voronoi_regions(
@@ -749,6 +760,50 @@ def _extract_boundary_pixels(
         boundary_dict[pair].append((int(ys[i]), int(xs[i])))
 
     return boundary_dict
+
+
+def _split_line_at_vein_gaps(
+    line: LineString,
+    vein_mask: np.ndarray,
+    gap_threshold: float = 30.0,
+) -> list[LineString]:
+    """Split a centerline at segments that jump through non-vein space.
+
+    Walks along the line's coordinates.  When consecutive points are far
+    apart (> gap_threshold) and the midpoint is NOT in the vein mask,
+    splits the line at that gap.  Returns the resulting sub-lines.
+    """
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return [line]
+
+    h, w = vein_mask.shape
+    segments: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = [coords[0]]
+
+    for i in range(1, len(coords)):
+        x0, y0 = coords[i - 1]
+        x1, y1 = coords[i]
+        dist = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+
+        if dist > gap_threshold:
+            # Sample midpoint and check if it's in vein mask
+            mid_x = int(round((x0 + x1) / 2))
+            mid_y = int(round((y0 + y1) / 2))
+            in_vein = 0 <= mid_y < h and 0 <= mid_x < w and vein_mask[mid_y, mid_x] > 0
+            if not in_vein:
+                # Split here — end current segment, start a new one
+                if len(current) >= 2:
+                    segments.append(current)
+                current = [coords[i]]
+                continue
+
+        current.append(coords[i])
+
+    if len(current) >= 2:
+        segments.append(current)
+
+    return [LineString(s) for s in segments]
 
 
 def _trace_pixels_to_line(

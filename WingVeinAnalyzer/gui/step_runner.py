@@ -94,6 +94,7 @@ class StepState:
     vein_mask: Optional[np.ndarray] = None
     nearest_labels: Optional[np.ndarray] = None
     centerlines: Optional[dict[tuple[int, int], LineString]] = None
+    bridge_segments: Optional[dict[tuple[int, int], LineString]] = None
 
     # Hull seeding intermediates (from step 2, displayed in step 3)
     hull_mask: Optional[np.ndarray] = None
@@ -302,6 +303,7 @@ class StepRunner:
         )
         state.polygons = voronoi_result.voronoi_polygons
         state.centerlines = voronoi_result.centerlines
+        state.bridge_segments = voronoi_result.bridge_segments
         state.nearest_labels = voronoi_result.nearest_labels
         state.vein_mask = voronoi_result.vein_mask
         state.hull_mask = voronoi_result.hull_mask
@@ -776,6 +778,7 @@ class StepRunner:
         state.vein_mask = prev.vein_mask
         state.nearest_labels = prev.nearest_labels
         state.centerlines = prev.centerlines
+        state.bridge_segments = prev.bridge_segments
         state.hull_mask = prev.hull_mask
         state.seed_labels = prev.seed_labels
         state.wing_midline = prev.wing_midline
