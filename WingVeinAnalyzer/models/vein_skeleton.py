@@ -861,8 +861,15 @@ def _scan_median_to_line(
     xs: np.ndarray,
     ys: np.ndarray,
     simplify_tolerance: float,
+    max_spread: float = 20.0,
 ) -> Optional[LineString]:
-    """Order pixels by scanning along the dominant axis, taking median position."""
+    """Order pixels by scanning along the dominant axis, taking median position.
+
+    Scan positions where pixels are spread wider than *max_spread* in the
+    perpendicular axis are skipped — these indicate fan/branch artifacts
+    (e.g. where two Voronoi regions diverge at a wing tip) rather than a
+    true boundary band.
+    """
     x_range = float(xs.max() - xs.min())
     y_range = float(ys.max() - ys.min())
 
@@ -875,17 +882,25 @@ def _scan_median_to_line(
                 groups[key] = []
             groups[key].append(y)
         sorted_keys = sorted(groups.keys())
-        points = [(float(k), float(np.median(groups[k]))) for k in sorted_keys]
+        points = [
+            (float(k), float(np.median(groups[k])))
+            for k in sorted_keys
+            if max(groups[k]) - min(groups[k]) <= max_spread
+        ]
     else:
         # Roughly vertical: scan by Y, compute median X
-        groups = {}
+        groups: dict[int, list[float]] = {}
         for x, y in zip(xs, ys):
             key = int(y)
             if key not in groups:
                 groups[key] = []
             groups[key].append(x)
         sorted_keys = sorted(groups.keys())
-        points = [(float(np.median(groups[k])), float(k)) for k in sorted_keys]
+        points = [
+            (float(np.median(groups[k])), float(k))
+            for k in sorted_keys
+            if max(groups[k]) - min(groups[k]) <= max_spread
+        ]
 
     if len(points) < 2:
         return None
