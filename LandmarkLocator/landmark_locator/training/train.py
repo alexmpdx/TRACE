@@ -36,45 +36,8 @@ def _populate_landmark_config(cfg: dict, annotation_dir: Path) -> None:
     print(f"Discovered {len(landmark_order)} landmarks: {landmark_order}")
 
 
-def extract_landmarks_from_heatmaps(heatmaps: np.ndarray) -> list[tuple[float, float]]:
-    """Extract landmark coordinates as weighted average around peak.
-
-    Args:
-        heatmaps: (C, H, W) predicted heatmap array
-
-    Returns:
-        List of (x, y) coordinates, one per channel.
-    """
-    coords = []
-    for c in range(heatmaps.shape[0]):
-        hm = heatmaps[c]
-        # Find peak
-        peak_idx = np.unravel_index(np.argmax(hm), hm.shape)
-        peak_y, peak_x = peak_idx
-
-        # Weighted average in 11×11 window around peak for sub-pixel accuracy
-        radius = 5
-        y0 = max(0, peak_y - radius)
-        y1 = min(hm.shape[0], peak_y + radius + 1)
-        x0 = max(0, peak_x - radius)
-        x1 = min(hm.shape[1], peak_x + radius + 1)
-
-        patch = hm[y0:y1, x0:x1]
-        patch = np.maximum(patch, 0)  # ReLU to avoid negative weights
-        total = patch.sum()
-
-        if total > 1e-8:
-            ys = np.arange(y0, y1, dtype=np.float64)
-            xs = np.arange(x0, x1, dtype=np.float64)
-            xx, yy = np.meshgrid(xs, ys)
-            wx = (patch * xx).sum() / total
-            wy = (patch * yy).sum() / total
-            coords.append((float(wx), float(wy)))
-        else:
-            # Fallback to argmax if heatmap is near-zero
-            coords.append((float(peak_x), float(peak_y)))
-
-    return coords
+# Re-export for backward compatibility
+from landmark_locator.inference.predict import extract_landmarks_from_heatmaps  # noqa: F401, E402
 
 
 def create_cv_splits(annotation_dir: Path, n_folds: int = 5) -> list[tuple[list[int], list[int]]]:

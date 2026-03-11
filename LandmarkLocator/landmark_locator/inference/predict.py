@@ -6,11 +6,54 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-import yaml
 
-from landmark_locator.data.dataset import IMAGENET_MEAN, IMAGENET_STD
 from landmark_locator.models.unet import LandmarkUNet
-from landmark_locator.training.train import extract_landmarks_from_heatmaps
+
+# ImageNet normalization stats (duplicated here to avoid importing dataset.py
+# which pulls in albumentations and other training-only dependencies)
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def extract_landmarks_from_heatmaps(heatmaps: np.ndarray) -> list[tuple[float, float]]:
+    """Extract landmark coordinates as weighted average around peak.
+
+    Args:
+        heatmaps: (C, H, W) predicted heatmap array
+
+    Returns:
+        List of (x, y) coordinates, one per channel.
+    """
+    coords = []
+    for c in range(heatmaps.shape[0]):
+        hm = heatmaps[c]
+        # Find peak
+        peak_idx = np.unravel_index(np.argmax(hm), hm.shape)
+        peak_y, peak_x = peak_idx
+
+        # Weighted average in 11x11 window around peak for sub-pixel accuracy
+        radius = 5
+        y0 = max(0, peak_y - radius)
+        y1 = min(hm.shape[0], peak_y + radius + 1)
+        x0 = max(0, peak_x - radius)
+        x1 = min(hm.shape[1], peak_x + radius + 1)
+
+        patch = hm[y0:y1, x0:x1]
+        patch = np.maximum(patch, 0)  # ReLU to avoid negative weights
+        total = patch.sum()
+
+        if total > 1e-8:
+            ys = np.arange(y0, y1, dtype=np.float64)
+            xs = np.arange(x0, x1, dtype=np.float64)
+            xx, yy = np.meshgrid(xs, ys)
+            wx = (patch * xx).sum() / total
+            wy = (patch * yy).sum() / total
+            coords.append((float(wx), float(wy)))
+        else:
+            # Fallback to argmax if heatmap is near-zero
+            coords.append((float(peak_x), float(peak_y)))
+
+    return coords
 
 
 class LandmarkPredictor:
@@ -65,8 +108,8 @@ class LandmarkPredictor:
             image: (H, W, 3) BGR uint8 numpy array
 
         Returns:
-            Dict with landmarks (name→(x,y) in original pixels),
-            confidences (name→float), heatmaps (C,H,W array).
+            Dict with landmarks (name->(x,y) in original pixels),
+            confidences (name->float), heatmaps (C,H,W array).
         """
         tensor, scale_x, scale_y = self._preprocess(image)
         tensor = tensor.to(self.device)

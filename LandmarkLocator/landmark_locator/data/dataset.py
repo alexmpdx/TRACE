@@ -10,8 +10,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from landmark_locator.data.augmentation import get_train_transform, get_val_transform
-
 # ImageNet normalization stats
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -110,7 +108,9 @@ class LandmarkDataset(Dataset):
         if indices is not None:
             self.samples = [self.samples[i] for i in indices]
 
-        # Build transforms
+        # Build transforms (lazy import to avoid albumentations dependency at inference)
+        from landmark_locator.data.augmentation import get_train_transform, get_val_transform
+
         if train:
             self.transform = get_train_transform(cfg)
         else:
