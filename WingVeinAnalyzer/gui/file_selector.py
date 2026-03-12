@@ -46,8 +46,10 @@ def discover_file_pairs(folder: Path) -> list[FilePair]:
         if p.suffix.lower() in image_exts:
             images.append(p)
         elif p.suffix.lower() == ".geojson":
-            # Skip ground-truth overlay files from primary matching
+            # Skip ground-truth overlay and landmark files from primary matching
             if "_expected_" in p.stem and "_overlay" in p.stem:
+                continue
+            if p.stem.endswith("_landmarks"):
                 continue
             geojsons.append(p)
 

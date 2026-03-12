@@ -510,6 +510,8 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(
             self,
             "Open Wing Data Folder",
+            "",
+            QFileDialog.DontUseNativeDialog,
         )
         if not folder:
             return

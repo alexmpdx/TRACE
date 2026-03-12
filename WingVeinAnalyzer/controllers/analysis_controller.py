@@ -48,6 +48,7 @@ from WingVeinAnalyzer.models.vein_skeleton import (
     extract_veins_from_mask,
 )
 from WingVeinAnalyzer.models.wing_geometry import (
+    HingeLandmarks,
     WingOutline,
     build_wing_outline,
     compute_compartments,
@@ -60,6 +61,28 @@ from WingVeinAnalyzer.models.wing_geometry import (
 from WingVeinAnalyzer.utils.skeleton_utils import smooth_line, smooth_polygon
 from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_skeleton_overlay
 from WingVeinAnalyzer.views.results_view import export_csv
+
+
+def _load_landmark_points(image_path: Path) -> Optional[dict[str, tuple[float, float]]]:
+    """Load landmark points from a *_landmarks.geojson file next to the image."""
+    import json
+
+    landmarks_path = image_path.parent / f"{image_path.stem}_landmarks.geojson"
+    if not landmarks_path.exists():
+        return None
+    try:
+        with open(landmarks_path) as f:
+            data = json.load(f)
+        points: dict[str, tuple[float, float]] = {}
+        for feat in data.get("features", []):
+            name = feat.get("properties", {}).get("classification", {}).get("name")
+            coords = feat.get("geometry", {}).get("coordinates")
+            if name and coords and len(coords) >= 2:
+                points[name] = (float(coords[0]), float(coords[1]))
+        return points if points else None
+    except Exception:
+        logger.warning("Failed to parse landmarks file: %s", landmarks_path)
+        return None
 
 
 @dataclass
@@ -411,8 +434,18 @@ def _run_polygon_pipeline(
     )
     result.wing_outline = outline
 
-    # Detect hinge and remove it
-    landmarks = detect_hinge_landmarks(outline, polygons, poly_names)
+    # Detect hinge and remove it — use deep-learning landmarks if available
+    landmark_points = _load_landmark_points(image_path)
+    if landmark_points and "subcostal break" in landmark_points and "alula notch" in landmark_points:
+        sc = landmark_points["subcostal break"]
+        al = landmark_points["alula notch"]
+        landmarks = HingeLandmarks(
+            subcostal_break=sc,
+            alula_notch=al,
+            hinge_line=LineString([sc, al]),
+        )
+    else:
+        landmarks = detect_hinge_landmarks(outline, polygons, poly_names)
     if landmarks:
         wing_blade = remove_hinge(outline, landmarks, polygons, poly_names)
     else:

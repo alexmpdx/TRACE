@@ -59,6 +59,7 @@ from WingVeinAnalyzer.models.vein_skeleton import (
     extract_veins_from_mask,
 )
 from WingVeinAnalyzer.models.wing_geometry import (
+    HingeLandmarks,
     WingMidline,
     WingOutline,
     build_wing_outline,
@@ -75,6 +76,32 @@ from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_s
 logger = logging.getLogger(__name__)
 
 
+def _load_landmarks(image_path: Path) -> Optional[dict[str, tuple[float, float]]]:
+    """Load landmark points from a *_landmarks.geojson file next to the image."""
+    import json
+
+    if image_path is None:
+        return None
+    stem = image_path.stem  # e.g. "-CTRL_PknRNAi_108870_0007"
+    landmarks_path = image_path.parent / f"{stem}_landmarks.geojson"
+    if not landmarks_path.exists():
+        return None
+    try:
+        with open(landmarks_path) as f:
+            data = json.load(f)
+        points: dict[str, tuple[float, float]] = {}
+        for feat in data.get("features", []):
+            name = feat.get("properties", {}).get("classification", {}).get("name")
+            coords = feat.get("geometry", {}).get("coordinates")
+            if name and coords and len(coords) >= 2:
+                points[name] = (float(coords[0]), float(coords[1]))
+        logger.info("Loaded %d landmarks from %s", len(points), landmarks_path.name)
+        return points if points else None
+    except Exception:
+        logger.warning("Failed to parse landmarks file: %s", landmarks_path)
+        return None
+
+
 @dataclass
 class StepState:
     """Accumulated pipeline state after each step."""
@@ -86,6 +113,7 @@ class StepState:
     polygons: Optional[list[Polygon]] = None
     vein_polygons: Optional[list[Polygon]] = None
     original_polygons: Optional[list[Polygon]] = None
+    landmark_points: Optional[dict[str, tuple[float, float]]] = None
 
     # Wing midline (from step 1)
     wing_midline: Optional[WingMidline] = None
@@ -267,6 +295,9 @@ class StepRunner:
         state.vein_polygons = list(annotations.vein_polygons)
         state.original_polygons = list(annotations.intervein_polygons)
 
+        # Load landmark points if available (from LandmarkLocator)
+        state.landmark_points = _load_landmarks(self._image_path)
+
         # Compute wing bounding box
         all_bounds = [p.bounds for p in state.polygons]
         if all_bounds:
@@ -284,6 +315,7 @@ class StepRunner:
             "image_size": f"{image.shape[1]}x{image.shape[0]}",
             "num_polygons": str(len(state.polygons)),
             "has_vein_mask": str(bool(state.vein_polygons)),
+            "landmarks": str(len(state.landmark_points)) if state.landmark_points else "none",
         }
         return state
 
@@ -608,14 +640,28 @@ class StepRunner:
         return state
 
     def _step_hinge(self, prev: StepState) -> StepState:
-        """Step 16: Detect hinge landmarks and remove hinge."""
+        """Step 15: Detect hinge landmarks and remove hinge."""
         state = self._copy_forward(prev)
 
-        landmarks = detect_hinge_landmarks(
-            state.outline,
-            state.polygons,
-            state.poly_names or {},
-        )
+        # Use deep-learning landmarks if available
+        lp = state.landmark_points or {}
+        if "subcostal break" in lp and "alula notch" in lp:
+            sc = lp["subcostal break"]
+            al = lp["alula notch"]
+            landmarks = HingeLandmarks(
+                subcostal_break=sc,
+                alula_notch=al,
+                hinge_line=LineString([sc, al]),
+            )
+            source = "landmarks file"
+        else:
+            landmarks = detect_hinge_landmarks(
+                state.outline,
+                state.polygons,
+                state.poly_names or {},
+            )
+            source = "polygon geometry"
+
         state.hinge_landmarks = landmarks
         if landmarks:
             wing_blade = remove_hinge(
@@ -624,7 +670,9 @@ class StepRunner:
                 state.polygons,
                 state.poly_names or {},
             )
-            state.params_used = {"status": "Hinge detected and removed"}
+            state.params_used = {
+                "status": f"Hinge detected and removed (from {source})",
+            }
         else:
             wing_blade = state.outline.polygon
             state.params_used = {"status": "No hinge detected"}
@@ -749,6 +797,7 @@ class StepRunner:
         state.polygons = prev.polygons
         state.vein_polygons = prev.vein_polygons
         state.original_polygons = prev.original_polygons
+        state.landmark_points = prev.landmark_points
         state.vein_mask = prev.vein_mask
         state.nearest_labels = prev.nearest_labels
         state.centerlines = prev.centerlines
