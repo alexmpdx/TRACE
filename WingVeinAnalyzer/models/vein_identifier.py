@@ -1416,8 +1416,7 @@ def _assign_remaining_longitudinals(
             rest = anterior[1:]
             if rest:
                 candidate = min(rest, key=lambda p: _path_y_at_x(p, ref_x))
-                if candidate.length_px <= l1_max:
-                    vein_map["L1"] = candidate
+                vein_map["L1"] = candidate
         elif best.length_px <= l1_max:
             vein_map["L1"] = min(anterior, key=lambda p: _path_y_at_x(p, ref_x))
         else:
