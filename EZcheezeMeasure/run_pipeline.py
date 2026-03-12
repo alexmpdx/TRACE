@@ -86,8 +86,26 @@ def main():
         print(f"No images found in {image_dir}")
         sys.exit(1)
 
+    # Prompt user for output folder name
+    import tkinter as tk
+    from tkinter import simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    output_name = simpledialog.askstring(
+        "Output folder",
+        "Enter a name for the output folder:",
+        initialvalue="output",
+        parent=root,
+    )
+    root.destroy()
+    if not output_name:
+        print("No output folder name provided, exiting.")
+        sys.exit(0)
+
     # Set up output directories
-    output_dir = image_dir.parent / "output"
+    output_dir = image_dir.parent / output_name
     output_dir.mkdir(exist_ok=True)
     overlay_dir = output_dir / "overlays"
     overlay_dir.mkdir(exist_ok=True)
