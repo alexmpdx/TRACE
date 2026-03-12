@@ -747,8 +747,15 @@ def _render_hinge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
         cv2.circle(left, al, 20, (255, 0, 0), -1)
         cv2.putText(left, "Subcostal", (sc[0] + 25, sc[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         cv2.putText(left, "Alula", (al[0] + 25, al[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
-        # Draw hinge line
-        hl_pts = np.array(lm.hinge_line.coords, dtype=np.int32)
+        # Draw hinge line extended to wing edges along subcostal→alula direction
+        hl_coords = list(lm.hinge_line.coords)
+        ext = 500
+        p_sc = np.array(lm.subcostal_break)
+        p_al = np.array(lm.alula_notch)
+        direction = p_al - p_sc
+        direction = direction / (np.linalg.norm(direction) + 1e-9)
+        draw_coords = [(p_sc - direction * ext).tolist()] + hl_coords + [(p_al + direction * ext).tolist()]
+        hl_pts = np.array(draw_coords, dtype=np.int32)
         cv2.polylines(left, [hl_pts], isClosed=False, color=(0, 165, 255), thickness=3)
 
     # Right: wing blade only

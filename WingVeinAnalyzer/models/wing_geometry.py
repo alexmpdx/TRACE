@@ -103,6 +103,7 @@ def compute_wing_midline(
     sample_spacing: float | None = None,
     smooth_sigma: float | None = None,
     wing_polygon: Optional[Polygon] = None,
+    dtip: Optional[tuple[float, float]] = None,
 ) -> Optional[WingMidline]:
     """Compute the anterior-posterior midline of the wing.
 
@@ -208,18 +209,24 @@ def compute_wing_midline(
         "wing annotation" if wing_polygon is not None else "buffered polygons",
     )
 
-    # Reference point at 3/4 span toward the distal (narrow) end.
-    # Determine distal direction from half-heights: the tapered end is distal.
-    quarter = max(1, len(hhs_smooth) // 4)
-    hh_low = float(hhs_smooth[:quarter].mean())  # mean half-height near min_x
-    hh_high = float(hhs_smooth[-quarter:].mean())  # mean half-height near max_x
-    # The narrower end is proximal (hinge), the broader end is distal (wing blade)
-    if hh_low < hh_high:
-        # min_x side is proximal → distal is max_x → ref at 0.75
-        ref_frac = 0.75
+    # Reference point at 3/4 span toward the distal end.
+    # Use DTip landmark to determine distal direction if available.
+    mid_x = (xs_arr[0] + xs_arr[-1]) / 2.0
+    if dtip is not None:
+        # DTip is the distal wing tip — ref point is 3/4 toward it
+        if dtip[0] > mid_x:
+            ref_frac = 0.75  # distal is max_x
+        else:
+            ref_frac = 0.25  # distal is min_x
     else:
-        # max_x side is proximal → distal is min_x → ref at 0.25
-        ref_frac = 0.25
+        # Fallback: use half-height taper to guess distal direction
+        quarter = max(1, len(hhs_smooth) // 4)
+        hh_low = float(hhs_smooth[:quarter].mean())
+        hh_high = float(hhs_smooth[-quarter:].mean())
+        if hh_low < hh_high:
+            ref_frac = 0.75
+        else:
+            ref_frac = 0.25
     ref_x = float(xs_arr[0] + (xs_arr[-1] - xs_arr[0]) * ref_frac)
     ref_y = float(np.interp(ref_x, xs_arr, ys_smooth))
 
@@ -383,16 +390,27 @@ def remove_hinge(
 
     hinge_side = _detect_hinge_side(list(polygons), poly_names) if polygons else "left"
 
-    # Extend the hinge line beyond the wing boundary
-    p1 = np.array(landmarks.subcostal_break)
-    p2 = np.array(landmarks.alula_notch)
-    direction = p2 - p1
-    direction = direction / (np.linalg.norm(direction) + 1e-9)
+    # Extend the hinge line beyond the wing boundary at both ends
+    hinge_coords = list(landmarks.hinge_line.coords)
+    p_start = np.array(hinge_coords[0])
+    p_next = np.array(hinge_coords[1])
+    p_prev = np.array(hinge_coords[-2])
+    p_end = np.array(hinge_coords[-1])
 
-    _hext = um_to_px(HINGE_EXTENSION_UM)
-    extended_start = p1 - direction * _hext
-    extended_end = p2 + direction * _hext
-    cut_line = LineString([extended_start.tolist(), extended_end.tolist()])
+    # Extend far enough to always exit the wing outline
+    min_x, min_y, max_x, max_y = wing.bounds
+    _hext = max(max_x - min_x, max_y - min_y)
+    dir_start = p_start - p_next
+    dir_start = dir_start / (np.linalg.norm(dir_start) + 1e-9)
+    dir_end = p_end - p_prev
+    dir_end = dir_end / (np.linalg.norm(dir_end) + 1e-9)
+
+    extended_coords = (
+        [(p_start + dir_start * _hext).tolist()]
+        + [list(c) for c in hinge_coords]
+        + [(p_end + dir_end * _hext).tolist()]
+    )
+    cut_line = LineString(extended_coords)
 
     try:
         result = split(wing, cut_line)

@@ -76,6 +76,36 @@ from WingVeinAnalyzer.views.overlay_view import render_rainbow_overlay, render_s
 logger = logging.getLogger(__name__)
 
 
+def _trim_l1_at_subcostal(
+    l1_line: LineString,
+    subcostal: tuple[float, float],
+    dtip: tuple[float, float],
+) -> Optional[LineString]:
+    """Trim L1 so it does not extend distally past the subcostal break.
+
+    Uses DTip (distal wing tip) to determine which direction is distal,
+    then removes any portion of L1 past the subcostal break X on that side.
+    """
+    sc_x = subcostal[0]
+    coords = list(l1_line.coords)
+    if len(coords) < 2:
+        return None
+
+    # DTip is the distal end of the wing; hinge is on the opposite side
+    hinge_left = sc_x < dtip[0]
+
+    if hinge_left:
+        # Distal is right — keep coords with X <= sc_x
+        trimmed = [(x, y) for x, y in coords if x <= sc_x]
+    else:
+        # Distal is left — keep coords with X >= sc_x
+        trimmed = [(x, y) for x, y in coords if x >= sc_x]
+
+    if len(trimmed) < 2:
+        return None
+    return LineString(trimmed)
+
+
 def _load_landmarks(image_path: Path) -> Optional[dict[str, tuple[float, float]]]:
     """Load landmark points from a *_landmarks.geojson file next to the image."""
     import json
@@ -403,10 +433,12 @@ class StepRunner:
             else:
                 midline_polys = state.polygons
                 midline_bbox = state.wing_bbox
+            lp = state.landmark_points or {}
             midline = compute_wing_midline(
                 midline_polys,
                 midline_bbox,
                 wing_polygon=wing_poly,
+                dtip=lp.get("DTip"),
             )
             state.wing_midline = midline
             if midline is not None:
@@ -492,8 +524,21 @@ class StepRunner:
         return state
 
     def _step_longitudinal_viz(self, prev: StepState) -> StepState:
-        """Step 8: Visualization-only — show L1-L5 classified."""
+        """Step 8: Classify L1-L5, trim L1 to subcostal break."""
         state = self._copy_forward(prev)
+
+        # Trim L1 at the subcostal break if landmark is available
+        lp = state.landmark_points or {}
+        l1_trimmed = False
+        if "subcostal break" in lp and "DTip" in lp and state.assignments:
+            l1 = next((a for a in state.assignments if a.vein_id == "L1" and a.line), None)
+            if l1:
+                trimmed = _trim_l1_at_subcostal(l1.line, lp["subcostal break"], lp["DTip"])
+                if trimmed is not None and trimmed.length < l1.line.length:
+                    l1.line = trimmed
+                    l1.length_px = trimmed.length
+                    l1_trimmed = True
+
         has_midline = state.wing_midline is not None
         has_cv = state.vein_map and ("ACV" in state.vein_map or "PCV" in state.vein_map)
         if has_midline and has_cv:
@@ -504,7 +549,10 @@ class StepRunner:
             weights = "Y:0.40, Len:0.30, CV:0.30"
         else:
             weights = "Y:0.60, Len:0.40"
-        state.params_used = {"scoring_weights": weights}
+        state.params_used = {
+            "scoring_weights": weights,
+            "L1_trim": "at subcostal break" if l1_trimmed else "none",
+        }
         return state
 
     def _step_regions_viz(self, prev: StepState) -> StepState:
@@ -648,10 +696,17 @@ class StepRunner:
         if "subcostal break" in lp and "alula notch" in lp:
             sc = lp["subcostal break"]
             al = lp["alula notch"]
+            # Build hinge line through intermediate landmarks if available
+            hinge_pts = [sc]
+            if "L1-Rs" in lp:
+                hinge_pts.append(lp["L1-Rs"])
+            if "L4-L5" in lp:
+                hinge_pts.append(lp["L4-L5"])
+            hinge_pts.append(al)
             landmarks = HingeLandmarks(
                 subcostal_break=sc,
                 alula_notch=al,
-                hinge_line=LineString([sc, al]),
+                hinge_line=LineString(hinge_pts),
             )
             source = "landmarks file"
         else:

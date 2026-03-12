@@ -192,12 +192,14 @@ def _run_polygon_pipeline(
     )
 
     # Compute wing midline — prefer "wing" annotation polygon when available
+    landmark_points = _load_landmark_points(image_path)
     original_polys = annotations.intervein_polygons + annotations.vein_polygons
     midline = (
         compute_wing_midline(
             original_polys,
             wing_bbox,
             wing_polygon=annotations.wing_polygon,
+            dtip=landmark_points.get("DTip") if landmark_points else None,
         )
         if original_polys
         else None
@@ -356,6 +358,7 @@ def _run_polygon_pipeline(
             polygons,
             wing_bbox,
             wing_polygon=annotations.wing_polygon,
+            dtip=landmark_points.get("DTip") if landmark_points else None,
         )
 
         id_result = identify_veins_and_regions(
@@ -439,10 +442,16 @@ def _run_polygon_pipeline(
     if landmark_points and "subcostal break" in landmark_points and "alula notch" in landmark_points:
         sc = landmark_points["subcostal break"]
         al = landmark_points["alula notch"]
+        hinge_pts = [sc]
+        if "L1-Rs" in landmark_points:
+            hinge_pts.append(landmark_points["L1-Rs"])
+        if "L4-L5" in landmark_points:
+            hinge_pts.append(landmark_points["L4-L5"])
+        hinge_pts.append(al)
         landmarks = HingeLandmarks(
             subcostal_break=sc,
             alula_notch=al,
-            hinge_line=LineString([sc, al]),
+            hinge_line=LineString(hinge_pts),
         )
     else:
         landmarks = detect_hinge_landmarks(outline, polygons, poly_names)
