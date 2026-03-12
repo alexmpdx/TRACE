@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -441,20 +442,34 @@ class HeatmapPanel(QScrollArea):
 # Training support: stdout capture, worker thread, log dialog
 # ---------------------------------------------------------------------------
 class _StdoutCapture(io.TextIOBase):
-    """Redirect sys.stdout writes to a Qt signal for live GUI logging."""
+    """Redirect sys.stdout writes to a Qt signal, throttled to avoid GUI flood."""
+
+    _INTERVAL = 0.15  # seconds between emissions
 
     def __init__(self, signal: pyqtSignal):
         super().__init__()
         self._signal = signal
         self._original = sys.stdout
+        self._buffer: list[str] = []
+        self._last_emit = 0.0
 
     def write(self, text: str) -> int:
-        if text and text.strip():
-            self._signal.emit(text)
-        return len(text) if text else 0
+        if not text:
+            return 0
+        if text.strip():
+            self._buffer.append(text)
+        now = time.monotonic()
+        if now - self._last_emit >= self._INTERVAL and self._buffer:
+            self._signal.emit("\n".join(self._buffer))
+            self._buffer.clear()
+            self._last_emit = now
+        return len(text)
 
     def flush(self) -> None:
-        pass
+        if self._buffer:
+            self._signal.emit("\n".join(self._buffer))
+            self._buffer.clear()
+            self._last_emit = time.monotonic()
 
 
 class TrainingThread(QThread):
@@ -530,6 +545,7 @@ class TrainingThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
         finally:
+            capture.flush()
             sys.stdout = old_stdout
 
 
@@ -551,6 +567,8 @@ class TrainingDialog(QDialog):
         self._series: dict[str, list[float]] = {name: [] for name in self._landmark_order}
         self._mean_series: list[float] = []
         self._lines: dict[str, object] = {}
+        self._last_chart_draw = 0.0
+        self._chart_dirty = False
 
         # Matplotlib chart with navigation toolbar for pan/zoom
         self._fig = Figure(figsize=(7, 3), facecolor="#1e1e1e")
@@ -603,7 +621,7 @@ class TrainingDialog(QDialog):
         self._canvas.mpl_connect("button_press_event", lambda e: setattr(self, "_user_zoomed", True))
 
     def update_chart(self, data: dict) -> None:
-        """Add one epoch's data and redraw the chart."""
+        """Add one epoch's data and redraw the chart (throttled to ~2 Hz)."""
         epoch = data["epoch"]
         self._epochs.append(epoch)
         self._mean_series.append(data["mean_error"])
@@ -625,7 +643,14 @@ class TrainingDialog(QDialog):
                 ymax = max(all_vals) * 1.1
                 self._ax.set_ylim(0, max(ymax, 1))
 
-        self._canvas.draw_idle()
+        # Throttle redraws — matplotlib canvas draws are expensive
+        now = time.monotonic()
+        if now - self._last_chart_draw >= 0.5:
+            self._canvas.draw_idle()
+            self._last_chart_draw = now
+            self._chart_dirty = False
+        else:
+            self._chart_dirty = True
 
     def append_log(self, text: str) -> None:
         """Append a line to the log view."""
@@ -634,6 +659,9 @@ class TrainingDialog(QDialog):
 
     def enable_close(self) -> None:
         """Enable the close button after training completes."""
+        if self._chart_dirty:
+            self._canvas.draw_idle()
+            self._chart_dirty = False
         self._close_btn.setEnabled(True)
 
 
