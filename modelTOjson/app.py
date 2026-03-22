@@ -195,6 +195,11 @@ def _build_smp_model(arch: dict, num_classes: int) -> nn.Module:
     backbone = arch.get("backbone", "resnet34")
     in_channels = int(arch.get("input_channels", 3))
 
+    # When context_scale > 1, model has 2x channels (detail + context)
+    context_scale = int(arch.get("context_scale", 1))
+    if context_scale > 1:
+        in_channels = in_channels * 2
+
     # Build kwargs — not all SMP architectures accept the same params
     kwargs = dict(
         encoder_name=backbone,
@@ -469,7 +474,7 @@ def run_inference(model, image: np.ndarray, metadata: dict, device: torch.device
     arch = metadata["architecture"]
     tile_size = int(arch["input_width"])  # 512
     downsample = int(arch["downsample"])  # 2
-    norm_stats = metadata["normalization_stats"]
+    context_scale = int(arch.get("context_scale", 1))
     num_classes = len(metadata["classes"])
 
     h_orig, w_orig = image.shape[:2]
@@ -482,6 +487,19 @@ def run_inference(model, image: np.ndarray, metadata: dict, device: torch.device
     else:
         h_ds, w_ds = h_orig, w_orig
         img_ds = image
+
+    # Normalization stats: prefer saved per-channel training stats, fall
+    # back to estimating per-channel percentiles from the image
+    norm_stats = metadata.get("normalization_stats")
+    if norm_stats is None:
+        input_cfg = metadata.get("input_config", {}).get("normalization", {})
+        clip_pct = input_cfg.get("clip_percentile", 99.0)
+        num_ch = img_ds.shape[2]
+        norm_stats = [
+            {"p1": float(np.percentile(img_ds[..., c], 100 - clip_pct)),
+             "p99": float(np.percentile(img_ds[..., c], clip_pct))}
+            for c in range(num_ch)
+        ]
 
     # Center-crop tiling: each tile is tile_size, but we only keep the
     # center (stride x stride) region. The padding on each side provides
@@ -543,7 +561,49 @@ def run_inference(model, image: np.ndarray, metadata: dict, device: torch.device
                         tile, ((0, extra_h), (0, extra_w), (0, 0)), mode="reflect"
                     )
 
-                tensor = preprocess_tile(tile, norm_stats).unsqueeze(0).to(device)
+                # Multi-scale context: read a context_scale-times-larger region
+                # centered on this tile, downsample to tile_size, and concatenate
+                # as extra channels (detail + context interleaved per pixel)
+                if context_scale > 1:
+                    ctx_half_w = (tile_size * context_scale) // 2
+                    ctx_half_h = (tile_size * context_scale) // 2
+                    tile_center_y = in_y0 + tile_size // 2
+                    tile_center_x = in_x0 + tile_size // 2
+
+                    ctx_y0 = tile_center_y - ctx_half_h
+                    ctx_x0 = tile_center_x - ctx_half_w
+                    ctx_y1 = ctx_y0 + tile_size * context_scale
+                    ctx_x1 = ctx_x0 + tile_size * context_scale
+
+                    # Clamp to image bounds
+                    if ctx_y0 < 0:
+                        ctx_y0 = 0
+                        ctx_y1 = min(tile_size * context_scale, h_ds)
+                    if ctx_x0 < 0:
+                        ctx_x0 = 0
+                        ctx_x1 = min(tile_size * context_scale, w_ds)
+                    if ctx_y1 > h_ds:
+                        ctx_y1 = h_ds
+                        ctx_y0 = max(0, ctx_y1 - tile_size * context_scale)
+                    if ctx_x1 > w_ds:
+                        ctx_x1 = w_ds
+                        ctx_x0 = max(0, ctx_x1 - tile_size * context_scale)
+
+                    ctx_region = img_ds[ctx_y0:ctx_y1, ctx_x0:ctx_x1]
+                    # Downsample context region to tile_size
+                    ctx_tile = np.array(
+                        Image.fromarray(ctx_region).resize(
+                            (tile_size, tile_size), Image.BILINEAR
+                        )
+                    )
+                    # Concatenate detail + context channels (axis=-1)
+                    tile = np.concatenate([tile, ctx_tile], axis=-1)
+                    # Double the norm_stats for context channels (same normalization)
+                    tile_norm = norm_stats + norm_stats
+                else:
+                    tile_norm = norm_stats
+
+                tensor = preprocess_tile(tile, tile_norm).unsqueeze(0).to(device)
                 output = model(tensor)  # (1, C, H, W)
                 if not isinstance(output, torch.Tensor):
                     output = torch.from_numpy(np.asarray(output))
