@@ -1,0 +1,12 @@
+torch
+torchvision
+segmentation-models-pytorch
+PyQt5
+numpy
+Pillow
+tifffile
+shapely
+geojson
+rasterio
+scipy
+onnxruntime
