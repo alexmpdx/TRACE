@@ -417,6 +417,27 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    from PyQt5.QtGui import QPalette, QColor
+    from PyQt5.QtCore import Qt
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(45, 45, 45))
+    palette.setColor(QPalette.WindowText, QColor(208, 208, 208))
+    palette.setColor(QPalette.Base, QColor(30, 30, 30))
+    palette.setColor(QPalette.AlternateBase, QColor(45, 45, 45))
+    palette.setColor(QPalette.ToolTipBase, QColor(45, 45, 45))
+    palette.setColor(QPalette.ToolTipText, QColor(208, 208, 208))
+    palette.setColor(QPalette.Text, QColor(208, 208, 208))
+    palette.setColor(QPalette.Button, QColor(55, 55, 55))
+    palette.setColor(QPalette.ButtonText, QColor(208, 208, 208))
+    palette.setColor(QPalette.BrightText, QColor(255, 51, 51))
+    palette.setColor(QPalette.Link, QColor(66, 133, 244))
+    palette.setColor(QPalette.Highlight, QColor(66, 133, 244))
+    palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor(128, 128, 128))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(128, 128, 128))
+    app.setPalette(palette)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
