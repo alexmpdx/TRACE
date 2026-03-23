@@ -46,7 +46,6 @@ def render_skeleton_overlay(
     assignments: list[VeinAssignment],
     outline_polygon: Polygon | None = None,
     output_path: Path | None = None,
-    midline: LineString | None = None,
 ) -> np.ndarray:
     """Draw color-coded vein LineStrings on the original image with legend."""
     overlay = image.copy()
@@ -62,19 +61,6 @@ def render_skeleton_overlay(
             thickness=OUTLINE_THICKNESS,
             lineType=cv2.LINE_AA,
         )
-
-    # Draw midline behind veins (thin gray anti-aliased line)
-    if midline is not None and not midline.is_empty:
-        mid_pts = np.array(midline.coords, dtype=np.int32)
-        if len(mid_pts) >= 2:
-            cv2.polylines(
-                overlay,
-                [mid_pts],
-                isClosed=False,
-                color=(160, 160, 160),
-                thickness=2,
-                lineType=cv2.LINE_AA,
-            )
 
     # Draw each vein in its assigned color
     legend_entries: list[tuple[tuple[int, int, int], str]] = []

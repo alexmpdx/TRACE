@@ -33,7 +33,6 @@ from WingVeinAnalyzer.models.vein_identifier import (
 from WingVeinAnalyzer.models.vein_labeler import (
     VeinAssignment,
     VeinStatus,
-    _extract_costa,
 )
 from WingVeinAnalyzer.models.vein_map import (
     BRIDGE_THRESHOLD_UM,
@@ -42,8 +41,6 @@ from WingVeinAnalyzer.models.vein_map import (
     COMPARTMENT_EXTENSION_UM,
     COMPARTMENT_SIMPLIFY_UM,
     CV_NORM_DIST_UM,
-    MIDLINE_SIGMA_UM,
-    MIDLINE_SPACING_UM,
     MIN_PATH_LENGTH_UM,
     MIN_SEGMENT_LENGTH_UM,
     MIN_SPLIT_LENGTH_UM,
@@ -60,11 +57,9 @@ from WingVeinAnalyzer.models.vein_skeleton import (
 )
 from WingVeinAnalyzer.models.wing_geometry import (
     HingeLandmarks,
-    WingMidline,
     WingOutline,
     build_wing_outline,
     compute_compartments,
-    compute_wing_midline,
     detect_hinge_landmarks,
     partition_by_vein_extension,
     partition_intervein_spaces,
@@ -145,10 +140,7 @@ class StepState:
     original_polygons: Optional[list[Polygon]] = None
     landmark_points: Optional[dict[str, tuple[float, float]]] = None
 
-    # Wing midline (from step 1)
-    wing_midline: Optional[WingMidline] = None
-
-    # Voronoi (from step 2)
+    # Voronoi (from step 1)
     vein_mask: Optional[np.ndarray] = None
     nearest_labels: Optional[np.ndarray] = None
     centerlines: Optional[dict[tuple[int, int], LineString]] = None
@@ -285,24 +277,22 @@ class StepRunner:
         """Dispatch to the appropriate step handler."""
         handlers = {
             0: self._step_load,
-            1: self._step_midline,
-            2: self._step_voronoi,
-            3: self._step_hull_seeds,
-            4: self._step_centerlines,
-            5: self._step_identify,
-            6: self._step_merge_viz,
-            7: self._step_split_viz,
-            8: self._step_longitudinal_viz,
-            9: self._step_crossvein_viz,
-            10: self._step_regions_viz,
-            11: self._step_poly_split_viz,
-            12: self._step_validate_viz,
-            13: self._step_costa,
-            14: self._step_outline,
-            15: self._step_hinge,
-            16: self._step_compartments,
-            17: self._step_measurements,
-            18: self._step_overlays,
+            1: self._step_voronoi,
+            2: self._step_hull_seeds,
+            3: self._step_centerlines,
+            4: self._step_identify,
+            5: self._step_merge_viz,
+            6: self._step_split_viz,
+            7: self._step_longitudinal_viz,
+            8: self._step_crossvein_viz,
+            9: self._step_regions_viz,
+            10: self._step_poly_split_viz,
+            11: self._step_validate_viz,
+            12: self._step_outline,
+            13: self._step_hinge,
+            14: self._step_compartments,
+            15: self._step_measurements,
+            16: self._step_overlays,
         }
         handler = handlers.get(index)
         if handler is None:
@@ -412,48 +402,6 @@ class StepRunner:
         }
         return state
 
-    def _step_midline(self, prev: StepState) -> StepState:
-        """Step 1: Compute the wing midline for crossvein-independent identification."""
-        state = self._copy_forward(prev)
-
-        if state.polygons and state.wing_bbox:
-            # Prefer "wing" annotation polygon for midline shape
-            wing_poly = state.annotations.wing_polygon if state.annotations else None
-
-            # Use original annotation polygons + bbox for midline (not hull-derived Voronoi)
-            if state.annotations and state.annotations.intervein_polygons:
-                midline_polys = list(state.annotations.intervein_polygons) + list(state.annotations.vein_polygons)
-                ann_bounds = [p.bounds for p in midline_polys]
-                midline_bbox = (
-                    min(b[0] for b in ann_bounds),
-                    min(b[1] for b in ann_bounds),
-                    max(b[2] for b in ann_bounds),
-                    max(b[3] for b in ann_bounds),
-                )
-            else:
-                midline_polys = state.polygons
-                midline_bbox = state.wing_bbox
-            lp = state.landmark_points or {}
-            midline = compute_wing_midline(
-                midline_polys,
-                midline_bbox,
-                wing_polygon=wing_poly,
-                dtip=lp.get("DTip"),
-            )
-            state.wing_midline = midline
-            if midline is not None:
-                state.params_used = {
-                    "sample_spacing": f"{um_to_px(MIDLINE_SPACING_UM):.0f} px ({MIDLINE_SPACING_UM} µm)",
-                    "smooth_sigma": f"{um_to_px(MIDLINE_SIGMA_UM):.0f} px ({MIDLINE_SIGMA_UM} µm)",
-                    "num_samples": str(len(midline.line.coords)),
-                }
-            else:
-                state.params_used = {"status": "Failed (too few samples)"}
-        else:
-            state.params_used = {"status": "Skipped (no polygons)"}
-
-        return state
-
     def _step_identify(self, prev: StepState) -> StepState:
         """Step 5: Run full identify_veins_and_regions() and cache result."""
         state = self._copy_forward(prev)
@@ -462,14 +410,15 @@ class StepRunner:
             logger.warning("No centerlines — skipping identification")
             return state
 
+        lp = state.landmark_points or {}
         id_result = identify_veins_and_regions(
             state.centerlines,
             state.polygons,
             state.vein_polygons or [],
             state.image.shape[:2],
             state.wing_bbox,
-            midline=state.wing_midline,
             original_polygons=list(state.original_polygons) if state.original_polygons else None,
+            dtip=lp.get("DTip"),
         )
         state.id_result = id_result
         state.assignments = list(id_result.assignments)
@@ -539,13 +488,8 @@ class StepRunner:
                     l1.length_px = trimmed.length
                     l1_trimmed = True
 
-        has_midline = state.wing_midline is not None
         has_cv = state.vein_map and ("ACV" in state.vein_map or "PCV" in state.vein_map)
-        if has_midline and has_cv:
-            weights = "Y:0.30, Len:0.25, CV:0.20, Mid:0.25"
-        elif has_midline:
-            weights = "Y:0.30, Len:0.25, Mid:0.45"
-        elif has_cv:
+        if has_cv:
             weights = "Y:0.40, Len:0.30, CV:0.30"
         else:
             weights = "Y:0.60, Len:0.40"
@@ -627,49 +571,6 @@ class StepRunner:
         if state.id_result and state.id_result.validation_report:
             warnings = state.id_result.validation_report.warnings
         state.params_used = {"num_warnings": str(len(warnings))}
-        return state
-
-    def _step_costa(self, prev: StepState) -> StepState:
-        """Step 13: Extract costa."""
-        state = self._copy_forward(prev)
-
-        has_costal = "costal_cell" in (state.poly_names or {}).values()
-        if has_costal and state.polygons and state.poly_names:
-            costa_line = _extract_costa(state.polygons, state.poly_names, state.wing_bbox)
-            if costa_line:
-                state.assignments.append(
-                    VeinAssignment(
-                        vein_id="costa",
-                        status=VeinStatus.COMPLETE,
-                        edge_ids=[],
-                        confidence=0.9,
-                        evidence=["anterior_margin"],
-                        length_px=costa_line.length,
-                        line=costa_line,
-                        endpoints=[
-                            list(costa_line.coords)[0],
-                            list(costa_line.coords)[-1],
-                        ],
-                    )
-                )
-                state.params_used = {"status": "Extracted", "length": f"{costa_line.length:.0f} px"}
-            else:
-                state.params_used = {"status": "Failed to extract"}
-        else:
-            state.assignments.append(
-                VeinAssignment(
-                    vein_id="costa",
-                    status=VeinStatus.ABSENT,
-                    edge_ids=[],
-                    confidence=0.0,
-                    evidence=["no_costal_region"],
-                )
-            )
-            state.params_used = {"status": "Absent (no costal region)"}
-
-        # Apply scale calibration
-        compile_results(state.assignments, self._um_per_px or None)
-
         return state
 
     def _step_outline(self, prev: StepState) -> StepState:
@@ -814,7 +715,6 @@ class StepRunner:
             state.image,
             smoothed_assignments,
             outline_polygon=outline_poly,
-            midline=state.wing_midline.line if state.wing_midline else None,
         )
 
         # Smooth region boundaries for display
@@ -859,7 +759,6 @@ class StepRunner:
         state.bridge_segments = prev.bridge_segments
         state.hull_mask = prev.hull_mask
         state.seed_labels = prev.seed_labels
-        state.wing_midline = prev.wing_midline
         state.id_result = prev.id_result
         state.junctions = prev.junctions
         state.merged_paths = prev.merged_paths

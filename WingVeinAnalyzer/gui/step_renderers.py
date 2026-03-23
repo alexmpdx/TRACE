@@ -40,24 +40,22 @@ def render_step(
     """
     renderers = {
         0: _render_load,
-        1: _render_midline,
-        2: _render_voronoi,
-        3: _render_hull_seeds,
-        4: _render_centerlines,
-        5: _render_junctions,
-        6: _render_merge,
-        7: _render_split,
-        8: _render_longitudinals,
-        9: _render_crossveins,
-        10: _render_regions,
-        11: _render_poly_split,
-        12: _render_validation,
-        13: _render_costa,
-        14: _render_outline,
-        15: _render_hinge,
-        16: _render_compartments,
-        17: _render_measurements,
-        18: _render_overlays,
+        1: _render_voronoi,
+        2: _render_hull_seeds,
+        3: _render_centerlines,
+        4: _render_junctions,
+        5: _render_merge,
+        6: _render_split,
+        7: _render_longitudinals,
+        8: _render_crossveins,
+        9: _render_regions,
+        10: _render_poly_split,
+        11: _render_validation,
+        12: _render_outline,
+        13: _render_hinge,
+        14: _render_compartments,
+        15: _render_measurements,
+        16: _render_overlays,
     }
     renderer = renderers.get(step_index)
     if renderer is None:
@@ -234,58 +232,6 @@ def _render_centerlines(state: StepState, prev: Optional[StepState]) -> tuple[np
                 2,
                 cv2.LINE_AA,
             )
-
-    return left, right
-
-
-def _render_midline(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 1: Annotation polygons → polygons + wing midline."""
-    # Left: image + polygon outlines (annotation footprint)
-    left = state.image.copy()
-    polys = state.polygons or []
-    for i, poly in enumerate(polys):
-        color = SEGMENT_COLORS[i % len(SEGMENT_COLORS)]
-        _draw_polygon_outline(left, poly, color, thickness=2)
-
-    # Right: polygon outlines + midline
-    right = left.copy()
-    if state.wing_midline is not None:
-        pts = np.array(state.wing_midline.line.coords, dtype=np.int32)
-        if len(pts) >= 2:
-            cv2.polylines(
-                right,
-                [pts],
-                isClosed=False,
-                color=(255, 255, 255),
-                thickness=3,
-                lineType=cv2.LINE_AA,
-            )
-            # Label
-            mid_idx = len(pts) // 2
-            cv2.putText(
-                right,
-                "midline",
-                (int(pts[mid_idx, 0]) - 40, int(pts[mid_idx, 1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            # Draw 3/4-span reference point
-            if state.wing_midline.ref_point is not None:
-                rx, ry = state.wing_midline.ref_point
-                cv2.circle(right, (int(rx), int(ry)), 10, (0, 0, 255), -1, cv2.LINE_AA)
-                cv2.putText(
-                    right,
-                    "ref 3/4",
-                    (int(rx) + 14, int(ry) + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
 
     return left, right
 
@@ -660,56 +606,6 @@ def _render_validation(state: StepState, prev: Optional[StepState]) -> tuple[np.
             2,
             cv2.LINE_AA,
         )
-
-    return left, right
-
-
-def _render_costa(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 14: Marginal cell → costa LineString."""
-    # Left: marginal cell highlighted
-    left = state.image.copy()
-    if state.poly_names and state.polygons:
-        for idx, name in state.poly_names.items():
-            if name == "marginal_cell" and idx < len(state.polygons):
-                poly = state.polygons[idx]
-                color = INTERVEIN_COLORS.get("marginal_cell", (180, 180, 180))
-                _fill_polygon_alpha(left, poly, color, alpha=0.4)
-                _draw_polygon_outline(left, poly, color, thickness=3)
-
-    # Right: costa drawn
-    right = state.image.copy()
-    if state.assignments:
-        costa = next((a for a in state.assignments if a.vein_id == "costa"), None)
-        if costa and costa.line is not None:
-            _draw_linestring(
-                right,
-                costa.line,
-                VEIN_COLORS.get("costa", (130, 100, 40)),
-                thickness=5,
-            )
-            coords = list(costa.line.coords)
-            mid = coords[len(coords) // 2]
-            cv2.putText(
-                right,
-                f"costa ({costa.length_px:.0f}px)",
-                (int(mid[0]) - 40, int(mid[1]) - 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                VEIN_COLORS.get("costa", (130, 100, 40)),
-                2,
-                cv2.LINE_AA,
-            )
-        else:
-            cv2.putText(
-                right,
-                "Costa: ABSENT",
-                (30, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 0, 200),
-                2,
-                cv2.LINE_AA,
-            )
 
     return left, right
 

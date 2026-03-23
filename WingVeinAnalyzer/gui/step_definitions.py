@@ -53,38 +53,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 1: Wing Midline
+    # 1: Rasterize & Voronoi
     StepDef(
         index=1,
-        name="Compute Wing Midline",
-        short_name="Midline",
-        description=(
-            "Compute the anterior-posterior midline from the original annotation polygons "
-            "and bounding box (before any hull/Voronoi processing). For each X position "
-            "across the wing, a vertical cross-section through the buffered polygon union "
-            "determines the wing's Y extent. The midpoint of each cross-section defines "
-            "the midline Y. Gaussian smoothing (sigma=30px) produces a clean curve. "
-            "The midline anchors L3/L4 identification independent of crossveins."
-        ),
-        pseudocode=(
-            "annotation_polys = intervein_polygons + vein_polygons\n"
-            "annotation_bbox = bounding_box(annotation_polys)\n"
-            "wing_shape = unary_union([p.buffer(20) for p in annotation_polys])\n"
-            "for x in range(min_x, max_x, 2.4µm):\n"
-            "  slice = wing_shape ∩ vertical_line(x)\n"
-            "  midline_y[x] = (slice.min_y + slice.max_y) / 2\n"
-            "  half_height[x] = (slice.max_y - slice.min_y) / 2\n"
-            "midline = smooth(midline_y, sigma=14.5µm)"
-        ),
-        params=[
-            StepParam("sample_spacing", "2.4 µm", "Horizontal sampling interval"),
-            StepParam("smooth_sigma", "14.5 µm", "Gaussian smoothing sigma"),
-        ],
-        runs_computation=True,
-    ),
-    # 2: Rasterize & Voronoi
-    StepDef(
-        index=2,
         name="Rasterize & Hull-Seeded Voronoi",
         short_name="Voronoi",
         description=(
@@ -114,9 +85,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 3: Hull Seeds
+    # 2: Hull Seeds
     StepDef(
-        index=3,
+        index=2,
         name="Hull Seed Visualization",
         short_name="Hull Seeds",
         description=(
@@ -139,9 +110,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=False,  # visualization of step 2 data
     ),
-    # 4: Centerline Extraction
+    # 3: Centerline Extraction
     StepDef(
-        index=4,
+        index=3,
         name="Centerline Extraction",
         short_name="Centerlines",
         description=(
@@ -164,9 +135,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 2
     ),
-    # 5: Identify Veins & Regions
+    # 4: Identify Veins & Regions
     StepDef(
-        index=5,
+        index=4,
         name="Identify Veins & Regions",
         short_name="Identify",
         description=(
@@ -181,7 +152,7 @@ STEP_DEFS: list[StepDef] = [
             "junctions = find_triple_junctions(centerlines, snap=14.5µm)\n"
             "merged = merge_segments_at_junctions(centerlines, junctions)\n"
             "split = split_sharp_turns(merged, angle=70°)\n"
-            "longitudinals = assign_longitudinals(split, midline)\n"
+            "longitudinals = assign_longitudinals(split, dtip)\n"
             "crossveins = classify_crossveins_from_longitudinals(split)\n"
             "poly_veins = build_poly_veins_spatial(original_polygons, vein_map)\n"
             "poly_names = name_regions_from_veins(original_polygons, vein_map, poly_veins)\n"
@@ -193,9 +164,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,  # runs identify_veins_and_regions() (full)
     ),
-    # 6: Merge Segments
+    # 5: Merge Segments
     StepDef(
-        index=6,
+        index=5,
         name="Merge Segments at Junctions",
         short_name="Merge",
         description=(
@@ -220,9 +191,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 5
     ),
-    # 7: Split Sharp Turns
+    # 6: Split Sharp Turns
     StepDef(
-        index=7,
+        index=6,
         name="Split at Sharp Turns",
         short_name="Split",
         description=(
@@ -248,20 +219,20 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 5
     ),
-    # 8: Classify Longitudinals
+    # 7: Classify Longitudinals
     StepDef(
-        index=8,
+        index=7,
         name="Classify Longitudinals",
         short_name="Longitudinals",
         description=(
             "Assign L1-L5 identities to the remaining paths after L3/L4 anchoring. "
-            "L2 is the longest anterior vein above L3, L1 is the most anterior short vein "
-            "above L2, and L5 is the longest posterior vein below L4. When no midline is "
-            "available, falls back to combinatorial scoring over all permutations using "
-            "Y-position, length, and midline distance."
+            "L3 is anchored via the DTip landmark (where L3 meets the distal wing tip). "
+            "L4 is the next posterior vein. L2 is the longest anterior vein above L3, "
+            "L1 is the most anterior short vein above L2, and L5 is the longest posterior "
+            "vein below L4."
         ),
         pseudocode=(
-            "# L3/L4 already anchored from midline\n"
+            "# L3 anchored from DTip landmark\n"
             "anterior = [p for p in remaining if p.y < L3.y]\n"
             "posterior = [p for p in remaining if p.y > L4.y]\n"
             "L2 = longest(anterior)\n"
@@ -271,13 +242,13 @@ STEP_DEFS: list[StepDef] = [
         params=[
             StepParam("y_position_weight", "0.30", "Weight for Y-position scoring"),
             StepParam("length_weight", "0.25", "Weight for length prior match"),
-            StepParam("midline_weight", "0.25", "Weight for midline distance scoring"),
+            StepParam("anchor", "DTip", "L3 anchored by DTip landmark proximity"),
         ],
         runs_computation=False,  # cached from step 5
     ),
-    # 9: Classify Crossveins
+    # 8: Classify Crossveins
     StepDef(
-        index=9,
+        index=8,
         name="Classify Crossveins",
         short_name="Crossveins",
         description=(
@@ -301,9 +272,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 5
     ),
-    # 10: Name Regions
+    # 9: Name Regions
     StepDef(
-        index=10,
+        index=9,
         name="Name Regions from Veins",
         short_name="Regions",
         description=(
@@ -328,9 +299,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 5
     ),
-    # 11: Vein-Extension Clipping
+    # 10: Vein-Extension Clipping
     StepDef(
-        index=11,
+        index=10,
         name="Vein-Extension Clipping",
         short_name="Vein Clip",
         description=(
@@ -352,9 +323,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 12: Cross-Validation
+    # 11: Cross-Validation
     StepDef(
-        index=12,
+        index=11,
         name="Cross-Validation",
         short_name="Validate",
         description=(
@@ -376,29 +347,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=False,  # cached from step 5
     ),
-    # 13: Costa Extraction
+    # 12: Wing Outline
     StepDef(
-        index=13,
-        name="Costa Extraction",
-        short_name="Costa",
-        description=(
-            "Extract the costa (leading edge vein) as the anterior margin of the marginal "
-            "cell polygon. The costa runs along the wing's anterior edge from the hinge "
-            "region to where L1 meets the margin. Marks costa ABSENT when no costal "
-            "region exists."
-        ),
-        pseudocode=(
-            "if not costal_cell in poly_names: mark costa ABSENT\n"
-            "marginal_poly = polygons[marginal_cell_idx]\n"
-            "costa_line = anterior_margin(marginal_poly)\n"
-            "assignments.append(costa assignment)"
-        ),
-        params=[],
-        runs_computation=True,
-    ),
-    # 14: Wing Outline
-    StepDef(
-        index=14,
+        index=12,
         name="Build Wing Outline",
         short_name="Outline",
         description=(
@@ -419,9 +370,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 15: Hinge Detection & Removal
+    # 13: Hinge Detection & Removal
     StepDef(
-        index=15,
+        index=13,
         name="Hinge Detection & Removal",
         short_name="Hinge",
         description=(
@@ -444,9 +395,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 16: Compartments
+    # 14: Compartments
     StepDef(
-        index=16,
+        index=14,
         name="Compute Compartments",
         short_name="Compartments",
         description=(
@@ -468,9 +419,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 17: Measurements
+    # 15: Measurements
     StepDef(
-        index=17,
+        index=15,
         name="Compute Measurements",
         short_name="Measurements",
         description=(
@@ -491,9 +442,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 18: Final Overlays
+    # 16: Final Overlays
     StepDef(
-        index=18,
+        index=16,
         name="Final Overlays",
         short_name="Overlays",
         description=(

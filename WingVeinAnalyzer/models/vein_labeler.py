@@ -108,7 +108,8 @@ def assign_veins_from_polygons(
             continue
 
         total_length = sum(e.length_px for e in vein_edges)
-        combined_line = _merge_vein_lines(vein_lines)
+        merged = _merge_vein_lines(vein_lines)
+        combined_line = merged[0] if merged else None
         endpoints = None
         if combined_line:
             coords = list(combined_line.coords)
@@ -352,19 +353,29 @@ def _assign_fallback(
     return names
 
 
-def _merge_vein_lines(lines: list[LineString]) -> Optional[LineString]:
-    """Merge multiple vein line segments into a single continuous LineString."""
+def _merge_vein_lines(
+    lines: list[LineString],
+    max_gap: float = float("inf"),
+) -> list[LineString]:
+    """Merge multiple vein line segments into continuous LineStrings.
+
+    Chains segments by spatial proximity. When the nearest unchained
+    segment is farther than *max_gap*, the current chain is finalized
+    and a new chain starts from the nearest unused segment. Returns
+    one LineString per connected chain.
+    """
     if not lines:
-        return None
+        return []
     if len(lines) == 1:
-        return lines[0]
+        return list(lines)
 
-    # Try shapely linemerge first
-    from shapely.ops import linemerge
+    # Try shapely linemerge first (only works when endpoints match exactly)
+    if max_gap == float("inf"):
+        from shapely.ops import linemerge
 
-    merged = linemerge(lines)
-    if isinstance(merged, LineString):
-        return merged
+        merged = linemerge(lines)
+        if isinstance(merged, LineString):
+            return [merged]
 
     # Manual merge: chain segments by spatial proximity with correct orientation
     segments = list(lines)
@@ -399,6 +410,7 @@ def _merge_vein_lines(lines: list[LineString]) -> Optional[LineString]:
         first_coords = first_coords[::-1]
     chain = first_coords
     used = {start_seg_idx}
+    result_chains: list[LineString] = []
 
     # Chain remaining segments by nearest endpoint to chain end
     for _ in range(len(segments) - 1):
@@ -425,6 +437,18 @@ def _merge_vein_lines(lines: list[LineString]) -> Optional[LineString]:
         if best_idx < 0:
             break
 
+        if best_dist > max_gap:
+            # Gap too large — finalize current chain, start a new one
+            if len(chain) >= 2:
+                result_chains.append(LineString(chain))
+            # Start new chain from the nearest unused segment
+            seg_coords = list(segments[best_idx].coords)
+            if reverse:
+                seg_coords = seg_coords[::-1]
+            chain = seg_coords
+            used.add(best_idx)
+            continue
+
         used.add(best_idx)
         seg_coords = list(segments[best_idx].coords)
         if reverse:
@@ -433,29 +457,11 @@ def _merge_vein_lines(lines: list[LineString]) -> Optional[LineString]:
         # Append without duplicating the junction point
         chain.extend(seg_coords[1:])
 
-    if len(chain) < 2:
-        return None
+    # Finalize last chain
+    if len(chain) >= 2:
+        result_chains.append(LineString(chain))
 
-    result = LineString(chain)
-
-    # Post-merge validation: warn about large jumps
-    coords = list(result.coords)
-    import logging
-
-    logger = logging.getLogger(__name__)
-    for i in range(1, len(coords)):
-        dx = coords[i][0] - coords[i - 1][0]
-        dy = coords[i][1] - coords[i - 1][1]
-        jump = (dx * dx + dy * dy) ** 0.5
-        if jump > 500:
-            logger.warning(
-                "Large jump %.0fpx between points %d and %d in merged vein",
-                jump,
-                i - 1,
-                i,
-            )
-
-    return result
+    return result_chains
 
 
 def _extract_costa(

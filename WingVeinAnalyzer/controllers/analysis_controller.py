@@ -52,7 +52,6 @@ from WingVeinAnalyzer.models.wing_geometry import (
     WingOutline,
     build_wing_outline,
     compute_compartments,
-    compute_wing_midline,
     detect_hinge_landmarks,
     partition_by_vein_extension,
     partition_intervein_spaces,
@@ -191,19 +190,7 @@ def _run_polygon_pipeline(
         max(b[3] for b in all_bounds),
     )
 
-    # Compute wing midline — prefer "wing" annotation polygon when available
     landmark_points = _load_landmark_points(image_path)
-    original_polys = annotations.intervein_polygons + annotations.vein_polygons
-    midline = (
-        compute_wing_midline(
-            original_polys,
-            wing_bbox,
-            wing_polygon=annotations.wing_polygon,
-            dtip=landmark_points.get("DTip") if landmark_points else None,
-        )
-        if original_polys
-        else None
-    )
 
     # Initialize variables shared across both pipeline paths
     hull_mask = None
@@ -246,8 +233,8 @@ def _run_polygon_pipeline(
             annotations.vein_polygons,
             image.shape[:2],
             wing_bbox,
-            midline=midline,
             original_polygons=list(annotations.intervein_polygons),
+            dtip=landmark_points.get("DTip") if landmark_points else None,
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -347,19 +334,11 @@ def _run_polygon_pipeline(
             output_dir,
         )
     else:
-        # --- Fallback: midline-only path (also uses new identifier) ---
-        logger.info("Using midline-only fallback pipeline")
+        # --- Fallback: polygon boundary path (no vein mask) ---
+        logger.info("Using polygon boundary fallback pipeline")
 
         graph, edges = build_graph_from_polygons(polygons, max_gap=max_gap)
         centerlines = {e.poly_pair: e.line for e in edges if e.poly_pair}
-
-        # Compute wing midline for crossvein-independent identification
-        midline = compute_wing_midline(
-            polygons,
-            wing_bbox,
-            wing_polygon=annotations.wing_polygon,
-            dtip=landmark_points.get("DTip") if landmark_points else None,
-        )
 
         id_result = identify_veins_and_regions(
             centerlines,
@@ -367,7 +346,7 @@ def _run_polygon_pipeline(
             [],
             image.shape[:2],
             wing_bbox,
-            midline=midline,
+            dtip=landmark_points.get("DTip") if landmark_points else None,
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -496,7 +475,6 @@ def _run_polygon_pipeline(
         assignments,
         outline_polygon=outline_smooth,
         output_path=skel_path,
-        midline=midline.line if midline else None,
     )
     result.skeleton_overlay_path = skel_path
 
@@ -527,7 +505,6 @@ def _run_polygon_pipeline(
         seed_labels_arr=seed_labels_arr if annotations.vein_polygons else None,
         vein_mask_arr=vein_mask_arr if annotations.vein_polygons else None,
         centerlines=centerlines,
-        midline=midline,
     )
 
     # Remove file handler to avoid duplicate logging in subsequent runs
@@ -1246,7 +1223,6 @@ def _write_step_summary(
     seed_labels_arr: Optional[np.ndarray] = None,
     vein_mask_arr: Optional[np.ndarray] = None,
     centerlines: Optional[dict] = None,
-    midline=None,
 ) -> None:
     """Write a step-by-step logic summary to diagnostics/pipeline_steps.txt."""
     import logging
@@ -1275,7 +1251,7 @@ def _write_step_summary(
     # Header
     lines.append("PIPELINE STEP-BY-STEP SUMMARY")
     lines.append(f"Image: {w}x{h} px")
-    lines.append(f"Pipeline: {'vein-mask-primary' if has_vein_mask else 'midline-fallback'}")
+    lines.append(f"Pipeline: {'vein-mask-primary' if has_vein_mask else 'polygon-boundary-fallback'}")
 
     # Step 0: Load Inputs
     step(0, "Load Inputs")
@@ -1284,18 +1260,7 @@ def _write_step_summary(
     for i, p in enumerate(annotations.intervein_polygons):
         lines.append(f"    P{i}: area={p.area:.0f} px², centroid=({p.centroid.x:.0f}, {p.centroid.y:.0f})")
 
-    # Step 1: Compute Wing Midline
-    step(1, "Compute Wing Midline")
-    if midline is not None:
-        lines.append(f"  Midline: {len(midline.line.coords)} samples")
-        coords = list(midline.line.coords)
-        lines.append(f"  Start: ({coords[0][0]:.0f}, {coords[0][1]:.0f})")
-        lines.append(f"  End: ({coords[-1][0]:.0f}, {coords[-1][1]:.0f})")
-        lines.append(f"  Logic: vertical cross-sections → midpoint Y → Gaussian smooth (sigma=30px)")
-    else:
-        lines.append(f"  Midline: could not compute")
-
-    # Step 2: Rasterize & Hull-Seeded Voronoi
+    # Step 1: Rasterize & Hull-Seeded Voronoi
     if has_vein_mask:
         step(2, "Rasterize & Hull-Seeded Voronoi")
 
@@ -1325,7 +1290,7 @@ def _write_step_summary(
         lines.append(f"    → boundaries within vein mask = vein centerlines")
     else:
         step(2, "Midline Boundary Extraction (fallback)")
-        lines.append(f"  No vein mask — using midline sampling between polygon boundaries")
+        lines.append(f"  No vein mask — using boundary sampling between adjacent polygons")
 
     # Steps 3-4: visualization of step 2 data
     lines.append(f"\n  [Steps 3-4: Hull Seed Visualization + Centerline Extraction — visualization of step 2 data]")
@@ -1341,7 +1306,9 @@ def _write_step_summary(
     lines.append(f"    1. Find triple junctions (3+ endpoints within 30px)")
     lines.append(f"    2. Merge collinear segments at junctions (tangent continuity)")
     lines.append(f"    3. Split merged paths at sharp turns (>70° direction change)")
-    lines.append(f"    4. Classify longitudinals: L3/L4 from midline, then L1/L2/L5 by position+length")
+    lines.append(
+        f"    4. Classify longitudinals: L3 from DTip landmark, L4 next posterior, then L1/L2/L5 by position+length"
+    )
     lines.append(f"    5. Classify crossveins: ACV near L3+L4, PCV near L4+L5")
     lines.append(f"    6. Name regions: boundary vein set → Jaccard match → area priors")
     lines.append(f"    7. Transfer names to original annotation polygons (greedy bipartite overlap)")

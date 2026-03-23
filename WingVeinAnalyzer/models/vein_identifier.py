@@ -32,8 +32,6 @@ from WingVeinAnalyzer.models.vein_map import (
     MAX_ANGLE_CHANGE_DEG,
     MAX_CROSSVEIN_DEFAULT_UM,
     MAX_CROSSVEIN_FLOOR_UM,
-    MIDLINE_PRIORS,
-    MIN_HALF_HEIGHT_UM,
     MIN_PATH_LENGTH_UM,
     MIN_POLY_AREA_UM2,
     MIN_SEGMENT_LENGTH_UM,
@@ -462,21 +460,33 @@ def merge_segments_at_junctions(
             groups[root] = []
         groups[root].append(key)
 
-    # Build MergedPath for each group
+    # Build MergedPath for each group. Use snap radius as max gap to
+    # prevent chaining segments across long distances (union-find
+    # transitivity can group segments that aren't physically adjacent).
+    max_gap = um_to_px(SNAP_RADIUS_UM)
     paths: list[MergedPath] = []
     for root, seg_keys in groups.items():
         lines = [centerlines[k] for k in seg_keys]
-        merged = _merge_vein_lines(lines)
-        if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
-            continue
-
-        paths.append(
-            MergedPath(
-                segment_keys=seg_keys,
-                line=merged,
-                length_px=merged.length,
+        merged_lines = _merge_vein_lines(lines, max_gap=max_gap)
+        for merged in merged_lines:
+            if merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
+                continue
+            # Determine which segment keys contributed to this chain
+            if len(merged_lines) == 1:
+                chain_keys = seg_keys
+            else:
+                chain_keys = [
+                    k for k in seg_keys if merged.distance(centerlines[k].interpolate(0.5, normalized=True)) < max_gap
+                ]
+                if not chain_keys:
+                    chain_keys = seg_keys[:1]
+            paths.append(
+                MergedPath(
+                    segment_keys=chain_keys,
+                    line=merged,
+                    length_px=merged.length,
+                )
             )
-        )
 
     logger.info(
         "Merged %d segments into %d paths",
@@ -697,7 +707,8 @@ def _try_split_path(
     result_paths = []
     for group in [group_a, group_b]:
         lines = [centerlines[k] for k in group if k in centerlines]
-        merged = _merge_vein_lines(lines)
+        merged_lines = _merge_vein_lines(lines)
+        merged = merged_lines[0] if merged_lines else None
         if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
             continue
         result_paths.append(
@@ -776,12 +787,12 @@ def _compute_path_features(
 def classify_merged_paths(
     paths: list[MergedPath],
     wing_bbox: tuple[float, float, float, float],
-    midline=None,
     junctions: list[JunctionPoint] | None = None,
+    dtip: tuple[float, float] | None = None,
 ) -> dict[str, MergedPath]:
     """Classify merged paths into named veins by geometry.
 
-    Assigns longitudinals FIRST (L3/L4 from midline, then L1/L2/L5),
+    Assigns longitudinals FIRST (L3/L4 from DTip, then L1/L2/L5),
     then identifies crossveins by proximity to assigned longitudinals
     (ACV between L3+L4, PCV between L4+L5).
     """
@@ -830,9 +841,9 @@ def classify_merged_paths(
 
     vein_map: dict[str, MergedPath] = {}
 
-    # Anchor L3/L4 from midline FIRST (most reliable — midline center is stable)
-    if midline is not None and len(longitudinals) >= 2:
-        l3, l4 = _anchor_l3_l4_from_midline(longitudinals, midline)
+    # Anchor L3/L4 from DTip landmark (L3 meets the distal wing tip there)
+    if dtip is not None and len(longitudinals) >= 2:
+        l3, l4 = _anchor_l3_l4_from_dtip(longitudinals, dtip)
         if l3:
             vein_map["L3"] = l3
         if l4:
@@ -850,14 +861,13 @@ def classify_merged_paths(
             del vein_map[k]
 
     # Assign remaining longitudinals (L1, L2, L5) BEFORE crossveins
-    if midline is not None and ("L3" in vein_map or "L4" in vein_map):
-        _assign_remaining_longitudinals(longitudinals, midline, vein_map)
+    if "L3" in vein_map or "L4" in vein_map:
+        _assign_remaining_from_anchors(longitudinals, vein_map)
     else:
-        # No midline or no anchors — fall back to scored assignment
+        # No anchors — fall back to scored assignment
         long_map = _assign_longitudinals_scored(
             longitudinals,
             bbox_w,
-            midline=midline,
         )
         vein_map.update(long_map)
 
@@ -867,7 +877,7 @@ def classify_merged_paths(
     _assign_crossveins_from_longitudinals(valid_crossveins, vein_map)
 
     # Final crossvein validation
-    all_longitudinals = [vein_map[k] for k in ("L1", "L2", "L3", "L4", "L5") if k in vein_map]
+    all_longitudinals = [vein_map[k] for k in ("L1", "Rs", "L2", "L3", "L4", "L5") if k in vein_map]
     _validate_crossveins(vein_map, all_longitudinals, valid_crossveins, junctions=junctions)
 
     # Post-assignment L4/L5 swap check using now-known crossveins
@@ -1061,8 +1071,8 @@ def _validate_junction_orientations(
     centerlines: dict[tuple[int, int], LineString],
     merge_decisions: dict[tuple[float, float], dict],
     wing_bbox: tuple[float, float, float, float],
-    midline=None,
     snap_radius: float | None = None,
+    dtip: tuple[float, float] | None = None,
 ) -> dict[str, MergedPath]:
     """Validate that triple junctions have correct vein topology after classification.
 
@@ -1174,7 +1184,8 @@ def _validate_junction_orientations(
         new_paths: list[MergedPath] = []
         for root, seg_keys in groups.items():
             lines = [centerlines[k] for k in seg_keys]
-            merged = _merge_vein_lines(lines)
+            merged_lines = _merge_vein_lines(lines)
+            merged = merged_lines[0] if merged_lines else None
             if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
                 continue
             new_paths.append(
@@ -1190,8 +1201,8 @@ def _validate_junction_orientations(
         new_vein_map = classify_merged_paths(
             new_paths,
             wing_bbox,
-            midline=midline,
             junctions=junctions,
+            dtip=dtip,
         )
 
         # Check if the new topology is better at this junction
@@ -1234,239 +1245,90 @@ def _path_y_at_x(path: MergedPath, target_x: float) -> float:
     return best_y
 
 
-def _mean_signed_distance_from_midline(
-    path: MergedPath,
-    midline,
-) -> float:
-    """Compute the mean signed distance of a path from the midline.
-
-    Samples the path at multiple X positions and compares each Y to the
-    midline Y at that X.  Returns mean signed distance: negative = anterior
-    (above midline), positive = posterior (below midline).
-    """
-    mid_coords = list(midline.line.coords)
-    mid_xs = np.array([c[0] for c in mid_coords])
-    mid_ys = np.array([c[1] for c in mid_coords])
-
-    path_coords = list(path.line.coords)
-    if len(path_coords) < 2:
-        center_x = (mid_xs[0] + mid_xs[-1]) / 2.0
-        return _path_y_at_x(path, center_x) - float(np.interp(center_x, mid_xs, mid_ys))
-
-    dists: list[float] = []
-    for px, py in path_coords:
-        if mid_xs[0] <= px <= mid_xs[-1]:
-            midline_y = float(np.interp(px, mid_xs, mid_ys))
-            dists.append(py - midline_y)
-
-    if not dists:
-        center_x = (mid_xs[0] + mid_xs[-1]) / 2.0
-        return _path_y_at_x(path, center_x) - float(np.interp(center_x, mid_xs, mid_ys))
-
-    return float(np.mean(dists))
-
-
-def _mean_normalized_distance_from_midline(
-    path: MergedPath,
-    midline,
-) -> float:
-    """Compute the mean normalized signed distance of a path from the midline.
-
-    Like ``_mean_signed_distance_from_midline`` but divides each sample by
-    the local half-height so the result is in [-1, +1] (anterior/posterior
-    wing edge).  Comparable to ``MIDLINE_PRIORS`` values.
-    """
-    path_coords = list(path.line.coords)
-    if len(path_coords) < 2:
-        return 0.0
-
-    dists: list[float] = []
-    for px, py in path_coords:
-        pt = Point(px, py)
-        proj_frac = midline.line.project(pt, normalized=True)
-        nearest = midline.line.interpolate(midline.line.project(pt))
-        idx = int(proj_frac * (len(midline.half_heights) - 1))
-        idx = max(0, min(idx, len(midline.half_heights) - 1))
-        hh = midline.half_heights[idx]
-        if hh > 0:
-            dists.append((py - nearest.y) / hh)
-
-    return float(np.mean(dists)) if dists else 0.0
-
-
-def _anchor_l3_l4_from_midline(
+def _anchor_l3_l4_from_dtip(
     longitudinals: list[MergedPath],
-    midline,
+    dtip: tuple[float, float],
 ) -> tuple[Optional[MergedPath], Optional[MergedPath]]:
-    """Anchor L3 and L4 from the midline before crossvein assignment.
+    """Anchor L3 using the DTip landmark (where L3 meets the distal wing tip).
 
-    L3 is the nearest vein anterior to (above) the midline.
-    L4 is the nearest vein posterior to (below) the midline.
-    Uses mean signed distance along the full path extent (not a single
-    point) for robust anterior/posterior classification.
-    Only considers paths >=30% of wing span.
-    Returns (l3_path, l4_path); either may be None if no candidates exist.
+    Finds the longitudinal whose nearest point to DTip is smallest → L3.
+    L4 is the next vein posterior (higher Y centroid) to L3.
     """
     if len(longitudinals) < 2:
         return None, None
 
-    mid_coords = list(midline.line.coords)
-    mid_xs = [c[0] for c in mid_coords]
-    wing_span = mid_xs[-1] - mid_xs[0]
-    # Use the midline's distal-aware reference point
-    ref_x = midline.ref_point[0] if midline.ref_point else mid_xs[0] + wing_span * 0.75
+    dtip_pt = Point(dtip)
 
-    # L3/L4 are the longest veins in the wing — require >=30% of wing span
-    min_length = wing_span * 0.30
-
-    # Measure each path's mean signed distance from the midline
-    anterior: list[tuple[float, MergedPath]] = []
-    posterior: list[tuple[float, MergedPath]] = []
+    # Score each longitudinal by distance to DTip
+    scored = []
     for p in longitudinals:
-        if p.length_px < min_length:
-            continue
-        mean_dist = _mean_signed_distance_from_midline(p, midline)
-        if mean_dist < 0:
-            anterior.append((mean_dist, p))
-        else:
-            posterior.append((mean_dist, p))
+        dist = p.line.distance(dtip_pt)
+        scored.append((dist, p))
+    scored.sort(key=lambda t: t[0])
 
-    l3 = None
-    l4 = None
+    l3 = scored[0][1]
+    l3_y = l3.line.centroid.y
 
-    if anterior:
-        # L3 = nearest anterior (least negative mean distance)
-        anterior.sort(key=lambda t: t[0])
-        l3 = anterior[-1][1]
-
+    # L4 = closest posterior vein (higher Y than L3)
+    posterior = [(p.line.distance(dtip_pt), p) for _, p in scored[1:] if p.line.centroid.y > l3_y]
     if posterior:
-        # L4 = nearest posterior (least positive mean distance)
-        posterior.sort(key=lambda t: t[0])
+        # Pick the one with the smallest Y (nearest posterior to L3)
+        posterior.sort(key=lambda t: t[1].line.centroid.y)
         l4 = posterior[0][1]
+    else:
+        l4 = None
 
-    if l3:
-        d = _mean_signed_distance_from_midline(l3, midline)
-        logger.info(
-            "Midline anchor: L3 → mean_dist=%.0fpx above midline, len=%.0fpx",
-            -d,
-            l3.length_px,
-        )
+    logger.info(
+        "DTip anchor: L3 → dist=%.0fpx from DTip, len=%.0fpx",
+        l3.line.distance(dtip_pt),
+        l3.length_px,
+    )
     if l4:
-        d = _mean_signed_distance_from_midline(l4, midline)
         logger.info(
-            "Midline anchor: L4 → mean_dist=%.0fpx below midline, len=%.0fpx",
-            d,
+            "DTip anchor: L4 → centroid Y=%.0f (L3 Y=%.0f), len=%.0fpx",
+            l4.line.centroid.y,
+            l3_y,
             l4.length_px,
         )
 
     return l3, l4
 
 
-def _assign_remaining_longitudinals(
+def _assign_remaining_from_anchors(
     longitudinals: list[MergedPath],
-    midline,
     vein_map: dict[str, MergedPath],
 ) -> None:
-    """Assign L1, L2, L5 from remaining longitudinals after L3/L4 are anchored.
+    """Assign L2, Rs, L5 using Y-position relative to anchored L3/L4.
 
-    L2 = longest anterior vein remaining above L3.
-    L1 = most anterior short vein above L2.
-    L5 = longest posterior vein remaining below L4.
+    L2 = longest unassigned vein anterior to L3.
+    Rs = remaining anterior vein above L2 (fused L2+L3 proximal stem).
+    L5 = longest unassigned vein posterior to L4.
     """
-    from WingVeinAnalyzer.models.vein_map import VEIN_LENGTH_PRIORS
-
-    # Skip paths already assigned (L3, L4)
     assigned = set(id(v) for v in vein_map.values())
     remaining = [p for p in longitudinals if id(p) not in assigned]
-    if not remaining:
-        return
 
-    mid_coords = list(midline.line.coords)
-    mid_xs = [c[0] for c in mid_coords]
-    mid_ys = [c[1] for c in mid_coords]
-    wing_span = mid_xs[-1] - mid_xs[0]
-    # Use the midline's distal-aware reference point
-    ref_x = midline.ref_point[0] if midline.ref_point else mid_xs[0] + wing_span * 0.75
-
-    # Get L3/L4 mean signed distances as reference
     l3 = vein_map.get("L3")
     l4 = vein_map.get("L4")
-    l3_dist = _mean_signed_distance_from_midline(l3, midline) if l3 else 0.0
-    l4_dist = _mean_signed_distance_from_midline(l4, midline) if l4 else 0.0
+    l3_y = l3.line.centroid.y if l3 else float("inf")
+    l4_y = l4.line.centroid.y if l4 else float("-inf")
 
-    # Split remaining into anterior (above L3) and posterior (below L4)
-    anterior: list[MergedPath] = []
-    posterior: list[MergedPath] = []
-    for p in remaining:
-        d = _mean_signed_distance_from_midline(p, midline)
-        if d < l3_dist:
-            anterior.append(p)
-        elif d > l4_dist:
-            posterior.append(p)
-        # Paths between L3 and L4 are discarded (likely ACV/PCV artifacts)
+    anterior = [p for p in remaining if p.line.centroid.y < l3_y]
+    posterior = [p for p in remaining if p.line.centroid.y > l4_y]
 
-    # Anterior: assign L2 (longest) then L1 (most anterior short vein)
     if anterior:
         anterior.sort(key=lambda p: p.length_px, reverse=True)
-        l2_min = VEIN_LENGTH_PRIORS["L2"][0] * wing_span
-        l1_max = VEIN_LENGTH_PRIORS["L1"][1] * wing_span
-        best = anterior[0]
-        if best.length_px >= l2_min:
-            vein_map["L2"] = best
-            rest = anterior[1:]
-            if rest:
-                candidate = min(rest, key=lambda p: _path_y_at_x(p, ref_x))
-                vein_map["L1"] = candidate
-        elif best.length_px <= l1_max:
-            vein_map["L1"] = min(anterior, key=lambda p: _path_y_at_x(p, ref_x))
-        else:
-            anterior.sort(key=lambda p: _path_y_at_x(p, ref_x))
-            for i, p in enumerate(anterior[:2]):
-                vein_map[["L1", "L2"][i]] = p
+        vein_map["L2"] = anterior[0]
+        assigned.add(id(anterior[0]))
+        rest_anterior = [p for p in anterior[1:]]
+        if rest_anterior:
+            rest_anterior.sort(key=lambda p: p.line.centroid.y)
+            vein_map["Rs"] = rest_anterior[0]
+            assigned.add(id(rest_anterior[0]))
 
-    # Posterior: longest → L5
     if posterior:
         posterior.sort(key=lambda p: p.length_px, reverse=True)
         vein_map["L5"] = posterior[0]
-
-    for name in ["L1", "L2", "L5"]:
-        if name in vein_map and id(vein_map[name]) not in assigned:
-            p = vein_map[name]
-            logger.debug(
-                "Remaining longitudinal: %s → Y_at_ref=%.0f, len=%.0fpx",
-                name,
-                _path_y_at_x(p, ref_x),
-                p.length_px,
-            )
-
-
-def _assign_longitudinals_from_midline(
-    longitudinals: list[MergedPath],
-    midline,
-) -> dict[str, MergedPath]:
-    """Assign longitudinal veins anchored by the wing midline.
-
-    L3 is the nearest vein anterior to (above) the midline center.
-    L4 is the nearest vein posterior to (below) the midline center.
-    Remaining anterior veins are assigned using length priors: L2 is
-    always the longest vein above L3, L1 is the most anterior short vein.
-    Remaining posterior veins → L5.
-    """
-    from WingVeinAnalyzer.models.vein_map import VEIN_LENGTH_PRIORS
-
-    result: dict[str, MergedPath] = {}
-
-    # Anchor L3/L4 first
-    l3, l4 = _anchor_l3_l4_from_midline(longitudinals, midline)
-    if l3:
-        result["L3"] = l3
-    if l4:
-        result["L4"] = l4
-
-    # Assign remaining
-    _assign_remaining_longitudinals(longitudinals, midline, result)
-
-    return result
+        assigned.add(id(posterior[0]))
 
 
 def _assign_longitudinals_scored(
@@ -1474,25 +1336,15 @@ def _assign_longitudinals_scored(
     wing_span_px: float,
     acv_path: Optional[MergedPath] = None,
     pcv_path: Optional[MergedPath] = None,
-    midline=None,
 ) -> dict[str, MergedPath]:
-    """Assign longitudinal veins using midline anchoring or combinatorial fallback.
-
-    When a midline is available, L3/L4 are anchored directly from the
-    midline center and the rest follow by anterior-posterior order.
-    Falls back to exhaustive combinatorial scoring when no midline.
-    """
+    """Assign longitudinal veins using exhaustive combinatorial scoring."""
     from itertools import combinations, permutations
 
-    long_names = ["L1", "L2", "L3", "L4", "L5"]
+    long_names = ["L2", "L3", "L4", "L5"]
     result: dict[str, MergedPath] = {}
 
     if not longitudinals:
         return result
-
-    # Midline-anchored assignment (primary path)
-    if midline is not None and len(longitudinals) >= 2:
-        return _assign_longitudinals_from_midline(longitudinals, midline)
 
     # Sort by Y centroid for ordering constraint
     sorted_paths = sorted(longitudinals, key=lambda p: p.y_centroid_norm)
@@ -1508,7 +1360,6 @@ def _assign_longitudinals_scored(
                 wing_span_px,
                 acv_path,
                 pcv_path,
-                midline=midline,
             )
 
     # Try all k from min(n,5) down to max(1, min(n,5)-2)
@@ -1604,7 +1455,6 @@ def _longitudinal_match_score(
     wing_span_px: float,
     acv_path: Optional[MergedPath] = None,
     pcv_path: Optional[MergedPath] = None,
-    midline=None,
 ) -> float:
     """Score how well a path matches a specific longitudinal vein identity."""
     # Y-position score: blend of median-Y closeness (60%) and Y-range overlap (40%)
@@ -1645,75 +1495,12 @@ def _longitudinal_match_score(
     # Crossvein proximity score
     cv_score = _compute_crossvein_score(path, vein_name, acv_path, pcv_path)
 
-    # Midline distance score
-    mid_score = _compute_midline_score(path, vein_name, midline) if midline is not None else None
-
     # Combined score — weights depend on available information
     has_cv = acv_path is not None or pcv_path is not None
-    has_mid = mid_score is not None
-
-    if has_mid and has_cv:
-        return 0.30 * y_score + 0.25 * len_score + 0.20 * cv_score + 0.25 * mid_score
-    elif has_mid:
-        return 0.30 * y_score + 0.25 * len_score + 0.45 * mid_score
-    elif has_cv:
+    if has_cv:
         return 0.40 * y_score + 0.30 * len_score + 0.30 * cv_score
     else:
         return 0.6 * y_score + 0.4 * len_score
-
-
-def _compute_midline_score(
-    path: MergedPath,
-    vein_name: str,
-    midline,
-) -> float:
-    """Score how well a path's signed distance from the midline matches priors."""
-    if vein_name not in MIDLINE_PRIORS:
-        return 0.5  # neutral for unknown veins
-
-    mid_lo, mid_hi = MIDLINE_PRIORS[vein_name]
-    mid_center = (mid_lo + mid_hi) / 2
-    mid_range = mid_hi - mid_lo
-
-    # Sample points along the path
-    line = path.line
-    n_samples = max(5, min(20, int(line.length / um_to_px(STEP_DIST_UM))))
-    midline_xs = np.array([c[0] for c in midline.line.coords])
-    midline_ys = np.array([c[1] for c in midline.line.coords])
-    half_heights = midline.half_heights
-
-    signed_dists: list[float] = []
-    for i in range(n_samples):
-        frac = i / max(n_samples - 1, 1)
-        pt = line.interpolate(frac, normalized=True)
-        x, y = pt.x, pt.y
-
-        # Interpolate midline Y and half-height at this X
-        if x < midline_xs[0] or x > midline_xs[-1]:
-            continue
-        mid_y = float(np.interp(x, midline_xs, midline_ys))
-        hh = float(np.interp(x, midline_xs, half_heights))
-        if hh < um_to_px(MIN_HALF_HEIGHT_UM):
-            continue
-
-        signed_dist = (y - mid_y) / hh
-        signed_dists.append(signed_dist)
-
-    if not signed_dists:
-        return 0.5  # neutral
-
-    median_dist = float(np.median(signed_dists))
-
-    # Score using same pattern as Y-position scoring
-    dist_from_center = abs(median_dist - mid_center)
-    if mid_lo <= median_dist <= mid_hi:
-        score = 1.0 - (dist_from_center / mid_range) if mid_range > 0 else 1.0
-    else:
-        # Outside range — decaying penalty
-        overshoot = max(mid_lo - median_dist, median_dist - mid_hi, 0)
-        score = max(0.0, 0.5 - overshoot)
-
-    return score
 
 
 def _compute_crossvein_score(
@@ -2599,8 +2386,8 @@ def identify_veins_and_regions(
     vein_polygons: list[Polygon],
     image_shape: tuple[int, int],
     wing_bbox: tuple[float, float, float, float],
-    midline=None,
     original_polygons: list[Polygon] | None = None,
+    dtip: tuple[float, float] | None = None,
 ) -> IdentificationResult:
     """Identify veins and regions independently using geometry, then cross-validate.
 
@@ -2624,7 +2411,7 @@ def identify_veins_and_regions(
     paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0)
 
     # 3c. Classify merged paths → named veins
-    vein_map = classify_merged_paths(paths, wing_bbox, midline=midline, junctions=junctions)
+    vein_map = classify_merged_paths(paths, wing_bbox, junctions=junctions, dtip=dtip)
 
     # 3c'. Validate junction topology — retry merges if crossvein/longitudinal
     # orientation is wrong at any triple junction
@@ -2634,7 +2421,7 @@ def identify_veins_and_regions(
         centerlines,
         merge_decisions,
         wing_bbox,
-        midline=midline,
+        dtip=dtip,
     )
 
     # 3d. Validate vein shapes
@@ -2757,7 +2544,8 @@ def identify_veins_and_regions(
                     )
                     continue
 
-        merged = _merge_vein_lines([mp.line, new_line])
+        merged_lines = _merge_vein_lines([mp.line, new_line])
+        merged = merged_lines[0] if merged_lines else None
         if merged is not None and merged.length > mp.length_px:
             old_len = mp.length_px
             mp.line = merged
@@ -2795,7 +2583,7 @@ def identify_veins_and_regions(
 
     # Build VeinAssignment objects from vein_map
     assignments: list[VeinAssignment] = []
-    for vein_id in ["L1", "L2", "L3", "L4", "L5", "ACV", "PCV"]:
+    for vein_id in ["L1", "Rs", "L2", "L3", "L4", "L5", "ACV", "PCV"]:
         if vein_id in vein_map:
             mp = vein_map[vein_id]
             coords = list(mp.line.coords)

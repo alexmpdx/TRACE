@@ -10,7 +10,6 @@ from typing import Optional
 import cv2
 import numpy as np
 from scipy import ndimage
-from scipy.ndimage import gaussian_filter1d
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.ops import linemerge, split, unary_union
 
@@ -21,10 +20,6 @@ from WingVeinAnalyzer.models.vein_map import (
     COMPARTMENT_EXTENSION_UM,
     COMPARTMENT_SIMPLIFY_UM,
     HINGE_EXTENSION_UM,
-    MIDLINE_SIGMA_UM,
-    MIDLINE_SPACING_UM,
-    MIN_HALF_HEIGHT_UM,
-    VLINE_EXTENSION_UM,
     um_to_px,
 )
 
@@ -86,151 +81,6 @@ def build_wing_outline(
     outline_poly = outline_poly.buffer(_sb).buffer(-_sb)
 
     return WingOutline(polygon=outline_poly)
-
-
-@dataclass
-class WingMidline:
-    """Wing midline with per-sample half-heights for signed-distance normalization."""
-
-    line: LineString
-    half_heights: np.ndarray  # parallel array of (max_y - min_y) / 2 at each sample X
-    ref_point: Optional[tuple[float, float]] = None  # 3/4-span reference point for vein scoring
-
-
-def compute_wing_midline(
-    polygons: list[Polygon],
-    wing_bbox: tuple[float, float, float, float],
-    sample_spacing: float | None = None,
-    smooth_sigma: float | None = None,
-    wing_polygon: Optional[Polygon] = None,
-    dtip: Optional[tuple[float, float]] = None,
-) -> Optional[WingMidline]:
-    """Compute the anterior-posterior midline of the wing.
-
-    For each X position across the wing, intersects a vertical line with the
-    wing shape to find the Y extent, then takes the midpoint.  The midline
-    Y values are Gaussian-smoothed to follow the wing's curvature.
-
-    When *wing_polygon* is provided (from the GeoJSON "wing" annotation),
-    it is used directly as the wing shape.  Otherwise falls back to building
-    a shape from buffered intervein + vein polygons.
-    """
-    if sample_spacing is None:
-        sample_spacing = um_to_px(MIDLINE_SPACING_UM)
-    if smooth_sigma is None:
-        smooth_sigma = um_to_px(MIDLINE_SIGMA_UM)
-
-    # Determine wing shape
-    if wing_polygon is not None and not wing_polygon.is_empty:
-        wing_shape = wing_polygon
-    elif polygons:
-        buffered = [p.buffer(um_to_px(BUFFER_OUTLINE_UM)) for p in polygons]
-        union = unary_union(buffered)
-        if isinstance(union, MultiPolygon):
-            wing_shape = max(union.geoms, key=lambda p: p.area)
-        else:
-            wing_shape = union
-    else:
-        return None
-
-    if wing_shape.is_empty:
-        return None
-
-    min_x, min_y, max_x, max_y = wing_bbox
-    xs: list[float] = []
-    ys: list[float] = []
-    hhs: list[float] = []
-
-    x = min_x
-    while x <= max_x:
-        _vext = um_to_px(VLINE_EXTENSION_UM)
-        vline = LineString([(x, min_y - _vext), (x, max_y + _vext)])
-        inter = wing_shape.intersection(vline)
-
-        if inter.is_empty:
-            x += sample_spacing
-            continue
-
-        # Extract Y bounds from intersection
-        if isinstance(inter, LineString):
-            coords = np.array(inter.coords)
-        elif isinstance(inter, MultiLineString):
-            coords = np.concatenate([np.array(g.coords) for g in inter.geoms])
-        elif isinstance(inter, Point):
-            x += sample_spacing
-            continue
-        else:
-            # GeometryCollection or other — extract all coordinates
-            try:
-                coords = np.array(inter.coords)
-            except Exception:
-                x += sample_spacing
-                continue
-
-        if len(coords) < 2:
-            x += sample_spacing
-            continue
-
-        y_min_local = coords[:, 1].min()
-        y_max_local = coords[:, 1].max()
-        mid_y = (y_min_local + y_max_local) / 2.0
-        half_h = (y_max_local - y_min_local) / 2.0
-
-        if half_h < um_to_px(MIN_HALF_HEIGHT_UM):  # skip degenerate slices
-            x += sample_spacing
-            continue
-
-        xs.append(x)
-        ys.append(mid_y)
-        hhs.append(half_h)
-
-        x += sample_spacing
-
-    if len(xs) < 10:
-        logger.warning("Too few midline samples (%d) — skipping midline", len(xs))
-        return None
-
-    xs_arr = np.array(xs)
-    ys_arr = np.array(ys)
-    hhs_arr = np.array(hhs)
-
-    # Smooth both midline Y and half-heights
-    sigma_samples = smooth_sigma / sample_spacing
-    ys_smooth = gaussian_filter1d(ys_arr, sigma=sigma_samples)
-    hhs_smooth = gaussian_filter1d(hhs_arr, sigma=sigma_samples)
-
-    coords = list(zip(xs_arr.tolist(), ys_smooth.tolist()))
-    midline = LineString(coords)
-
-    logger.info(
-        "Wing midline: %d samples, mean half-height=%.0fpx, source=%s",
-        len(xs),
-        hhs_smooth.mean(),
-        "wing annotation" if wing_polygon is not None else "buffered polygons",
-    )
-
-    # Reference point at 3/4 span toward the distal end.
-    # Use DTip landmark to determine distal direction if available.
-    mid_x = (xs_arr[0] + xs_arr[-1]) / 2.0
-    if dtip is not None:
-        # DTip is the distal wing tip — ref point is 3/4 toward it
-        if dtip[0] > mid_x:
-            ref_frac = 0.75  # distal is max_x
-        else:
-            ref_frac = 0.25  # distal is min_x
-    else:
-        # Fallback: use half-height taper to guess distal direction
-        quarter = max(1, len(hhs_smooth) // 4)
-        hh_low = float(hhs_smooth[:quarter].mean())
-        hh_high = float(hhs_smooth[-quarter:].mean())
-        if hh_low < hh_high:
-            ref_frac = 0.75
-        else:
-            ref_frac = 0.25
-    ref_x = float(xs_arr[0] + (xs_arr[-1] - xs_arr[0]) * ref_frac)
-    ref_y = float(np.interp(ref_x, xs_arr, ys_smooth))
-
-    return WingMidline(line=midline, half_heights=hhs_smooth, ref_point=(ref_x, ref_y))
 
 
 def _detect_hinge_side(

@@ -36,16 +36,6 @@ SPATIAL_PRIORS_Y: dict[str, tuple[float, float]] = {
     "L5": (0.38, 0.78),
 }
 
-# Signed distance from wing midline as fraction of local half-height
-# Negative = anterior (above midline), positive = posterior (below)
-MIDLINE_PRIORS: dict[str, tuple[float, float]] = {
-    "L1": (-0.95, -0.50),
-    "L2": (-0.75, -0.20),
-    "L3": (-0.45, +0.05),
-    "L4": (-0.05, +0.45),
-    "L5": (+0.10, +0.70),
-}
-
 # Crossvein connection topology
 CROSSVEIN_CONNECTIONS: dict[str, tuple[str, str]] = {
     "ACV": ("L3", "L4"),
@@ -91,6 +81,7 @@ INTERVEIN_COLORS: dict[str, tuple[int, int, int]] = {
 VEIN_COLORS: dict[str, tuple[int, int, int]] = {
     "costa": (0, 0, 0),  # black (matches wing outline)
     "L1": (0, 0, 255),  # red
+    "Rs": (128, 0, 255),  # magenta (fused L2+L3 proximal stem)
     "L2": (0, 94, 255),  # orange
     "L3": (0, 191, 219),  # gold
     "L4": (255, 0, 0),  # blue
@@ -250,7 +241,7 @@ CV_NORM_DIST_UM = 96.6  # 200 px — crossvein scoring normalization distance
 CV_CONNECTIVITY_UM = 24.15  # 50 px — crossvein connectivity / L4-L5 swap
 
 # -- Buffers --
-BUFFER_OUTLINE_UM = 9.66  # 20 px — wing outline / midline polygon buffer
+BUFFER_OUTLINE_UM = 9.66  # 20 px — wing outline polygon buffer
 BUFFER_VEIN_UM = 2.415  # 5 px — vein polygon buffer in outline
 BUFFER_SMOOTH_UM = 2.415  # 5 px — outline smooth buffer
 BUFFER_SPATIAL_UM = 12.075  # 25 px — spatial proximity for poly-vein mapping
@@ -271,10 +262,6 @@ EDGE_PROXIMITY_UM = 24.15  # 50 px — distance to existing centerline
 MIN_ANT_BOUNDARY_UM = 24.15  # 50 px — min anterior boundary line length
 
 # -- Wing geometry --
-MIDLINE_SPACING_UM = 2.415  # 5 px — midline sampling spacing
-MIDLINE_SIGMA_UM = 14.49  # 30 px — midline smoothing sigma
-VLINE_EXTENSION_UM = 48.3  # 100 px — vertical line extension for midline
-MIN_HALF_HEIGHT_UM = 2.415  # 5 px — min half-height for midline
 HINGE_EXTENSION_UM = 48.3  # 100 px — hinge line extension
 COMPARTMENT_SIMPLIFY_UM = 4.83  # 10 px — L4 simplification for compartments
 COMPARTMENT_EXTENSION_UM = 241.5  # 500 px — L4 extension beyond wing boundary

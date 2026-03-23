@@ -69,6 +69,8 @@ def parse_geojson(path: Path) -> ParsedAnnotations:
         feat_id = feat.get("id", props.get("objectType", "unknown"))
         cls = props.get("classification", {})
         cls_name = cls.get("name", "").lower().strip()
+        if not cls_name:
+            cls_name = props.get("class", "").lower().strip()
 
         # Skip ignored features
         if cls_name.startswith("ignore") or cls_name == "hair":
