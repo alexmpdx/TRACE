@@ -2618,7 +2618,127 @@ def identify_veins_and_regions(
 
 
 # ---------------------------------------------------------------------------
-# 3h. Ground-Truth Diagnostic Validation
+# 3h. L1 Extraction from Vein Mask + Landmarks
+# ---------------------------------------------------------------------------
+
+
+def extract_l1_from_mask(
+    vein_mask: np.ndarray,
+    subcostal_break: tuple[float, float],
+    l1_rs: tuple[float, float],
+    padding: int = 50,
+) -> Optional[LineString]:
+    """Extract L1 centerline from the vein mask between two landmarks.
+
+    Uses the subcostal break and L1-Rs landmarks as endpoints.
+    Crops the vein mask around those points, skeletonizes it,
+    and finds the shortest path through the skeleton.
+    """
+    from skimage.morphology import skeletonize
+
+    h, w = vein_mask.shape[:2]
+    sc = (int(round(subcostal_break[0])), int(round(subcostal_break[1])))
+    lr = (int(round(l1_rs[0])), int(round(l1_rs[1])))
+
+    # Bounding box around the two endpoints with padding
+    x_min = max(0, min(sc[0], lr[0]) - padding)
+    x_max = min(w, max(sc[0], lr[0]) + padding)
+    y_min = max(0, min(sc[1], lr[1]) - padding)
+    y_max = min(h, max(sc[1], lr[1]) + padding)
+
+    # Crop and skeletonize
+    crop = vein_mask[y_min:y_max, x_min:x_max]
+    if crop.max() == 0:
+        logger.warning("No vein mask pixels in L1 region")
+        return None
+
+    binary = (crop > 0).astype(np.uint8)
+    skeleton = skeletonize(binary).astype(np.uint8)
+
+    if skeleton.sum() == 0:
+        logger.warning("Empty skeleton in L1 region")
+        return None
+
+    # Local coordinates of endpoints
+    sc_local = (sc[0] - x_min, sc[1] - y_min)
+    lr_local = (lr[0] - x_min, lr[1] - y_min)
+
+    # Snap endpoints to nearest skeleton pixel
+    skel_ys, skel_xs = np.nonzero(skeleton)
+    if len(skel_xs) == 0:
+        return None
+
+    skel_pts = np.column_stack([skel_xs, skel_ys])
+
+    def _snap_to_skeleton(pt: tuple[int, int]) -> tuple[int, int]:
+        dists = np.sum((skel_pts - np.array(pt)) ** 2, axis=1)
+        idx = np.argmin(dists)
+        return int(skel_pts[idx, 0]), int(skel_pts[idx, 1])
+
+    sc_snap = _snap_to_skeleton(sc_local)
+    lr_snap = _snap_to_skeleton(lr_local)
+
+    # BFS shortest path through skeleton pixels
+    path = _bfs_skeleton_path(skeleton, sc_snap, lr_snap)
+    if path is None or len(path) < 2:
+        logger.warning("Could not find path through skeleton for L1")
+        return None
+
+    # Convert back to global coordinates
+    global_coords = [(x + x_min, y + y_min) for x, y in path]
+
+    line = LineString(global_coords).simplify(2.0, preserve_topology=True)
+    logger.info("Extracted L1 from vein mask: %.0f px, %d points", line.length, len(list(line.coords)))
+    return line
+
+
+def _bfs_skeleton_path(
+    skeleton: np.ndarray,
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> Optional[list[tuple[int, int]]]:
+    """BFS shortest path through skeleton pixels (8-connected)."""
+    from collections import deque
+
+    h, w = skeleton.shape
+    sx, sy = start
+    ex, ey = end
+
+    if skeleton[sy, sx] == 0 or skeleton[ey, ex] == 0:
+        return None
+
+    visited = np.zeros_like(skeleton, dtype=bool)
+    visited[sy, sx] = True
+    parent: dict[tuple[int, int], Optional[tuple[int, int]]] = {(sx, sy): None}
+    queue: deque[tuple[int, int]] = deque([(sx, sy)])
+
+    while queue:
+        cx, cy = queue.popleft()
+        if cx == ex and cy == ey:
+            # Reconstruct path
+            path = []
+            node: Optional[tuple[int, int]] = (ex, ey)
+            while node is not None:
+                path.append(node)
+                node = parent[node]
+            path.reverse()
+            return path
+
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < w and 0 <= ny < h and not visited[ny, nx] and skeleton[ny, nx]:
+                    visited[ny, nx] = True
+                    parent[(nx, ny)] = (cx, cy)
+                    queue.append((nx, ny))
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 3i. Ground-Truth Diagnostic Validation
 # ---------------------------------------------------------------------------
 
 

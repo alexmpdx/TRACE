@@ -24,6 +24,7 @@ from WingVeinAnalyzer.models.vein_identifier import (
     ValidationReport,
     classify_merged_paths,
     cross_validate,
+    extract_l1_from_mask,
     find_triple_junctions,
     identify_veins_and_regions,
     merge_segments_at_junctions,
@@ -425,6 +426,31 @@ class StepRunner:
         state.poly_names = dict(id_result.poly_names)
         if id_result.polygons:
             state.polygons = list(id_result.polygons)
+
+        # Extract L1 from vein mask using landmarks
+        if state.vein_mask is not None and "subcostal break" in lp and "L1-Rs" in lp:
+            l1_line = extract_l1_from_mask(
+                state.vein_mask,
+                lp["subcostal break"],
+                lp["L1-Rs"],
+            )
+            if l1_line is not None:
+                # Replace the ABSENT L1 assignment with the extracted one
+                state.assignments = [a for a in state.assignments if a.vein_id != "L1"]
+                coords = list(l1_line.coords)
+                state.assignments.append(
+                    VeinAssignment(
+                        vein_id="L1",
+                        status=VeinStatus.COMPLETE,
+                        edge_ids=[],
+                        confidence=0.9,
+                        evidence=["landmark_mask_extraction"],
+                        length_px=l1_line.length,
+                        line=l1_line,
+                        endpoints=[coords[0], coords[-1]],
+                    )
+                )
+                logger.info("L1 extracted from vein mask: %.0f px", l1_line.length)
 
         # Extract sub-results for visualization steps
         # Re-run sub-steps to capture intermediate data
