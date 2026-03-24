@@ -8,7 +8,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 
 from WingVeinAnalyzer.controllers.measurement_controller import (
     WingMeasurements,
@@ -43,7 +43,6 @@ from WingVeinAnalyzer.models.vein_map import (
     um_to_px,
 )
 from WingVeinAnalyzer.models.vein_skeleton import (
-    VoronoiResult,
     extract_edge_boundary_veins,
     extract_veins_from_mask,
 )
@@ -143,6 +142,7 @@ def run_pipeline(
             max_gap,
             geojson_path,
             smooth_sigma=smooth_sigma,
+            image_path=image_path,
         )
     elif annotations.veins:
         result = _run_vein_pipeline(image, annotations, output_dir, stem, microns_per_pixel, snap_tolerance)
@@ -161,6 +161,7 @@ def _run_polygon_pipeline(
     max_gap: float,
     geojson_path: Optional[Path] = None,
     smooth_sigma: float = 3.0,
+    image_path: Optional[Path] = None,
 ) -> PipelineResult:
     """Pipeline for intervein polygon annotations."""
     result = PipelineResult()
@@ -190,11 +191,9 @@ def _run_polygon_pipeline(
         max(b[3] for b in all_bounds),
     )
 
-    landmark_points = _load_landmark_points(image_path)
+    landmark_points = _load_landmark_points(image_path) if image_path else None
 
     # Initialize variables shared across both pipeline paths
-    hull_mask = None
-    seed_labels_arr = None
     vein_mask_arr = None
     centerlines = {}
 
@@ -202,29 +201,14 @@ def _run_polygon_pipeline(
         # --- Vein-mask-primary path ---
         logger.info("Using vein-mask-primary pipeline (%d vein polygons)", len(annotations.vein_polygons))
 
-        # Extract centerlines from vein mask via hull-component Voronoi
-        voronoi_result = extract_veins_from_mask(
+        # Extract centerlines from vein mask via skeletonization
+        centerline_result = extract_veins_from_mask(
             annotations.vein_polygons,
             image.shape[:2],
             intervein_polygons=annotations.intervein_polygons,
         )
-        centerlines = voronoi_result.centerlines
-        vein_mask_arr = voronoi_result.vein_mask
-        hull_mask = voronoi_result.hull_mask
-        seed_labels_arr = voronoi_result.seed_labels
-        nearest_labels = voronoi_result.nearest_labels
-        polygons = voronoi_result.voronoi_polygons  # replaces input polygons
-
-        # Recompute wing bounding box from Voronoi-derived polygons
-        valid_polys = [p for p in polygons if not p.is_empty]
-        if valid_polys:
-            all_bounds = [p.bounds for p in valid_polys]
-            wing_bbox = (
-                min(b[0] for b in all_bounds),
-                min(b[1] for b in all_bounds),
-                max(b[2] for b in all_bounds),
-                max(b[3] for b in all_bounds),
-            )
+        centerlines = centerline_result.centerlines
+        vein_mask_arr = centerline_result.vein_mask
 
         # Identify veins and regions independently via geometry
         id_result = identify_veins_and_regions(
@@ -235,6 +219,8 @@ def _run_polygon_pipeline(
             wing_bbox,
             original_polygons=list(annotations.intervein_polygons),
             dtip=landmark_points.get("DTip") if landmark_points else None,
+            landmark_points=landmark_points,
+            wing_polygon=annotations.wing_polygon,
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -285,36 +271,6 @@ def _run_polygon_pipeline(
             assignments=assignments,
         )
 
-        # Add costa only if costal region exists
-        if has_costal:
-            costa_line = _extract_costa(polygons, poly_names, wing_bbox)
-            if costa_line:
-                assignments.append(
-                    VeinAssignment(
-                        vein_id="costa",
-                        status=VeinStatus.COMPLETE,
-                        edge_ids=[],
-                        confidence=0.9,
-                        evidence=["anterior_margin"],
-                        length_px=costa_line.length,
-                        line=costa_line,
-                        endpoints=[
-                            list(costa_line.coords)[0],
-                            list(costa_line.coords)[-1],
-                        ],
-                    )
-                )
-        else:
-            assignments.append(
-                VeinAssignment(
-                    vein_id="costa",
-                    status=VeinStatus.ABSENT,
-                    edge_ids=[],
-                    confidence=0.0,
-                    evidence=["no_costal_region"],
-                )
-            )
-
         result.assignments = assignments
         result.poly_names = poly_names
 
@@ -325,7 +281,7 @@ def _run_polygon_pipeline(
         compile_results(assignments, microns_per_pixel)
 
         # Save diagnostics (vein-mask path)
-        _save_diagnostics_voronoi(
+        _save_diagnostics(
             image,
             polygons,
             annotations.vein_polygons,
@@ -347,6 +303,8 @@ def _run_polygon_pipeline(
             image.shape[:2],
             wing_bbox,
             dtip=landmark_points.get("DTip") if landmark_points else None,
+            landmark_points=landmark_points,
+            wing_polygon=annotations.wing_polygon,
         )
         assignments = id_result.assignments
         poly_names = id_result.poly_names
@@ -366,37 +324,6 @@ def _run_polygon_pipeline(
             assignments=assignments,
         )
 
-        # Add costa only if costal region exists
-        has_costal = "costal_cell" in poly_names.values()
-        if has_costal:
-            costa_line = _extract_costa(polygons, poly_names, wing_bbox)
-            if costa_line:
-                assignments.append(
-                    VeinAssignment(
-                        vein_id="costa",
-                        status=VeinStatus.COMPLETE,
-                        edge_ids=[],
-                        confidence=0.9,
-                        evidence=["anterior_margin"],
-                        length_px=costa_line.length,
-                        line=costa_line,
-                        endpoints=[
-                            list(costa_line.coords)[0],
-                            list(costa_line.coords)[-1],
-                        ],
-                    )
-                )
-        else:
-            assignments.append(
-                VeinAssignment(
-                    vein_id="costa",
-                    status=VeinStatus.ABSENT,
-                    edge_ids=[],
-                    confidence=0.0,
-                    evidence=["no_costal_region"],
-                )
-            )
-
         result.assignments = assignments
         result.poly_names = poly_names
 
@@ -407,7 +334,7 @@ def _run_polygon_pipeline(
         compile_results(assignments, microns_per_pixel)
 
         # Save diagnostics (midline path)
-        _save_diagnostics(image, polygons, edges, poly_names, assignments, output_dir)
+        _save_diagnostics_fallback(image, polygons, edges, poly_names, assignments, output_dir)
 
     # Build wing outline (include vein polygons for full wing tip coverage)
     outline = build_wing_outline(
@@ -417,7 +344,7 @@ def _run_polygon_pipeline(
     result.wing_outline = outline
 
     # Detect hinge and remove it — use deep-learning landmarks if available
-    landmark_points = _load_landmark_points(image_path)
+    landmark_points = _load_landmark_points(image_path) if image_path else None
     if landmark_points and "subcostal break" in landmark_points and "alula notch" in landmark_points:
         sc = landmark_points["subcostal break"]
         al = landmark_points["alula notch"]
@@ -501,8 +428,6 @@ def _run_polygon_pipeline(
         regions,
         anterior,
         posterior,
-        hull_mask=hull_mask if annotations.vein_polygons else None,
-        seed_labels_arr=seed_labels_arr if annotations.vein_polygons else None,
         vein_mask_arr=vein_mask_arr if annotations.vein_polygons else None,
         centerlines=centerlines,
     )
@@ -1080,7 +1005,7 @@ def _save_diagnostics(
     (diag_dir / "edge_assignments.txt").write_text("".join(log_lines))
 
 
-def _save_diagnostics_voronoi(
+def _save_diagnostics_fallback(
     image: np.ndarray,
     polygons: list[Polygon],
     vein_polygons: list[Polygon],
@@ -1088,18 +1013,16 @@ def _save_diagnostics_voronoi(
     assignments: list[VeinAssignment],
     output_dir: Path,
 ) -> None:
-    """Save diagnostic images for the vein-mask Voronoi pipeline."""
+    """Save diagnostic images for the vein-mask pipeline."""
     diag_dir = output_dir / "diagnostics"
     diag_dir.mkdir(parents=True, exist_ok=True)
-
-    from scipy import ndimage
 
     from WingVeinAnalyzer.models.vein_map import VEIN_COLORS
     from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
 
     h, w = image.shape[:2]
 
-    # 1. Polygon map (same as midline path)
+    # 1. Polygon map
     poly_img = image.copy()
     for i, poly in enumerate(polygons):
         pts = np.array(poly.exterior.coords, dtype=np.int32)
@@ -1130,27 +1053,7 @@ def _save_diagnostics_voronoi(
     mask_img = cv2.addWeighted(mask_img, 0.7, mask_overlay, 0.3, 0)
     cv2.imwrite(str(diag_dir / "vein_mask.jpg"), mask_img)
 
-    # 3. Voronoi partition visualization
-    label_map = np.zeros((h, w), dtype=np.int32)
-    for i, poly in enumerate(polygons):
-        _fill_polygon(label_map, poly, i + 1)
-    background = label_map == 0
-    _, nearest_indices = ndimage.distance_transform_edt(background, return_distances=True, return_indices=True)
-    nearest_labels = label_map[nearest_indices[0], nearest_indices[1]]
-    nearest_labels[~background] = label_map[~background]
-
-    # Color-code Voronoi regions within vein mask
-    voronoi_img = image.copy()
-    vein_pixels = vein_mask > 0
-    for i in range(len(polygons)):
-        region_mask = (nearest_labels == i + 1) & vein_pixels
-        color = _DIAG_COLORS[i % len(_DIAG_COLORS)]
-        voronoi_img[region_mask] = (
-            np.array(voronoi_img[region_mask], dtype=np.float32) * 0.4 + np.array(color, dtype=np.float32) * 0.6
-        ).astype(np.uint8)
-    cv2.imwrite(str(diag_dir / "voronoi_partition.jpg"), voronoi_img)
-
-    # 4. Per-vein merged line diagnostics
+    # 3. Per-vein merged line diagnostics
     for assignment in assignments:
         vein_id = assignment.vein_id
         vein_color = VEIN_COLORS.get(vein_id, (40, 40, 40))
@@ -1219,8 +1122,6 @@ def _write_step_summary(
     regions: dict[str, Polygon],
     anterior: Optional[Polygon],
     posterior: Optional[Polygon],
-    hull_mask: Optional[np.ndarray] = None,
-    seed_labels_arr: Optional[np.ndarray] = None,
     vein_mask_arr: Optional[np.ndarray] = None,
     centerlines: Optional[dict] = None,
 ) -> None:
@@ -1260,34 +1161,15 @@ def _write_step_summary(
     for i, p in enumerate(annotations.intervein_polygons):
         lines.append(f"    P{i}: area={p.area:.0f} px², centroid=({p.centroid.x:.0f}, {p.centroid.y:.0f})")
 
-    # Step 1: Rasterize & Hull-Seeded Voronoi
+    # Step 1: Skeletonize & Extract Centerlines
     if has_vein_mask:
-        step(2, "Rasterize & Hull-Seeded Voronoi")
+        step(1, "Skeletonize & Extract Centerlines")
 
         vein_px = int(vein_mask_arr.sum()) if vein_mask_arr is not None else 0
         lines.append(f"  Vein mask: {vein_px} pixels ({100.0 * vein_px / (h * w):.1f}% of image)")
-
-        if hull_mask is not None:
-            hull_px = int(hull_mask.sum())
-            lines.append(f"  Convex hull: {hull_px} pixels")
-            lines.append(f"  Logic: hull = convex_hull(vein_mask_points)")
-            lines.append(f"         seed_mask = hull & ~vein_mask")
-            lines.append(f"         → large connected components (≥10k px) get sequential labels 1..M")
-
-        if seed_labels_arr is not None:
-            unique_seeds = set(int(v) for v in np.unique(seed_labels_arr) if v > 0)
-            lines.append(f"  Seed labels: {len(unique_seeds)} distinct components")
-
-        lines.append(f"  Voronoi polygons: {n_final_polys} regions vectorized from Voronoi partition")
-        for i, poly in enumerate(polygons):
-            if not poly.is_empty:
-                lines.append(
-                    f"    V{i}: area={poly.area:.0f} px², centroid=({poly.centroid.x:.0f}, {poly.centroid.y:.0f})"
-                )
-
-        lines.append(f"  Voronoi: distance_transform_edt from seed_labels")
-        lines.append(f"    → each pixel assigned to nearest seed label")
-        lines.append(f"    → boundaries within vein mask = vein centerlines")
+        lines.append(f"  Method: morphological skeletonization + pruning (200px threshold)")
+        lines.append(f"    → skeleton pixels assigned to polygon pairs via perpendicular EDT sampling")
+        lines.append(f"    → traced into LineString centerlines")
     else:
         step(2, "Midline Boundary Extraction (fallback)")
         lines.append(f"  No vein mask — using boundary sampling between adjacent polygons")

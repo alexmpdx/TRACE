@@ -153,6 +153,7 @@ class IdentificationResult:
     polygons: list[Polygon] = field(default_factory=list)  # possibly updated by splitting
     validation_report: ValidationReport = field(default_factory=ValidationReport)
     vein_map: dict[str, MergedPath] = field(default_factory=dict)
+    split_paths: list[MergedPath] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +498,102 @@ def merge_segments_at_junctions(
 
 
 # ---------------------------------------------------------------------------
-# 3b'. Post-Merge Sharp Turn Splitting
+# 3b'. Post-Merge Landmark Splitting
+# ---------------------------------------------------------------------------
+
+# Landmark names that mark longitudinal vein fork points
+_FORK_LANDMARKS = ("L1-Rs", "L2-L3", "L4-L5")
+
+
+def _split_at_landmarks(
+    paths: list[MergedPath],
+    landmark_points: dict[str, tuple[float, float]],
+    snap_radius: float = 60.0,
+    min_split_length: float = 50.0,
+) -> list[MergedPath]:
+    """Split merged paths at landmark fork points (L1-Rs, L2-L3, L4-L5).
+
+    For each fork landmark, finds the MergedPath whose line passes nearest
+    to the landmark point.  If within snap_radius and not near an endpoint,
+    splits the path at the projection point.
+    """
+    from shapely.geometry import Point
+    from shapely.ops import substring
+
+    result = list(paths)
+
+    for lm_name in _FORK_LANDMARKS:
+        if lm_name not in landmark_points:
+            continue
+
+        lm_x, lm_y = landmark_points[lm_name]
+        lm_pt = Point(lm_x, lm_y)
+
+        # Find the closest path
+        best_idx = -1
+        best_dist = snap_radius
+        for i, path in enumerate(result):
+            d = path.line.distance(lm_pt)
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+
+        if best_idx < 0:
+            logger.info("Landmark %s: no path within %.0fpx", lm_name, snap_radius)
+            continue
+
+        path = result[best_idx]
+        split_dist = path.line.project(lm_pt)
+
+        # Skip if near an endpoint — fork is already at path boundary
+        if split_dist < snap_radius or (path.line.length - split_dist) < snap_radius:
+            logger.info(
+                "Landmark %s: near endpoint of path (%.0fpx from end) — skipping",
+                lm_name,
+                min(split_dist, path.line.length - split_dist),
+            )
+            continue
+
+        # Split the LineString
+        line_a = substring(path.line, 0, split_dist)
+        line_b = substring(path.line, split_dist, path.line.length)
+
+        if line_a.length < min_split_length or line_b.length < min_split_length:
+            logger.info(
+                "Landmark %s: split would produce short segment (%.0f + %.0f px) — skipping",
+                lm_name,
+                line_a.length,
+                line_b.length,
+            )
+            continue
+
+        # Build two new MergedPaths
+        path_a = MergedPath(segment_keys=list(path.segment_keys), line=line_a, length_px=line_a.length)
+        path_b = MergedPath(segment_keys=list(path.segment_keys), line=line_b, length_px=line_b.length)
+
+        result[best_idx] = path_a
+        result.insert(best_idx + 1, path_b)
+
+        logger.info(
+            "Landmark %s: split path (%.0fpx) → %.0fpx + %.0fpx at dist=%.0f",
+            lm_name,
+            path.line.length,
+            line_a.length,
+            line_b.length,
+            split_dist,
+        )
+
+    if len(result) != len(paths):
+        logger.info(
+            "Landmark splitting: %d paths → %d paths",
+            len(paths),
+            len(result),
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 3b''. Post-Merge Sharp Turn Splitting
 # ---------------------------------------------------------------------------
 
 
@@ -508,14 +604,14 @@ def _split_on_sharp_turns(
     step_dist: float | None = None,
     min_path_length: float | None = None,
     min_split_length: float | None = None,
+    junctions: list[JunctionPoint] | None = None,
 ) -> list[MergedPath]:
     """Split merged paths at points where direction changes sharply.
 
     Walks each MergedPath in step_dist increments, computing the angle change
     at each step.  If a turn exceeds angle_threshold_deg, the path is split.
-    Multi-segment paths split at the nearest segment boundary; single-segment
-    paths split the LineString directly.  Paths shorter than min_path_length
-    are never split, and both halves must be >= min_split_length.
+    Turns at known triple junctions are skipped (junction artifacts, not real
+    direction changes).
     """
     if step_dist is None:
         step_dist = um_to_px(STEP_DIST_UM)
@@ -536,6 +632,7 @@ def _split_on_sharp_turns(
             step_dist,
             min_path_length,
             min_split_length,
+            junctions=junctions,
         )
         result.extend(split_paths)
 
@@ -555,14 +652,29 @@ def _try_split_path(
     step_dist: float,
     min_path_length: float | None = None,
     min_split_length: float | None = None,
+    junctions: list[JunctionPoint] | None = None,
 ) -> list[MergedPath]:
     """Attempt to split a single MergedPath at its sharpest turn."""
+    from shapely.geometry import Point
     from shapely.ops import substring
 
     if min_path_length is None:
         min_path_length = um_to_px(MIN_PATH_LENGTH_UM)
     if min_split_length is None:
         min_split_length = um_to_px(MIN_SPLIT_LENGTH_UM)
+
+    # Build junction proximity check
+    junction_snap = um_to_px(SNAP_RADIUS_LARGE_UM) if junctions else 0
+
+    def _near_junction(pt_x: float, pt_y: float) -> bool:
+        """Check if a point is near any known triple junction."""
+        if not junctions:
+            return False
+        for j in junctions:
+            if (pt_x - j.x) ** 2 + (pt_y - j.y) ** 2 <= junction_snap**2:
+                return True
+        return False
+
     # Smooth the line before measuring angle changes to prevent
     # noisy pixel jitter from creating false sharp turns
     line = smooth_line(path.line, sigma=um_to_px(SMOOTH_SIGMA_SPLIT_UM), sample_spacing=um_to_px(SMOOTH_SPACING_UM))
@@ -579,6 +691,10 @@ def _try_split_path(
         dist = (i / n_steps) * line.length
         if dist < min_split_length or (line.length - dist) < min_split_length:
             continue  # skip turns too close to ends
+
+        # Skip turns at known triple junctions (junction artifacts)
+        if _near_junction(sample_pts[i].x, sample_pts[i].y):
+            continue
 
         dx1 = sample_pts[i].x - sample_pts[i - 1].x
         dy1 = sample_pts[i].y - sample_pts[i - 1].y
@@ -600,6 +716,8 @@ def _try_split_path(
         for i in range(wide_window, len(sample_pts) - wide_window):
             dist = (i / n_steps) * line.length
             if dist < min_split_length or (line.length - dist) < min_split_length:
+                continue
+            if _near_junction(sample_pts[i].x, sample_pts[i].y):
                 continue
 
             dx1 = sample_pts[i].x - sample_pts[i - wide_window].x
@@ -784,17 +902,203 @@ def _compute_path_features(
     path.length_px = path.line.length
 
 
+def _identify_costa_segments(
+    paths: list[MergedPath],
+    wing_polygon: "Polygon",
+    min_fraction: float = 0.7,
+    min_costa_length: float = 200.0,
+    min_split_length: float = 50.0,
+    n_samples: int = 40,
+    dtip: tuple[float, float] | None = None,
+    landmark_points: dict[str, tuple[float, float]] | None = None,
+    fallback_max_distance: float = 100.0,
+) -> tuple[list[MergedPath], list[MergedPath]]:
+    """Separate costa segments from other paths using wing outline proximity.
+
+    The distance threshold is calibrated dynamically from the L2-L3 landmark:
+    that junction sits where L2 meets the wing margin, so its distance to the
+    wing outline defines the boundary between interior veins and margin-following
+    costa.  Falls back to fallback_max_distance if no L2-L3 landmark.
+
+    For each path, samples points and checks distance to wing polygon exterior.
+    - If the whole path is near the outline (>= min_fraction) → entire path is costa.
+    - If only a contiguous portion is near the outline → split the path at the
+      transition point; the near-outline piece becomes costa, the rest stays.
+    - Short paths (< min_costa_length) are never costa.
+
+    Returns (costa_paths, non_costa_paths).
+    """
+    from shapely.geometry import Point
+    from shapely.ops import substring
+
+    wing_exterior = wing_polygon.exterior
+
+    # Calibrate max_distance from L2-L3 landmark
+    l2_l3 = (landmark_points or {}).get("L2-L3")
+    if l2_l3 is not None:
+        ref_dist = wing_exterior.distance(Point(l2_l3[0], l2_l3[1]))
+        max_distance = ref_dist * 1.2  # small margin above the reference
+        logger.info(
+            "Costa threshold from L2-L3 landmark: %.0fpx (ref=%.0fpx)",
+            max_distance,
+            ref_dist,
+        )
+    else:
+        max_distance = fallback_max_distance
+        logger.info("Costa threshold fallback: %.0fpx (no L2-L3 landmark)", max_distance)
+
+    # Distal filter: only consider points distal to subcostal break
+    # (the subcostal break marks the proximal start of costa)
+    sc_break = (landmark_points or {}).get("subcostal break")
+    sc_x = sc_break[0] if sc_break else None
+
+    # Determine wing orientation: is hinge on left (low X) or right (high X)?
+    # Subcostal break is proximal → distal is the opposite direction
+    wing_centroid_x = wing_polygon.centroid.x
+    hinge_is_left = sc_x < wing_centroid_x if sc_x is not None else True
+
+    costa_paths: list[MergedPath] = []
+    other_paths: list[MergedPath] = []
+
+    for path in paths:
+        if path.length_px < min_costa_length:
+            other_paths.append(path)
+            continue
+
+        line = path.line
+        n_pts = max(5, min(n_samples, int(line.length / 20)))
+
+        # Build a per-sample proximity profile
+        # Only count points that are distal to the subcostal break
+        near_outline: list[bool] = []
+        for i in range(n_pts):
+            frac = i / (n_pts - 1) if n_pts > 1 else 0.5
+            pt = line.interpolate(frac, normalized=True)
+
+            # Skip points proximal to subcostal break (hinge region)
+            if sc_x is not None:
+                if hinge_is_left and pt.x < sc_x:
+                    near_outline.append(False)
+                    continue
+                elif not hinge_is_left and pt.x > sc_x:
+                    near_outline.append(False)
+                    continue
+
+            near_outline.append(wing_exterior.distance(pt) < max_distance)
+
+        close_count = sum(near_outline)
+        fraction_close = close_count / n_pts
+
+        if fraction_close >= min_fraction:
+            # Whole path is costa
+            costa_paths.append(path)
+            logger.info(
+                "Costa segment (whole): %.0fpx, %.1f%% near outline",
+                path.length_px,
+                fraction_close * 100,
+            )
+        elif fraction_close >= 0.15:
+            # Partial costa — find the longest contiguous run of near-outline samples
+            best_start, best_end = 0, 0
+            cur_start = -1
+            for i, near in enumerate(near_outline):
+                if near:
+                    if cur_start < 0:
+                        cur_start = i
+                else:
+                    if cur_start >= 0 and (i - cur_start) > (best_end - best_start):
+                        best_start, best_end = cur_start, i
+                    cur_start = -1
+            # Check final run
+            if cur_start >= 0 and (n_pts - cur_start) > (best_end - best_start):
+                best_start, best_end = cur_start, n_pts
+
+            run_length = best_end - best_start
+            if run_length < 3:
+                other_paths.append(path)
+                continue
+
+            # Convert sample indices to distance along line
+            split_frac_start = best_start / (n_pts - 1)
+            split_frac_end = (best_end - 1) / (n_pts - 1)
+            dist_start = split_frac_start * line.length
+            dist_end = split_frac_end * line.length
+            costa_length = dist_end - dist_start
+
+            if costa_length < min_costa_length:
+                other_paths.append(path)
+                continue
+
+            # Split: the costa piece and the remainder(s)
+            pieces_added = False
+            if dist_start > min_split_length:
+                # There's a non-costa piece before the costa
+                line_before = substring(line, 0, dist_start)
+                if line_before.length >= min_split_length:
+                    other_paths.append(
+                        MergedPath(
+                            segment_keys=list(path.segment_keys),
+                            line=line_before,
+                            length_px=line_before.length,
+                        )
+                    )
+                    pieces_added = True
+
+            costa_line = substring(line, dist_start, dist_end)
+            if costa_line.length >= min_costa_length:
+                costa_paths.append(
+                    MergedPath(
+                        segment_keys=list(path.segment_keys),
+                        line=costa_line,
+                        length_px=costa_line.length,
+                    )
+                )
+                pieces_added = True
+                logger.info(
+                    "Costa segment (split): %.0fpx from %.0fpx path " "(dist %.0f–%.0f, %d/%d samples near outline)",
+                    costa_line.length,
+                    path.length_px,
+                    dist_start,
+                    dist_end,
+                    run_length,
+                    n_pts,
+                )
+
+            if dist_end < line.length - min_split_length:
+                line_after = substring(line, dist_end, line.length)
+                if line_after.length >= min_split_length:
+                    other_paths.append(
+                        MergedPath(
+                            segment_keys=list(path.segment_keys),
+                            line=line_after,
+                            length_px=line_after.length,
+                        )
+                    )
+                    pieces_added = True
+
+            if not pieces_added:
+                other_paths.append(path)
+        else:
+            other_paths.append(path)
+
+    if costa_paths:
+        logger.info("Identified %d costa segment(s), %d other paths", len(costa_paths), len(other_paths))
+    return costa_paths, other_paths
+
+
 def classify_merged_paths(
     paths: list[MergedPath],
     wing_bbox: tuple[float, float, float, float],
     junctions: list[JunctionPoint] | None = None,
     dtip: tuple[float, float] | None = None,
+    wing_polygon: "Polygon | None" = None,
+    landmark_points: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, MergedPath]:
     """Classify merged paths into named veins by geometry.
 
-    Assigns longitudinals FIRST (L3/L4 from DTip, then L1/L2/L5),
-    then identifies crossveins by proximity to assigned longitudinals
-    (ACV between L3+L4, PCV between L4+L5).
+    Separates costa first (using wing polygon outline proximity), then
+    assigns longitudinals (L3/L4 from DTip, then L1/L2/L5), then
+    crossveins (ACV/PCV). Unassigned paths are labeled EV1, EV2, ...
     """
     min_x, min_y, max_x, max_y = wing_bbox
     bbox_w = max_x - min_x
@@ -803,7 +1107,41 @@ def classify_merged_paths(
     for p in paths:
         _compute_path_features(p, wing_bbox)
 
-    # Split into longitudinal vs crossvein candidates
+    vein_map: dict[str, MergedPath] = {}
+
+    # 0. Separate costa segments (near wing outline) before classification
+    if wing_polygon is not None:
+        costa_paths, paths = _identify_costa_segments(
+            paths,
+            wing_polygon,
+            dtip=dtip,
+            landmark_points=landmark_points,
+        )
+        if costa_paths:
+            # Merge costa segments into a single LineString
+            if len(costa_paths) == 1:
+                vein_map["costa"] = costa_paths[0]
+                logger.info("Costa assigned to vein_map: %.0fpx", costa_paths[0].length_px)
+            else:
+                from shapely.ops import linemerge
+
+                merged = linemerge([cp.line for cp in costa_paths])
+                if hasattr(merged, "geoms"):
+                    # linemerge returned MultiLineString — pick longest
+                    merged = max(merged.geoms, key=lambda g: g.length)
+                all_keys = []
+                for cp in costa_paths:
+                    all_keys.extend(cp.segment_keys)
+                vein_map["costa"] = MergedPath(
+                    segment_keys=all_keys,
+                    line=merged,
+                    length_px=merged.length,
+                )
+
+    # Track non-costa paths for EV assignment
+    all_input_paths = list(paths)
+
+    # Split remaining into longitudinal vs crossvein candidates
     longitudinals: list[MergedPath] = []
     crossveins: list[MergedPath] = []
 
@@ -817,15 +1155,7 @@ def classify_merged_paths(
             crossveins.append(p)
         elif p.orientation_deg < 30:
             longitudinals.append(p)
-        elif p.orientation_deg >= 60 and p.length_px >= max_crossvein_len:
-            # Steep but too long for crossvein — likely an artifact, skip
-            logger.info(
-                "Skipping steep long path (%.0f°, %.0fpx) — too long for crossvein",
-                p.orientation_deg,
-                p.length_px,
-            )
         elif jn == 2 and p.orientation_deg > 40 and p.length_px < max_crossvein_len:
-            # Both endpoints at triple junctions — strong crossvein signal
             logger.info(
                 "Junction-promoted crossvein (%.0f°, %.0fpx, 2 junction endpoints)",
                 p.orientation_deg,
@@ -833,13 +1163,9 @@ def classify_merged_paths(
             )
             crossveins.append(p)
         elif p.orientation_deg >= 50 and p.length_px <= um_to_px(SHORT_CROSSVEIN_UM):
-            # Ambiguous 50-60° but short — crossvein candidate
             crossveins.append(p)
         else:
-            # 30-50° or >300px — longitudinal (all real crossveins are >60°)
             longitudinals.append(p)
-
-    vein_map: dict[str, MergedPath] = {}
 
     # Anchor L3/L4 from DTip landmark (L3 meets the distal wing tip there)
     if dtip is not None and len(longitudinals) >= 2:
@@ -882,6 +1208,15 @@ def classify_merged_paths(
 
     # Post-assignment L4/L5 swap check using now-known crossveins
     _swap_l4_l5_if_needed(vein_map, vein_map.get("ACV"), vein_map.get("PCV"))
+
+    # Assign unclassified paths as EV1, EV2, ... (no silent dropping)
+    assigned_ids = set(id(mp) for mp in vein_map.values())
+    unassigned = [p for p in all_input_paths if id(p) not in assigned_ids]
+    unassigned.sort(key=lambda p: p.length_px, reverse=True)
+    for i, p in enumerate(unassigned):
+        ev_name = f"EV{i + 1}"
+        vein_map[ev_name] = p
+        logger.info("Extra vein %s: %.0fpx, orient=%.0f°", ev_name, p.length_px, p.orientation_deg)
 
     logger.info(
         "Classified veins: %s",
@@ -1373,7 +1708,7 @@ def _assign_longitudinals_scored(
 
     for k in range(max_k, min_k - 1, -1):
         for path_indices in combinations(range(n), k):
-            for name_subset in combinations(range(5), k):
+            for name_subset in combinations(range(len(long_names)), k):
                 # Try all permutations of name assignment (not just Y-ordered)
                 # Adjacent veins (e.g. L1/L2) can have overlapping Y centroids
                 for name_perm in permutations(name_subset):
@@ -2388,12 +2723,15 @@ def identify_veins_and_regions(
     wing_bbox: tuple[float, float, float, float],
     original_polygons: list[Polygon] | None = None,
     dtip: tuple[float, float] | None = None,
+    landmark_points: dict[str, tuple[float, float]] | None = None,
+    wing_polygon: "Polygon | None" = None,
 ) -> IdentificationResult:
     """Identify veins and regions independently using geometry, then cross-validate.
 
     If original_polygons is provided, names them directly using spatial proximity
-    instead of Voronoi segment_keys, skipping the match_names_to_original_polygons
-    transfer step.
+    instead of segment_keys.  If landmark_points includes fork landmarks
+    (L1-Rs, L2-L3, L4-L5), merged paths are split at those points before
+    classification.
     """
     result = IdentificationResult()
 
@@ -2407,11 +2745,29 @@ def identify_veins_and_regions(
     # 3b. Merge segments at junctions
     paths, merge_decisions = merge_segments_at_junctions(centerlines, junctions)
 
-    # 3b'. Split merged paths at sharp turns
-    paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0)
+    # 3b'. Split merged paths at landmark fork points
+    if landmark_points:
+        paths = _split_at_landmarks(paths, landmark_points)
+
+    # 3b''. Split merged paths at sharp turns (skip turns at known junctions)
+    paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0, junctions=junctions)
+
+    # Store split paths for visualization (before classification)
+    result.split_paths = list(paths)
 
     # 3c. Classify merged paths → named veins
-    vein_map = classify_merged_paths(paths, wing_bbox, junctions=junctions, dtip=dtip)
+    vein_map = classify_merged_paths(
+        paths,
+        wing_bbox,
+        junctions=junctions,
+        dtip=dtip,
+        wing_polygon=wing_polygon,
+        landmark_points=landmark_points,
+    )
+
+    # Preserve costa before junction validation (retries don't have wing_polygon)
+    costa_path = vein_map.get("costa")
+    logger.info("Costa preserved: %s", f"{costa_path.length_px:.0f}px" if costa_path else "None")
 
     # 3c'. Validate junction topology — retry merges if crossvein/longitudinal
     # orientation is wrong at any triple junction
@@ -2423,6 +2779,16 @@ def identify_veins_and_regions(
         wing_bbox,
         dtip=dtip,
     )
+
+    # Restore costa if lost during junction validation retries
+    logger.info("Costa in vein_map after validation: %s", "costa" in vein_map)
+    if costa_path is not None and "costa" not in vein_map:
+        logger.info("Restoring costa (%0.fpx)", costa_path.length_px)
+        vein_map["costa"] = costa_path
+        # Remove costa from EVs if it was re-assigned as one
+        ev_keys_to_remove = [k for k, v in vein_map.items() if k.startswith("EV") and id(v) == id(costa_path)]
+        for k in ev_keys_to_remove:
+            del vein_map[k]
 
     # 3d. Validate vein shapes
     shape_warnings = validate_vein_shapes(vein_map)
@@ -2583,7 +2949,8 @@ def identify_veins_and_regions(
 
     # Build VeinAssignment objects from vein_map
     assignments: list[VeinAssignment] = []
-    for vein_id in ["L1", "Rs", "L2", "L3", "L4", "L5", "ACV", "PCV"]:
+    known_ids = ["L1", "Rs", "L2", "L3", "L4", "L5", "ACV", "PCV", "costa"]
+    for vein_id in known_ids:
         if vein_id in vein_map:
             mp = vein_map[vein_id]
             coords = list(mp.line.coords)
@@ -2611,7 +2978,23 @@ def identify_veins_and_regions(
                 )
             )
 
-    # Costa is added by the caller (extracted separately)
+    # Add extra veins (EV1, EV2, ...) — unclassified paths
+    for vein_id, mp in vein_map.items():
+        if vein_id.startswith("EV"):
+            coords = list(mp.line.coords)
+            assignments.append(
+                VeinAssignment(
+                    vein_id=vein_id,
+                    status=VeinStatus.COMPLETE,
+                    edge_ids=[],
+                    confidence=0.5,
+                    evidence=["unclassified_path"],
+                    length_px=mp.length_px,
+                    line=mp.line,
+                    endpoints=[coords[0], coords[-1]],
+                )
+            )
+
     result.assignments = assignments
 
     return result

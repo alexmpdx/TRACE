@@ -1,4 +1,4 @@
-"""Voronoi-based vein centerline extraction from vein mask."""
+"""Vein centerline extraction from vein mask via morphological skeletonization."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ from typing import Optional
 import cv2
 import numpy as np
 from scipy import ndimage
-from shapely.geometry import LineString, MultiPoint, Polygon
+from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
+from skimage.morphology import skeletonize
 
 from WingVeinAnalyzer.models.vein_map import (
     BRIDGE_THRESHOLD_UM,
@@ -25,13 +26,12 @@ from WingVeinAnalyzer.models.vein_map import (
     MIN_DARK_BAND_HALF_UM,
     MIN_EDGE_LENGTH_UM,
     MIN_POLY_AREA_UM2,
-    MIN_SEED_AREA_UM2,
     MIN_SEGMENT_LENGTH_UM,
     MIN_SPLIT_BUFFER_UM,
     PAD_CENTERLINE_UM,
     PAD_EROSION_UM,
     PAD_RIDGE_UM,
-    PRE_VORONOI_EROSION_UM,
+    PRE_SPLIT_EROSION_UM,
     SIMPLIFY_DARKBAND_UM,
     SIMPLIFY_UM,
     um2_to_px2,
@@ -42,31 +42,28 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class VoronoiResult:
-    """Result of Voronoi-based vein extraction from vein mask."""
+class CenterlineResult:
+    """Result of centerline extraction from vein mask."""
 
     centerlines: dict[tuple[int, int], LineString]
-    voronoi_polygons: list[Polygon]
-    nearest_labels: np.ndarray
     vein_mask: np.ndarray
-    hull_mask: np.ndarray
-    seed_labels: np.ndarray
+    nearest_labels: np.ndarray
     bridge_segments: dict[tuple[int, int], LineString] = dataclasses.field(default_factory=dict)
+
+
+# Backward-compatible alias
+VoronoiResult = CenterlineResult
 
 
 def extract_veins_from_mask(
     vein_polygons: list[Polygon],
     image_shape: tuple[int, int],
     closing_kernel_size: int = 11,
-    min_seed_area: int | None = None,
     intervein_polygons: list[Polygon] | None = None,
-) -> VoronoiResult:
-    """Extract vein centerlines using Voronoi partition of vein mask.
-
-    Hull-minus-vein connected components become Voronoi seeds with
-    sequential labels 1..M. No input polygon overlap mapping is needed;
-    each large connected component defines its own region.  Voronoi-derived
-    polygons replace the input intervein polygons downstream.
+    prune_threshold: int = 200,
+    **kwargs,
+) -> CenterlineResult:
+    """Extract vein centerlines via morphological skeletonization of vein mask.
 
     Parameters
     ----------
@@ -76,17 +73,16 @@ def extract_veins_from_mask(
         Image dimensions for rasterization.
     closing_kernel_size : int
         Morphological closing kernel size for vein mask.
-    min_seed_area : int
-        Minimum component area (in pixels) to use as a Voronoi seed.
+    intervein_polygons : list[Polygon] | None
+        Intervein space polygons for polygon-pair assignment.
+    prune_threshold : int
+        Remove skeleton branches shorter than this (pixels).
 
     Returns
     -------
-    VoronoiResult
-        centerlines, voronoi_polygons, nearest_labels, vein_mask,
-        hull_mask, seed_labels.
+    CenterlineResult
+        centerlines, vein_mask, nearest_labels, bridge_segments.
     """
-    if min_seed_area is None:
-        min_seed_area = int(um2_to_px2(MIN_SEED_AREA_UM2))
     h, w = image_shape
 
     # 1. Rasterize vein mask to binary
@@ -99,122 +95,42 @@ def extract_veins_from_mask(
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (closing_kernel_size, closing_kernel_size))
         vein_mask = cv2.morphologyEx(vein_mask, cv2.MORPH_CLOSE, kernel)
 
-    # 3. Vein-mask hull seeding
-    vm_ys, vm_xs = np.where(vein_mask > 0)
-    step = max(1, len(vm_ys) // 10000)  # subsample for speed
-    hull = MultiPoint(list(zip(vm_xs[::step].tolist(), vm_ys[::step].tolist()))).convex_hull
-    hull_mask = np.zeros((h, w), dtype=np.uint8)
-    _fill_polygon(hull_mask, hull, 1)
+    # 3. Skeletonize the vein mask
+    skeleton = skeletonize(vein_mask > 0).astype(np.uint8)
+    raw_pixels = int(skeleton.sum())
+    logger.info("Raw skeleton: %d pixels from %d vein mask pixels", raw_pixels, int(vein_mask.sum()))
 
-    seed_mask = (hull_mask > 0) & (vein_mask == 0)
+    # 4. Prune short terminal branches
+    skeleton = _prune_skeleton(skeleton, min_branch_length=prune_threshold)
+    pruned_pixels = int(skeleton.sum())
+    logger.info("Pruned skeleton: %d pixels (%d removed)", pruned_pixels, raw_pixels - pruned_pixels)
 
-    structure = ndimage.generate_binary_structure(2, 2)
-    component_labels, n_components = ndimage.label(seed_mask, structure=structure)
+    # 5. Trace skeleton into LineString segments at junction points
+    centerlines = _trace_skeleton_segments(skeleton, min_length=um_to_px(MIN_SEGMENT_LENGTH_UM))
+    logger.info("Traced %d centerline segments from skeleton", len(centerlines))
 
-    # 4. Assign sequential labels 1..M to large components
-    seed_labels = np.zeros((h, w), dtype=np.int32)
-    comp_sizes = ndimage.sum(
-        np.ones_like(component_labels),
-        component_labels,
-        range(1, n_components + 1),
-    )
-    next_label = 1
-    for comp_id in range(1, n_components + 1):
-        if comp_sizes[comp_id - 1] < min_seed_area:
-            continue
-        comp_mask = component_labels == comp_id
-        seed_labels[comp_mask] = next_label
-        next_label += 1
-
-    # Remove phantom seeds outside the annotation footprint
-    if intervein_polygons:
-        ivn_mask = np.zeros((h, w), dtype=np.uint8)
-        for poly in intervein_polygons:
-            _fill_polygon(ivn_mask, poly, 1)
-        phantom_ids = []
-        for label_id in range(1, next_label):
-            comp_pixels = seed_labels == label_id
-            overlap = (comp_pixels & (ivn_mask > 0)).sum()
-            if overlap / comp_pixels.sum() < 0.1:
-                phantom_ids.append(label_id)
-                seed_labels[comp_pixels] = 0
-        if phantom_ids:
-            # Renumber remaining labels sequentially
-            old_to_new = {}
-            new_id = 1
-            for old_id in range(1, next_label):
-                if old_id not in phantom_ids:
-                    old_to_new[old_id] = new_id
-                    new_id += 1
-            new_seed_labels = np.zeros_like(seed_labels)
-            for old_id, new_id_val in old_to_new.items():
-                new_seed_labels[seed_labels == old_id] = new_id_val
-            seed_labels = new_seed_labels
-            next_label = new_id
-            logger.info(
-                "Removed %d phantom seed(s) outside annotation boundary",
-                len(phantom_ids),
-            )
-
-    n_seeds = next_label - 1
-    logger.info(
-        "Hull seeding: %d large components from %d total (min_area=%d)",
-        n_seeds,
-        n_components,
-        min_seed_area,
-    )
-
-    # 5. Voronoi partition via EDT
-    background = seed_labels == 0
-    _, nearest_indices = ndimage.distance_transform_edt(background, return_distances=True, return_indices=True)
-    nearest_labels = seed_labels[nearest_indices[0], nearest_indices[1]]
-    nearest_labels[~background] = seed_labels[~background]
-
-    logger.info(
-        "Voronoi partition: %d unique labels, vein mask covers %d pixels",
-        len(np.unique(nearest_labels)),
-        int(vein_mask.sum()),
-    )
-
-    # 6. Extract label boundaries within the vein mask
-    boundary_pixels = _extract_boundary_pixels(nearest_labels, vein_mask)
-
-    # 7. Filter and trace into LineStrings
-    centerlines: dict[tuple[int, int], LineString] = {}
-    for (label_a, label_b), pixels in boundary_pixels.items():
-        idx_a = label_a - 1
-        idx_b = label_b - 1
-        if idx_a < 0 or idx_b < 0:
-            continue
-
-        line = _trace_pixels_to_line(pixels)
-        if line is not None and line.length > um_to_px(MIN_SEGMENT_LENGTH_UM):
-            # Split at large jumps through non-vein space
-            sub_lines = _split_line_at_vein_gaps(line, vein_mask)
-            best = max(sub_lines, key=lambda l: l.length) if sub_lines else line
-            if best.length > um_to_px(MIN_SEGMENT_LENGTH_UM):
-                pair = (min(idx_a, idx_b), max(idx_a, idx_b))
-                centerlines[pair] = best
-
-    logger.info("Extracted %d centerline segments from vein mask", len(centerlines))
-
-    # 8. Bridge dangling endpoints
+    # 6. Bridge dangling endpoints
     centerlines, bridge_segments = bridge_dangling_endpoints(centerlines)
 
-    # 9. Vectorize Voronoi regions into polygons
-    voronoi_polygons = _vectorize_voronoi_regions(
-        nearest_labels,
-        hull_mask,
-        n_seeds,
-    )
+    # 7. Build nearest-label map from intervein polygons via EDT (for downstream use)
+    label_seeds = np.zeros((h, w), dtype=np.int32)
+    if intervein_polygons:
+        for i, poly in enumerate(intervein_polygons):
+            _fill_polygon(label_seeds, poly, i + 1)
 
-    return VoronoiResult(
+    background = label_seeds == 0
+    _, nearest_indices = ndimage.distance_transform_edt(
+        background,
+        return_distances=True,
+        return_indices=True,
+    )
+    nearest_labels = label_seeds[nearest_indices[0], nearest_indices[1]]
+    nearest_labels[~background] = label_seeds[~background]
+
+    return CenterlineResult(
         centerlines=centerlines,
-        voronoi_polygons=voronoi_polygons,
-        nearest_labels=nearest_labels,
         vein_mask=vein_mask,
-        hull_mask=hull_mask,
-        seed_labels=seed_labels,
+        nearest_labels=nearest_labels,
         bridge_segments=bridge_segments,
     )
 
@@ -311,40 +227,6 @@ def bridge_dangling_endpoints(
         logger.info("Bridged %d dangling endpoint pair(s)", bridges_made)
 
     return result, bridge_segments
-
-
-def _vectorize_voronoi_regions(
-    nearest_labels: np.ndarray,
-    hull_mask: np.ndarray,
-    n_labels: int,
-) -> list[Polygon]:
-    """Convert Voronoi label regions into Shapely Polygons.
-
-    For each label 1..n_labels, creates a binary mask restricted to the
-    hull, finds the largest contour, and converts to a Shapely Polygon.
-    Returns a list where index i corresponds to label i+1.
-    """
-    polygons: list[Polygon] = []
-    for label in range(1, n_labels + 1):
-        region_mask = ((nearest_labels == label) & (hull_mask > 0)).astype(np.uint8) * 255
-        contours, _ = cv2.findContours(
-            region_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
-        if contours:
-            largest = max(contours, key=cv2.contourArea)
-            coords = [(float(pt[0][0]), float(pt[0][1])) for pt in largest]
-            if len(coords) >= 4:
-                p = Polygon(coords)
-                if p.is_valid and p.area > um2_to_px2(MIN_POLY_AREA_UM2):
-                    polygons.append(p)
-                    continue
-        # Placeholder for invalid/empty regions
-        polygons.append(Polygon())
-
-    logger.info("Vectorized %d Voronoi regions into polygons", len(polygons))
-    return polygons
 
 
 def _extend_line(
@@ -694,6 +576,155 @@ def extract_edge_boundary_veins(
     return result
 
 
+def _prune_skeleton(skeleton: np.ndarray, min_branch_length: int = 200) -> np.ndarray:
+    """Remove terminal branches shorter than min_branch_length (single-pass)."""
+    pruned = skeleton.copy()
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    kernel[1, 1] = 0
+    neighbor_count = cv2.filter2D(pruned, -1, kernel)
+
+    endpoints = (pruned > 0) & (neighbor_count == 1)
+    ep_ys, ep_xs = np.where(endpoints)
+
+    to_remove: list[tuple[int, int]] = []
+    for ey, ex in zip(ep_ys, ep_xs):
+        branch_pixels: list[tuple[int, int]] = []
+        cy, cx = int(ey), int(ex)
+        visited: set[tuple[int, int]] = set()
+
+        while True:
+            branch_pixels.append((cy, cx))
+            visited.add((cy, cx))
+
+            neighbors = []
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = cy + dy, cx + dx
+                    if (
+                        0 <= ny < pruned.shape[0]
+                        and 0 <= nx < pruned.shape[1]
+                        and pruned[ny, nx] > 0
+                        and (ny, nx) not in visited
+                    ):
+                        neighbors.append((ny, nx))
+
+            if len(neighbors) == 0:
+                break
+            elif len(neighbors) == 1:
+                cy, cx = neighbors[0]
+            else:
+                break
+
+        if len(branch_pixels) < min_branch_length:
+            to_remove.extend(branch_pixels)
+
+    for py, px in to_remove:
+        pruned[py, px] = 0
+
+    return pruned
+
+
+def _trace_skeleton_segments(
+    skeleton: np.ndarray,
+    min_length: float = 10.0,
+) -> dict[tuple[int, int], LineString]:
+    """Trace a skeleton into LineString segments between junction points.
+
+    Finds junction pixels (3+ skeleton neighbors) and endpoints (1 neighbor),
+    then traces paths between them.  Each segment gets a unique sequential key.
+    Segments shorter than min_length are discarded.
+    """
+    h, w = skeleton.shape
+
+    # Compute neighbor count for each skeleton pixel
+    kern = np.ones((3, 3), dtype=np.uint8)
+    kern[1, 1] = 0
+    neighbor_count = cv2.filter2D(skeleton, -1, kern)
+
+    # Classify skeleton pixels
+    skel_mask = skeleton > 0
+    junctions = skel_mask & (neighbor_count >= 3)
+    endpoints = skel_mask & (neighbor_count == 1)
+
+    # Start points for tracing: all endpoints + all junction pixels
+    start_ys, start_xs = np.where(endpoints | junctions)
+    junction_set = set(zip(*np.where(junctions))) if junctions.any() else set()
+
+    # Track which pixels have been assigned to a segment
+    visited_edges: set[tuple[int, int]] = set()
+    centerlines: dict[tuple[int, int], LineString] = {}
+    seg_id = 0
+
+    for sy, sx in zip(start_ys, start_xs):
+        # From each start pixel, try tracing along each unvisited neighbor
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                ny, nx = sy + dy, sx + dx
+                if not (0 <= ny < h and 0 <= nx < w and skeleton[ny, nx] > 0):
+                    continue
+                if (ny, nx) in visited_edges and (sy, sx) not in junction_set:
+                    continue
+
+                # Trace from (sy, sx) through (ny, nx) until hitting
+                # another junction, endpoint, or dead end
+                path = [(int(sx), int(sy))]  # x, y order for LineString
+                cy, cx = ny, nx
+                prev_y, prev_x = sy, sx
+
+                while True:
+                    if (cy, cx) in visited_edges and (cy, cx) not in junction_set:
+                        break
+
+                    path.append((int(cx), int(cy)))
+
+                    # Stop at junctions (but include the junction pixel)
+                    if (cy, cx) in junction_set and len(path) > 1:
+                        break
+
+                    # Find next unvisited neighbor (excluding where we came from)
+                    next_pixel = None
+                    for ddy in (-1, 0, 1):
+                        for ddx in (-1, 0, 1):
+                            if ddy == 0 and ddx == 0:
+                                continue
+                            nny, nnx = cy + ddy, cx + ddx
+                            if (nny, nnx) == (prev_y, prev_x):
+                                continue
+                            if 0 <= nny < h and 0 <= nnx < w and skeleton[nny, nnx] > 0:
+                                next_pixel = (nny, nnx)
+                                break
+                        if next_pixel is not None:
+                            break
+
+                    if next_pixel is None:
+                        break  # endpoint or dead end
+
+                    prev_y, prev_x = cy, cx
+                    cy, cx = next_pixel
+
+                # Mark interior pixels (not junctions) as visited
+                for px, py in path[1:-1]:
+                    visited_edges.add((py, px))
+
+                if len(path) >= 2:
+                    line = LineString(path)
+                    if line.length >= min_length:
+                        centerlines[(seg_id, seg_id + 1)] = line
+                        seg_id += 2
+
+    logger.info(
+        "Skeleton tracing: %d junctions, %d endpoints, %d segments",
+        len(junction_set),
+        int(endpoints.sum()),
+        len(centerlines),
+    )
+    return centerlines
+
+
 def _fill_polygon(raster: np.ndarray, poly: Polygon, value: int) -> None:
     """Fill a shapely Polygon (with holes) into a numpy raster."""
     # Exterior ring
@@ -1005,7 +1036,7 @@ def _pre_split_by_erosion(
     erode_amount = None
     parts: list[Polygon] = []
 
-    for amount in [um_to_px(e) for e in PRE_VORONOI_EROSION_UM]:
+    for amount in [um_to_px(e) for e in PRE_SPLIT_EROSION_UM]:
         eroded = poly.buffer(-amount)
         if eroded.is_empty:
             continue

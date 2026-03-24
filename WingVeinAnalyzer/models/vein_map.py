@@ -247,12 +247,11 @@ BUFFER_SMOOTH_UM = 2.415  # 5 px — outline smooth buffer
 BUFFER_SPATIAL_UM = 12.075  # 25 px — spatial proximity for poly-vein mapping
 MIN_SPATIAL_LENGTH_UM = 14.49  # 30 px — min intersection length for poly-vein
 
-# -- Voronoi / skeleton --
-MIN_SEED_AREA_UM2 = 2332.89  # 10 000 px² — min Voronoi seed area
+# -- Skeleton / centerline extraction --
 BRIDGE_THRESHOLD_UM = 14.49  # 30 px — bridge dangling endpoints
 MIN_CENTERLINE_EXTRACT_UM = 24.15  # 50 px — min centerline between polygons
 PAD_CENTERLINE_UM = 9.66  # 20 px — padding around polygon bbox
-MIN_POLY_AREA_UM2 = 23.33  # 100 px² — min polygon area (Voronoi / erosion)
+MIN_POLY_AREA_UM2 = 23.33  # 100 px² — min polygon area (erosion)
 
 # -- Edge boundary veins --
 MIN_EDGE_LENGTH_UM = 48.3  # 100 px — min edge boundary vein length
@@ -279,7 +278,7 @@ CUT_EXTENSION_UM = 4.83  # 10 px — cut line extension beyond polygon
 # -- Erosion amount lists --
 BOTTLENECK_EROSION_UM = [4.83, 7.245, 9.66, 14.49]  # [10,15,20,30] px
 SPLIT_EROSION_UM = [4.83, 7.245, 9.66, 14.49, 24.15]  # [10,15,20,30,50] px
-PRE_VORONOI_EROSION_UM = [9.66, 19.32, 28.98, 38.64, 48.3, 72.45]  # [20..150] px
+PRE_SPLIT_EROSION_UM = [9.66, 19.32, 28.98, 38.64, 48.3, 72.45]  # [20..150] px
 
 # -- Dark band detection --
 DARK_BAND_SIZE_UM = 4.83  # 10 px — band size for dark band detection
