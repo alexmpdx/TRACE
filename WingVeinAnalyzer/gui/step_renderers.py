@@ -221,17 +221,25 @@ def _render_merge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
 
 
 def _render_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 4: Merged paths → split paths with landmark annotations."""
-    # Left: merged paths (before split) + fork landmark points
+    """Step 4: Merged paths → split paths with costa region + landmark annotations."""
+    # Left: merged paths (before split) + costa region overlay + fork landmarks
     left = state.image.copy()
+    if state.costa_region is not None:
+        costa_overlay = np.zeros_like(left)
+        costa_overlay[state.costa_region] = (0, 255, 255)  # yellow
+        left = cv2.addWeighted(left, 0.7, costa_overlay, 0.3, 0)
     if state.merged_paths:
         for idx, mp in enumerate(state.merged_paths):
             color = SEGMENT_COLORS[idx % len(SEGMENT_COLORS)]
             _draw_linestring(left, mp.line, color, thickness=3)
     _draw_fork_landmarks(left, state)
 
-    # Right: all paths after splitting (before classification) + fork landmarks
+    # Right: all paths after splitting (before classification) + costa region + fork landmarks
     right = state.image.copy()
+    if state.costa_region is not None:
+        costa_overlay = np.zeros_like(right)
+        costa_overlay[state.costa_region] = (0, 255, 255)
+        right = cv2.addWeighted(right, 0.7, costa_overlay, 0.3, 0)
     if state.split_paths:
         for idx, mp in enumerate(state.split_paths):
             color = SEGMENT_COLORS[idx % len(SEGMENT_COLORS)]

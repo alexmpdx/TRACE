@@ -153,6 +153,7 @@ class IdentificationResult:
     validation_report: ValidationReport = field(default_factory=ValidationReport)
     vein_map: dict[str, MergedPath] = field(default_factory=dict)
     split_paths: list[MergedPath] = field(default_factory=list)
+    costa_region: Optional[np.ndarray] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -901,61 +902,107 @@ def _compute_path_features(
     path.length_px = path.line.length
 
 
+def _build_costa_region(
+    wing_polygon: "Polygon",
+    vein_polygons: list["Polygon"],
+    image_shape: tuple[int, int],
+    landmark_points: dict[str, tuple[float, float]] | None = None,
+) -> np.ndarray | None:
+    """Build a binary raster mask of the costa region (wing edge within vein width).
+
+    Computes average vein width from the vein mask distance transform at skeleton
+    pixels, then marks pixels inside the wing polygon that are within that width
+    of the wing edge.  Masks out the hinge region between subcostal break and alula
+    notch using perpendicular cuts at each landmark.
+
+    Returns a boolean array (H, W) or None if inputs are insufficient.
+    """
+    from scipy import ndimage as _ndi
+    from skimage.morphology import skeletonize as _skeletonize
+
+    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
+
+    h, w = image_shape
+
+    # Rasterize vein mask and compute average vein width
+    vein_mask = np.zeros((h, w), dtype=np.uint8)
+    for poly in vein_polygons:
+        _fill_polygon(vein_mask, poly, 1)
+    dist_vein = _ndi.distance_transform_edt(vein_mask > 0)
+    skel = _skeletonize(vein_mask > 0)
+    half_widths = dist_vein[skel]
+    if len(half_widths) == 0:
+        return None
+    avg_vein_width = float(2 * np.median(half_widths))
+    logger.info("Costa region: avg vein width = %.0fpx", avg_vein_width)
+
+    # Rasterize wing polygon and compute distance to edge
+    wing_mask = np.zeros((h, w), dtype=np.uint8)
+    _fill_polygon(wing_mask, wing_polygon, 1)
+    dist_to_edge = _ndi.distance_transform_edt(wing_mask > 0)
+
+    # Costa region = inside wing, within one vein width of the edge
+    costa_region = (wing_mask > 0) & (dist_to_edge <= avg_vein_width)
+
+    # Mask out hinge region between subcostal break and alula notch
+    lp = landmark_points or {}
+    sc = lp.get("subcostal break")
+    al = lp.get("alula notch")
+    wing_ext = wing_polygon.exterior
+    wing_cx = float(wing_polygon.centroid.x)
+    wing_cy = float(wing_polygon.centroid.y)
+
+    if sc is not None and al is not None:
+        from shapely.geometry import Point as _Pt
+
+        yy, xx = np.mgrid[:h, :w]
+        for lxy in (sc, al):
+            pt = _Pt(lxy[0], lxy[1])
+            proj = wing_ext.project(pt)
+            delta = 30.0
+            p1 = wing_ext.interpolate(max(0, proj - delta))
+            p2 = wing_ext.interpolate(min(wing_ext.length, proj + delta))
+            tx = p2.x - p1.x
+            ty = p2.y - p1.y
+            t_len = (tx**2 + ty**2) ** 0.5
+            if t_len < 1e-6:
+                continue
+            tx /= t_len
+            ty /= t_len
+            # Signed distance from cut line through landmark with tangent as normal
+            side = (xx - lxy[0]) * tx + (yy - lxy[1]) * ty
+            # Keep the side that contains the wing centroid
+            centroid_side = (wing_cx - lxy[0]) * tx + (wing_cy - lxy[1]) * ty
+            if centroid_side > 0:
+                costa_region[side < 0] = False
+            else:
+                costa_region[side > 0] = False
+
+    return costa_region
+
+
 def _identify_costa_segments(
     paths: list[MergedPath],
-    wing_polygon: "Polygon",
+    costa_region: np.ndarray,
     min_fraction: float = 0.7,
     min_costa_length: float = 200.0,
     min_split_length: float = 50.0,
-    n_samples: int = 40,
-    dtip: tuple[float, float] | None = None,
-    landmark_points: dict[str, tuple[float, float]] | None = None,
-    fallback_max_distance: float = 100.0,
+    sample_spacing: float = 20.0,
 ) -> tuple[list[MergedPath], list[MergedPath]]:
-    """Separate costa segments from other paths using wing outline proximity.
+    """Separate costa segments from other paths using a precomputed costa region mask.
 
-    The distance threshold is calibrated dynamically from the L2-L3 landmark:
-    that junction sits where L2 meets the wing margin, so its distance to the
-    wing outline defines the boundary between interior veins and margin-following
-    costa.  Falls back to fallback_max_distance if no L2-L3 landmark.
-
-    For each path, samples points and checks distance to wing polygon exterior.
-    - If the whole path is near the outline (>= min_fraction) → entire path is costa.
-    - If only a contiguous portion is near the outline → split the path at the
-      transition point; the near-outline piece becomes costa, the rest stays.
+    For each path, samples points at sample_spacing intervals and checks if they
+    fall inside the costa region raster.
+    - If the whole path is inside (>= min_fraction) → entire path is costa.
+    - If only a contiguous portion is inside → split the path at the transition
+      point; the inside piece becomes costa, the rest stays.
     - Short paths (< min_costa_length) are never costa.
 
     Returns (costa_paths, non_costa_paths).
     """
-    from shapely.geometry import Point
     from shapely.ops import substring
 
-    wing_exterior = wing_polygon.exterior
-
-    # Calibrate max_distance from L2-L3 landmark
-    l2_l3 = (landmark_points or {}).get("L2-L3")
-    if l2_l3 is not None:
-        ref_dist = wing_exterior.distance(Point(l2_l3[0], l2_l3[1]))
-        max_distance = ref_dist * 1.2  # small margin above the reference
-        logger.info(
-            "Costa threshold from L2-L3 landmark: %.0fpx (ref=%.0fpx)",
-            max_distance,
-            ref_dist,
-        )
-    else:
-        max_distance = fallback_max_distance
-        logger.info("Costa threshold fallback: %.0fpx (no L2-L3 landmark)", max_distance)
-
-    # Distal filter: only consider points distal to subcostal break
-    # (the subcostal break marks the proximal start of costa)
-    sc_break = (landmark_points or {}).get("subcostal break")
-    sc_x = sc_break[0] if sc_break else None
-
-    # Determine wing orientation: is hinge on left (low X) or right (high X)?
-    # Subcostal break is proximal → distal is the opposite direction
-    wing_centroid_x = wing_polygon.centroid.x
-    hinge_is_left = sc_x < wing_centroid_x if sc_x is not None else True
-
+    h, w = costa_region.shape
     costa_paths: list[MergedPath] = []
     other_paths: list[MergedPath] = []
 
@@ -965,39 +1012,31 @@ def _identify_costa_segments(
             continue
 
         line = path.line
-        n_pts = max(5, min(n_samples, int(line.length / 20)))
+        n_pts = max(5, int(line.length / sample_spacing))
 
-        # Build a per-sample proximity profile
-        # Only count points that are distal to the subcostal break
+        # Build per-sample proximity profile from raster mask
         near_outline: list[bool] = []
         for i in range(n_pts):
             frac = i / (n_pts - 1) if n_pts > 1 else 0.5
             pt = line.interpolate(frac, normalized=True)
-
-            # Skip points proximal to subcostal break (hinge region)
-            if sc_x is not None:
-                if hinge_is_left and pt.x < sc_x:
-                    near_outline.append(False)
-                    continue
-                elif not hinge_is_left and pt.x > sc_x:
-                    near_outline.append(False)
-                    continue
-
-            near_outline.append(wing_exterior.distance(pt) < max_distance)
+            px, py = int(round(pt.x)), int(round(pt.y))
+            if 0 <= py < h and 0 <= px < w:
+                near_outline.append(bool(costa_region[py, px]))
+            else:
+                near_outline.append(False)
 
         close_count = sum(near_outline)
         fraction_close = close_count / n_pts
 
         if fraction_close >= min_fraction:
-            # Whole path is costa
             costa_paths.append(path)
             logger.info(
-                "Costa segment (whole): %.0fpx, %.1f%% near outline",
+                "Costa segment (whole): %.0fpx, %.1f%% in costa region",
                 path.length_px,
                 fraction_close * 100,
             )
-        elif fraction_close >= 0.15:
-            # Partial costa — find the longest contiguous run of near-outline samples
+        elif close_count >= 5:
+            # Partial costa — find longest contiguous run of in-region samples
             best_start, best_end = 0, 0
             cur_start = -1
             for i, near in enumerate(near_outline):
@@ -1008,7 +1047,6 @@ def _identify_costa_segments(
                     if cur_start >= 0 and (i - cur_start) > (best_end - best_start):
                         best_start, best_end = cur_start, i
                     cur_start = -1
-            # Check final run
             if cur_start >= 0 and (n_pts - cur_start) > (best_end - best_start):
                 best_start, best_end = cur_start, n_pts
 
@@ -1017,7 +1055,6 @@ def _identify_costa_segments(
                 other_paths.append(path)
                 continue
 
-            # Convert sample indices to distance along line
             split_frac_start = best_start / (n_pts - 1)
             split_frac_end = (best_end - 1) / (n_pts - 1)
             dist_start = split_frac_start * line.length
@@ -1028,10 +1065,9 @@ def _identify_costa_segments(
                 other_paths.append(path)
                 continue
 
-            # Split: the costa piece and the remainder(s)
+            # Split: costa piece and remainder(s)
             pieces_added = False
             if dist_start > min_split_length:
-                # There's a non-costa piece before the costa
                 line_before = substring(line, 0, dist_start)
                 if line_before.length >= min_split_length:
                     other_paths.append(
@@ -1054,7 +1090,7 @@ def _identify_costa_segments(
                 )
                 pieces_added = True
                 logger.info(
-                    "Costa segment (split): %.0fpx from %.0fpx path " "(dist %.0f–%.0f, %d/%d samples near outline)",
+                    "Costa segment (split): %.0fpx from %.0fpx path (dist %.0f\u2013%.0f, %d/%d samples in region)",
                     costa_line.length,
                     path.length_px,
                     dist_start,
@@ -1092,6 +1128,7 @@ def classify_merged_paths(
     dtip: tuple[float, float] | None = None,
     wing_polygon: "Polygon | None" = None,
     landmark_points: dict[str, tuple[float, float]] | None = None,
+    costa_region: np.ndarray | None = None,
 ) -> dict[str, MergedPath]:
     """Classify merged paths into named veins by geometry.
 
@@ -1108,26 +1145,17 @@ def classify_merged_paths(
 
     vein_map: dict[str, MergedPath] = {}
 
-    # 0. Separate costa segments (near wing outline) before classification
-    if wing_polygon is not None:
-        costa_paths, paths = _identify_costa_segments(
-            paths,
-            wing_polygon,
-            dtip=dtip,
-            landmark_points=landmark_points,
-        )
+    # 0. Separate costa segments (near wing edge) before classification
+    if costa_region is not None:
+        costa_paths, paths = _identify_costa_segments(paths, costa_region)
         if costa_paths:
             # Merge costa segments into a single LineString
             if len(costa_paths) == 1:
                 vein_map["costa"] = costa_paths[0]
                 logger.info("Costa assigned to vein_map: %.0fpx", costa_paths[0].length_px)
             else:
-                from shapely.ops import linemerge
-
-                merged = linemerge([cp.line for cp in costa_paths])
-                if hasattr(merged, "geoms"):
-                    # linemerge returned MultiLineString — pick longest
-                    merged = max(merged.geoms, key=lambda g: g.length)
+                merged_lines = _merge_vein_lines([cp.line for cp in costa_paths])
+                merged = merged_lines[0] if merged_lines else costa_paths[0].line
                 all_keys = []
                 for cp in costa_paths:
                     all_keys.extend(cp.segment_keys)
@@ -1135,6 +1163,11 @@ def classify_merged_paths(
                     segment_keys=all_keys,
                     line=merged,
                     length_px=merged.length,
+                )
+                logger.info(
+                    "Costa merged %d segments: %.0fpx",
+                    len(costa_paths),
+                    merged.length,
                 )
 
     # Track non-costa paths for EV assignment
@@ -2584,7 +2617,13 @@ def identify_veins_and_regions(
     # Store split paths for visualization (before classification)
     result.split_paths = list(paths)
 
-    # 3c. Classify merged paths → named veins
+    # 3c. Build costa region mask (vein-width from wing edge, hinge excluded)
+    costa_region = None
+    if wing_polygon is not None and vein_polygons:
+        costa_region = _build_costa_region(wing_polygon, vein_polygons, image_shape, landmark_points)
+    result.costa_region = costa_region
+
+    # 3c'. Classify merged paths → named veins
     vein_map = classify_merged_paths(
         paths,
         wing_bbox,
@@ -2592,6 +2631,7 @@ def identify_veins_and_regions(
         dtip=dtip,
         wing_polygon=wing_polygon,
         landmark_points=landmark_points,
+        costa_region=costa_region,
     )
 
     # 3d. Validate vein shapes

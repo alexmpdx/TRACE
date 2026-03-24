@@ -151,6 +151,7 @@ class StepState:
     junctions: Optional[list[JunctionPoint]] = None
     merged_paths: Optional[list[MergedPath]] = None
     split_paths: Optional[list[MergedPath]] = None
+    costa_region: Optional[np.ndarray] = None
     vein_map: Optional[dict[str, MergedPath]] = None
     poly_names: Optional[dict[int, str]] = None
 
@@ -384,6 +385,7 @@ class StepRunner:
         state.assignments = list(id_result.assignments)
         state.poly_names = dict(id_result.poly_names)
         state.split_paths = list(id_result.split_paths)
+        state.costa_region = id_result.costa_region
         if id_result.polygons:
             state.polygons = list(id_result.polygons)
 
@@ -747,6 +749,7 @@ class StepRunner:
         state.junctions = prev.junctions
         state.merged_paths = prev.merged_paths
         state.split_paths = prev.split_paths
+        state.costa_region = prev.costa_region
         state.vein_map = prev.vein_map
         state.poly_names = prev.poly_names
         state.extension_lines = prev.extension_lines

@@ -18,3 +18,5 @@
 16. [ ] Label extra veins
 17. [ ] Sort out partial veins
 18. [ ] Check out wingmachine and mapper code
+19. [ ] Fix finnicky costa extraction
+20. [ ] Make real wing DL model for wing class
