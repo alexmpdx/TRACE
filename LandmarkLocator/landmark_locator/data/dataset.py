@@ -65,6 +65,33 @@ def extract_genotype(filename: str) -> str:
     return "unknown"
 
 
+def _find_similar_file(directory: Path, target_name: str) -> Optional[Path]:
+    """Find a file in directory with a name similar to target_name.
+
+    Handles stray whitespace, case differences, and minor typos by comparing
+    names with whitespace stripped. Returns the best match or None.
+    """
+    target_clean = re.sub(r"\s+", "", target_name).lower()
+    best_match = None
+    best_ratio = 0.0
+    for candidate in directory.iterdir():
+        if not candidate.is_file():
+            continue
+        candidate_clean = re.sub(r"\s+", "", candidate.name).lower()
+        if candidate_clean == target_clean:
+            return candidate
+        # Check if names are very similar (off by a few chars)
+        shorter = min(len(target_clean), len(candidate_clean))
+        if shorter == 0:
+            continue
+        common = sum(a == b for a, b in zip(target_clean, candidate_clean))
+        ratio = common / max(len(target_clean), len(candidate_clean))
+        if ratio > 0.9 and ratio > best_ratio:
+            best_ratio = ratio
+            best_match = candidate
+    return best_match
+
+
 class LandmarkDataset(Dataset):
     """Dataset for wing landmark heatmap regression."""
 
@@ -101,7 +128,24 @@ class LandmarkDataset(Dataset):
             image_name = geojson_path.stem  # foo.tif
             image_path = self.image_dir / image_name
             if not image_path.exists():
-                raise FileNotFoundError(f"Image not found: {image_path} for annotation {geojson_path}")
+                # Try stripping whitespace from the stem (handles stray spaces)
+                image_path = self.image_dir / image_name.strip()
+            if not image_path.exists():
+                match = _find_similar_file(self.image_dir, image_name)
+                if match:
+                    answer = (
+                        input(f"Image not found for '{geojson_path.name}'.\n" f"  Did you mean '{match.name}'? [Y/n] ")
+                        .strip()
+                        .lower()
+                    )
+                    if answer in ("", "y", "yes"):
+                        image_path = match
+                    else:
+                        print(f"Skipping {geojson_path.name}")
+                        continue
+                else:
+                    print(f"Warning: skipping {geojson_path.name} — no matching image in {self.image_dir}")
+                    continue
             self.samples.append((geojson_path, image_path))
 
         # Subset by indices if provided (for CV splits)
