@@ -42,10 +42,7 @@ from WingVeinAnalyzer.models.vein_map import (
     set_scale,
     um_to_px,
 )
-from WingVeinAnalyzer.models.vein_skeleton import (
-    extract_edge_boundary_veins,
-    extract_veins_from_mask,
-)
+from WingVeinAnalyzer.models.vein_skeleton import extract_veins_from_mask
 from WingVeinAnalyzer.models.wing_geometry import (
     HingeLandmarks,
     WingOutline,
@@ -281,14 +278,17 @@ def _run_polygon_pipeline(
         compile_results(assignments, microns_per_pixel)
 
         # Save diagnostics (vein-mask path)
-        _save_diagnostics(
-            image,
-            polygons,
-            annotations.vein_polygons,
-            poly_names,
-            assignments,
-            output_dir,
-        )
+        try:
+            _save_diagnostics(
+                image,
+                polygons,
+                annotations.vein_polygons,
+                poly_names,
+                assignments,
+                output_dir,
+            )
+        except Exception as e:
+            logger.warning("Diagnostics failed: %s", e)
     else:
         # --- Fallback: polygon boundary path (no vein mask) ---
         logger.info("Using polygon boundary fallback pipeline")

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -343,13 +343,13 @@ class MainWindow(QMainWindow):
             sdef = STEP_DEFS[i]
             if i == self._current_step:
                 item.setText(f"> {sdef.index:2d}. {sdef.short_name}")
-                item.setForeground(Qt.blue)
+                item.setForeground(QColor("#FFD700"))  # gold — current step
             elif state is not None:
                 item.setText(f"  {sdef.index:2d}. {sdef.short_name}  [done]")
-                item.setForeground(Qt.darkGreen)
+                item.setForeground(QColor("#66FF66"))  # bright green — done
             else:
                 item.setText(f"  {sdef.index:2d}. {sdef.short_name}")
-                item.setForeground(Qt.black)
+                item.setForeground(QColor("#999999"))  # gray — pending
 
     # ------------------------------------------------------------------
     # Step execution
@@ -468,7 +468,9 @@ class MainWindow(QMainWindow):
         for param in sdef.params:
             label = QLabel(f"{param.name}: {param.value}")
             label.setFont(QFont("Menlo", 10))
-            label.setStyleSheet("background: #e8e8e8; padding: 2px 8px; border-radius: 3px; margin: 2px;")
+            label.setStyleSheet(
+                "background: #3a3a3a; color: #e0e0e0; padding: 2px 8px; border-radius: 3px; margin: 2px;"
+            )
             if param.tooltip:
                 label.setToolTip(param.tooltip)
             self._param_layout.addWidget(label)
@@ -478,7 +480,9 @@ class MainWindow(QMainWindow):
             for key, val in state.params_used.items():
                 label = QLabel(f"{key}: {val}")
                 label.setFont(QFont("Menlo", 10))
-                label.setStyleSheet("background: #d8e8f8; padding: 2px 8px; border-radius: 3px; margin: 2px;")
+                label.setStyleSheet(
+                    "background: #2a3a4a; color: #b0d0f0; padding: 2px 8px; border-radius: 3px; margin: 2px;"
+                )
                 self._param_layout.addWidget(label)
 
         self._param_layout.addStretch()
@@ -561,7 +565,7 @@ class MainWindow(QMainWindow):
             item = self._step_list.item(i)
             sdef = STEP_DEFS[i]
             item.setText(f"  {sdef.index:2d}. {sdef.short_name}")
-            item.setForeground(Qt.black)
+            item.setForeground(QColor("#999999"))  # gray — pending
         self._step_list.setCurrentRow(-1)
         self._step_list.blockSignals(False)
 

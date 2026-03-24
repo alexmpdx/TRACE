@@ -249,16 +249,7 @@ MIN_SPATIAL_LENGTH_UM = 14.49  # 30 px — min intersection length for poly-vein
 
 # -- Skeleton / centerline extraction --
 BRIDGE_THRESHOLD_UM = 14.49  # 30 px — bridge dangling endpoints
-MIN_CENTERLINE_EXTRACT_UM = 24.15  # 50 px — min centerline between polygons
-PAD_CENTERLINE_UM = 9.66  # 20 px — padding around polygon bbox
 MIN_POLY_AREA_UM2 = 23.33  # 100 px² — min polygon area (erosion)
-
-# -- Edge boundary veins --
-MIN_EDGE_LENGTH_UM = 48.3  # 100 px — min edge boundary vein length
-MAX_EDGE_LENGTH_UM = 1932.0  # 4 000 px — max edge boundary vein length
-MAX_BAND_WIDTH_UM = 14.49  # 30 px — max band width for edge veins
-EDGE_PROXIMITY_UM = 24.15  # 50 px — distance to existing centerline
-MIN_ANT_BOUNDARY_UM = 24.15  # 50 px — min anterior boundary line length
 
 # -- Wing geometry --
 HINGE_EXTENSION_UM = 48.3  # 100 px — hinge line extension
@@ -278,15 +269,6 @@ CUT_EXTENSION_UM = 4.83  # 10 px — cut line extension beyond polygon
 # -- Erosion amount lists --
 BOTTLENECK_EROSION_UM = [4.83, 7.245, 9.66, 14.49]  # [10,15,20,30] px
 SPLIT_EROSION_UM = [4.83, 7.245, 9.66, 14.49, 24.15]  # [10,15,20,30,50] px
-PRE_SPLIT_EROSION_UM = [9.66, 19.32, 28.98, 38.64, 48.3, 72.45]  # [20..150] px
-
-# -- Dark band detection --
-DARK_BAND_SIZE_UM = 4.83  # 10 px — band size for dark band detection
-MIN_DARK_BAND_HALF_UM = 9.66  # 20 px — min half-band width
 
 # -- Misc --
-FIND_POLY_BUFFER_UM = 7.245  # 15 px — buffer for find_poly_pair_for_line
 GT_TOLERANCE_UM = 12.075  # 25 px — ground truth validation tolerance
-PAD_EROSION_UM = 4.83  # 10 px — padding for erosion watershed
-PAD_RIDGE_UM = 2.415  # 5 px — padding for ridge detection
-MIN_SPLIT_BUFFER_UM = 2.415  # 5 px — min buffer for split zone

@@ -91,16 +91,18 @@ STEP_DEFS: list[StepDef] = [
         short_name="Identify",
         description=(
             "Run the full identify_veins_and_regions() pipeline: find triple junctions, "
-            "merge collinear segments, split sharp turns, assign longitudinals (L1-L5) "
-            "first, then classify crossveins (ACV/PCV) by proximity to assigned "
+            "merge collinear segments, split at landmark fork points (L1-Rs, L2-L3, L4-L5), "
+            "separate costa via wing outline proximity, assign longitudinals (L1-L5), "
+            "then classify crossveins (ACV/PCV) by proximity to assigned "
             "longitudinals, name intervein regions from vein boundaries, split oversized "
             "polygons, and cross-validate. Original annotation polygons are named directly "
-            "using spatial proximity to classified veins. Steps 6-12 visualize cached sub-results."
+            "using spatial proximity to classified veins."
         ),
         pseudocode=(
             "junctions = find_triple_junctions(centerlines, snap=14.5µm)\n"
             "merged = merge_segments_at_junctions(centerlines, junctions)\n"
-            "split = split_sharp_turns(merged, angle=70°)\n"
+            "split = split_at_landmarks(merged, [L1-Rs, L2-L3, L4-L5])\n"
+            "costa = identify_costa(split, wing_polygon)\n"
             "longitudinals = assign_longitudinals(split, dtip)\n"
             "crossveins = classify_crossveins_from_longitudinals(split)\n"
             "poly_veins = build_poly_veins_spatial(original_polygons, vein_map)\n"
@@ -140,31 +142,28 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 2
     ),
-    # 4: Split Sharp Turns
+    # 4: Landmark Split
     StepDef(
         index=4,
-        name="Split at Sharp Turns",
+        name="Landmark Split",
         short_name="Split",
         description=(
-            "After merging, some paths contain sharp direction changes where a crossvein "
-            "was incorrectly merged with a longitudinal. Walk along each merged path, "
-            "computing direction changes over a sliding window. Where the direction changes "
-            "by more than angle_threshold, split the path into two. Both halves must exceed "
-            "min_split_length to keep the split."
+            "Split merged paths at landmark fork points where veins diverge. "
+            "L1-Rs splits L1 from the radial sector, L2-L3 splits L2 from L3, "
+            "and L4-L5 splits L4 from L5. Each landmark is projected onto the "
+            "nearest merged path and the path is cut at that point. Costa segments "
+            "are also separated using wing polygon outline proximity."
         ),
         pseudocode=(
-            "for path in merged_paths:\n"
-            "  if path.length < min_path_length: skip\n"
-            "  for point along path (step=24.2µm):\n"
-            "    angle_change = direction_at(point+step) - direction_at(point-step)\n"
-            "    if angle_change > 70°:\n"
-            "      split path at point"
+            "for landmark in [L1-Rs, L2-L3, L4-L5]:\n"
+            "  path = closest_path(landmark)\n"
+            "  split_dist = path.project(landmark)\n"
+            "  path_a, path_b = substring(path, split_dist)\n"
+            "costa = identify_costa(paths, wing_polygon, L2-L3 threshold)"
         ),
         params=[
-            StepParam("angle_threshold", "70°", "Direction change to trigger split"),
-            StepParam("step_dist", "24.2 µm", "Window size for direction estimation"),
-            StepParam("min_path_length", "241.5 µm", "Only split paths longer than this"),
-            StepParam("min_split_length", "96.6 µm", "Both halves must exceed this"),
+            StepParam("snap_radius", "60 px", "Max distance from landmark to path"),
+            StepParam("costa_threshold", "L2-L3 dist × 1.2", "Dynamic costa distance from wing outline"),
         ],
         runs_computation=False,  # cached from step 2
     ),

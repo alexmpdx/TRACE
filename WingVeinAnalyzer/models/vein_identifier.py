@@ -57,7 +57,6 @@ from WingVeinAnalyzer.models.vein_map import (
     um2_to_px2,
     um_to_px,
 )
-from WingVeinAnalyzer.models.vein_skeleton import extract_centerline_between_polygons
 from WingVeinAnalyzer.utils.skeleton_utils import smooth_line
 
 logger = logging.getLogger(__name__)
@@ -1400,173 +1399,6 @@ def _validate_crossveins(
     return demoted
 
 
-def _validate_junction_orientations(
-    vein_map: dict[str, MergedPath],
-    junctions: list[JunctionPoint],
-    centerlines: dict[tuple[int, int], LineString],
-    merge_decisions: dict[tuple[float, float], dict],
-    wing_bbox: tuple[float, float, float, float],
-    snap_radius: float | None = None,
-    dtip: tuple[float, float] | None = None,
-) -> dict[str, MergedPath]:
-    """Validate that triple junctions have correct vein topology after classification.
-
-    At crossvein junctions (ACV/PCV), we expect exactly 2 longitudinals + 1 crossvein.
-    If the topology is wrong and an alternative merge was recorded, retry with that
-    alternative and re-classify.
-    """
-    if snap_radius is None:
-        snap_radius = um_to_px(SNAP_RADIUS_LARGE_UM)
-
-    if not merge_decisions or not junctions:
-        return vein_map
-
-    # Build reverse map: segment_key → vein name
-    def _build_seg_to_vein(vm: dict[str, MergedPath]) -> dict[tuple[int, int], str]:
-        result: dict[tuple[int, int], str] = {}
-        for name, mp in vm.items():
-            for sk in mp.segment_keys:
-                result[sk] = name
-        return result
-
-    seg_to_vein = _build_seg_to_vein(vein_map)
-
-    # Check each junction that had a merge decision
-    for junc_coord, decision in merge_decisions.items():
-        arrivals = decision.get("arrivals", [])
-        if len(arrivals) < 3:
-            continue
-
-        # Find which veins meet at this junction
-        vein_names_at_junction: set[str] = set()
-        for seg_key, _ep_idx in arrivals:
-            name = seg_to_vein.get(seg_key)
-            if name:
-                vein_names_at_junction.add(name)
-
-        if len(vein_names_at_junction) < 2:
-            continue
-
-        # Classify arrivals as longitudinal or crossvein
-        longitudinals_here = {n for n in vein_names_at_junction if n.startswith("L")}
-        crossveins_here = {n for n in vein_names_at_junction if n in ("ACV", "PCV")}
-
-        # Expected: 2 longitudinals + 1 crossvein at CV junctions
-        # Check ACV junction: should have L3 + L4 + ACV
-        # Check PCV junction: should have L4 + L5 + PCV
-        is_cv_junction = len(crossveins_here) > 0
-
-        if not is_cv_junction:
-            continue  # non-crossvein junctions don't need validation
-
-        # Topology is correct if we have exactly 1 crossvein + 2 longitudinals
-        if len(crossveins_here) == 1 and len(longitudinals_here) >= 2:
-            continue  # correct topology
-
-        # Wrong topology — try the alternative merge
-        alternative = decision.get("alternative")
-        chosen = decision.get("chosen")
-        if alternative is None or chosen is None:
-            continue
-        if alternative[0] is None or alternative[1] is None:
-            continue
-
-        logger.info(
-            "Junction (%.0f, %.0f): wrong topology (veins: %s) — " "trying alternative merge %s → %s",
-            junc_coord[0],
-            junc_coord[1],
-            vein_names_at_junction,
-            chosen,
-            alternative,
-        )
-
-        # Re-merge: undo the chosen merge and apply the alternative
-        # Build new groups from scratch using all merge decisions except
-        # this junction's, then apply the alternative for this junction
-        # This is expensive but junctions are few (typically 2-4)
-        parent: dict[tuple[int, int], tuple[int, int]] = {k: k for k in centerlines}
-
-        def find(k: tuple[int, int]) -> tuple[int, int]:
-            while parent.get(k, k) != k:
-                parent[k] = parent.get(parent[k], parent[k])
-                k = parent[k]
-            return k
-
-        def union(a: tuple[int, int], b: tuple[int, int]) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[rb] = ra
-
-        # Replay all merge decisions, substituting this junction's alternative
-        for jc, dec in merge_decisions.items():
-            ch = dec.get("chosen")
-            if ch is None or ch[0] is None or ch[1] is None:
-                continue
-            if jc == junc_coord:
-                # Apply alternative instead
-                union(alternative[0], alternative[1])
-            else:
-                union(ch[0], ch[1])
-
-        # Rebuild paths from the new groups
-        groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
-        for key in centerlines:
-            root = find(key)
-            if root not in groups:
-                groups[root] = []
-            groups[root].append(key)
-
-        new_paths: list[MergedPath] = []
-        for root, seg_keys in groups.items():
-            lines = [centerlines[k] for k in seg_keys]
-            merged_lines = _merge_vein_lines(lines)
-            merged = merged_lines[0] if merged_lines else None
-            if merged is None or merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
-                continue
-            new_paths.append(
-                MergedPath(
-                    segment_keys=seg_keys,
-                    line=merged,
-                    length_px=merged.length,
-                )
-            )
-
-        # Re-split and re-classify
-        new_paths = _split_on_sharp_turns(new_paths, centerlines, angle_threshold_deg=70.0)
-        new_vein_map = classify_merged_paths(
-            new_paths,
-            wing_bbox,
-            junctions=junctions,
-            dtip=dtip,
-        )
-
-        # Check if the new topology is better at this junction
-        new_seg_to_vein = _build_seg_to_vein(new_vein_map)
-        new_veins: set[str] = set()
-        for seg_key, _ep_idx in arrivals:
-            name = new_seg_to_vein.get(seg_key)
-            if name:
-                new_veins.add(name)
-
-        new_longs = {n for n in new_veins if n.startswith("L")}
-        new_cvs = {n for n in new_veins if n in ("ACV", "PCV")}
-
-        if len(new_cvs) == 1 and len(new_longs) >= 2:
-            logger.info(
-                "  Alternative merge fixes topology: %s → accepting",
-                new_veins,
-            )
-            vein_map = new_vein_map
-            seg_to_vein = new_seg_to_vein
-        else:
-            logger.info(
-                "  Alternative merge didn't improve topology: %s → keeping original",
-                new_veins,
-            )
-
-    return vein_map
-
-
 def _path_y_at_x(path: MergedPath, target_x: float) -> float:
     """Return the path's Y value at *target_x* (or nearest point)."""
     coords = list(path.line.coords)
@@ -2743,14 +2575,11 @@ def identify_veins_and_regions(
     junctions = find_triple_junctions(centerlines)
 
     # 3b. Merge segments at junctions
-    paths, merge_decisions = merge_segments_at_junctions(centerlines, junctions)
+    paths, _merge_decisions = merge_segments_at_junctions(centerlines, junctions)
 
     # 3b'. Split merged paths at landmark fork points
     if landmark_points:
         paths = _split_at_landmarks(paths, landmark_points)
-
-    # 3b''. Split merged paths at sharp turns (skip turns at known junctions)
-    paths = _split_on_sharp_turns(paths, centerlines, angle_threshold_deg=70.0, junctions=junctions)
 
     # Store split paths for visualization (before classification)
     result.split_paths = list(paths)
@@ -2764,31 +2593,6 @@ def identify_veins_and_regions(
         wing_polygon=wing_polygon,
         landmark_points=landmark_points,
     )
-
-    # Preserve costa before junction validation (retries don't have wing_polygon)
-    costa_path = vein_map.get("costa")
-    logger.info("Costa preserved: %s", f"{costa_path.length_px:.0f}px" if costa_path else "None")
-
-    # 3c'. Validate junction topology — retry merges if crossvein/longitudinal
-    # orientation is wrong at any triple junction
-    vein_map = _validate_junction_orientations(
-        vein_map,
-        junctions,
-        centerlines,
-        merge_decisions,
-        wing_bbox,
-        dtip=dtip,
-    )
-
-    # Restore costa if lost during junction validation retries
-    logger.info("Costa in vein_map after validation: %s", "costa" in vein_map)
-    if costa_path is not None and "costa" not in vein_map:
-        logger.info("Restoring costa (%0.fpx)", costa_path.length_px)
-        vein_map["costa"] = costa_path
-        # Remove costa from EVs if it was re-assigned as one
-        ev_keys_to_remove = [k for k, v in vein_map.items() if k.startswith("EV") and id(v) == id(costa_path)]
-        for k in ev_keys_to_remove:
-            del vein_map[k]
 
     # 3d. Validate vein shapes
     shape_warnings = validate_vein_shapes(vein_map)
@@ -2824,109 +2628,6 @@ def identify_veins_and_regions(
     # Rebuild spatial poly_veins after splits if any occurred
     if spatial_pv is not None and split_infos:
         spatial_pv = _build_poly_veins_spatial(naming_polygons, vein_map)
-
-    # 3e'''. Post-split centerline extraction
-    # For each split, extract the missing centerline between the two new pieces
-    # and merge it into the corresponding vein
-    for si in split_infos:
-        if not si.separating_vein or si.separating_vein not in vein_map:
-            continue
-        if not vein_polygons:
-            continue
-
-        new_line = extract_centerline_between_polygons(
-            naming_polygons[si.orig_idx],
-            naming_polygons[si.new_idx],
-            vein_polygons,
-            image_shape,
-        )
-        if new_line is None:
-            logger.info(
-                "  No post-split centerline extracted for %s (P%d↔P%d)",
-                si.separating_vein,
-                si.orig_idx,
-                si.new_idx,
-            )
-            continue
-
-        # Only merge if the new segment connects near an endpoint of the
-        # existing vein (not a distant jump that would double back)
-        mp = vein_map[si.separating_vein]
-        existing_coords = list(mp.line.coords)
-        ep_start = np.array(existing_coords[0])
-        ep_end = np.array(existing_coords[-1])
-        new_coords = list(new_line.coords)
-        new_start = np.array(new_coords[0])
-        new_end = np.array(new_coords[-1])
-        min_gap = min(
-            float(np.linalg.norm(ep_start - new_start)),
-            float(np.linalg.norm(ep_start - new_end)),
-            float(np.linalg.norm(ep_end - new_start)),
-            float(np.linalg.norm(ep_end - new_end)),
-        )
-        max_gap = um_to_px(BRIDGE_THRESHOLD_UM)
-        if min_gap > max_gap:
-            logger.info(
-                "  Skipping post-split centerline for %s: nearest endpoint %.0fpx away (max %.0fpx)",
-                si.separating_vein,
-                min_gap,
-                max_gap,
-            )
-            continue
-
-        # Direction check: verify appending won't create a U-turn.
-        # Find which existing endpoint is nearest the new segment and
-        # check that the new segment continues in roughly the same
-        # direction (not doubling back >120°).
-        gaps = [
-            (float(np.linalg.norm(ep_end - new_start)), "end", "start"),
-            (float(np.linalg.norm(ep_end - new_end)), "end", "end"),
-            (float(np.linalg.norm(ep_start - new_start)), "start", "start"),
-            (float(np.linalg.norm(ep_start - new_end)), "start", "end"),
-        ]
-        _, attach_side, new_side = min(gaps, key=lambda x: x[0])
-        # Tangent of existing vein at the attachment point
-        tangent_len = min(50, len(existing_coords) // 4, len(new_coords) // 4)
-        if tangent_len >= 2:
-            if attach_side == "end":
-                ev = np.array(existing_coords[-1]) - np.array(existing_coords[-tangent_len])
-            else:
-                ev = np.array(existing_coords[0]) - np.array(existing_coords[tangent_len - 1])
-            if new_side == "start":
-                nv = np.array(new_coords[tangent_len - 1]) - np.array(new_coords[0])
-            else:
-                nv = np.array(new_coords[-tangent_len]) - np.array(new_coords[-1])
-            ev_norm = np.linalg.norm(ev)
-            nv_norm = np.linalg.norm(nv)
-            if ev_norm > 0 and nv_norm > 0:
-                cos_angle = float(np.dot(ev, nv) / (ev_norm * nv_norm))
-                cos_angle = max(-1.0, min(1.0, cos_angle))
-                angle_deg = np.degrees(np.arccos(cos_angle))
-                if angle_deg > 120:
-                    logger.info(
-                        "  Skipping post-split centerline for %s: direction change %.0f° (U-turn)",
-                        si.separating_vein,
-                        angle_deg,
-                    )
-                    continue
-
-        merged_lines = _merge_vein_lines([mp.line, new_line])
-        merged = merged_lines[0] if merged_lines else None
-        if merged is not None and merged.length > mp.length_px:
-            old_len = mp.length_px
-            mp.line = merged
-            mp.length_px = merged.length
-            # Add a synthetic segment key for the new piece
-            new_key = (si.orig_idx, si.new_idx)
-            if new_key not in mp.segment_keys:
-                mp.segment_keys.append(new_key)
-            logger.info(
-                "  Merged post-split centerline into %s: %.0fpx → %.0fpx (+%.0fpx)",
-                si.separating_vein,
-                old_len,
-                mp.length_px,
-                mp.length_px - old_len,
-            )
 
     # 3f. Cross-validate
     validation = cross_validate(
