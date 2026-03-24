@@ -181,9 +181,12 @@ class PreprocessingWindow(QMainWindow):
         self.chk_segment = QCheckBox("Segmentation")
         self.chk_segment.setChecked(True)
         self.chk_segment.toggled.connect(self._on_stage_toggled)
+        self.chk_wing = QCheckBox("Add Wing")
+        self.chk_wing.setChecked(True)
         sg_layout.addWidget(self.chk_landmarks)
         sg_layout.addWidget(self.chk_hinge)
         sg_layout.addWidget(self.chk_segment)
+        sg_layout.addWidget(self.chk_wing)
         left_layout.addWidget(stage_group)
 
         # Run / Cancel
@@ -283,6 +286,7 @@ class PreprocessingWindow(QMainWindow):
             self.chk_landmarks.isChecked(),
             self.chk_hinge.isChecked(),
             self.chk_segment.isChecked(),
+            self.chk_wing.isChecked(),
         )
         if not any(stages):
             QMessageBox.warning(self, "No Stages", "Please select at least one stage to run.")
