@@ -453,6 +453,36 @@ def merge_segments_at_junctions(
                         gap,
                     )
 
+    # Merge non-junction endpoint pairs within snap radius
+    # After junction merging, some segment endpoints are near each other
+    # but weren't at a triple junction (only 2 segments meeting). Union them.
+    snap = um_to_px(SNAP_RADIUS_UM)
+    junction_pts = {(junc.x, junc.y) for junc in junctions}
+
+    # Collect all endpoints with their segment keys
+    all_eps: list[tuple[float, float, tuple[int, int], int]] = []
+    for key, line in centerlines.items():
+        coords = list(line.coords)
+        all_eps.append((coords[0][0], coords[0][1], key, 0))
+        all_eps.append((coords[-1][0], coords[-1][1], key, -1))
+
+    for i in range(len(all_eps)):
+        xi, yi, key_i, _ = all_eps[i]
+        # Skip endpoints at known junctions
+        at_junction = any((xi - jx) ** 2 + (yi - jy) ** 2 < snap * snap for jx, jy in junction_pts)
+        if at_junction:
+            continue
+        for j in range(i + 1, len(all_eps)):
+            xj, yj, key_j, _ = all_eps[j]
+            if find(key_i) == find(key_j):
+                continue  # already in the same group
+            d2 = (xi - xj) ** 2 + (yi - yj) ** 2
+            if d2 < snap * snap:
+                # Check this endpoint isn't at a junction either
+                at_junc_j = any((xj - jx) ** 2 + (yj - jy) ** 2 < snap * snap for jx, jy in junction_pts)
+                if not at_junc_j:
+                    union(key_i, key_j)
+
     # Collect connected components
     groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
     for key in centerlines:
@@ -510,12 +540,17 @@ def _split_at_landmarks(
     landmark_points: dict[str, tuple[float, float]],
     snap_radius: float = 60.0,
     min_split_length: float = 50.0,
+    junctions: list[JunctionPoint] | None = None,
 ) -> list[MergedPath]:
     """Split merged paths at landmark fork points (L1-Rs, L2-L3, L4-L5).
 
     For each fork landmark, finds the MergedPath whose line passes nearest
     to the landmark point.  If within snap_radius and not near an endpoint,
     splits the path at the projection point.
+
+    For L2-L3 specifically: aligns to the nearest triple junction within
+    2× snap_radius so the split happens at the actual skeleton junction
+    (even if that's at a path endpoint from the merge step).
     """
     from shapely.geometry import Point
     from shapely.ops import substring
@@ -527,6 +562,26 @@ def _split_at_landmarks(
             continue
 
         lm_x, lm_y = landmark_points[lm_name]
+
+        # For L2-L3: align to nearest triple junction within 2× snap_radius
+        if lm_name == "L2-L3" and junctions:
+            best_junc = None
+            best_junc_dist = 2 * snap_radius
+            for j in junctions:
+                d = ((j.x - lm_x) ** 2 + (j.y - lm_y) ** 2) ** 0.5
+                if d < best_junc_dist:
+                    best_junc_dist = d
+                    best_junc = j
+            if best_junc is not None:
+                logger.info(
+                    "Landmark %s: aligned to junction (%.0f, %.0f), dist=%.0fpx",
+                    lm_name,
+                    best_junc.x,
+                    best_junc.y,
+                    best_junc_dist,
+                )
+                lm_x, lm_y = best_junc.x, best_junc.y
+
         lm_pt = Point(lm_x, lm_y)
 
         # Find the closest path
@@ -545,14 +600,25 @@ def _split_at_landmarks(
         path = result[best_idx]
         split_dist = path.line.project(lm_pt)
 
-        # Skip if near an endpoint — fork is already at path boundary
-        if split_dist < snap_radius or (path.line.length - split_dist) < snap_radius:
-            logger.info(
-                "Landmark %s: near endpoint of path (%.0fpx from end) — skipping",
-                lm_name,
-                min(split_dist, path.line.length - split_dist),
-            )
-            continue
+        # For L2-L3 with junction alignment: allow splitting at endpoints
+        # (the junction IS at the endpoint of the merged Rs+L2 path)
+        if lm_name == "L2-L3":
+            if split_dist < min_split_length or (path.line.length - split_dist) < min_split_length:
+                logger.info(
+                    "Landmark %s: split would produce piece < %.0fpx — skipping",
+                    lm_name,
+                    min_split_length,
+                )
+                continue
+        else:
+            # Other landmarks: skip if near an endpoint
+            if split_dist < snap_radius or (path.line.length - split_dist) < snap_radius:
+                logger.info(
+                    "Landmark %s: near endpoint of path (%.0fpx from end) — skipping",
+                    lm_name,
+                    min(split_dist, path.line.length - split_dist),
+                )
+                continue
 
         # Split the LineString
         line_a = substring(path.line, 0, split_dist)
@@ -1199,44 +1265,24 @@ def classify_merged_paths(
         else:
             longitudinals.append(p)
 
-    # Anchor L3/L4 from DTip landmark (L3 meets the distal wing tip there)
-    if dtip is not None and len(longitudinals) >= 2:
-        l3, l4 = _anchor_l3_l4_from_dtip(longitudinals, dtip)
+    # Anchor L3 from DTip landmark (L3 meets the distal wing tip)
+    if dtip is not None and longitudinals:
+        l3 = _anchor_l3_from_dtip(longitudinals, dtip)
         if l3:
             vein_map["L3"] = l3
-        if l4:
-            vein_map["L4"] = l4
 
-    # Pre-validate crossvein candidates: demote those too far from any
-    # longitudinal back to the longitudinal pool before assignment
-    _assign_crossveins(crossveins, vein_map)
-    known_for_precheck = longitudinals + [vein_map[k] for k in ("L3", "L4") if k in vein_map]
-    demoted = _validate_crossveins(vein_map, known_for_precheck, crossveins, junctions=junctions)
-    longitudinals.extend(demoted)
-    # Clear provisional crossveins — will be reassigned from longitudinals
-    for k in list(vein_map.keys()):
-        if k in ("ACV", "PCV"):
-            del vein_map[k]
+    # Assign remaining longitudinals (L2, Rs, L1, L4, L5) from landmarks
+    all_paths = longitudinals + crossveins
+    if landmark_points:
+        _assign_longitudinals_from_landmarks(all_paths, vein_map, landmark_points, wing_bbox=wing_bbox)
 
-    # Assign remaining longitudinals (L1, L2, L5) BEFORE crossveins
-    if "L3" in vein_map or "L4" in vein_map:
-        _assign_remaining_from_anchors(longitudinals, vein_map)
+        # Assign crossveins (ACV, PCV) from landmarks
+        _assign_crossveins_from_landmarks(all_paths, vein_map, landmark_points)
     else:
-        # No anchors — fall back to scored assignment
-        long_map = _assign_longitudinals_scored(
-            longitudinals,
-            bbox_w,
-        )
+        # No landmarks — fall back to scored assignment
+        long_map = _assign_longitudinals_scored(longitudinals, bbox_w)
         vein_map.update(long_map)
-
-    # Assign crossveins using proximity to now-known longitudinals
-    # Only use candidates that weren't demoted
-    valid_crossveins = [c for c in crossveins if c not in demoted]
-    _assign_crossveins_from_longitudinals(valid_crossveins, vein_map)
-
-    # Final crossvein validation
-    all_longitudinals = [vein_map[k] for k in ("L1", "Rs", "L2", "L3", "L4", "L5") if k in vein_map]
-    _validate_crossveins(vein_map, all_longitudinals, valid_crossveins, junctions=junctions)
+        _assign_crossveins_from_longitudinals(crossveins, vein_map)
 
     # Post-assignment L4/L5 swap check using now-known crossveins
     _swap_l4_l5_if_needed(vein_map, vein_map.get("ACV"), vein_map.get("PCV"))
@@ -1445,90 +1491,180 @@ def _path_y_at_x(path: MergedPath, target_x: float) -> float:
     return best_y
 
 
-def _anchor_l3_l4_from_dtip(
-    longitudinals: list[MergedPath],
+def _anchor_l3_from_dtip(
+    paths: list[MergedPath],
     dtip: tuple[float, float],
-) -> tuple[Optional[MergedPath], Optional[MergedPath]]:
+) -> Optional[MergedPath]:
     """Anchor L3 using the DTip landmark (where L3 meets the distal wing tip).
 
-    Finds the longitudinal whose nearest point to DTip is smallest → L3.
-    L4 is the next vein posterior (higher Y centroid) to L3.
+    Returns the path whose endpoint is nearest to DTip.
     """
-    if len(longitudinals) < 2:
-        return None, None
+    if not paths:
+        return None
 
     dtip_pt = Point(dtip)
+    best_path = None
+    best_dist = float("inf")
+    for p in paths:
+        coords = list(p.line.coords)
+        for ep in (coords[0], coords[-1]):
+            d = (ep[0] - dtip[0]) ** 2 + (ep[1] - dtip[1]) ** 2
+            if d < best_dist:
+                best_dist = d
+                best_path = p
 
-    # Score each longitudinal by distance to DTip
-    scored = []
-    for p in longitudinals:
-        dist = p.line.distance(dtip_pt)
-        scored.append((dist, p))
-    scored.sort(key=lambda t: t[0])
-
-    l3 = scored[0][1]
-    l3_y = l3.line.centroid.y
-
-    # L4 = closest posterior vein (higher Y than L3)
-    posterior = [(p.line.distance(dtip_pt), p) for _, p in scored[1:] if p.line.centroid.y > l3_y]
-    if posterior:
-        # Pick the one with the smallest Y (nearest posterior to L3)
-        posterior.sort(key=lambda t: t[1].line.centroid.y)
-        l4 = posterior[0][1]
-    else:
-        l4 = None
-
-    logger.info(
-        "DTip anchor: L3 → dist=%.0fpx from DTip, len=%.0fpx",
-        l3.line.distance(dtip_pt),
-        l3.length_px,
-    )
-    if l4:
+    if best_path:
         logger.info(
-            "DTip anchor: L4 → centroid Y=%.0f (L3 Y=%.0f), len=%.0fpx",
-            l4.line.centroid.y,
-            l3_y,
-            l4.length_px,
+            "DTip anchor: L3 → endpoint dist=%.0fpx, len=%.0fpx",
+            best_dist**0.5,
+            best_path.length_px,
         )
+    return best_path
 
-    return l3, l4
+
+def _endpoint_dist(path: MergedPath, landmark: tuple[float, float]) -> float:
+    """Return the minimum distance from either endpoint of path to a landmark."""
+    coords = list(path.line.coords)
+    d0 = (coords[0][0] - landmark[0]) ** 2 + (coords[0][1] - landmark[1]) ** 2
+    d1 = (coords[-1][0] - landmark[0]) ** 2 + (coords[-1][1] - landmark[1]) ** 2
+    return min(d0, d1) ** 0.5
 
 
-def _assign_remaining_from_anchors(
-    longitudinals: list[MergedPath],
+def _assign_longitudinals_from_landmarks(
+    paths: list[MergedPath],
     vein_map: dict[str, MergedPath],
+    landmark_points: dict[str, tuple[float, float]],
+    wing_bbox: tuple[float, float, float, float] | None = None,
 ) -> None:
-    """Assign L2, Rs, L5 using Y-position relative to anchored L3/L4.
+    """Assign L2, Rs, L1, L4, L5 using endpoint proximity to landmarks.
 
-    L2 = longest unassigned vein anterior to L3.
-    Rs = remaining anterior vein above L2 (fused L2+L3 proximal stem).
-    L5 = longest unassigned vein posterior to L4.
+    Landmarks define specific vein endpoints:
+      L2-L3 → proximal end of L2 and L3, distal end of Rs
+      L1-Rs → proximal end of L1 and Rs
+      subcostal break → distal end of L1
+      L4-L5 → proximal end of L4 and L5
     """
     assigned = set(id(v) for v in vein_map.values())
-    remaining = [p for p in longitudinals if id(p) not in assigned]
 
-    l3 = vein_map.get("L3")
-    l4 = vein_map.get("L4")
-    l3_y = l3.line.centroid.y if l3 else float("inf")
-    l4_y = l4.line.centroid.y if l4 else float("-inf")
+    # Scale-based max distance: 5% of wing span
+    if wing_bbox:
+        max_dist = (wing_bbox[2] - wing_bbox[0]) * 0.05
+    else:
+        max_dist = 200.0
 
-    anterior = [p for p in remaining if p.line.centroid.y < l3_y]
-    posterior = [p for p in remaining if p.line.centroid.y > l4_y]
+    def _unassigned() -> list[MergedPath]:
+        return [p for p in paths if id(p) not in assigned]
 
-    if anterior:
-        anterior.sort(key=lambda p: p.length_px, reverse=True)
-        vein_map["L2"] = anterior[0]
-        assigned.add(id(anterior[0]))
-        rest_anterior = [p for p in anterior[1:]]
-        if rest_anterior:
-            rest_anterior.sort(key=lambda p: p.line.centroid.y)
-            vein_map["Rs"] = rest_anterior[0]
-            assigned.add(id(rest_anterior[0]))
+    def _nearest(candidates: list[MergedPath], lm: tuple[float, float]) -> MergedPath | None:
+        if not candidates:
+            return None
+        best = min(candidates, key=lambda p: _endpoint_dist(p, lm))
+        if _endpoint_dist(best, lm) > max_dist:
+            return None
+        return best
 
-    if posterior:
-        posterior.sort(key=lambda p: p.length_px, reverse=True)
-        vein_map["L5"] = posterior[0]
-        assigned.add(id(posterior[0]))
+    lm_l2l3 = landmark_points.get("L2-L3")
+    lm_l1rs = landmark_points.get("L1-Rs")
+    lm_l4l5 = landmark_points.get("L4-L5")
+
+    # Rs: path minimizing sum of endpoint distances to BOTH L1-Rs and L2-L3
+    if lm_l1rs and lm_l2l3:
+        candidates = _unassigned()
+        if candidates:
+            best = min(candidates, key=lambda p: _endpoint_dist(p, lm_l1rs) + _endpoint_dist(p, lm_l2l3))
+            if _endpoint_dist(best, lm_l1rs) <= max_dist and _endpoint_dist(best, lm_l2l3) <= max_dist:
+                vein_map["Rs"] = best
+                assigned.add(id(best))
+                logger.info(
+                    "Landmark assign: Rs → %.0fpx (L1-Rs dist=%.0f, L2-L3 dist=%.0f)",
+                    best.length_px,
+                    _endpoint_dist(best, lm_l1rs),
+                    _endpoint_dist(best, lm_l2l3),
+                )
+
+    # L2: nearest endpoint to L2-L3
+    if lm_l2l3:
+        best = _nearest(_unassigned(), lm_l2l3)
+        if best:
+            vein_map["L2"] = best
+            assigned.add(id(best))
+            logger.info(
+                "Landmark assign: L2 → %.0fpx (ep dist=%.0fpx to L2-L3)",
+                best.length_px,
+                _endpoint_dist(best, lm_l2l3),
+            )
+
+    # L1: nearest endpoint to L1-Rs
+    if lm_l1rs:
+        best = _nearest(_unassigned(), lm_l1rs)
+        if best:
+            vein_map["L1"] = best
+            assigned.add(id(best))
+            logger.info(
+                "Landmark assign: L1 → %.0fpx (ep dist=%.0fpx to L1-Rs)",
+                best.length_px,
+                _endpoint_dist(best, lm_l1rs),
+            )
+
+    # L4 & L5: two nearest to L4-L5 within max_dist, disambiguate by Y-position
+    if lm_l4l5:
+        candidates = [p for p in _unassigned() if _endpoint_dist(p, lm_l4l5) <= max_dist]
+        candidates.sort(key=lambda p: _endpoint_dist(p, lm_l4l5))
+        if len(candidates) >= 2:
+            pair = sorted(candidates[:2], key=lambda p: p.line.centroid.y)
+            vein_map["L4"] = pair[0]  # anterior (lower Y)
+            assigned.add(id(pair[0]))
+            vein_map["L5"] = pair[1]  # posterior (higher Y)
+            assigned.add(id(pair[1]))
+            logger.info(
+                "Landmark assign: L4 → %.0fpx (Y=%.0f, dist=%.0f), L5 → %.0fpx (Y=%.0f, dist=%.0f)",
+                pair[0].length_px,
+                pair[0].line.centroid.y,
+                _endpoint_dist(pair[0], lm_l4l5),
+                pair[1].length_px,
+                pair[1].line.centroid.y,
+                _endpoint_dist(pair[1], lm_l4l5),
+            )
+        elif len(candidates) == 1:
+            l3 = vein_map.get("L3")
+            l3_y = l3.line.centroid.y if l3 else float("inf")
+            name = "L4" if candidates[0].line.centroid.y <= l3_y + 50 else "L5"
+            vein_map[name] = candidates[0]
+            assigned.add(id(candidates[0]))
+            logger.info("Landmark assign: %s → %.0fpx (only candidate)", name, candidates[0].length_px)
+
+
+def _assign_crossveins_from_landmarks(
+    paths: list[MergedPath],
+    vein_map: dict[str, MergedPath],
+    landmark_points: dict[str, tuple[float, float]],
+) -> None:
+    """Assign ACV and PCV using endpoint proximity to crossvein landmarks.
+
+    ACV.a/ACV.p define ACV endpoints; PCV.a/PCV.p define PCV endpoints.
+    """
+    assigned = set(id(v) for v in vein_map.values())
+
+    for cv_name, lm_a_key, lm_p_key in [("ACV", "ACV.a", "ACV.p"), ("PCV", "PCV.a", "PCV.p")]:
+        lm_a = landmark_points.get(lm_a_key)
+        lm_p = landmark_points.get(lm_p_key)
+        if lm_a is None or lm_p is None:
+            continue
+
+        best_path = None
+        best_score = float("inf")
+        for p in paths:
+            if id(p) in assigned:
+                continue
+            score = _endpoint_dist(p, lm_a) + _endpoint_dist(p, lm_p)
+            if score < best_score:
+                best_score = score
+                best_path = p
+
+        if best_path:
+            vein_map[cv_name] = best_path
+            assigned.add(id(best_path))
+            logger.info("Landmark assign: %s → %.0fpx (score=%.0fpx)", cv_name, best_path.length_px, best_score)
 
 
 def _assign_longitudinals_scored(
@@ -2612,7 +2748,7 @@ def identify_veins_and_regions(
 
     # 3b'. Split merged paths at landmark fork points
     if landmark_points:
-        paths = _split_at_landmarks(paths, landmark_points)
+        paths = _split_at_landmarks(paths, landmark_points, junctions=junctions)
 
     # Store split paths for visualization (before classification)
     result.split_paths = list(paths)

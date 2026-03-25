@@ -502,7 +502,10 @@ class StepRunner:
         vein_lines = {
             a.vein_id: a.line
             for a in (state.assignments or [])
-            if a.line is not None and a.vein_id != "costa" and a.status != VeinStatus.ABSENT
+            if a.line is not None
+            and a.vein_id != "costa"
+            and not a.vein_id.startswith("EV")
+            and a.status != VeinStatus.ABSENT
         }
         if vein_lines and state.polygons and state.poly_names:
             # Build temporary wing outline (wing_blade not available until step 16)
@@ -511,10 +514,22 @@ class StepRunner:
                 vein_polygons=state.vein_polygons or None,
             )
             image_shape = state.image.shape[:2] if state.image is not None else (1, 1)
+            # Don't extend L1's distal end (nearest to DTip)
+            skip_eps: dict[str, list[int]] = {}
+            if "L1" in vein_lines:
+                lp = state.landmark_points or {}
+                dtip = lp.get("DTip")
+                if dtip is not None:
+                    l1_coords = list(vein_lines["L1"].coords)
+                    d_start = (l1_coords[0][0] - dtip[0]) ** 2 + (l1_coords[0][1] - dtip[1]) ** 2
+                    d_end = (l1_coords[-1][0] - dtip[0]) ** 2 + (l1_coords[-1][1] - dtip[1]) ** 2
+                    skip_eps["L1"] = [0 if d_start < d_end else -1]
             ext_polys, ext_poly_veins, ext_lines = partition_by_vein_extension(
                 outline.polygon,
                 vein_lines,
                 image_shape,
+                skip_endpoints=skip_eps,
+                landmark_points=state.landmark_points,
             )
             ext_names = name_regions_from_veins(
                 ext_polys,

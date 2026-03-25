@@ -20,3 +20,6 @@
 18. [ ] Check out wingmachine and mapper code
 19. [ ] Fix finnicky costa extraction
 20. [ ] Make real wing DL model for wing class
+21. [ ] Fix vein calling to be landmark dependent
+22. [ ] Move outline creation step to the beginning and replace wing mask use
+23. [ ] Fix validation step

@@ -23,6 +23,7 @@ from WingVeinAnalyzer.models.vein_graph import (
 )
 from WingVeinAnalyzer.models.vein_identifier import (
     VeinValidationReport,
+    extract_l1_from_mask,
     identify_veins_and_regions,
     name_regions_from_veins,
     validate_regions_against_ground_truth,
@@ -226,22 +227,58 @@ def _run_polygon_pipeline(
         for w in id_result.validation_report.warnings:
             logger.warning("Validation: %s", w)
 
+        # Extract L1 from vein mask using landmarks
+        if vein_mask_arr is not None and landmark_points:
+            sc = landmark_points.get("subcostal break")
+            l1rs = landmark_points.get("L1-Rs")
+            if sc and l1rs:
+                l1_line = extract_l1_from_mask(vein_mask_arr, sc, l1rs)
+                if l1_line is not None:
+                    assignments = [a for a in assignments if a.vein_id != "L1"]
+                    coords = list(l1_line.coords)
+                    assignments.append(
+                        VeinAssignment(
+                            vein_id="L1",
+                            status=VeinStatus.COMPLETE,
+                            edge_ids=[],
+                            confidence=0.9,
+                            evidence=["landmark_mask_extraction"],
+                            length_px=l1_line.length,
+                            line=l1_line,
+                            endpoints=[coords[0], coords[-1]],
+                        )
+                    )
+                    logger.info("L1 extracted from vein mask: %.0f px", l1_line.length)
+
         # Vein-extension clipping: intersect each named polygon with its
         # matching vein-extension region to trim oversized areas
         vein_lines_for_ext = {
             a.vein_id: a.line
             for a in assignments
-            if a.line is not None and a.vein_id != "costa" and a.status != VeinStatus.ABSENT
+            if a.line is not None
+            and a.vein_id != "costa"
+            and not a.vein_id.startswith("EV")
+            and a.status != VeinStatus.ABSENT
         }
         if vein_lines_for_ext:
             outline_temp = build_wing_outline(
                 polygons,
                 vein_polygons=annotations.vein_polygons or None,
             )
+            # Don't extend L1's distal end (nearest to DTip)
+            skip_eps: dict[str, list[int]] = {}
+            if "L1" in vein_lines_for_ext and landmark_points and "DTip" in landmark_points:
+                dtip = landmark_points["DTip"]
+                l1c = list(vein_lines_for_ext["L1"].coords)
+                d0 = (l1c[0][0] - dtip[0]) ** 2 + (l1c[0][1] - dtip[1]) ** 2
+                d1 = (l1c[-1][0] - dtip[0]) ** 2 + (l1c[-1][1] - dtip[1]) ** 2
+                skip_eps["L1"] = [0 if d0 < d1 else -1]
             ext_polys, ext_poly_veins, _ext_lines = partition_by_vein_extension(
                 outline_temp.polygon,
                 vein_lines_for_ext,
                 image.shape[:2],
+                skip_endpoints=skip_eps,
+                landmark_points=landmark_points,
             )
             ext_poly_names = name_regions_from_veins(
                 ext_polys,

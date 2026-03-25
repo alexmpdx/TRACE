@@ -327,8 +327,14 @@ def partition_by_vein_extension(
     touch_dist: float = 5.0,
     tangent_points: int = 10,
     min_area_frac: float = 0.01,
+    skip_endpoints: dict[str, list[int]] | None = None,
+    landmark_points: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[list[Polygon], dict[int, set[str]], dict[str, list[LineString]]]:
     """Partition wing into intervein regions by extending vein centerlines.
+
+    skip_endpoints maps vein_id to endpoint indices (0 or -1) that should NOT
+    be extended.  landmark_points (L1-Rs, L2-L3, L4-L5, PCV.p, ACV.a) are
+    drawn as barrier pixels so that growing extensions stop at them.
 
     Returns (polygons, poly_veins, extension_lines) where poly_veins maps
     polygon index to the set of vein names that border it, and
@@ -361,6 +367,15 @@ def partition_by_vein_extension(
         for i in range(len(coords) - 1):
             cv2.line(barrier, tuple(coords[i]), tuple(coords[i + 1]), int(lbl), thickness=line_width)
 
+    # --- 2b. Draw landmark points as barrier pixels ---
+    _STOP_LANDMARKS = ("L1-Rs", "L2-L3", "L4-L5", "PCV.p", "ACV.a")
+    if landmark_points:
+        for lm_name, (lx, ly) in landmark_points.items():
+            if lm_name in _STOP_LANDMARKS:
+                ix, iy = int(round(lx)), int(round(ly))
+                if 0 <= iy < H and 0 <= ix < W:
+                    cv2.circle(barrier, (ix, iy), line_width + 1, -1, thickness=-1)
+
     # --- 3. Identify endpoints needing extension ---
     wing_boundary = wing_polygon.exterior
     active_extensions: list[dict] = []  # {pos, direction, label, trace}
@@ -380,6 +395,9 @@ def partition_by_vein_extension(
             continue
 
         for ep_idx in (0, -1):
+            # Skip explicitly excluded endpoints
+            if skip_endpoints and vein_id in skip_endpoints and ep_idx in skip_endpoints[vein_id]:
+                continue
             ep = Point(coords[ep_idx])
             # Skip if already near wing boundary or another vein
             dist_to_boundary = wing_boundary.distance(ep)
