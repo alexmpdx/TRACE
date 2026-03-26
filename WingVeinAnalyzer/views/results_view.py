@@ -12,13 +12,12 @@ from WingVeinAnalyzer.models.vein_labeler import VeinAssignment
 from WingVeinAnalyzer.models.vein_map import ALL_VEINS, INTERVEIN_SPACE_NAMES
 
 
-def export_csv(
+def _build_row(
     assignments: list[VeinAssignment],
-    output_path: Path,
     image_name: str = "",
     measurements: Optional[WingMeasurements] = None,
-) -> None:
-    """Export vein measurements to CSV with per-vein status columns."""
+) -> dict[str, object]:
+    """Build a single measurement row dict for one wing."""
     row: dict[str, object] = {"image": image_name}
 
     # Per-vein columns
@@ -55,5 +54,27 @@ def export_csv(
             row[name + "_area_px2"] = measurements.intervein_areas_px2.get(name)
             row[name + "_area_um2"] = measurements.intervein_areas_um2.get(name)
 
+    return row
+
+
+def export_csv(
+    assignments: list[VeinAssignment],
+    output_path: Path,
+    image_name: str = "",
+    measurements: Optional[WingMeasurements] = None,
+) -> None:
+    """Export vein measurements to CSV with per-vein status columns."""
+    row = _build_row(assignments, image_name, measurements)
     df = pd.DataFrame([row])
     df.to_csv(output_path, index=False)
+
+
+def consolidate_csv(
+    results: list[tuple[str, list[VeinAssignment], Optional[WingMeasurements]]],
+    output_path: Path,
+) -> Path:
+    """Consolidate multiple wings into a single CSV (one row per wing)."""
+    rows = [_build_row(assignments, stem, measurements) for stem, assignments, measurements in results]
+    df = pd.DataFrame(rows)
+    df.to_csv(output_path, index=False)
+    return output_path
