@@ -22,6 +22,7 @@ from WingVeinAnalyzer.models.vein_identifier import (
     JunctionPoint,
     MergedPath,
     ValidationReport,
+    _build_poly_veins_spatial,
     classify_merged_paths,
     cross_validate,
     extract_l1_from_mask,
@@ -506,7 +507,7 @@ class StepRunner:
         return state
 
     def _step_poly_split_viz(self, prev: StepState) -> StepState:
-        """Step 11: Clip intervein regions using vein-extension boundaries."""
+        """Step 9: Clip intervein regions using vein-extension boundaries."""
         state = self._copy_forward(prev)
 
         vein_lines = {
@@ -548,12 +549,31 @@ class StepRunner:
                 poly_veins=ext_poly_veins,
             )
             if ext_names:
-                state.polygons, state.poly_names = _clip_regions_by_extension(
+                state.polygons, transferred_names = _clip_regions_by_extension(
                     state.polygons,
                     state.poly_names,
                     ext_polys,
                     ext_names,
                 )
+                # Re-name clipped polygons using spatial proximity
+                # (segment_keys reference old polygon indices so can't be used).
+                # Fall back to transferred names for polygons that spatial
+                # proximity can't reach (e.g., large regions far from veins).
+                img_shape = state.image.shape[:2] if state.image is not None else None
+                spatial_pv = _build_poly_veins_spatial(
+                    state.polygons,
+                    state.vein_map or {},
+                    image_shape=img_shape,
+                )
+                spatial_names = name_regions_from_veins(
+                    state.polygons,
+                    state.vein_map or {},
+                    state.wing_bbox,
+                    poly_veins=spatial_pv,
+                )
+                # Merge: spatial names take priority, transferred fill gaps
+                state.poly_names = dict(transferred_names)
+                state.poly_names.update(spatial_names)
                 state.extension_lines = ext_lines
                 n_ext = sum(len(v) for v in ext_lines.values())
                 ext_summary = ", ".join(

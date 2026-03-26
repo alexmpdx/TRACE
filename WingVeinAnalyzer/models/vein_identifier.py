@@ -2006,15 +2006,65 @@ def validate_vein_shapes(
 def _build_poly_veins_spatial(
     polygons: list[Polygon],
     vein_map: dict[str, MergedPath],
+    image_shape: tuple[int, int] | None = None,
     buffer_dist: float | None = None,
     min_length: float | None = None,
 ) -> dict[int, set[str]]:
-    """Build polygon→bounding veins mapping using spatial proximity."""
+    """Build polygon→bounding veins mapping using EDT-expanded polygons.
+
+    Expands polygons via nearest-label distance transform to fill gaps
+    (vein tissue between polygons), then checks which vein centerlines
+    border each expanded polygon.
+    """
+    from WingVeinAnalyzer.models.vein_skeleton import _fill_polygon
+
     if buffer_dist is None:
         buffer_dist = um_to_px(BUFFER_SPATIAL_UM)
     if min_length is None:
         min_length = um_to_px(MIN_SPATIAL_LENGTH_UM)
+
     poly_veins: dict[int, set[str]] = {i: set() for i in range(len(polygons))}
+
+    # EDT expansion: rasterize polygons, expand into gaps via nearest-label
+    if image_shape is not None and len(polygons) > 0:
+        h, w = image_shape
+        label_img = np.zeros((h, w), dtype=np.int32)
+        for i, poly in enumerate(polygons):
+            _fill_polygon(label_img, poly, i + 1)  # 1-indexed labels
+
+        # Expand: each unlabeled pixel gets the label of its nearest polygon
+        mask = label_img == 0
+        if mask.any():
+            _, nearest_idx = ndimage.distance_transform_edt(mask, return_indices=True)
+            label_img[mask] = label_img[nearest_idx[0][mask], nearest_idx[1][mask]]
+
+        # For each vein, rasterize its line and check which labels it touches
+        for vein_id, mp in vein_map.items():
+            if mp.line is None:
+                continue
+            coords = np.array(mp.line.coords, dtype=np.int32)
+            for k in range(len(coords) - 1):
+                x0, y0 = coords[k]
+                x1, y1 = coords[k + 1]
+                # Walk the line segment pixel by pixel (Bresenham-like)
+                n_steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+                for t in range(n_steps + 1):
+                    px = int(x0 + (x1 - x0) * t / n_steps)
+                    py = int(y0 + (y1 - y0) * t / n_steps)
+                    if 0 <= py < h and 0 <= px < w:
+                        lbl = label_img[py, px]
+                        if lbl > 0:
+                            poly_veins[lbl - 1].add(vein_id)
+                        # Also check neighbors (vein may sit on label boundary)
+                        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                            ny, nx = py + dy, px + dx
+                            if 0 <= ny < h and 0 <= nx < w:
+                                nlbl = label_img[ny, nx]
+                                if nlbl > 0:
+                                    poly_veins[nlbl - 1].add(vein_id)
+        return poly_veins
+
+    # Fallback: buffer-based proximity (when image_shape not available)
     for vein_id, mp in vein_map.items():
         if mp.line is None:
             continue
@@ -2825,7 +2875,7 @@ def identify_veins_and_regions(
     # Decide which polygons to name: original annotations (spatial) or Voronoi (segment_keys)
     if original_polygons is not None:
         naming_polygons = original_polygons
-        spatial_pv = _build_poly_veins_spatial(naming_polygons, vein_map)
+        spatial_pv = _build_poly_veins_spatial(naming_polygons, vein_map, image_shape=image_shape)
     else:
         naming_polygons = intervein_polygons
         spatial_pv = None
@@ -2849,7 +2899,7 @@ def identify_veins_and_regions(
 
     # Rebuild spatial poly_veins after splits if any occurred
     if spatial_pv is not None and split_infos:
-        spatial_pv = _build_poly_veins_spatial(naming_polygons, vein_map)
+        spatial_pv = _build_poly_veins_spatial(naming_polygons, vein_map, image_shape=image_shape)
 
     # 3f. Cross-validate
     validation = cross_validate(
