@@ -253,11 +253,18 @@ def _assign_intervein_names(
     areas = [p.area for p in polygons]
     names: dict[int, str] = {}
 
-    if n == 8:
-        return _assign_8_polygons(polygons, centroids, areas)
+    if n in (7, 8):
+        names = _assign_8_polygons(polygons, centroids, areas)
+    else:
+        names = _assign_fallback(polygons, centroids, y_sorted_indices, areas)
 
-    # Fallback for unexpected polygon counts
-    return _assign_fallback(polygons, centroids, y_sorted_indices, areas)
+    # Assign ER names to any unassigned polygons
+    er_num = 1
+    for idx in range(n):
+        if idx not in names:
+            names[idx] = f"ER{er_num}"
+            er_num += 1
+    return names
 
 
 def _assign_8_polygons(
@@ -286,17 +293,8 @@ def _assign_8_polygons(
 
     remaining = set(indices)
 
-    # 1. costal_cell: smallest area AND most anterior (min Y centroid)
-    # Among the 3 most anterior polygons, pick the smallest
+    # 1. marginal_cell: most anterior by Y centroid
     by_y = sorted(remaining, key=lambda i: centroids[i][1])
-    anterior_3 = by_y[:3]
-    costal = min(anterior_3, key=lambda i: areas[i])
-    names[costal] = "costal_cell"
-    remaining.discard(costal)
-
-    # 2. marginal_cell: next most anterior by Y, significantly larger than costal
-    by_y = sorted(remaining, key=lambda i: centroids[i][1])
-    # Among the 2 most anterior remaining, pick the more anterior one
     marginal = by_y[0]
     names[marginal] = "marginal_cell"
     remaining.discard(marginal)
@@ -467,16 +465,13 @@ def _extract_costa(
     wing_bbox: tuple[float, float, float, float],
 ) -> Optional[LineString]:
     """Extract the costa as the anterior margin of the most anterior polygon."""
-    # Find the marginal cell (or costal cell) - the most anterior large polygon
+    # Find the marginal cell - the most anterior large polygon
     marginal_idx = None
-    costal_idx = None
     for idx, name in poly_names.items():
         if name == "marginal_cell":
             marginal_idx = idx
-        elif name == "costal_cell":
-            costal_idx = idx
 
-    target_idx = marginal_idx if marginal_idx is not None else costal_idx
+    target_idx = marginal_idx
     if target_idx is None:
         return None
 

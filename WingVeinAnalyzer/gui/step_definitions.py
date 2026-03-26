@@ -351,7 +351,7 @@ STEP_DEFS: list[StepDef] = [
         description=(
             "Detect the hinge landmarks (subcostal break + alula notch) and draw a cut "
             "line to separate the wing blade from the hinge/body region. The hinge side "
-            "is detected by clustering proximal regions (1st_basal, costal, discal). The "
+            "is detected by clustering proximal regions (1st_basal, discal). The "
             "cut line is extended beyond the wing outline to ensure a clean split. The "
             "distal piece is kept as the wing blade."
         ),

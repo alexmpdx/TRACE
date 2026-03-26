@@ -49,10 +49,14 @@ def _build_row(
         row["posterior_compartment_area_px2"] = measurements.posterior_compartment_area_px2
         row["posterior_compartment_area_um2"] = measurements.posterior_compartment_area_um2
 
-        # Intervein areas
+        # Intervein areas (known regions + any extra ER regions)
         for name in INTERVEIN_SPACE_NAMES:
             row[name + "_area_px2"] = measurements.intervein_areas_px2.get(name)
             row[name + "_area_um2"] = measurements.intervein_areas_um2.get(name)
+        for name in sorted(measurements.intervein_areas_px2):
+            if name.startswith("ER"):
+                row[name + "_area_px2"] = measurements.intervein_areas_px2[name]
+                row[name + "_area_um2"] = measurements.intervein_areas_um2.get(name)
 
     return row
 

@@ -44,7 +44,6 @@ CROSSVEIN_CONNECTIONS: dict[str, tuple[str, str]] = {
 
 # All intervein space names ordered anterior to posterior (used internally)
 _ALL_INTERVEIN_SPACE_NAMES = [
-    "costal_cell",  # between costa and L1 (excluded from output)
     "marginal_cell",  # between L1 and L2
     "submarginal_cell",  # between L2 and L3
     "1st_basal_cell",  # between L3 and L4, proximal to ACV
@@ -54,7 +53,7 @@ _ALL_INTERVEIN_SPACE_NAMES = [
     "3rd_posterior_cell",  # posterior to L5
 ]
 
-# Intervein spaces included in measurements and overlays (costal cell excluded)
+# Intervein spaces included in measurements and overlays
 INTERVEIN_SPACE_NAMES = [
     "marginal_cell",
     "submarginal_cell",
@@ -67,7 +66,6 @@ INTERVEIN_SPACE_NAMES = [
 
 # Colors for intervein spaces (BGR for OpenCV, matching ground-truth overlay)
 INTERVEIN_COLORS: dict[str, tuple[int, int, int]] = {
-    "costal_cell": (0, 200, 200),  # yellow (no GT; distinct neutral)
     "marginal_cell": (0, 0, 255),  # red
     "submarginal_cell": (0, 94, 255),  # orange
     "1st_basal_cell": (0, 191, 219),  # gold
@@ -93,7 +91,6 @@ VEIN_COLORS: dict[str, tuple[int, int, int]] = {
 # Vein boundary definitions: which intervein pair each vein separates
 # Each tuple is (anterior_region, posterior_region)
 VEIN_BOUNDARIES: dict[str, list[tuple[str, str]]] = {
-    "L1": [("costal_cell", "marginal_cell")],
     "L2": [("marginal_cell", "submarginal_cell")],
     "L3": [
         ("submarginal_cell", "1st_basal_cell"),
@@ -138,7 +135,6 @@ VEIN_LENGTH_PRIORS: dict[str, tuple[float, float]] = {
 
 # Region area as fraction of total intervein area (min, max)
 REGION_AREA_PRIORS: dict[str, tuple[float, float]] = {
-    "costal_cell": (0.002, 0.03),
     "marginal_cell": (0.05, 0.18),
     "submarginal_cell": (0.08, 0.25),
     "1st_basal_cell": (0.01, 0.06),
@@ -150,7 +146,6 @@ REGION_AREA_PRIORS: dict[str, tuple[float, float]] = {
 
 # Reverse lookup: which veins bound each region
 REGION_EXPECTED_VEINS: dict[str, set[str]] = {
-    "costal_cell": {"L1"},
     "marginal_cell": {"L1", "L2"},
     "submarginal_cell": {"L2", "L3"},
     "1st_basal_cell": {"L3", "L4", "ACV"},
@@ -165,7 +160,6 @@ VEIN_Y_ORDER = ["L1", "L2", "L3", "ACV", "L4", "PCV", "L5"]
 
 # Expected region centroid Y ordering (anterior=0.0, posterior=1.0)
 REGION_Y_ORDER = [
-    "costal_cell",
     "marginal_cell",
     "submarginal_cell",
     "1st_basal_cell",

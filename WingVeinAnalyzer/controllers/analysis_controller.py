@@ -405,9 +405,7 @@ def _run_polygon_pipeline(
     result.wing_blade = wing_blade
 
     # Partition intervein spaces (polygons already updated by vein-extension above)
-    all_regions = partition_intervein_spaces(wing_blade, polygons, poly_names)
-    # Exclude costal cell from output regions
-    regions = {k: v for k, v in all_regions.items() if k != "costal_cell"}
+    regions = partition_intervein_spaces(wing_blade, polygons, poly_names)
     # Smooth region boundaries
     if smooth_sigma > 0:
         regions = {k: smooth_polygon(v, sigma=smooth_sigma) for k, v in regions.items()}
@@ -420,7 +418,6 @@ def _run_polygon_pipeline(
     result.anterior_compartment = anterior
     result.posterior_compartment = posterior
 
-    # Compute measurements (using filtered regions without costal cell)
     measurements = compute_measurements(
         assignments,
         wing_polygon=wing_blade,
@@ -1252,10 +1249,7 @@ def _write_step_summary(
 
     # Step 13: L1 Recovery
     step(13, "L1 Recovery from Anterior Edge")
-    has_costal = "costal_cell" in poly_names.values()
     l1 = next((a for a in assignments if a.vein_id == "L1"), None)
-    if not has_costal:
-        lines.append(f"  No costal cell → L1 recovered from anterior vein mask edge")
     if l1 and l1.line:
         lines.append(f"  L1: {l1.length_px:.0f} px")
     else:

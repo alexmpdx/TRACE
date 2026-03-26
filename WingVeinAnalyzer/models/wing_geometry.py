@@ -90,9 +90,9 @@ def _detect_hinge_side(
     """Detect whether the hinge is on the left or right side of the image.
 
     The hinge is the proximal end where small regions (1st_basal_cell,
-    costal_cell) cluster.  Returns "left" or "right".
+    discal_cell) cluster.  Returns "left" or "right".
     """
-    proximal_regions = {"1st_basal_cell", "costal_cell", "discal_cell"}
+    proximal_regions = {"1st_basal_cell", "discal_cell"}
     distal_regions = {"3rd_posterior_cell", "2nd_posterior_cell", "marginal_cell"}
 
     proximal_xs: list[float] = []
@@ -152,15 +152,12 @@ def detect_hinge_landmarks(
         return int(pts[:, 0].argmax() if use_max_x else pts[:, 0].argmin())
 
     # Find the subcostal break: most proximal point of anterior margin
-    costal_idx = None
     marginal_idx = None
     for idx, name in poly_names.items():
-        if name == "costal_cell":
-            costal_idx = idx
-        elif name == "marginal_cell":
+        if name == "marginal_cell":
             marginal_idx = idx
 
-    target = marginal_idx if marginal_idx is not None else costal_idx
+    target = marginal_idx
     if target is not None:
         ring = np.array(polygons[target].exterior.coords)
         upper_mask = ring[:, 1] < np.median(ring[:, 1])

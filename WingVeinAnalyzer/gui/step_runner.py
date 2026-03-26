@@ -678,7 +678,7 @@ class StepRunner:
             state.polygons,
             state.poly_names or {},
         )
-        regions = {k: v for k, v in all_regions.items() if k != "costal_cell"}
+        regions = all_regions
         state.intervein_regions = regions
 
         # Compute compartments

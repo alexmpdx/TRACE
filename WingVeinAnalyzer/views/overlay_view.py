@@ -103,12 +103,25 @@ def render_rainbow_overlay(
 
     legend_entries: list[tuple[tuple[int, int, int], str]] = []
 
-    # Only render regions in the display list (excludes costal_cell)
-    for region_name in INTERVEIN_SPACE_NAMES:
+    # Render known regions plus any extra regions (ER1, ER2, ...)
+    # ER colors cycle through distinct BGR values
+    _ER_COLORS = [
+        (0, 200, 200),  # yellow
+        (180, 105, 255),  # hot pink
+        (0, 215, 255),  # gold
+        (203, 192, 255),  # pink
+        (147, 20, 255),  # deep pink
+    ]
+    render_order = list(INTERVEIN_SPACE_NAMES) + sorted(k for k in wing_regions if k.startswith("ER"))
+    for region_name in render_order:
         poly = wing_regions.get(region_name)
         if poly is None or poly.is_empty:
             continue
-        color = INTERVEIN_COLORS.get(region_name, (180, 180, 180))
+        if region_name.startswith("ER"):
+            er_idx = int(region_name[2:]) - 1
+            color = _ER_COLORS[er_idx % len(_ER_COLORS)]
+        else:
+            color = INTERVEIN_COLORS.get(region_name, (180, 180, 180))
         pts = np.array(poly.exterior.coords, dtype=np.int32)
 
         cv2.fillPoly(color_overlay, [pts], color)

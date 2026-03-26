@@ -2062,6 +2062,16 @@ def _build_poly_veins_spatial(
                                 nlbl = label_img[ny, nx]
                                 if nlbl > 0:
                                     poly_veins[nlbl - 1].add(vein_id)
+
+        # Snap pass: pick up any veins within snapping distance of each polygon
+        snap_dist = um_to_px(SNAP_RADIUS_UM)
+        for i, poly in enumerate(polygons):
+            for vein_id, mp in vein_map.items():
+                if mp.line is None or vein_id in poly_veins[i]:
+                    continue
+                if poly.distance(mp.line) <= snap_dist:
+                    poly_veins[i].add(vein_id)
+
         return poly_veins
 
     # Fallback: buffer-based proximity (when image_shape not available)
@@ -2136,6 +2146,9 @@ def name_regions_from_veins(
     # Validate and correct region positions
     _validate_and_correct_region_positions(poly_names, polygons, wing_bbox)
 
+    # Assign ER names to any unassigned polygons — no regions should be skipped
+    _assign_extra_region_names(poly_names, polygons)
+
     return poly_names
 
 
@@ -2156,20 +2169,12 @@ def _region_from_bounding_veins(
     # Area fraction for area-prior scoring
     area_frac = poly.area / total_area if total_area > 0 else 0.0
 
-    # Special case: costal_cell is anterior to L1, bounded only by L1
-    if bounding_veins == {"L1"}:
-        l1_y = vein_map["L1"].y_centroid_norm if "L1" in vein_map else 0.1
-        if y_norm < l1_y:
-            return "costal_cell"
-
     # Check each region's expected veins — best match wins
     # Score = Jaccard overlap × area-prior multiplier
     best_name = None
     best_score = -1.0
 
     for region_name, expected_veins in REGION_EXPECTED_VEINS.items():
-        if region_name == "costal_cell":
-            continue  # handled above
         matched = bounding_veins & expected_veins
         if not matched:
             continue
@@ -2230,6 +2235,19 @@ def _region_from_bounding_veins(
             best_name = "discal_cell"
 
     return best_name
+
+
+def _assign_extra_region_names(
+    poly_names: dict[int, str],
+    polygons: list[Polygon],
+) -> None:
+    """Assign ER1, ER2, ... names to any polygons not yet named."""
+    er_num = 1
+    for idx in range(len(polygons)):
+        if idx not in poly_names:
+            poly_names[idx] = f"ER{er_num}"
+            logger.info("P%d: unidentified region → %s", idx, poly_names[idx])
+            er_num += 1
 
 
 def _resolve_name_conflicts(
@@ -2381,29 +2399,6 @@ def _validate_and_correct_region_positions(
             name_to_idx[name_a] = idx_b
             name_to_idx[name_b] = idx_a
 
-    # Costal/marginal area check: costal_cell is always much smaller than
-    # marginal_cell.  Swap if costal is significantly larger.
-    costal_idx = name_to_idx.get("costal_cell")
-    marginal_idx = name_to_idx.get("marginal_cell")
-    if (
-        costal_idx is not None
-        and marginal_idx is not None
-        and costal_idx < len(polygons)
-        and marginal_idx < len(polygons)
-    ):
-        costal_area = polygons[costal_idx].area
-        marginal_area = polygons[marginal_idx].area
-        if costal_area > marginal_area * 2.0:
-            logger.warning(
-                "Costal/marginal area violation: costal (%.0f) > marginal (%.0f) × 2, swapping",
-                costal_area,
-                marginal_area,
-            )
-            poly_names[costal_idx] = "marginal_cell"
-            poly_names[marginal_idx] = "costal_cell"
-            name_to_idx["costal_cell"] = marginal_idx
-            name_to_idx["marginal_cell"] = costal_idx
-
 
 # ---------------------------------------------------------------------------
 # 3e''. Merged Polygon Detection and Splitting
@@ -2447,7 +2442,7 @@ def split_merged_polygons(
     # Find which expected regions have no assigned polygon
     assigned_regions = set(poly_names.values())
     all_regions = set(REGION_EXPECTED_VEINS.keys())
-    missing_regions = all_regions - assigned_regions - {"costal_cell"}
+    missing_regions = all_regions - assigned_regions
 
     if not missing_regions:
         return poly_names, polygons, []
