@@ -44,16 +44,17 @@ def render_step(
         2: _render_junctions,
         3: _render_merge,
         4: _render_split,
-        5: _render_longitudinals,
-        6: _render_crossveins,
-        7: _render_regions,
-        8: _render_poly_split,
-        9: _render_validation,
-        10: _render_outline,
-        11: _render_hinge,
-        12: _render_compartments,
-        13: _render_measurements,
-        14: _render_overlays,
+        5: _render_costa,
+        6: _render_longitudinals,
+        7: _render_crossveins,
+        8: _render_regions,
+        9: _render_poly_split,
+        10: _render_validation,
+        11: _render_outline,
+        12: _render_hinge,
+        13: _render_compartments,
+        14: _render_measurements,
+        15: _render_overlays,
     }
     renderer = renderers.get(step_index)
     if renderer is None:
@@ -221,25 +222,17 @@ def _render_merge(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
 
 
 def _render_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 4: Merged paths → split paths with costa region + landmark annotations."""
-    # Left: merged paths (before split) + costa region overlay + fork landmarks
+    """Step 4: Merged paths → split paths with landmark annotations."""
+    # Left: merged paths (before split) + fork landmarks
     left = state.image.copy()
-    if state.costa_region is not None:
-        costa_overlay = np.zeros_like(left)
-        costa_overlay[state.costa_region] = (0, 255, 255)  # yellow
-        left = cv2.addWeighted(left, 0.7, costa_overlay, 0.3, 0)
     if state.merged_paths:
         for idx, mp in enumerate(state.merged_paths):
             color = SEGMENT_COLORS[idx % len(SEGMENT_COLORS)]
             _draw_linestring(left, mp.line, color, thickness=3)
     _draw_fork_landmarks(left, state)
 
-    # Right: all paths after splitting (before classification) + costa region + fork landmarks
+    # Right: all paths after splitting (before classification) + fork landmarks
     right = state.image.copy()
-    if state.costa_region is not None:
-        costa_overlay = np.zeros_like(right)
-        costa_overlay[state.costa_region] = (0, 255, 255)
-        right = cv2.addWeighted(right, 0.7, costa_overlay, 0.3, 0)
     if state.split_paths:
         for idx, mp in enumerate(state.split_paths):
             color = SEGMENT_COLORS[idx % len(SEGMENT_COLORS)]
@@ -261,8 +254,52 @@ def _render_split(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarr
     return left, right
 
 
+def _render_costa(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
+    """Step 5: Show costa region mask and extracted costa vein."""
+    # Left: all split paths + costa region overlay
+    left = state.image.copy()
+    if state.costa_region is not None:
+        costa_overlay = np.zeros_like(left)
+        costa_overlay[state.costa_region] = (0, 255, 255)  # yellow
+        left = cv2.addWeighted(left, 0.7, costa_overlay, 0.3, 0)
+    if state.split_paths:
+        for idx, mp in enumerate(state.split_paths):
+            color = SEGMENT_COLORS[idx % len(SEGMENT_COLORS)]
+            _draw_linestring(left, mp.line, color, thickness=3)
+
+    # Right: costa vein highlighted, other paths dimmed
+    right = state.image.copy()
+    if state.costa_region is not None:
+        costa_overlay = np.zeros_like(right)
+        costa_overlay[state.costa_region] = (0, 255, 255)
+        right = cv2.addWeighted(right, 0.7, costa_overlay, 0.3, 0)
+    if state.assignments:
+        # Draw non-costa veins in gray
+        for a in state.assignments:
+            if a.line is not None and a.vein_id != "costa":
+                _draw_linestring(right, a.line, (128, 128, 128), thickness=2)
+        # Draw costa in bright white
+        for a in state.assignments:
+            if a.line is not None and a.vein_id == "costa":
+                _draw_linestring(right, a.line, (255, 255, 255), thickness=4)
+                coords = list(a.line.coords)
+                mid = coords[len(coords) // 2]
+                cv2.putText(
+                    right,
+                    f"costa ({a.length_px:.0f}px)",
+                    (int(mid[0]) - 60, int(mid[1]) - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+    return left, right
+
+
 def _render_crossveins(state: StepState, prev: Optional[StepState]) -> tuple[np.ndarray, np.ndarray]:
-    """Step 6: L1-L5 colored + crossveins gray → all veins colored (ACV/PCV highlighted)."""
+    """Step 7: L1-L5 colored + crossveins gray → all veins colored (ACV/PCV highlighted)."""
     # Left: L1-L5 colored, crossveins gray
     left = state.image.copy()
     if state.assignments:

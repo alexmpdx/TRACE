@@ -318,7 +318,25 @@ def merge_segments_at_junctions(
             tangent = _get_tangent_away_from_junction(centerlines[seg_key], ep_idx)
             arrivals.append((seg_key, ep_idx, tangent))
 
-        if len(arrivals) < 3:
+        if len(arrivals) < 2:
+            continue
+
+        if len(arrivals) == 2:
+            # Two segments meeting at a junction — merge directly
+            union(arrivals[0][0], arrivals[1][0])
+            junc_coord = (junc.x, junc.y)
+            merge_decisions[junc_coord] = {
+                "chosen": (arrivals[0][0], arrivals[1][0]),
+                "alternative": None,
+                "arrivals": [(a[0], a[1]) for a in arrivals],
+            }
+            logger.debug(
+                "Merged %s + %s at 2-segment junction (%.0f, %.0f)",
+                arrivals[0][0],
+                arrivals[1][0],
+                junc.x,
+                junc.y,
+            )
             continue
 
         # Score all pairs: deviation from 180° (lower = more collinear)
@@ -351,8 +369,8 @@ def merge_segments_at_junctions(
 
         if best_score >= collinearity_threshold_deg or orientation_mismatch:
             reason = "orientation mismatch" if orientation_mismatch else "above threshold"
-            logger.debug(
-                "Skipped merge at junction (%.0f, %.0f): " "best=%.1f°, gap=%.1f°, reason=%s",
+            logger.info(
+                "Skipped merge at junction (%.0f, %.0f): best=%.1f°, gap=%.1f°, reason=%s",
                 junc.x,
                 junc.y,
                 best_score,
@@ -467,13 +485,13 @@ def merge_segments_at_junctions(
         all_eps.append((coords[-1][0], coords[-1][1], key, -1))
 
     for i in range(len(all_eps)):
-        xi, yi, key_i, _ = all_eps[i]
+        xi, yi, key_i, ep_idx_i = all_eps[i]
         # Skip endpoints at known junctions
         at_junction = any((xi - jx) ** 2 + (yi - jy) ** 2 < snap * snap for jx, jy in junction_pts)
         if at_junction:
             continue
         for j in range(i + 1, len(all_eps)):
-            xj, yj, key_j, _ = all_eps[j]
+            xj, yj, key_j, ep_idx_j = all_eps[j]
             if find(key_i) == find(key_j):
                 continue  # already in the same group
             d2 = (xi - xj) ** 2 + (yi - yj) ** 2
@@ -481,7 +499,30 @@ def merge_segments_at_junctions(
                 # Check this endpoint isn't at a junction either
                 at_junc_j = any((xj - jx) ** 2 + (yj - jy) ** 2 < snap * snap for jx, jy in junction_pts)
                 if not at_junc_j:
-                    union(key_i, key_j)
+                    # Collinearity check: tangents should point in opposite
+                    # directions (angle near 180°), same threshold as Phase 1
+                    tang_i = _get_tangent_away_from_junction(centerlines[key_i], ep_idx_i)
+                    tang_j = _get_tangent_away_from_junction(centerlines[key_j], ep_idx_j)
+                    angle = _angle_between_vectors(tang_i, tang_j)
+                    deviation = abs(angle - 180.0)
+                    if deviation <= collinearity_threshold_deg:
+                        union(key_i, key_j)
+                        logger.debug(
+                            "Phase 2 merged %s + %s: dist=%.0f, collinearity=%.1f°",
+                            key_i,
+                            key_j,
+                            d2**0.5,
+                            deviation,
+                        )
+                    else:
+                        logger.debug(
+                            "Phase 2 rejected %s + %s: dist=%.0f, collinearity=%.1f° > %.0f°",
+                            key_i,
+                            key_j,
+                            d2**0.5,
+                            deviation,
+                            collinearity_threshold_deg,
+                        )
 
     # Collect connected components
     groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
@@ -491,6 +532,9 @@ def merge_segments_at_junctions(
             groups[root] = []
         groups[root].append(key)
 
+    for root, seg_keys in groups.items():
+        logger.debug("Group %s: %s", root, seg_keys)
+
     # Build MergedPath for each group. Use snap radius as max gap to
     # prevent chaining segments across long distances (union-find
     # transitivity can group segments that aren't physically adjacent).
@@ -499,6 +543,13 @@ def merge_segments_at_junctions(
     for root, seg_keys in groups.items():
         lines = [centerlines[k] for k in seg_keys]
         merged_lines = _merge_vein_lines(lines, max_gap=max_gap)
+        if len(merged_lines) != 1:
+            logger.debug(
+                "Group %s split into %d chains (seg_keys=%s)",
+                root,
+                len(merged_lines),
+                seg_keys,
+            )
         for merged in merged_lines:
             if merged.length < um_to_px(MIN_SEGMENT_LENGTH_UM):
                 continue
@@ -532,7 +583,7 @@ def merge_segments_at_junctions(
 # ---------------------------------------------------------------------------
 
 # Landmark names that mark longitudinal vein fork points
-_FORK_LANDMARKS = ("L1-Rs", "L2-L3", "L4-L5")
+_FORK_LANDMARKS = ("subcostal break", "L1-Rs", "L2-L3", "L4-L5")
 
 
 def _split_at_landmarks(
@@ -978,8 +1029,8 @@ def _build_costa_region(
 
     Computes average vein width from the vein mask distance transform at skeleton
     pixels, then marks pixels inside the wing polygon that are within that width
-    of the wing edge.  Masks out the hinge region between subcostal break and alula
-    notch using perpendicular cuts at each landmark.
+    of the wing edge.  Masks out the hinge region with a vertical line through
+    the subcostal break.
 
     Returns a boolean array (H, W) or None if inputs are insufficient.
     """
@@ -1010,39 +1061,18 @@ def _build_costa_region(
     # Costa region = inside wing, within one vein width of the edge
     costa_region = (wing_mask > 0) & (dist_to_edge <= avg_vein_width)
 
-    # Mask out hinge region between subcostal break and alula notch
+    # Mask out hinge region with a vertical line through the subcostal break
     lp = landmark_points or {}
     sc = lp.get("subcostal break")
-    al = lp.get("alula notch")
-    wing_ext = wing_polygon.exterior
-    wing_cx = float(wing_polygon.centroid.x)
-    wing_cy = float(wing_polygon.centroid.y)
 
-    if sc is not None and al is not None:
-        from shapely.geometry import Point as _Pt
-
-        yy, xx = np.mgrid[:h, :w]
-        for lxy in (sc, al):
-            pt = _Pt(lxy[0], lxy[1])
-            proj = wing_ext.project(pt)
-            delta = 30.0
-            p1 = wing_ext.interpolate(max(0, proj - delta))
-            p2 = wing_ext.interpolate(min(wing_ext.length, proj + delta))
-            tx = p2.x - p1.x
-            ty = p2.y - p1.y
-            t_len = (tx**2 + ty**2) ** 0.5
-            if t_len < 1e-6:
-                continue
-            tx /= t_len
-            ty /= t_len
-            # Signed distance from cut line through landmark with tangent as normal
-            side = (xx - lxy[0]) * tx + (yy - lxy[1]) * ty
-            # Keep the side that contains the wing centroid
-            centroid_side = (wing_cx - lxy[0]) * tx + (wing_cy - lxy[1]) * ty
-            if centroid_side > 0:
-                costa_region[side < 0] = False
-            else:
-                costa_region[side > 0] = False
+    if sc is not None:
+        wing_cx = float(wing_polygon.centroid.x)
+        cut_x = sc[0]
+        # Keep the side that contains the wing centroid
+        if wing_cx > cut_x:
+            costa_region[:, : int(cut_x)] = False
+        else:
+            costa_region[:, int(cut_x) :] = False
 
     return costa_region
 
@@ -1215,13 +1245,29 @@ def classify_merged_paths(
     if costa_region is not None:
         costa_paths, paths = _identify_costa_segments(paths, costa_region)
         if costa_paths:
-            # Merge costa segments into a single LineString
+            # Merge nearby costa segments, then join all chains along the wing outline
             if len(costa_paths) == 1:
                 vein_map["costa"] = costa_paths[0]
                 logger.info("Costa assigned to vein_map: %.0fpx", costa_paths[0].length_px)
             else:
-                merged_lines = _merge_vein_lines([cp.line for cp in costa_paths])
-                merged = merged_lines[0] if merged_lines else costa_paths[0].line
+                snap = um_to_px(SNAP_RADIUS_UM)
+                chains = _merge_vein_lines([cp.line for cp in costa_paths], max_gap=snap)
+                if len(chains) == 1:
+                    merged = chains[0]
+                else:
+                    # Sort chains by position along wing outline, concatenate
+                    if wing_polygon is not None:
+                        outline = wing_polygon.exterior
+                        chains.sort(key=lambda ln: outline.project(ln.interpolate(0.5, normalized=True)))
+                    all_coords: list[tuple] = []
+                    for ch in chains:
+                        all_coords.extend(list(ch.coords))
+                    merged = LineString(all_coords)
+                    logger.info(
+                        "Costa: joined %d chains along outline (%.0fpx)",
+                        len(chains),
+                        merged.length,
+                    )
                 all_keys = []
                 for cp in costa_paths:
                     all_keys.extend(cp.segment_keys)

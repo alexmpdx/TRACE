@@ -79,7 +79,7 @@ INTERVEIN_COLORS: dict[str, tuple[int, int, int]] = {
 
 # Colors for individual veins on skeleton overlay (BGR for OpenCV, matching ground-truth)
 VEIN_COLORS: dict[str, tuple[int, int, int]] = {
-    "costa": (0, 0, 0),  # black (matches wing outline)
+    "costa": (255, 255, 255),  # white
     "L1": (0, 0, 255),  # red
     "Rs": (128, 0, 255),  # magenta (fused L2+L3 proximal stem)
     "L2": (0, 94, 255),  # orange

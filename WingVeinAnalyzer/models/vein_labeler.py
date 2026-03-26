@@ -413,49 +413,46 @@ def _merge_vein_lines(
     result_chains: list[LineString] = []
 
     # Chain remaining segments by nearest endpoint to chain end
-    for _ in range(len(segments) - 1):
-        chain_end = np.array(chain[-1])
-        best_dist = float("inf")
-        best_idx = -1
-        reverse = False
+    def _extend_chain(chain: list, used: set) -> list:
+        """Greedily extend chain from its end."""
+        for _ in range(len(segments)):
+            chain_end = np.array(chain[-1])
+            best_dist = float("inf")
+            best_idx = -1
+            reverse = False
 
-        for i, seg in enumerate(segments):
-            if i in used:
-                continue
-            seg_coords = list(seg.coords)
-            d_start = float(np.linalg.norm(chain_end - np.array(seg_coords[0])))
-            d_end = float(np.linalg.norm(chain_end - np.array(seg_coords[-1])))
-            if d_start < best_dist:
-                best_dist = d_start
-                best_idx = i
-                reverse = False
-            if d_end < best_dist:
-                best_dist = d_end
-                best_idx = i
-                reverse = True
+            for i, seg in enumerate(segments):
+                if i in used:
+                    continue
+                seg_coords = list(seg.coords)
+                d_start = float(np.linalg.norm(chain_end - np.array(seg_coords[0])))
+                d_end = float(np.linalg.norm(chain_end - np.array(seg_coords[-1])))
+                if d_start < best_dist:
+                    best_dist = d_start
+                    best_idx = i
+                    reverse = False
+                if d_end < best_dist:
+                    best_dist = d_end
+                    best_idx = i
+                    reverse = True
 
-        if best_idx < 0:
-            break
+            if best_idx < 0 or best_dist > max_gap:
+                break
 
-        if best_dist > max_gap:
-            # Gap too large — finalize current chain, start a new one
-            if len(chain) >= 2:
-                result_chains.append(LineString(chain))
-            # Start new chain from the nearest unused segment
+            used.add(best_idx)
             seg_coords = list(segments[best_idx].coords)
             if reverse:
                 seg_coords = seg_coords[::-1]
-            chain = seg_coords
-            used.add(best_idx)
-            continue
+            chain.extend(seg_coords[1:])
+        return chain
 
-        used.add(best_idx)
-        seg_coords = list(segments[best_idx].coords)
-        if reverse:
-            seg_coords = seg_coords[::-1]
+    # Extend forward from the starting segment
+    chain = _extend_chain(chain, used)
 
-        # Append without duplicating the junction point
-        chain.extend(seg_coords[1:])
+    # Extend backward from chain start (handles cases where the
+    # outermost-endpoint heuristic started in the middle of the group)
+    chain.reverse()
+    chain = _extend_chain(chain, used)
 
     # Finalize last chain
     if len(chain) >= 2:

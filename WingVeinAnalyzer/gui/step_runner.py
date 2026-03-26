@@ -278,16 +278,17 @@ class StepRunner:
             2: self._step_identify,
             3: self._step_merge_viz,
             4: self._step_split_viz,
-            5: self._step_longitudinal_viz,
-            6: self._step_crossvein_viz,
-            7: self._step_regions_viz,
-            8: self._step_poly_split_viz,
-            9: self._step_validate_viz,
-            10: self._step_outline,
-            11: self._step_hinge,
-            12: self._step_compartments,
-            13: self._step_measurements,
-            14: self._step_overlays,
+            5: self._step_costa_viz,
+            6: self._step_longitudinal_viz,
+            7: self._step_crossvein_viz,
+            8: self._step_regions_viz,
+            9: self._step_poly_split_viz,
+            10: self._step_validate_viz,
+            11: self._step_outline,
+            12: self._step_hinge,
+            13: self._step_compartments,
+            14: self._step_measurements,
+            15: self._step_overlays,
         }
         handler = handlers.get(index)
         if handler is None:
@@ -450,8 +451,17 @@ class StepRunner:
         }
         return state
 
+    def _step_costa_viz(self, prev: StepState) -> StepState:
+        """Step 5: Visualization-only — show costa region and extracted costa segments."""
+        state = self._copy_forward(prev)
+        state.params_used = {
+            "method": "vein-width EDT + wing mask EDT",
+            "hinge_exclusion": "subcostal break ↔ alula notch",
+        }
+        return state
+
     def _step_crossvein_viz(self, prev: StepState) -> StepState:
-        """Step 9: Visualization-only — highlight ACV/PCV."""
+        """Step 7: Visualization-only — highlight ACV/PCV."""
         state = self._copy_forward(prev)
         state.params_used = {
             "max_crossvein_len": "15% wing span",

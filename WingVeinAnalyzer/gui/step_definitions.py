@@ -149,27 +149,52 @@ STEP_DEFS: list[StepDef] = [
         short_name="Split",
         description=(
             "Split merged paths at landmark fork points where veins diverge. "
-            "L1-Rs splits L1 from the radial sector, L2-L3 splits L2 from L3, "
-            "and L4-L5 splits L4 from L5. Each landmark is projected onto the "
-            "nearest merged path and the path is cut at that point. Costa segments "
-            "are also separated using wing polygon outline proximity."
+            "L1-Rs splits L1 from the radial sector, L2-L3 splits L2 from L3 "
+            "(aligned to nearest triple junction), and L4-L5 splits L4 from L5. "
+            "Each landmark is projected onto the nearest merged path and the "
+            "path is cut at that point."
         ),
         pseudocode=(
             "for landmark in [L1-Rs, L2-L3, L4-L5]:\n"
             "  path = closest_path(landmark)\n"
             "  split_dist = path.project(landmark)\n"
-            "  path_a, path_b = substring(path, split_dist)\n"
-            "costa = identify_costa(paths, wing_polygon, L2-L3 threshold)"
+            "  path_a, path_b = substring(path, split_dist)"
         ),
         params=[
             StepParam("snap_radius", "60 px", "Max distance from landmark to path"),
-            StepParam("costa_threshold", "L2-L3 dist × 1.2", "Dynamic costa distance from wing outline"),
         ],
         runs_computation=False,  # cached from step 2
     ),
-    # 5: Classify Longitudinals
+    # 5: Costa Extraction
     StepDef(
         index=5,
+        name="Costa Extraction",
+        short_name="Costa",
+        description=(
+            "Identify costa vein segments that run along the wing margin. "
+            "Computes average vein width from the vein mask distance transform, "
+            "then marks skeleton segments within that width of the wing edge. "
+            "Hinge region between subcostal break and alula notch is excluded "
+            "via perpendicular cuts. Segments inside the costa region are split "
+            "off and merged into the costa vein."
+        ),
+        pseudocode=(
+            "avg_width = 2 * median(EDT(vein_mask)[skeleton_pixels])\n"
+            "wing_edge_dist = EDT(wing_mask)\n"
+            "costa_region = (wing_edge_dist <= avg_width) & ~hinge_mask\n"
+            "for path in paths:\n"
+            "  if path mostly inside costa_region → costa\n"
+            "  if path partially inside → split at transition"
+        ),
+        params=[
+            StepParam("vein_width", "auto (median EDT)", "Self-calibrating from vein mask"),
+            StepParam("hinge_exclusion", "subcostal break → alula notch", "Perpendicular cuts"),
+        ],
+        runs_computation=False,  # cached from step 2
+    ),
+    # 6: Classify Longitudinals
+    StepDef(
+        index=6,
         name="Classify Longitudinals",
         short_name="Longitudinals",
         description=(
@@ -194,9 +219,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 2
     ),
-    # 6: Classify Crossveins
+    # 7: Classify Crossveins
     StepDef(
-        index=6,
+        index=7,
         name="Classify Crossveins",
         short_name="Crossveins",
         description=(
@@ -220,9 +245,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 2
     ),
-    # 7: Name Regions
+    # 8: Name Regions
     StepDef(
-        index=7,
+        index=8,
         name="Name Regions from Veins",
         short_name="Regions",
         description=(
@@ -247,9 +272,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=False,  # cached from step 2
     ),
-    # 8: Vein-Extension Clipping
+    # 9: Vein-Extension Clipping
     StepDef(
-        index=8,
+        index=9,
         name="Vein-Extension Clipping",
         short_name="Vein Clip",
         description=(
@@ -271,9 +296,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 9: Cross-Validation
+    # 10: Cross-Validation
     StepDef(
-        index=9,
+        index=10,
         name="Cross-Validation",
         short_name="Validate",
         description=(
@@ -295,9 +320,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=False,  # cached from step 2
     ),
-    # 10: Wing Outline
+    # 11: Wing Outline
     StepDef(
-        index=10,
+        index=11,
         name="Build Wing Outline",
         short_name="Outline",
         description=(
@@ -318,9 +343,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 11: Hinge Detection & Removal
+    # 12: Hinge Detection & Removal
     StepDef(
-        index=11,
+        index=12,
         name="Hinge Detection & Removal",
         short_name="Hinge",
         description=(
@@ -343,9 +368,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 12: Compartments
+    # 13: Compartments
     StepDef(
-        index=12,
+        index=13,
         name="Compute Compartments",
         short_name="Compartments",
         description=(
@@ -367,9 +392,9 @@ STEP_DEFS: list[StepDef] = [
         ],
         runs_computation=True,
     ),
-    # 13: Measurements
+    # 14: Measurements
     StepDef(
-        index=13,
+        index=14,
         name="Compute Measurements",
         short_name="Measurements",
         description=(
@@ -390,9 +415,9 @@ STEP_DEFS: list[StepDef] = [
         params=[],
         runs_computation=True,
     ),
-    # 14: Final Overlays
+    # 15: Final Overlays
     StepDef(
-        index=14,
+        index=15,
         name="Final Overlays",
         short_name="Overlays",
         description=(
