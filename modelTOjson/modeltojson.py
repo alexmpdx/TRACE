@@ -79,8 +79,10 @@ def _replace_bn_with_batchrenorm(module):
     for name, child in module.named_children():
         if isinstance(child, nn.BatchNorm2d):
             br = BatchRenorm(
-                child.num_features, eps=child.eps,
-                momentum=child.momentum, affine=child.affine,
+                child.num_features,
+                eps=child.eps,
+                momentum=child.momentum,
+                affine=child.affine,
             )
             setattr(module, name, br)
         else:
@@ -98,8 +100,7 @@ class ModelWrapper(ABC):
         """Run forward pass. Input/output are (N, C, H, W) float tensors."""
 
     @abstractmethod
-    def to(self, device: torch.device) -> "ModelWrapper":
-        ...
+    def to(self, device: torch.device) -> "ModelWrapper": ...
 
     def eval(self) -> "ModelWrapper":
         return self
@@ -142,9 +143,9 @@ class OnnxModelWrapper(ModelWrapper):
         self.device = device
 
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-        np_input = tensor.cpu().numpy()
+        np_input = np.from_dlpack(tensor.detach().cpu().contiguous())
         outputs = self.session.run(None, {self.input_name: np_input})
-        return torch.from_numpy(outputs[0]).to(self.device)
+        return torch.tensor(np.array(outputs[0]), dtype=torch.float32).to(self.device)
 
     def to(self, device: torch.device) -> "OnnxModelWrapper":
         self.device = device
@@ -205,9 +206,7 @@ def _build_smp_model(arch: dict, num_classes: int) -> nn.Module:
     if "encoder_depth" in arch:
         kwargs["encoder_depth"] = int(arch["encoder_depth"])
 
-    if "decoder_channels" in arch and model_cls in (
-        smp.Unet, smp.UnetPlusPlus, smp.MAnet
-    ):
+    if "decoder_channels" in arch and model_cls in (smp.Unet, smp.UnetPlusPlus, smp.MAnet):
         kwargs["decoder_channels"] = [int(c) for c in arch["decoder_channels"]]
 
     return model_cls(**kwargs)
@@ -235,8 +234,7 @@ def _find_model_file(model_dir: Path):
         return checkpoints[-1], "pt"
 
     raise FileNotFoundError(
-        f"No model file found in {model_dir}. "
-        f"Expected model.pt, model.onnx, or checkpoint_*.pt"
+        f"No model file found in {model_dir}. " f"Expected model.pt, model.onnx, or checkpoint_*.pt"
     )
 
 
@@ -249,20 +247,14 @@ def _load_torch_state(path: Path, device: torch.device):
             if key in loaded and isinstance(loaded[key], dict):
                 return loaded[key], False
         sample_keys = list(loaded.keys())[:5]
-        if sample_keys and all(
-            isinstance(k, str) and ("." in k or "weight" in k or "bias" in k)
-            for k in sample_keys
-        ):
+        if sample_keys and all(isinstance(k, str) and ("." in k or "weight" in k or "bias" in k) for k in sample_keys):
             return loaded, False
         return loaded, False
 
     if isinstance(loaded, nn.Module):
         return loaded, True
 
-    raise ValueError(
-        f"Cannot interpret {path.name}: expected state dict or nn.Module, "
-        f"got {type(loaded).__name__}"
-    )
+    raise ValueError(f"Cannot interpret {path.name}: expected state dict or nn.Module, " f"got {type(loaded).__name__}")
 
 
 def load_model(model_dir: str, device: torch.device = None):
@@ -300,9 +292,7 @@ def load_model(model_dir: str, device: torch.device = None):
         if model_format != "onnx":
             onnx_files = list(model_dir.glob("*.onnx"))
             if not onnx_files:
-                raise FileNotFoundError(
-                    f"Architecture is 'custom_onnx' but no .onnx file found in {model_dir}"
-                )
+                raise FileNotFoundError(f"Architecture is 'custom_onnx' but no .onnx file found in {model_dir}")
             onnx_path = onnx_files[0]
         wrapper = OnnxModelWrapper(str(onnx_path), device)
         return wrapper, metadata
@@ -433,7 +423,7 @@ def preprocess_tile(tile: np.ndarray, norm_stats: list) -> torch.Tensor:
         else:
             tile[..., c] = 0.0
     tile = np.clip(tile, 0.0, 1.0)
-    return torch.from_numpy(tile.transpose(2, 0, 1))
+    return torch.tensor(tile.transpose(2, 0, 1).copy(), dtype=torch.float32)
 
 
 def _compute_effective_padding(tile_size: int) -> int:
@@ -446,10 +436,14 @@ def _compute_effective_padding(tile_size: int) -> int:
     return max(64, min(min_pad, max_pad))
 
 
-def run_inference(model, image: np.ndarray, metadata: dict,
-                  device: torch.device = None,
-                  progress_callback=None,
-                  smoothing_sigma: float = 2.0) -> np.ndarray:
+def run_inference(
+    model,
+    image: np.ndarray,
+    metadata: dict,
+    device: torch.device = None,
+    progress_callback=None,
+    smoothing_sigma: float = 2.0,
+) -> np.ndarray:
     """Run tiled inference using expanded reads + center-crop stitching.
 
     Each tile is read with extra context (real neighboring pixels where
@@ -496,8 +490,10 @@ def run_inference(model, image: np.ndarray, metadata: dict,
         clip_pct = input_cfg.get("clip_percentile", 99.0)
         num_ch = img_ds.shape[2]
         norm_stats = [
-            {"p1": float(np.percentile(img_ds[..., c], 100 - clip_pct)),
-             "p99": float(np.percentile(img_ds[..., c], clip_pct))}
+            {
+                "p1": float(np.percentile(img_ds[..., c], 100 - clip_pct)),
+                "p99": float(np.percentile(img_ds[..., c], clip_pct)),
+            }
             for c in range(num_ch)
         ]
 
@@ -548,9 +544,7 @@ def run_inference(model, image: np.ndarray, metadata: dict,
                 if tile.shape[0] < tile_size or tile.shape[1] < tile_size:
                     extra_h = tile_size - tile.shape[0]
                     extra_w = tile_size - tile.shape[1]
-                    tile = np.pad(
-                        tile, ((0, extra_h), (0, extra_w), (0, 0)), mode="reflect"
-                    )
+                    tile = np.pad(tile, ((0, extra_h), (0, extra_w), (0, 0)), mode="reflect")
 
                 # Multi-scale context
                 if context_scale > 1:
@@ -578,11 +572,7 @@ def run_inference(model, image: np.ndarray, metadata: dict,
                         ctx_x0 = max(0, ctx_x1 - tile_size * context_scale)
 
                     ctx_region = img_ds[ctx_y0:ctx_y1, ctx_x0:ctx_x1]
-                    ctx_tile = np.array(
-                        Image.fromarray(ctx_region).resize(
-                            (tile_size, tile_size), Image.BILINEAR
-                        )
-                    )
+                    ctx_tile = np.array(Image.fromarray(ctx_region).resize((tile_size, tile_size), Image.BILINEAR))
                     tile = np.concatenate([tile, ctx_tile], axis=-1)
                     tile_norm = norm_stats + norm_stats
                 else:
@@ -591,8 +581,8 @@ def run_inference(model, image: np.ndarray, metadata: dict,
                 tensor = preprocess_tile(tile, tile_norm).unsqueeze(0).to(device)
                 output = model(tensor)
                 if not isinstance(output, torch.Tensor):
-                    output = torch.from_numpy(np.asarray(output))
-                probs = torch.softmax(output, dim=1).cpu().numpy()[0]
+                    output = torch.tensor(np.asarray(output), dtype=torch.float32)
+                probs = np.from_dlpack(torch.softmax(output, dim=1).detach().cpu().contiguous())[0]
 
                 center = probs[
                     :,
@@ -612,9 +602,7 @@ def run_inference(model, image: np.ndarray, metadata: dict,
     pred_classes = prob_map.argmax(axis=0).astype(np.uint8)
 
     if downsample > 1:
-        pred_classes = np.array(
-            Image.fromarray(pred_classes).resize((w_orig, h_orig), Image.NEAREST)
-        )
+        pred_classes = np.array(Image.fromarray(pred_classes).resize((w_orig, h_orig), Image.NEAREST))
 
     return pred_classes
 
@@ -648,14 +636,13 @@ def mask_to_geojson(mask: np.ndarray, classes: list, image_path: str) -> dict:
 
         try:
             import rasterio.features
+
             if transform is not None:
-                shapes = rasterio.features.shapes(
-                    binary, mask=binary > 0, transform=transform
-                )
+                shapes = rasterio.features.shapes(binary, mask=binary > 0, transform=transform)
             else:
                 from rasterio.transform import from_bounds
-                t = from_bounds(0, mask.shape[0], mask.shape[1], 0,
-                                mask.shape[1], mask.shape[0])
+
+                t = from_bounds(0, mask.shape[0], mask.shape[1], 0, mask.shape[1], mask.shape[0])
                 shapes = rasterio.features.shapes(binary, mask=binary > 0, transform=t)
 
             for geom, value in shapes:
@@ -690,10 +677,14 @@ def save_geojson(fc: dict, path: str):
 # ---------------------------------------------------------------------------
 # Convenience: process a folder of images
 # ---------------------------------------------------------------------------
-def process_folder(model_dir: str, image_folder: str, output_folder: str,
-                   device: torch.device = None,
-                   smoothing_sigma: float = 2.0,
-                   progress_callback=None):
+def process_folder(
+    model_dir: str,
+    image_folder: str,
+    output_folder: str,
+    device: torch.device = None,
+    smoothing_sigma: float = 2.0,
+    progress_callback=None,
+):
     """Run inference on all images in a folder and save GeoJSON detections.
 
     Args:
@@ -720,8 +711,7 @@ def process_folder(model_dir: str, image_folder: str, output_folder: str,
             progress_callback(i, len(image_paths), img_path)
 
         image = read_image(img_path)
-        mask = run_inference(model, image, metadata, device,
-                             smoothing_sigma=smoothing_sigma)
+        mask = run_inference(model, image, metadata, device, smoothing_sigma=smoothing_sigma)
         fc = mask_to_geojson(mask, metadata["classes"], img_path)
 
         stem = Path(img_path).stem

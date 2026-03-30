@@ -12,18 +12,34 @@ from pathlib import Path
 import geojson
 import numpy as np
 import torch
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QRectF
-from PyQt5.QtGui import QImage, QPixmap, QColor, QPainter
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QFileDialog, QLabel, QSlider, QProgressBar,
-    QListWidget, QSplitter, QGroupBox, QGraphicsView, QGraphicsScene,
-    QGraphicsPixmapItem, QStatusBar, QMessageBox,
-)
-
 from modeltojson import (
-    load_model, read_image, run_inference, mask_to_geojson,
     SUPPORTED_EXTENSIONS,
+    load_model,
+    mask_to_geojson,
+    read_image,
+    run_inference,
+)
+from PyQt5.QtCore import QRectF, Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor, QImage, QPainter, QPixmap
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QGraphicsPixmapItem,
+    QGraphicsScene,
+    QGraphicsView,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSlider,
+    QSplitter,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 
@@ -84,7 +100,10 @@ class InferenceWorker(QThread):
                     break
                 img = read_image(path)
                 mask = run_inference(
-                    self.model, img, self.metadata, self.device,
+                    self.model,
+                    img,
+                    self.metadata,
+                    self.device,
                     progress_callback=lambda cur, tot: self.progress.emit(cur, tot),
                 )
                 self.image_done.emit(path, img, mask)
@@ -232,7 +251,9 @@ class MainWindow(QMainWindow):
 
     # --- Model loading ---
     def _select_model(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Model Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Model Folder", "", QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog
+        )
         if not folder:
             return
         meta_path = os.path.join(folder, "metadata.json")
@@ -275,7 +296,9 @@ class MainWindow(QMainWindow):
 
     # --- Image selection ---
     def _select_images(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Image Folder", "", QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog
+        )
         if not folder:
             return
         self.image_list.clear()
@@ -304,9 +327,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.results.clear()
 
-        self.worker = InferenceWorker(
-            self.model, self.metadata, self._image_paths, self.device
-        )
+        self.worker = InferenceWorker(self.model, self.metadata, self._image_paths, self.device)
         self.worker.progress.connect(self._on_tile_progress)
         self.worker.image_done.connect(self._on_image_done)
         self.worker.finished_all.connect(self._on_all_done)
@@ -381,7 +402,12 @@ class MainWindow(QMainWindow):
 
     # --- GeoJSON export ---
     def _export_geojson(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder for GeoJSON files")
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Folder for GeoJSON files",
+            "",
+            QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog,
+        )
         if not folder:
             return
         count = 0
@@ -399,8 +425,7 @@ class MainWindow(QMainWindow):
             return
         stem = Path(self._current_path).stem
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save GeoJSON", f"{stem}_detections.geojson",
-            "GeoJSON (*.geojson);;All Files (*)"
+            self, "Save GeoJSON", f"{stem}_detections.geojson", "GeoJSON (*.geojson);;All Files (*)"
         )
         if not path:
             return
@@ -418,8 +443,9 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    from PyQt5.QtGui import QPalette, QColor
     from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QColor, QPalette
+
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(45, 45, 45))
     palette.setColor(QPalette.WindowText, QColor(208, 208, 208))
