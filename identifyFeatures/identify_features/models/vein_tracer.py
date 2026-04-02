@@ -43,23 +43,47 @@ logger = logging.getLogger(__name__)
 def trace_veins_from_landmarks(
     skel_graph: SkeletonGraph,
     landmarks: dict[str, Landmark],
+    wing_outline: "Polygon | None" = None,
     config: PipelineConfig | None = None,
 ) -> list[VeinIdentification]:
-    """Identify veins in the skeleton graph using landmarks."""
+    """Identify veins in the skeleton graph using landmarks.
+
+    Args:
+        skel_graph: Skeleton graph (after landmark anchoring).
+        landmarks: Anchored landmarks dict.
+        wing_outline: Wing outline polygon for costa detection.
+        config: Pipeline configuration.
+    """
     if config is None:
         config = PipelineConfig()
 
     G = skel_graph.graph
     edge_labels: dict[tuple, str] = {}
 
-    # Phase 1: Label edges at landmark positions
+    # Phase 0: Detect costa edges using margin band
+    if wing_outline is not None:
+        from identify_features.models.costa_detector import detect_costa_edges
+
+        costa_keys, _ = detect_costa_edges(skel_graph, landmarks, wing_outline, config)
+        for key in costa_keys:
+            edge_labels[key] = "costa"
+
+    # Phase 1: Merge longitudinals through crossvein junctions (graph-level)
+    # Done BEFORE labeling so merged edges get a single label.
+    # Only costa labels exist at this point, protecting costa from being merged.
+    # Landmark nodes are protected from being contracted.
+    from identify_features.models.junction_resolver import merge_through_junctions
+
+    protected = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
+    skel_graph.graph = merge_through_junctions(G, edge_labels, config, protected_nodes=protected)
+    G = skel_graph.graph
+
+    # Phase 2: Label edges at landmark positions (on the merged graph)
     _label_landmark_edges(G, landmarks, edge_labels, config)
 
-    # Phase 2: Reserved for future spatial/crossvein assignment
-    # (proximity-only assignment is too greedy — direction + topology needed)
-
     # Phase 3: Build VeinIdentification objects
-    veins = _build_vein_identifications(G, edge_labels)
+    merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
+    veins = _build_vein_identifications(G, edge_labels, max_merge_gap_px=merge_gap)
 
     return veins
 
@@ -123,24 +147,30 @@ def _label_landmark_edges(
                         angle_l1rs = angle_between_vectors(dep, toward_l1rs) if toward_l1rs else 180
                         scored.append((n, angle_dtip, angle_l1rs))
 
-                    # Best toward DTip → L3-side (could be L2 or L3)
+                    # Best toward DTip → L3
                     scored.sort(key=lambda s: s[1])
                     best_dtip = scored[0]
                     key = _edge_key(node, best_dtip[0])
-                    # If it's not already labeled as L3, label as L2
-                    # (the DTip edge itself should already be L3 if DTip is in same component)
                     if key not in edge_labels:
-                        edge_labels[key] = "L2"
-                        logger.info("Labeled edge %s as L2 (from L2-L3, toward DTip)", key)
+                        edge_labels[key] = "L3"
+                        logger.info("Labeled edge %s as L3 (from L2-L3, toward DTip)", key)
 
-                    # If there's a second edge heading toward L1-Rs → Rs
-                    if len(scored) >= 2 and toward_l1rs:
-                        scored_rs = sorted(scored, key=lambda s: s[2])
-                        best_rs = scored_rs[0]
+                    # Remaining edges: best toward L1-Rs → Rs, others → L2
+                    remaining_scored = [s for s in scored if s[0] != best_dtip[0]]
+                    if remaining_scored and toward_l1rs:
+                        remaining_scored.sort(key=lambda s: s[2])
+                        best_rs = remaining_scored[0]
                         key_rs = _edge_key(node, best_rs[0])
                         if key_rs not in edge_labels:
                             edge_labels[key_rs] = "Rs"
                             logger.info("Labeled edge %s as Rs (from L2-L3, toward L1-Rs)", key_rs)
+
+                        # Any remaining → L2
+                        for s in remaining_scored[1:]:
+                            key_l2 = _edge_key(node, s[0])
+                            if key_l2 not in edge_labels:
+                                edge_labels[key_l2] = "L2"
+                                logger.info("Labeled edge %s as L2 (from L2-L3, remaining)", key_l2)
 
     # L1-Rs junction
     lm_l1rs = landmarks.get("L1-Rs")
@@ -271,6 +301,7 @@ def _assign_by_proximity(
 def _build_vein_identifications(
     G: nx.Graph,
     edge_labels: dict[tuple, str],
+    max_merge_gap_px: float = float("inf"),
 ) -> list[VeinIdentification]:
     """Build VeinIdentification objects from labeled edges."""
     vein_edges: dict[str, list[tuple]] = defaultdict(list)
@@ -291,7 +322,7 @@ def _build_vein_identifications(
         if len(lines) == 1:
             merged = lines[0]
         elif len(lines) > 1:
-            merged = _merge_nearby_lines(lines)
+            merged = _merge_nearby_lines(lines, max_gap_px=max_merge_gap_px)
         else:
             merged = None
 
@@ -316,8 +347,16 @@ def _build_vein_identifications(
     return veins
 
 
-def _merge_nearby_lines(lines: list[LineString]) -> LineString:
-    """Merge multiple LineStrings into one, ordering by spatial proximity."""
+def _merge_nearby_lines(
+    lines: list[LineString],
+    max_gap_px: float = float("inf"),
+) -> LineString:
+    """Merge multiple LineStrings into one, ordering by spatial proximity.
+
+    Lines that are farther apart than max_gap_px are NOT connected —
+    only lines within the gap threshold are chained together. Distant
+    lines are skipped to avoid drawing long straight connectors.
+    """
     if len(lines) <= 1:
         return lines[0] if lines else LineString()
 
@@ -329,14 +368,13 @@ def _merge_nearby_lines(lines: list[LineString]) -> LineString:
         end = Point(result_coords[-1])
         start = Point(result_coords[0])
 
-        best_idx = 0
+        best_idx = None
         best_dist = float("inf")
         best_reverse = False
         best_prepend = False
 
         for i, line in enumerate(remaining):
             coords = list(line.coords)
-            # Check both ends of result against both ends of candidate
             for prepend in (False, True):
                 ref = start if prepend else end
                 for reverse in (False, True):
@@ -347,6 +385,10 @@ def _merge_nearby_lines(lines: list[LineString]) -> LineString:
                         best_idx = i
                         best_reverse = reverse
                         best_prepend = prepend
+
+        # Stop if the nearest remaining line is too far away
+        if best_idx is None or best_dist > max_gap_px:
+            break
 
         next_line = remaining.pop(best_idx)
         next_coords = list(next_line.coords)

@@ -48,7 +48,6 @@ _NEIGHBORS_8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1
 def build_skeleton_graph(
     vein_polygons: list[Polygon | MultiPolygon],
     image_shape: tuple[int, int],
-    wing_outline: Polygon | None = None,
     methods: list[SkeletonMethod] | None = None,
     smooth_sigma: float = 2.0,
     prune_methods: list[PruneMethod] | None = None,
@@ -134,20 +133,14 @@ def build_skeleton_graph(
     graph = _skeleton_to_graph(skel)
     logger.info("Raw graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
 
-    # Step 7: Collinear merging at junctions
-    graph = _collinear_merge(graph, min_angle=collinear_min_angle)
-    logger.info(
-        "After collinear merging (%.0f°): %d nodes, %d edges",
-        collinear_min_angle,
-        graph.number_of_nodes(),
-        graph.number_of_edges(),
-    )
+    # Compute median vein width early (needed for collinear merge guard)
+    median_vein_width = _compute_median_vein_width(skel, distance_map, vein_mask)
 
-    # Step 8: Contract degree-2 nodes
+    # Step 7: Contract degree-2 nodes
     graph = _simplify_graph(graph)
     logger.info("Simplified graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
 
-    # Step 9: Gap bridging + re-simplify (iterative, hierarchical)
+    # Step 8: Gap bridging + re-simplify (iterative, hierarchical)
     graph = _bridge_and_simplify(
         graph,
         max_gap_px=max_gap_px,
@@ -158,22 +151,44 @@ def build_skeleton_graph(
         max_on_axis_angle=bridge_on_axis_max_angle,
         on_axis_relaxed_cap=bridge_on_axis_relaxed_cap,
         collinear_min_angle=collinear_min_angle,
+        collinear_min_edge_length=median_vein_width * 2,
         prune_min_length=prune_min_length_px,
     )
 
-    # Step 10: Remove overlapping/redundant edges
+    # Step 9: Remove overlapping/redundant edges
     _remove_redundant_edges(graph)
     graph = _simplify_graph(graph)
+
+    # Step 10: Absorb or remove tiny segments (2x median vein width)
+    _absorb_tiny_segments(graph, min_length=median_vein_width * 2)
+    graph = _simplify_graph(graph)
+
+    # Step 11: Merge nodes closer than median vein width
+    _merge_close_nodes(graph, min_dist=median_vein_width)
+    graph = _simplify_graph(graph)
+
+    # Step 12: Collinear merging at junctions (AFTER tiny segments removed)
+    graph = _collinear_merge(graph, min_angle=collinear_min_angle)
+    graph = _simplify_graph(graph)
+    logger.info(
+        "After collinear merging (%.0f°): %d nodes, %d edges",
+        collinear_min_angle,
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
+    )
+
+    # Step 13: Remove isolated fragments shorter than 4x median vein width
+    _remove_small_fragments(graph, min_length=median_vein_width * 4)
 
     # Remove isolated nodes (degree 0)
     isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
     graph.remove_nodes_from(isolated)
 
-    logger.info("Final graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
+    # Step 14: Snap edge LineString endpoints to node positions
+    _snap_edge_endpoints(graph)
 
-    # Step 12: Compute margin band for costa identification
-    margin_band, median_vein_width = _compute_margin_band(vein_mask, skel, distance_map, image_shape, wing_outline)
-    logger.info("Median vein width: %.1fpx, margin band: %d pixels", median_vein_width, np.count_nonzero(margin_band))
+    logger.info("Final graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
+    logger.info("Median vein width: %.1fpx", median_vein_width)
 
     return SkeletonGraph(
         graph=graph,
@@ -181,7 +196,6 @@ def build_skeleton_graph(
         skeleton=skel,
         image_shape=image_shape,
         distance_map=distance_map,
-        margin_band=margin_band,
         median_vein_width_px=median_vein_width,
     )
 
@@ -825,12 +839,19 @@ def _cluster_junctions(
 # ---------------------------------------------------------------------------
 
 
-def _collinear_merge(G: nx.Graph, min_angle: float = 150.0) -> nx.Graph:
+def _collinear_merge(
+    G: nx.Graph,
+    min_angle: float = 150.0,
+    min_edge_length: float = 0.0,
+) -> nx.Graph:
     """At each degree-3+ junction, merge the most collinear edge pair.
 
     Two edges at a junction whose tangent vectors make an angle > min_angle
     (close to 180° = straight through) are merged into a single edge.
     The remaining edge(s) become spurs from a point on the merged edge.
+
+    Edges shorter than min_edge_length are excluded from being merged.
+    This prevents tiny stubs from being incorrectly fused with real veins.
 
     Iterates until no more merges are possible.
     """
@@ -866,6 +887,12 @@ def _collinear_merge(G: nx.Graph, min_angle: float = 150.0) -> nx.Graph:
             for i in range(len(neighbors)):
                 for j in range(i + 1, len(neighbors)):
                     n1, n2 = neighbors[i], neighbors[j]
+                    # Skip if either edge is too short
+                    if min_edge_length > 0:
+                        l1 = result[node][n1].get("length_px", 0)
+                        l2 = result[node][n2].get("length_px", 0)
+                        if l1 < min_edge_length or l2 < min_edge_length:
+                            continue
                     d1 = edge_departure_direction(result, node, n1, 80.0)
                     d2 = edge_departure_direction(result, node, n2, 80.0)
                     # Angle between opposite directions (should be close to 180°)
@@ -924,6 +951,7 @@ def _bridge_and_simplify(
     max_on_axis_angle: float = 20.0,
     on_axis_relaxed_cap: float = 45.0,
     collinear_min_angle: float = 150.0,
+    collinear_min_edge_length: float = 0.0,
     prune_min_length: int = 30,
     max_iterations: int = 10,
 ) -> nx.Graph:
@@ -956,7 +984,7 @@ def _bridge_and_simplify(
 
         # Re-simplify
         result = _simplify_graph(result)
-        result = _collinear_merge(result, min_angle=collinear_min_angle)
+        result = _collinear_merge(result, min_angle=collinear_min_angle, min_edge_length=collinear_min_edge_length)
         result = _simplify_graph(result)
 
         # Prune short terminal stubs
@@ -1173,54 +1201,224 @@ def _build_bridge_line(
     return LineString([p1, p2])
 
 
-def _compute_margin_band(
-    vein_mask: np.ndarray,
+def _compute_median_vein_width(
     skeleton: np.ndarray,
     distance_map: np.ndarray | None,
-    image_shape: tuple[int, int],
-    wing_outline: Polygon | None = None,
-) -> tuple[np.ndarray, float]:
-    """Compute the wing margin band where the costa runs.
+    vein_mask: np.ndarray,
+) -> float:
+    """Compute the median full vein width from the distance map at skeleton pixels.
 
-    1. Sample the distance transform at skeleton pixels → vein half-widths
-    2. Median half-width × 2 = median full vein width
-    3. Rasterize the wing outline to get the full wing mask
-    4. Compute distance from wing background inward (wing-edge distance)
-    5. Margin band = vein pixels where wing-edge-distance < median vein width
-
-    Returns:
-        (margin_band, median_vein_width) where margin_band is a boolean mask
-        and median_vein_width is in pixels.
+    distance_transform_edt(vein_mask) gives the half-width (distance to
+    nearest non-vein pixel) at each vein pixel. Sampling at skeleton pixels
+    gives the half-width at the vein center. 2 * median = median full width.
     """
-    # Get distance map (compute if not provided)
     if distance_map is None:
         dist = ndimage.distance_transform_edt(vein_mask > 0)
     else:
         dist = distance_map
 
-    # Sample half-widths at skeleton pixels
     skel_pixels = skeleton > 0
     half_widths = dist[skel_pixels]
     half_widths = half_widths[half_widths > 0]
 
     if len(half_widths) == 0:
-        return np.zeros(vein_mask.shape, dtype=bool), 0.0
+        return 0.0
 
-    median_half_width = float(np.median(half_widths))
-    median_vein_width = 2.0 * median_half_width
+    return 2.0 * float(np.median(half_widths))
 
-    if wing_outline is None:
-        logger.warning("No wing outline — cannot compute margin band")
-        return np.zeros(vein_mask.shape, dtype=bool), median_vein_width
 
-    # Rasterize the wing outline polygon to get the full wing mask
-    wing_mask = rasterize_polygons([wing_outline], image_shape)
-    wing_edge_dist = ndimage.distance_transform_edt(wing_mask > 0)
+def _snap_edge_endpoints(G: nx.Graph) -> None:
+    """Snap each edge LineString's start/end to its node positions (in-place).
 
-    # Margin band: vein pixels within one median vein width of the wing edge
-    margin_band = (vein_mask > 0) & (wing_edge_dist < median_vein_width)
+    After graph simplification, edge LineStrings may start/end at
+    original skeleton pixel positions rather than at the node centroid.
+    This creates visible stubs. Fix by replacing the first/last
+    coordinate of each LineString with the node's (x, y).
+    """
+    import math
 
-    return margin_band, median_vein_width
+    for u, v, data in G.edges(data=True):
+        line = data.get("line")
+        if line is None or line.is_empty:
+            continue
+
+        coords = list(line.coords)
+        if len(coords) < 2:
+            continue
+
+        nd_u = G.nodes[u]
+        nd_v = G.nodes[v]
+        u_pos = (nd_u["x"], nd_u["y"])
+        v_pos = (nd_v["x"], nd_v["y"])
+
+        # Determine which end of the LineString is closer to u vs v
+        d_start_u = math.hypot(coords[0][0] - u_pos[0], coords[0][1] - u_pos[1])
+        d_start_v = math.hypot(coords[0][0] - v_pos[0], coords[0][1] - v_pos[1])
+
+        if d_start_u <= d_start_v:
+            # coords[0] is near u, coords[-1] is near v
+            coords[0] = u_pos
+            coords[-1] = v_pos
+        else:
+            # coords[0] is near v, coords[-1] is near u
+            coords[0] = v_pos
+            coords[-1] = u_pos
+
+        data["line"] = LineString(coords)
+
+
+def _merge_close_nodes(G: nx.Graph, min_dist: float) -> None:
+    """Merge nodes closer than min_dist into a single node (in-place).
+
+    When two nodes are spatially close (< min_dist), they likely
+    represent the same junction point. Merge them: keep one node,
+    transfer the other's edges to it, remove the other.
+
+    If there's an edge between the two close nodes, it's removed
+    (it's a tiny connecting segment). Other edges from the removed
+    node are reconnected to the kept node.
+    """
+    import math
+
+    changed = True
+    while changed:
+        changed = False
+        nodes = list(G.nodes())
+
+        for i, n1 in enumerate(nodes):
+            if n1 not in G:
+                continue
+            nd1 = G.nodes[n1]
+
+            for n2 in nodes[i + 1 :]:
+                if n2 not in G:
+                    continue
+                nd2 = G.nodes[n2]
+
+                dist = math.hypot(nd1["x"] - nd2["x"], nd1["y"] - nd2["y"])
+                if dist >= min_dist:
+                    continue
+
+                # Merge n2 into n1: transfer n2's edges to n1
+                # Remove any direct edge between n1 and n2
+                if G.has_edge(n1, n2):
+                    G.remove_edge(n1, n2)
+
+                # Reconnect n2's remaining neighbors to n1
+                for neighbor in list(G.neighbors(n2)):
+                    if neighbor == n1:
+                        continue
+                    edge_data = G[n2][neighbor].copy()
+                    G.remove_edge(n2, neighbor)
+                    if not G.has_edge(n1, neighbor):
+                        G.add_edge(n1, neighbor, **edge_data)
+
+                G.remove_node(n2)
+                changed = True
+                logger.debug(
+                    "Merged node %d into %d (dist=%.0fpx)",
+                    n2,
+                    n1,
+                    dist,
+                )
+                break  # restart after modification
+
+            if changed:
+                break
+
+
+def _remove_small_fragments(G: nx.Graph, min_length: float) -> None:
+    """Remove isolated graph fragments shorter than min_length (in-place).
+
+    An isolated fragment is a connected component where all nodes are
+    degree-1 (no connection to the rest of the graph). If the total
+    edge length of the fragment is below min_length, remove it.
+    """
+    import networkx as nx
+
+    for component in list(nx.connected_components(G)):
+        # Check if this component is isolated (no degree-3+ junctions)
+        has_junction = any(G.degree(n) >= 3 for n in component)
+        if has_junction:
+            continue
+
+        # Total edge length in this component
+        total_length = sum(G[u][v].get("length_px", 0) for u, v in G.edges() if u in component and v in component)
+
+        if total_length < min_length:
+            G.remove_nodes_from(component)
+            logger.debug(
+                "Removed isolated fragment: %d nodes, %.0fpx total",
+                len(component),
+                total_length,
+            )
+
+
+def _absorb_tiny_segments(G: nx.Graph, min_length: float = 30.0) -> None:
+    """Absorb or remove tiny segments (in-place).
+
+    Case 1: Tiny edge connects a single edge (A) to a junction (B, C).
+            Merge the tiny edge into A (extend A to the junction).
+    Case 2: Tiny edge is a dead-end stub at a junction (degree-1 on one
+            end, junction on the other). Remove it.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for u, v, data in list(G.edges(data=True)):
+            if not G.has_edge(u, v):
+                continue
+            if data.get("length_px", 0) >= min_length:
+                continue
+
+            deg_u = G.degree(u)
+            deg_v = G.degree(v)
+
+            # Case 2: dead-end stub at a junction — remove it
+            # One end is degree-1 (free), other is degree-3+ (junction)
+            if (deg_u == 1 and deg_v >= 3) or (deg_v == 1 and deg_u >= 3):
+                free_node = u if deg_u == 1 else v
+                G.remove_node(free_node)
+                changed = True
+                logger.debug(
+                    "Removed tiny dead-end stub: %d↔%d (%.0fpx)",
+                    u,
+                    v,
+                    data.get("length_px", 0),
+                )
+                continue
+
+            # Case 1: bridges a single edge to a junction — merge into the single edge
+            # One end is degree-2 (pass-through), other is degree-3+ (junction)
+            if (deg_u == 2 and deg_v >= 3) or (deg_v == 2 and deg_u >= 3):
+                pass_node = u if deg_u == 2 else v
+                # pass_node connects to the tiny edge AND one other edge
+                # Merge tiny edge into the other edge by contracting pass_node
+                # (this is what _simplify_graph does for degree-2 nodes,
+                # but we trigger it explicitly here for tiny edges)
+                # Just remove the tiny edge — _simplify_graph will contract
+                # the now-degree-1 pass_node on the next pass
+                # Actually, easier: just let _simplify_graph handle it
+                # after we remove the tiny edge
+                pass  # _simplify_graph after this function handles it
+
+            # Case 1 variant: both ends are degree-2 (tiny edge between two edges)
+            # Just let _simplify_graph contract through it
+            # Nothing to do here
+
+    # Also remove remaining degree-1 stubs shorter than min_length
+    # (catches stubs at degree-2 nodes that weren't at junctions)
+    changed = True
+    while changed:
+        changed = False
+        for node in list(G.nodes()):
+            if node not in G or G.degree(node) != 1:
+                continue
+            neighbor = list(G.neighbors(node))[0]
+            edge_len = G[node][neighbor].get("length_px", 0)
+            if edge_len < min_length:
+                G.remove_node(node)
+                changed = True
 
 
 def _remove_redundant_edges(G: nx.Graph, buffer_px: float = 15.0) -> None:

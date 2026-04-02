@@ -52,10 +52,21 @@ def anchor_landmarks(
                 G,
                 lm.x,
                 lm.y,
-                max_dist=prefer_junction_radius,
+                max_dist=snap_radius,
                 prefer_degree=3,
-                prefer_degree_radius=prefer_junction_radius,
+                prefer_degree_radius=snap_radius,
             )
+            # Junction landmarks must snap to degree-3+ nodes.
+            # If only a degree-1 node was found, reject it and fall
+            # through to edge insertion (which creates a split point).
+            if node is not None and G.degree(node) < 2:
+                logger.debug(
+                    "Landmark %r: rejecting degree-%d node %s, will insert on edge",
+                    name,
+                    G.degree(node),
+                    node,
+                )
+                node = None
         elif name in _ENDPOINT_LANDMARKS:
             node = nearest_node(
                 G,
@@ -145,7 +156,8 @@ def _insert_node_on_nearest_edge(
 
     # Split the line at the projection point
     split_dist = line.project(best_point)
-    if split_dist < 1.0 or split_dist > line.length - 1.0:
+    min_split_dist = 20.0  # Don't create segments shorter than this
+    if split_dist < min_split_dist or split_dist > line.length - min_split_dist:
         # Too close to an existing endpoint — just snap to that node
         if split_dist < 1.0:
             return (

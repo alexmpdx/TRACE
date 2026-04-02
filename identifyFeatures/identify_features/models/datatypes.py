@@ -97,7 +97,6 @@ class SkeletonGraph:
     image_shape: tuple[int, int]
     distance_map: Optional[np.ndarray] = None  # from medial_axis
     voronoi_labels: Optional[np.ndarray] = None  # pixel → intervein polygon index
-    margin_band: Optional[np.ndarray] = None  # bool mask: pixels within 1 vein-width of wing edge
     median_vein_width_px: float = 0.0  # median full vein width in pixels
 
 
