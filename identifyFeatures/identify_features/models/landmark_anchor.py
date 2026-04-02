@@ -76,8 +76,12 @@ def anchor_landmarks(
                 prefer_degree=1,
                 prefer_degree_radius=snap_radius,
             )
+        elif name == "alula notch":
+            # Alula notch is a wing margin reference point — don't modify the graph
+            logger.debug("Landmark %r: margin reference, skipping graph modification", name)
+            continue
         else:
-            # alula notch — snap to nearest node, no degree preference
+            # Other landmarks — snap to nearest node, no degree preference
             node = nearest_node(G, lm.x, lm.y, max_dist=snap_radius)
 
         if node is not None:

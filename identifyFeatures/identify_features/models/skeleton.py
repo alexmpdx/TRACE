@@ -904,6 +904,20 @@ def _collinear_merge(
             if best_pair is None or best_angle < min_angle:
                 continue
 
+            # Divergence check: if 2+ pairs exceed the collinear threshold,
+            # this is a divergence junction (one stem, two branches).
+            # Don't merge — it would destroy the divergence point.
+            collinear_count = 0
+            for i in range(len(neighbors)):
+                for j in range(i + 1, len(neighbors)):
+                    di = edge_departure_direction(result, node, neighbors[i], 80.0)
+                    dj = edge_departure_direction(result, node, neighbors[j], 80.0)
+                    if di is not None and dj is not None:
+                        if angle_between_vectors(di, dj) >= min_angle:
+                            collinear_count += 1
+            if collinear_count >= 2:
+                continue
+
             n1, n2 = best_pair
             e1_data = result[node][n1]
             e2_data = result[node][n2]
