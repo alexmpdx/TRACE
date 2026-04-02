@@ -81,7 +81,10 @@ def trace_veins_from_landmarks(
     # Phase 2: Label edges at landmark positions (on the merged graph)
     _label_landmark_edges(G, landmarks, edge_labels, config)
 
-    # Phase 3: Build VeinIdentification objects
+    # Phase 3: Detect L6 (short posterior branch off L5 near L4-L5)
+    _detect_l6(G, edge_labels, landmarks)
+
+    # Phase 4: Build VeinIdentification objects
     merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
     veins = _build_vein_identifications(G, edge_labels, max_merge_gap_px=merge_gap)
 
@@ -401,6 +404,95 @@ def _merge_nearby_lines(
             result_coords = result_coords + next_coords[1:]
 
     return LineString(result_coords)
+
+
+def _detect_l6(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    landmarks: dict[str, Landmark],
+) -> None:
+    """Detect L6: a short posterior branch off L5 near L4-L5.
+
+    L6 branches from L5 near the proximal end (within 0.5-1.5× Rs length
+    from L4-L5) and heads posteriorly. It's similar in length to Rs/L1
+    and may be absent.
+    """
+    # Need Rs length as reference
+    rs_length = None
+    for key, label in edge_labels.items():
+        if label == "Rs":
+            u, v = key
+            if G.has_edge(u, v):
+                rs_length = G[u][v].get("length_px", 0)
+                break
+
+    if rs_length is None or rs_length < 10:
+        return
+
+    # Find L4-L5 landmark position
+    l4l5 = landmarks.get("L4-L5")
+    if l4l5 is None:
+        return
+
+    l4l5_x, l4l5_y = l4l5.x, l4l5.y
+
+    # Look for unlabeled edges that:
+    # 1. Have at least one endpoint near the L4-L5 area (within 1.5× Rs)
+    # 2. Are short (0.5-1.5× Rs length)
+    # 3. Head posteriorly (positive Y direction = toward bottom of wing)
+    min_length = rs_length * 0.5
+    max_length = rs_length * 1.5
+    max_dist_from_l4l5 = rs_length * 1.5
+
+    best_candidate = None
+    best_score = float("inf")
+
+    for u, v, data in G.edges(data=True):
+        key = _edge_key(u, v)
+        if key in edge_labels:
+            continue
+
+        length = data.get("length_px", 0)
+        if length < min_length or length > max_length:
+            continue
+
+        # Check if either endpoint is near L4-L5
+        nd_u = G.nodes[u]
+        nd_v = G.nodes[v]
+        dist_u = math.hypot(nd_u["x"] - l4l5_x, nd_u["y"] - l4l5_y)
+        dist_v = math.hypot(nd_v["x"] - l4l5_x, nd_v["y"] - l4l5_y)
+        min_dist = min(dist_u, dist_v)
+
+        if min_dist > max_dist_from_l4l5:
+            continue
+
+        # Check direction: must head posteriorly (positive Y)
+        line = data.get("line")
+        if line is None:
+            continue
+        start = line.coords[0]
+        end = line.coords[-1]
+        dy = end[1] - start[1]
+        # Positive dy = heading posteriorly (down in image)
+        if abs(dy) < length * 0.3:
+            continue  # not heading substantially in Y direction
+        if dy < 0:
+            # Check reversed
+            dy = -dy
+            if dy < length * 0.3:
+                continue
+
+        # Score: prefer edges closer to L4-L5 and more posterior
+        score = min_dist
+        if score < best_score:
+            best_score = score
+            best_candidate = key
+
+    if best_candidate is not None:
+        edge_labels[best_candidate] = "L6"
+        u, v = best_candidate
+        length = G[u][v].get("length_px", 0)
+        logger.info("Detected L6: edge %d↔%d, %.0fpx", u, v, length)
 
 
 def _edge_key(u: int, v: int) -> tuple[int, int]:
