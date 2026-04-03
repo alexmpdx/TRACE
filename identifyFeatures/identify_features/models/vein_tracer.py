@@ -60,17 +60,8 @@ def trace_veins_from_landmarks(
     G = skel_graph.graph
     edge_labels: dict[tuple, str] = {}
 
-    # Phase 0: Detect costa edges using margin band
-    if wing_outline is not None:
-        from identify_features.models.costa_detector import detect_costa_edges
-
-        costa_keys, _ = detect_costa_edges(skel_graph, landmarks, wing_outline, config)
-        for key in costa_keys:
-            edge_labels[key] = "costa"
-
-    # Phase 1: Merge longitudinals through crossvein junctions (graph-level)
+    # Phase 0: Merge longitudinals through crossvein junctions (graph-level)
     # Done BEFORE labeling so merged edges get a single label.
-    # Only costa labels exist at this point, protecting costa from being merged.
     # Landmark nodes are protected from being contracted.
     from identify_features.models.junction_resolver import merge_through_junctions
 
@@ -78,13 +69,24 @@ def trace_veins_from_landmarks(
     skel_graph.graph = merge_through_junctions(G, edge_labels, config, protected_nodes=protected)
     G = skel_graph.graph
 
+    # Phase 1: Detect costa edges using margin band (on the merged graph)
+    if wing_outline is not None:
+        from identify_features.models.costa_detector import detect_costa_edges
+
+        costa_keys, _ = detect_costa_edges(skel_graph, landmarks, wing_outline, config)
+        for key in costa_keys:
+            edge_labels[key] = "costa"
+
     # Phase 2: Label edges at landmark positions (on the merged graph)
     _label_landmark_edges(G, landmarks, edge_labels, config)
 
     # Phase 3: Detect L6 (short posterior branch off L5 near L4-L5)
     _detect_l6(G, edge_labels, landmarks)
 
-    # Phase 4: Build VeinIdentification objects
+    # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5)
+    _detect_crossveins(G, edge_labels)
+
+    # Phase 5: Build VeinIdentification objects
     merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
     veins = _build_vein_identifications(G, edge_labels, max_merge_gap_px=merge_gap)
 
@@ -395,12 +397,16 @@ def _merge_nearby_lines(
 
         next_line = remaining.pop(best_idx)
         next_coords = list(next_line.coords)
-        if best_reverse:
-            next_coords = next_coords[::-1]
 
         if best_prepend:
-            result_coords = next_coords + result_coords[1:]
+            # Shared point must be at next_coords[-1] — invert reverse logic
+            if not best_reverse:
+                next_coords = next_coords[::-1]
+            result_coords = next_coords[:-1] + result_coords
         else:
+            # Shared point must be at next_coords[0]
+            if best_reverse:
+                next_coords = next_coords[::-1]
             result_coords = result_coords + next_coords[1:]
 
     return LineString(result_coords)
@@ -493,6 +499,107 @@ def _detect_l6(
         u, v = best_candidate
         length = G[u][v].get("length_px", 0)
         logger.info("Detected L6: edge %d↔%d, %.0fpx", u, v, length)
+
+
+def _detect_crossveins(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+) -> None:
+    """Detect ACV and PCV crossveins.
+
+    After junction merging (Phase 1), crossvein edges are unlabeled
+    branches whose endpoints sit on or near two different longitudinal
+    veins.  ACV connects L3↔L4, PCV connects L4↔L5.
+
+    Detection: for each crossvein, find unlabeled edges where one
+    endpoint is near vein_a and the other near vein_b.  "Near" means
+    the node is an endpoint of a labeled edge (shared graph node) or
+    its coordinates lie on/close to a labeled vein LineString (typical
+    after junction merging contracts the junction node into the
+    longitudinal's line).
+    """
+    from identify_features.models.topology import CROSSVEIN_CONNECTIONS
+
+    # Build lookup: labeled vein LineStrings and endpoint node sets
+    vein_lines: dict[str, list[LineString]] = defaultdict(list)
+    vein_nodes: dict[str, set[int]] = defaultdict(set)
+    for (u, v), label in edge_labels.items():
+        if G.has_edge(u, v):
+            line = G[u][v].get("line")
+            if line:
+                vein_lines[label].append(line)
+            vein_nodes[label].add(u)
+            vein_nodes[label].add(v)
+
+    for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
+        if vein_a not in vein_lines or vein_b not in vein_lines:
+            logger.info("Cannot detect %s: %s or %s not labeled", cv_name, vein_a, vein_b)
+            continue
+
+        best_key = None
+        best_score = float("inf")
+
+        for u, v, data in G.edges(data=True):
+            key = _edge_key(u, v)
+            if key in edge_labels:
+                continue
+
+            if data.get("line") is None:
+                continue
+
+            # Try both orientations: u→vein_a / v→vein_b  and  u→vein_b / v→vein_a
+            for end_a, end_b in [(u, v), (v, u)]:
+                dist_a = _node_vein_distance(G, end_a, vein_a, vein_lines, vein_nodes)
+                dist_b = _node_vein_distance(G, end_b, vein_b, vein_lines, vein_nodes)
+
+                if dist_a is not None and dist_b is not None:
+                    score = dist_a + dist_b
+                    if score < best_score:
+                        best_score = score
+                        best_key = key
+                    break  # valid orientation found
+
+        if best_key is not None:
+            edge_labels[best_key] = cv_name
+            u, v = best_key
+            length = G[u][v].get("length_px", 0)
+            logger.info("Detected %s: edge %d↔%d, %.0fpx (score=%.1f)", cv_name, u, v, length, best_score)
+        else:
+            logger.info("No candidate found for %s", cv_name)
+
+
+def _node_vein_distance(
+    G: nx.Graph,
+    node: int,
+    vein_label: str,
+    vein_lines: dict[str, list[LineString]],
+    vein_nodes: dict[str, set[int]],
+    max_dist: float = 50.0,
+) -> Optional[float]:
+    """Distance from a graph node to a labeled vein.
+
+    Returns 0 if the node shares a graph edge endpoint with the vein.
+    Returns geometric distance to the nearest vein LineString if within
+    *max_dist* (covers the post-merge case where the junction node's
+    coordinates are embedded in the merged longitudinal line).
+    Returns None if too far — the node is not connected to this vein.
+    """
+    # Direct graph connectivity: node is an endpoint of a vein edge
+    if node in vein_nodes.get(vein_label, set()):
+        return 0.0
+
+    # Geometric proximity (post-merge: node coords on the LineString)
+    pt = Point(G.nodes[node]["x"], G.nodes[node]["y"])
+    min_dist = float("inf")
+    for line in vein_lines.get(vein_label, []):
+        d = line.distance(pt)
+        if d < min_dist:
+            min_dist = d
+
+    if min_dist <= max_dist:
+        return min_dist
+
+    return None
 
 
 def _edge_key(u: int, v: int) -> tuple[int, int]:

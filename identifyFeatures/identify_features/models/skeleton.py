@@ -48,45 +48,36 @@ _NEIGHBORS_8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1
 def build_skeleton_graph(
     vein_polygons: list[Polygon | MultiPolygon],
     image_shape: tuple[int, int],
-    methods: list[SkeletonMethod] | None = None,
-    smooth_sigma: float = 2.0,
-    prune_methods: list[PruneMethod] | None = None,
-    prune_min_length_px: int = 30,
-    prune_radius_ratio: float = 0.3,
-    prune_scale_sigmas: list[float] | None = None,
-    prune_single_scale_sigma: float = 4.0,
-    collinear_min_angle: float = 150.0,
-    max_gap_px: float = 100.0,
-    bridge_gap_fraction: float = 0.1,
-    direction_window_px: float = 207.0,
-    min_combined_length_px: float = 207.0,
-    bridge_min_facing_angle: float = 150.0,
-    bridge_on_axis_max_angle: float = 20.0,
-    bridge_on_axis_relaxed_cap: float = 45.0,
+    config: "PipelineConfig | None" = None,
 ) -> SkeletonGraph:
     """Full pipeline: vein polygons → binary mask → skeleton → graph.
 
-    Args:
-        vein_polygons: Vein tissue polygons from pixel classifier.
-        image_shape: (height, width) of the image.
-        methods: Skeletonization method(s). Defaults to [MEDIAL_AXIS].
-        smooth_sigma: Gaussian sigma for boundary smoothing.
-        prune_methods: Pruning methods to apply sequentially.
-        prune_min_length_px: Minimum branch length for basic pruning.
-        prune_radius_ratio: Threshold for distance-map pruning.
-        prune_scale_sigmas: Sigma levels for multi-scale persistence.
-        prune_single_scale_sigma: Sigma for single-scale methods.
-        collinear_min_angle: Min angle for collinear edge merging.
+    All parameters are read from *config* (a PipelineConfig instance).
+    If *config* is None a default PipelineConfig is created.
 
     Returns:
         SkeletonGraph with the NetworkX graph and supporting arrays.
     """
-    if methods is None:
-        methods = [SkeletonMethod.MEDIAL_AXIS]
-    if prune_methods is None:
-        prune_methods = []
-    if prune_scale_sigmas is None:
-        prune_scale_sigmas = [2.0, 4.0, 8.0, 16.0]
+    from identify_features.config import PipelineConfig
+
+    if config is None:
+        config = PipelineConfig()
+
+    methods = config.skeleton_methods
+    smooth_sigma = config.smooth_sigma
+    prune_methods = config.prune_methods
+    prune_min_length_px = config.prune_min_length_px  # None = auto from median vein width
+    prune_radius_ratio = config.prune_radius_ratio_threshold
+    prune_scale_sigmas = config.prune_scale_sigmas
+    prune_single_scale_sigma = config.prune_single_scale_sigma
+    collinear_min_angle = config.collinear_min_angle
+    max_gap_px = config.to_px(config.bridge_max_gap_um)
+    bridge_gap_fraction = config.bridge_gap_fraction
+    direction_window_px = config.to_px(config.bridge_direction_window_um)
+    min_combined_length_px = config.to_px(config.bridge_min_combined_length_um)
+    bridge_min_facing_angle = config.bridge_min_facing_angle
+    bridge_on_axis_max_angle = config.bridge_on_axis_max_angle
+    bridge_on_axis_relaxed_cap = config.bridge_on_axis_relaxed_cap
 
     # Step 1: Rasterize vein polygons to binary mask
     vein_mask = rasterize_polygons(vein_polygons, image_shape)
@@ -110,9 +101,18 @@ def build_skeleton_graph(
 
     logger.info("Skeleton: %d pixels", np.count_nonzero(skel))
 
+    # Compute median vein width from the raw skeleton (before pruning)
+    median_vein_width = _compute_median_vein_width(skel, distance_map, vein_mask)
+    logger.info("Median vein width: %.1fpx", median_vein_width)
+
     # Step 4: Basic length-based pruning
-    skel = _prune_branches(skel, min_length=prune_min_length_px)
-    logger.info("After basic pruning (min=%dpx): %d pixels", prune_min_length_px, np.count_nonzero(skel))
+    # Use median vein width if no explicit pixel threshold was set
+    if prune_min_length_px is not None:
+        prune_threshold = prune_min_length_px
+    else:
+        prune_threshold = max(10, int(median_vein_width * config.prune_min_length_vein_widths))
+    skel = _prune_branches(skel, min_length=prune_threshold)
+    logger.info("After basic pruning (min=%dpx): %d pixels", prune_threshold, np.count_nonzero(skel))
 
     # Step 5: Advanced pruning methods (applied sequentially)
     for method in prune_methods:
@@ -133,9 +133,6 @@ def build_skeleton_graph(
     graph = _skeleton_to_graph(skel)
     logger.info("Raw graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
 
-    # Compute median vein width early (needed for collinear merge guard)
-    median_vein_width = _compute_median_vein_width(skel, distance_map, vein_mask)
-
     # Step 7: Contract degree-2 nodes
     graph = _simplify_graph(graph)
     logger.info("Simplified graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
@@ -152,43 +149,54 @@ def build_skeleton_graph(
         on_axis_relaxed_cap=bridge_on_axis_relaxed_cap,
         collinear_min_angle=collinear_min_angle,
         collinear_min_edge_length=median_vein_width * 2,
-        prune_min_length=prune_min_length_px,
+        prune_min_length=prune_threshold,
     )
 
     # Step 9: Remove overlapping/redundant edges
     _remove_redundant_edges(graph)
     graph = _simplify_graph(graph)
 
-    # Step 10: Absorb or remove tiny segments (2x median vein width)
-    _absorb_tiny_segments(graph, min_length=median_vein_width * 2)
+    # Step 10: Absorb or remove tiny segments (1x median vein width)
+    # Must be below the pruning threshold to avoid cascading collapse
+    _absorb_tiny_segments(graph, min_length=median_vein_width)
     graph = _simplify_graph(graph)
 
     # Step 11: Merge nodes closer than median vein width
     _merge_close_nodes(graph, min_dist=median_vein_width)
     graph = _simplify_graph(graph)
 
-    # Step 12: Collinear merging at junctions (AFTER tiny segments removed)
-    graph = _collinear_merge(graph, min_angle=collinear_min_angle)
-    graph = _simplify_graph(graph)
-    logger.info(
-        "After collinear merging (%.0f°): %d nodes, %d edges",
-        collinear_min_angle,
-        graph.number_of_nodes(),
-        graph.number_of_edges(),
-    )
+    # No final collinear merge or stub removal here — merge_through_junctions
+    # in the vein tracer handles these with landmark-aware guards
+    # (protected nodes, label protection, perpendicularity check).
 
-    # Step 13: Remove isolated fragments shorter than 4x median vein width
+    # Step 12: Remove isolated fragments shorter than 4x median vein width
     _remove_small_fragments(graph, min_length=median_vein_width * 4)
 
     # Remove isolated nodes (degree 0)
     isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
     graph.remove_nodes_from(isolated)
 
+    # Step 13: Second bridging pass — cleanup may have exposed new bridgeable endpoints.
+    # No collinear merge here — the vein tracer handles that with landmark guards.
+    graph = _bridge_and_simplify(
+        graph,
+        max_gap_px=config.to_px(config.bridge2_max_gap_um),
+        gap_fraction=config.bridge2_gap_fraction,
+        direction_window_px=config.to_px(config.bridge2_direction_window_um),
+        min_combined_length_px=config.to_px(config.bridge2_min_combined_length_um),
+        min_facing_angle=config.bridge2_min_facing_angle,
+        max_on_axis_angle=config.bridge2_on_axis_max_angle,
+        on_axis_relaxed_cap=config.bridge2_on_axis_relaxed_cap,
+        collinear_min_angle=collinear_min_angle,
+        collinear_min_edge_length=median_vein_width * 2,
+        prune_min_length=prune_threshold,
+        do_collinear_merge=False,
+    )
+
     # Step 14: Snap edge LineString endpoints to node positions
     _snap_edge_endpoints(graph)
 
     logger.info("Final graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
-    logger.info("Median vein width: %.1fpx", median_vein_width)
 
     return SkeletonGraph(
         graph=graph,
@@ -919,6 +927,28 @@ def _collinear_merge(
                 continue
 
             n1, n2 = best_pair
+
+            # Perpendicularity guard: the unmerged edge(s) must branch off
+            # at a steep angle from both merged edges.  If any unmerged edge
+            # is roughly collinear with either merged edge (angle > 150°),
+            # this is a divergence junction — don't merge.
+            d1 = edge_departure_direction(result, node, n1, 80.0)
+            d2 = edge_departure_direction(result, node, n2, 80.0)
+            skip = False
+            for nb in neighbors:
+                if nb == n1 or nb == n2:
+                    continue
+                d_other = edge_departure_direction(result, node, nb, 80.0)
+                if d_other is not None:
+                    if d1 is not None and angle_between_vectors(d_other, d1) > 150:
+                        skip = True
+                        break
+                    if d2 is not None and angle_between_vectors(d_other, d2) > 150:
+                        skip = True
+                        break
+            if skip:
+                continue
+
             e1_data = result[node][n1]
             e2_data = result[node][n2]
 
@@ -968,6 +998,7 @@ def _bridge_and_simplify(
     collinear_min_edge_length: float = 0.0,
     prune_min_length: int = 30,
     max_iterations: int = 10,
+    do_collinear_merge: bool = True,
 ) -> nx.Graph:
     """Bridge nearby endpoint gaps and re-simplify, hierarchically.
 
@@ -996,10 +1027,11 @@ def _bridge_and_simplify(
 
         logger.debug("Iteration %d: bridged %d gaps", iteration + 1, bridges_added)
 
-        # Re-simplify
+        # Re-simplify + optional collinear merge
         result = _simplify_graph(result)
-        result = _collinear_merge(result, min_angle=collinear_min_angle, min_edge_length=collinear_min_edge_length)
-        result = _simplify_graph(result)
+        if do_collinear_merge:
+            result = _collinear_merge(result, min_angle=collinear_min_angle, min_edge_length=collinear_min_edge_length)
+            result = _simplify_graph(result)
 
         # Prune short terminal stubs
         pruned = True
@@ -1313,27 +1345,33 @@ def _merge_close_nodes(G: nx.Graph, min_dist: float) -> None:
                 if dist >= min_dist:
                     continue
 
-                # Merge n2 into n1: transfer n2's edges to n1
-                # Remove any direct edge between n1 and n2
-                if G.has_edge(n1, n2):
-                    G.remove_edge(n1, n2)
+                # Keep the higher-degree node (more likely at a real junction)
+                if G.degree(n2) > G.degree(n1):
+                    keep, drop = n2, n1
+                else:
+                    keep, drop = n1, n2
 
-                # Reconnect n2's remaining neighbors to n1
-                for neighbor in list(G.neighbors(n2)):
-                    if neighbor == n1:
+                # Remove any direct edge between the pair
+                if G.has_edge(keep, drop):
+                    G.remove_edge(keep, drop)
+
+                # Reconnect drop's remaining neighbors to keep
+                for neighbor in list(G.neighbors(drop)):
+                    if neighbor == keep:
                         continue
-                    edge_data = G[n2][neighbor].copy()
-                    G.remove_edge(n2, neighbor)
-                    if not G.has_edge(n1, neighbor):
-                        G.add_edge(n1, neighbor, **edge_data)
+                    edge_data = G[drop][neighbor].copy()
+                    G.remove_edge(drop, neighbor)
+                    if not G.has_edge(keep, neighbor):
+                        G.add_edge(keep, neighbor, **edge_data)
 
-                G.remove_node(n2)
+                G.remove_node(drop)
                 changed = True
                 logger.debug(
-                    "Merged node %d into %d (dist=%.0fpx)",
-                    n2,
-                    n1,
+                    "Merged node %d into %d (dist=%.0fpx, kept deg=%d)",
+                    drop,
+                    keep,
                     dist,
+                    G.degree(keep),
                 )
                 break  # restart after modification
 
@@ -1368,6 +1406,32 @@ def _remove_small_fragments(G: nx.Graph, min_length: float) -> None:
             )
 
 
+def _remove_dead_end_stubs(G: nx.Graph, max_length: float) -> None:
+    """Remove degree-1 stubs at junctions that are shorter than max_length.
+
+    Only removes edges where one end is degree-1 and the other is degree-3+.
+    Does NOT contract degree-2 nodes or cascade — just clips the stubs.
+    Safe to run as a final cleanup after collinear merge.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for u, v, data in list(G.edges(data=True)):
+            if not G.has_edge(u, v):
+                continue
+            length = data.get("length_px", 0)
+            if length >= max_length:
+                continue
+            deg_u = G.degree(u)
+            deg_v = G.degree(v)
+            if (deg_u == 1 and deg_v >= 3) or (deg_v == 1 and deg_u >= 3):
+                free_node = u if deg_u == 1 else v
+                G.remove_node(free_node)
+                changed = True
+                logger.debug("Removed dead-end stub: %d↔%d (%.0fpx)", u, v, length)
+                break  # restart scan
+
+
 def _absorb_tiny_segments(G: nx.Graph, min_length: float = 30.0) -> None:
     """Absorb or remove tiny segments (in-place).
 
@@ -1400,6 +1464,9 @@ def _absorb_tiny_segments(G: nx.Graph, min_length: float = 30.0) -> None:
                     v,
                     data.get("length_px", 0),
                 )
+                continue
+
+            if data.get("length_px", 0) >= min_length:
                 continue
 
             # Case 1: bridges a single edge to a junction — merge into the single edge

@@ -16,15 +16,16 @@ class PipelineConfig:
     """
 
     # -- Scale --
-    um_per_px: float | None = None  # Microns per pixel (user must specify)
+    um_per_px: float | None = 0.483  # Microns per pixel (0.483 for standard test data)
 
     # -- Skeletonization --
-    skeleton_methods: list[SkeletonMethod] = field(default_factory=lambda: [SkeletonMethod.MEDIAL_AXIS])
+    skeleton_methods: list[SkeletonMethod] = field(default_factory=lambda: [SkeletonMethod.RIDGE])
     smooth_sigma: float = 2.0  # Gaussian sigma for boundary smoothing
 
     # -- Pruning --
     prune_methods: list[PruneMethod] = field(default_factory=list)  # Empty = length-based pruning only
-    prune_min_length_px: int = 30  # Minimum branch length to keep
+    prune_min_length_px: int | None = None  # Minimum branch length to keep (None = use median vein width)
+    prune_min_length_vein_widths: float = 2.0  # Multiplier of median vein width for auto prune threshold
     prune_radius_ratio_threshold: float = 0.3  # For distance-map: r_endpoint/r_junction below this = noise
     prune_scale_sigmas: list[float] = field(
         default_factory=lambda: [2.0, 4.0, 8.0, 16.0]  # For multi-scale persistence
@@ -34,14 +35,23 @@ class PipelineConfig:
     # -- Collinear merging --
     collinear_min_angle: float = 150.0  # Min angle (degrees) for collinear edge pairs
 
-    # -- Gap bridging --
-    bridge_max_gap_um: float = 100.0  # Absolute max gap distance (µm)
+    # -- Gap bridging (first pass) --
+    bridge_max_gap_um: float = 200.0  # Absolute max gap distance (µm)
     bridge_gap_fraction: float = 0.15  # Gap allowance as fraction of max(edge lengths)
     bridge_direction_window_um: float = 100.0  # Edge window for direction computation (µm)
     bridge_min_combined_length_um: float = 100.0  # Min total length of both edges (µm)
     bridge_on_axis_max_angle: float = 45.0  # Strict on-axis angle for longer edge (degrees)
     bridge_on_axis_relaxed_cap: float = 45.0  # Cap for relaxed angle on shorter edge (degrees)
     bridge_min_facing_angle: float = 150.0  # Min angle between opposing directions (degrees)
+
+    # -- Gap bridging (second pass, after cleanup) --
+    bridge2_max_gap_um: float = 200.0
+    bridge2_gap_fraction: float = 0.5
+    bridge2_direction_window_um: float = 100.0
+    bridge2_min_combined_length_um: float = 100.0
+    bridge2_on_axis_max_angle: float = 45.0
+    bridge2_on_axis_relaxed_cap: float = 45.0
+    bridge2_min_facing_angle: float = 150.0
 
     # -- Landmark anchoring --
     snap_radius_um: float = 100.0  # Max distance to snap landmark to graph node (µm)

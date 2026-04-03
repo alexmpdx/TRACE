@@ -96,7 +96,7 @@ def _build_margin_band(
     median_vein_width: float,
     landmarks: dict[str, Landmark],
 ) -> np.ndarray:
-    """Build the margin band: pixels within 1 median vein width of the wing edge.
+    """Build the margin band: pixels within 2x median vein width of the wing edge.
 
     Trimmed at the subcostal-break → alula-notch line to exclude the hinge.
     """
@@ -104,8 +104,8 @@ def _build_margin_band(
     wing_mask = rasterize_polygons([wing_outline], image_shape)
     wing_edge_dist = ndimage.distance_transform_edt(wing_mask > 0)
 
-    # Band = inside wing AND within median vein width of edge
-    margin_band = (wing_mask > 0) & (wing_edge_dist <= median_vein_width)
+    # Band = inside wing AND within 2x median vein width of edge
+    margin_band = (wing_mask > 0) & (wing_edge_dist <= median_vein_width * 2)
 
     # Trim hinge: keep only band in the largest piece of the SC-AN split
     sc = landmarks.get("subcostal break")
