@@ -193,7 +193,12 @@ def build_skeleton_graph(
         do_collinear_merge=False,
     )
 
-    # Step 14: Snap edge LineString endpoints to node positions
+    # Step 14: Final single-pass stub removal
+    # Last step before snapping — removes tiny dead-end stubs that survived
+    # earlier cleanup. Single sweep, no simplify after, no cascade.
+    _remove_stubs_single_pass(graph, max_length=median_vein_width * config.final_stub_vein_widths)
+
+    # Step 15: Snap edge LineString endpoints to node positions
     _snap_edge_endpoints(graph)
 
     logger.info("Final graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
@@ -1404,6 +1409,33 @@ def _remove_small_fragments(G: nx.Graph, min_length: float) -> None:
                 len(component),
                 total_length,
             )
+
+
+def _remove_stubs_single_pass(G: nx.Graph, max_length: float) -> None:
+    """Remove degree-1 stubs at junctions in a single pass (no cascade).
+
+    Collects all eligible stubs first, then removes them all at once.
+    This prevents the cascade where removing one stub demotes a junction
+    to degree-2, which then gets contracted, exposing more stubs.
+    """
+    to_remove = []
+    for u, v, data in G.edges(data=True):
+        length = data.get("length_px", 0)
+        if length >= max_length:
+            continue
+        deg_u = G.degree(u)
+        deg_v = G.degree(v)
+        if (deg_u == 1 and deg_v >= 3) or (deg_v == 1 and deg_u >= 3):
+            free_node = u if deg_u == 1 else v
+            to_remove.append((free_node, u, v, length))
+
+    for free_node, u, v, length in to_remove:
+        if free_node in G:
+            G.remove_node(free_node)
+            logger.debug("Removed stub (single pass): %d↔%d (%.0fpx)", u, v, length)
+
+    if to_remove:
+        logger.info("Single-pass stub removal: removed %d stubs (max %.0fpx)", len(to_remove), max_length)
 
 
 def _remove_dead_end_stubs(G: nx.Graph, max_length: float) -> None:
