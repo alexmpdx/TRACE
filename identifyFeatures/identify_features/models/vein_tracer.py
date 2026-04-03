@@ -144,11 +144,12 @@ def _label_landmark_edges(
                 best_n = n
         return best_n, best_dist
 
-    # L2-L3 junction
+    # L2-L3 junction: simultaneous matching with L2.d and DTip
     lm_l2l3 = landmarks.get("L2-L3")
     lm_dtip = landmarks.get("DTip")
     lm_l1rs = landmarks.get("L1-Rs")
     lm_l2d = landmarks.get("L2.d")
+    max_lm_dist = config.snap_radius
 
     if lm_l2l3 and lm_l2l3.snapped_node is not None:
         node = lm_l2l3.snapped_node
@@ -157,66 +158,81 @@ def _label_landmark_edges(
             sample_px = config.departure_sample
 
             if len(neighbors) >= 1:
-                # 1) Edge nearest to L2.d → L2 (identify first to prevent DTip stealing it)
-                if lm_l2d and lm_l2d.snapped_node is not None:
-                    best_l2, _ = _nearest_edge_to_landmark(node, neighbors, lm_l2d)
-                    if best_l2 is not None:
-                        key_l2 = _edge_key(node, best_l2)
-                        if key_l2 not in edge_labels:
-                            edge_labels[key_l2] = "L2"
-                            logger.info("Labeled edge %s as L2 (from L2-L3, nearest to L2.d)", key_l2)
+                # Check if L3 already labeled at this junction (from DTip endpoint)
+                l3_already = any(edge_labels.get(_edge_key(node, n)) == "L3" for n in G.neighbors(node))
 
-                remaining = [n for n in neighbors if _edge_key(node, n) not in edge_labels]
+                # Simultaneous: for each edge, compute distance to L2.d and DTip
+                # Assign L2 to edge nearest L2.d, L3 to edge nearest DTip
+                l2_assigned = False
+                l3_assigned = l3_already
 
-                # 2) L3: check if DTip's edge already connects to this node
-                # (already labeled by _label_endpoint_edge). If not, use
-                # direction toward DTip among remaining edges.
-                l3_already_at_junction = any(edge_labels.get(_edge_key(node, n)) == "L3" for n in G.neighbors(node))
-                if not l3_already_at_junction and remaining and lm_dtip:
+                if not l3_already and lm_l2d and lm_l2d.snapped_node is not None and lm_dtip:
+                    # Score all edges against both landmarks
+                    scores = []
+                    for n in neighbors:
+                        _, dist_l2d = _nearest_edge_to_landmark(node, [n], lm_l2d)
+                        _, dist_dtip = _nearest_edge_to_landmark(node, [n], lm_dtip)
+                        scores.append((n, dist_l2d, dist_dtip))
+
+                    # L2: edge with smallest dist to L2.d (if within snap radius)
+                    scores_l2 = sorted(scores, key=lambda s: s[1])
+                    if scores_l2[0][1] <= max_lm_dist:
+                        best_l2 = scores_l2[0][0]
+                        key = _edge_key(node, best_l2)
+                        if key not in edge_labels:
+                            edge_labels[key] = "L2"
+                            logger.info(
+                                "Labeled edge %s as L2 (from L2-L3, nearest to L2.d, dist=%.0f)", key, scores_l2[0][1]
+                            )
+                            l2_assigned = True
+
+                    # L3: edge with smallest dist to DTip (excluding L2 edge)
+                    remaining_scores = [s for s in scores if _edge_key(node, s[0]) not in edge_labels]
+                    if remaining_scores:
+                        scores_l3 = sorted(remaining_scores, key=lambda s: s[2])
+                        best_l3 = scores_l3[0][0]
+                        key = _edge_key(node, best_l3)
+                        if key not in edge_labels:
+                            edge_labels[key] = "L3"
+                            logger.info(
+                                "Labeled edge %s as L3 (from L2-L3, nearest to DTip, dist=%.0f)", key, scores_l3[0][2]
+                            )
+                            l3_assigned = True
+
+                elif lm_l2d and lm_l2d.snapped_node is not None:
+                    # Only L2.d available (L3 already labeled or no DTip)
+                    best_l2, dist = _nearest_edge_to_landmark(node, neighbors, lm_l2d)
+                    if best_l2 is not None and dist <= max_lm_dist:
+                        key = _edge_key(node, best_l2)
+                        if key not in edge_labels:
+                            edge_labels[key] = "L2"
+                            logger.info("Labeled edge %s as L2 (from L2-L3, nearest to L2.d, dist=%.0f)", key, dist)
+                            l2_assigned = True
+
+                elif not l3_already and lm_dtip:
+                    # Only DTip available (no L2.d)
                     toward_dtip = direction_toward(
                         (G.nodes[node]["x"], G.nodes[node]["y"]),
                         (lm_dtip.x, lm_dtip.y),
                     )
                     scored = []
-                    for n in remaining:
+                    for n in neighbors:
                         dep = edge_departure_direction(G, node, n, sample_px)
                         angle = angle_between_vectors(dep, toward_dtip)
                         scored.append((n, angle))
                     scored.sort(key=lambda s: s[1])
-                    best_l3 = scored[0][0]
-                    key = _edge_key(node, best_l3)
+                    key = _edge_key(node, scored[0][0])
                     if key not in edge_labels:
                         edge_labels[key] = "L3"
-                        logger.info("Labeled edge %s as L3 (from L2-L3, toward DTip)", key)
+                        logger.info("Labeled edge %s as L3 (from L2-L3, toward DTip fallback)", key)
 
+                # Remaining → Rs
                 remaining = [n for n in neighbors if _edge_key(node, n) not in edge_labels]
-
-                # 3) Best toward L1-Rs → Rs. Any still remaining → Rs.
-                if remaining and lm_l1rs:
-                    toward_l1rs = direction_toward(
-                        (G.nodes[node]["x"], G.nodes[node]["y"]),
-                        (lm_l1rs.x, lm_l1rs.y),
-                    )
-                    scored_rs = []
-                    for n in remaining:
-                        dep = edge_departure_direction(G, node, n, sample_px)
-                        angle = angle_between_vectors(dep, toward_l1rs)
-                        scored_rs.append((n, angle))
-                    scored_rs.sort(key=lambda s: s[1])
-                    best_rs = scored_rs[0][0]
-                    key_rs = _edge_key(node, best_rs)
-                    if key_rs not in edge_labels:
-                        edge_labels[key_rs] = "Rs"
-                        logger.info("Labeled edge %s as Rs (from L2-L3, toward L1-Rs)", key_rs)
-
-                remaining = [n for n in neighbors if _edge_key(node, n) not in edge_labels]
-
-                # 4) Any still remaining → Rs (after L2 and L3, everything else at L2-L3 is Rs)
                 for n in remaining:
-                    key_rs = _edge_key(node, n)
-                    if key_rs not in edge_labels:
-                        edge_labels[key_rs] = "Rs"
-                        logger.info("Labeled edge %s as Rs (from L2-L3, remaining)", key_rs)
+                    key = _edge_key(node, n)
+                    if key not in edge_labels:
+                        edge_labels[key] = "Rs"
+                        logger.info("Labeled edge %s as Rs (from L2-L3, remaining)", key)
 
     # L1-Rs junction
     lm_l1rs = landmarks.get("L1-Rs")
@@ -251,7 +267,7 @@ def _label_landmark_edges(
     # Subcostal break → L1
     _label_endpoint_edge("subcostal break", "L1")
 
-    # L4-L5 junction: use L4.d and L5.d landmarks for identification
+    # L4-L5 junction: simultaneous matching with L4.d and L5.d
     lm_l4l5 = landmarks.get("L4-L5")
     lm_l4d = landmarks.get("L4.d")
     lm_l5d = landmarks.get("L5.d")
@@ -260,36 +276,85 @@ def _label_landmark_edges(
         node = lm_l4l5.snapped_node
         if node in G:
             neighbors = _unlabeled_neighbors(node)
+            used_soft = False
 
-            if len(neighbors) >= 2 and lm_l4d and lm_l4d.snapped_node is not None:
-                # Edge nearest to L4.d → L4
-                best_l4, _ = _nearest_edge_to_landmark(node, neighbors, lm_l4d)
-                if best_l4 is not None:
-                    key = _edge_key(node, best_l4)
-                    if key not in edge_labels:
-                        edge_labels[key] = "L4"
-                        logger.info("Labeled edge %s as L4 (from L4-L5, nearest to L4.d)", key)
+            if (
+                len(neighbors) >= 2
+                and lm_l4d
+                and lm_l5d
+                and lm_l4d.snapped_node is not None
+                and lm_l5d.snapped_node is not None
+            ):
+                # Simultaneous: for each edge, compute distance to both L4.d and L5.d
+                # Assign each edge to whichever landmark it's closer to
+                scores = []
+                for n in neighbors:
+                    _, dist_l4d = _nearest_edge_to_landmark(node, [n], lm_l4d)
+                    _, dist_l5d = _nearest_edge_to_landmark(node, [n], lm_l5d)
+                    scores.append((n, dist_l4d, dist_l5d))
 
-                remaining = [n for n in neighbors if _edge_key(node, n) not in edge_labels]
+                # Only use soft landmarks if at least one edge is within snap radius
+                any_close = any(min(s[1], s[2]) <= max_lm_dist for s in scores)
+                if any_close:
+                    # Find the single best edge for each landmark
+                    best_for_l4 = min(scores, key=lambda s: s[1])
+                    best_for_l5 = min(scores, key=lambda s: s[2])
 
-                # Edge nearest to L5.d → L5. Fallback: remaining.
-                if remaining:
-                    if lm_l5d and lm_l5d.snapped_node is not None:
-                        best_l5, _ = _nearest_edge_to_landmark(node, remaining, lm_l5d)
-                        if best_l5 is not None:
-                            key = _edge_key(node, best_l5)
-                            if key not in edge_labels:
+                    if best_for_l4[0] != best_for_l5[0]:
+                        # Different edges — assign directly
+                        for n, dist_l4, dist_l5 in scores:
+                            key = _edge_key(node, n)
+                            if key in edge_labels:
+                                continue
+                            if n == best_for_l4[0]:
+                                edge_labels[key] = "L4"
+                                logger.info(
+                                    "Labeled edge %s as L4 (from L4-L5, nearest to L4.d, dist=%.0f)", key, dist_l4
+                                )
+                            else:
                                 edge_labels[key] = "L5"
-                                logger.info("Labeled edge %s as L5 (from L4-L5, nearest to L5.d)", key)
-                                remaining.remove(best_l5)
-                    # Any still remaining → L5
-                    for n in remaining:
-                        key = _edge_key(node, n)
-                        if key not in edge_labels:
-                            edge_labels[key] = "L5"
-                            logger.info("Labeled edge %s as L5 (from L4-L5, remaining)", key)
+                                logger.info(
+                                    "Labeled edge %s as L5 (from L4-L5, nearest to L5.d, dist=%.0f)", key, dist_l5
+                                )
+                    else:
+                        # Both landmarks point to same edge — give it to whichever
+                        # landmark is closer, assign the other edge the other vein
+                        winner = best_for_l4[0]
+                        if best_for_l4[1] <= best_for_l5[2]:
+                            # L4.d is closer to this edge
+                            for n, dist_l4, dist_l5 in scores:
+                                key = _edge_key(node, n)
+                                if key in edge_labels:
+                                    continue
+                                if n == winner:
+                                    edge_labels[key] = "L4"
+                                    logger.info(
+                                        "Labeled edge %s as L4 (from L4-L5, contested, L4.d closer: %.0f)", key, dist_l4
+                                    )
+                                else:
+                                    edge_labels[key] = "L5"
+                                    logger.info(
+                                        "Labeled edge %s as L5 (from L4-L5, contested, assigned remaining)", key
+                                    )
+                        else:
+                            # L5.d is closer
+                            for n, dist_l4, dist_l5 in scores:
+                                key = _edge_key(node, n)
+                                if key in edge_labels:
+                                    continue
+                                if n == winner:
+                                    edge_labels[key] = "L5"
+                                    logger.info(
+                                        "Labeled edge %s as L5 (from L4-L5, contested, L5.d closer: %.0f)", key, dist_l5
+                                    )
+                                else:
+                                    edge_labels[key] = "L4"
+                                    logger.info(
+                                        "Labeled edge %s as L4 (from L4-L5, contested, assigned remaining)", key
+                                    )
+                    used_soft = True
 
-            elif len(neighbors) >= 1 and lm_dtip:
+            if not used_soft and len(neighbors) >= 1 and lm_dtip:
                 # Fallback if no L4.d landmark: use DTip direction
                 toward_dtip = direction_toward(
                     (G.nodes[node]["x"], G.nodes[node]["y"]),
