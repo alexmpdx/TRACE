@@ -143,6 +143,7 @@ def build_skeleton_graph(
     graph = _simplify_graph(graph)
 
     # Step 8: Gap bridging + re-simplify (iterative, hierarchical)
+    # No collinear merge — preserves all degree-3 junctions.
     graph = _bridge_and_simplify(
         graph,
         max_gap_px=max_gap_px,
@@ -155,6 +156,7 @@ def build_skeleton_graph(
         collinear_min_angle=collinear_min_angle,
         collinear_min_edge_length=median_vein_width * 2,
         prune_min_length=prune_threshold,
+        do_collinear_merge=False,
     )
 
     # Step 9: Remove overlapping/redundant edges
@@ -1043,20 +1045,10 @@ def _bridge_and_simplify(
             result = _collinear_merge(result, min_angle=collinear_min_angle, min_edge_length=collinear_min_edge_length)
             result = _simplify_graph(result)
 
-        # Prune short terminal stubs
-        pruned = True
-        while pruned:
-            pruned = False
-            for node in list(result.nodes()):
-                if node not in result or result.degree(node) != 1:
-                    continue
-                neighbor = list(result.neighbors(node))[0]
-                edge_len = result[node][neighbor].get("length_px", 0)
-                if edge_len < prune_min_length:
-                    result.remove_node(node)
-                    pruned = True
-
-        result = _simplify_graph(result)
+        # No stub pruning inside bridge loop — removing stubs at degree-3
+        # junctions demotes them to degree-2, and subsequent simplify
+        # iterations cascade through the demoted nodes, collapsing the graph.
+        # Stubs are handled by the final single-pass removal at the end.
 
     return result
 
