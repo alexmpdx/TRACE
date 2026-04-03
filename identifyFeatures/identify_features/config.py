@@ -27,6 +27,7 @@ class PipelineConfig:
     prune_min_length_px: int | None = None  # Minimum branch length to keep (None = use median vein width)
     prune_min_length_vein_widths: float = 2.0  # Multiplier of median vein width for auto prune threshold
     final_stub_vein_widths: float = 3.0  # Final stub removal: multiplier of median vein width
+    junction_merge_vein_widths: float = 2.0  # Tight junction merge: merge deg-2/3 nodes within this × vein width
     prune_radius_ratio_threshold: float = 0.3  # For distance-map: r_endpoint/r_junction below this = noise
     prune_scale_sigmas: list[float] = field(
         default_factory=lambda: [2.0, 4.0, 8.0, 16.0]  # For multi-scale persistence

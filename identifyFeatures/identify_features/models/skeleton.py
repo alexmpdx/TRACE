@@ -137,6 +137,11 @@ def build_skeleton_graph(
     graph = _simplify_graph(graph)
     logger.info("Simplified graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
 
+    # Step 7b: Merge nearby degree-2/3 junction nodes (tight radius)
+    # Nearly overlapping nodes at junctions cause bridging and labeling issues.
+    _merge_junction_nodes(graph, min_dist=median_vein_width * config.junction_merge_vein_widths)
+    graph = _simplify_graph(graph)
+
     # Step 8: Gap bridging + re-simplify (iterative, hierarchical)
     graph = _bridge_and_simplify(
         graph,
@@ -1316,6 +1321,78 @@ def _snap_edge_endpoints(G: nx.Graph) -> None:
             coords[-1] = u_pos
 
         data["line"] = LineString(coords)
+
+
+def _merge_junction_nodes(G: nx.Graph, min_dist: float) -> None:
+    """Merge degree-2 and degree-3 nodes that are within min_dist of each other.
+
+    Only merges pairs where both nodes are degree 2 or 3. Keeps the
+    higher-degree node; if equal, takes the median position.
+    Single pass — collects all pairs first, then merges.
+    """
+    import math
+
+    # Collect eligible pairs (both deg 2 or 3, within min_dist)
+    pairs = []
+    nodes = [n for n in G.nodes() if 2 <= G.degree(n) <= 3]
+    for i, n1 in enumerate(nodes):
+        nd1 = G.nodes[n1]
+        for n2 in nodes[i + 1 :]:
+            nd2 = G.nodes[n2]
+            dist = math.hypot(nd1["x"] - nd2["x"], nd1["y"] - nd2["y"])
+            if dist < min_dist:
+                pairs.append((n1, n2, dist))
+
+    # Sort by distance (merge closest first)
+    pairs.sort(key=lambda p: p[2])
+
+    merged = set()
+    for n1, n2, dist in pairs:
+        if n1 in merged or n2 in merged:
+            continue
+        if n1 not in G or n2 not in G:
+            continue
+
+        deg1 = G.degree(n1)
+        deg2 = G.degree(n2)
+
+        if deg1 > deg2:
+            keep, drop = n1, n2
+        elif deg2 > deg1:
+            keep, drop = n2, n1
+        else:
+            # Same degree — keep one, set to median position
+            keep, drop = n1, n2
+            nd1, nd2 = G.nodes[n1], G.nodes[n2]
+            G.nodes[keep]["x"] = (nd1["x"] + nd2["x"]) / 2
+            G.nodes[keep]["y"] = (nd1["y"] + nd2["y"]) / 2
+
+        # Remove direct edge if exists
+        if G.has_edge(keep, drop):
+            G.remove_edge(keep, drop)
+
+        # Transfer drop's edges to keep
+        for neighbor in list(G.neighbors(drop)):
+            if neighbor == keep:
+                continue
+            edge_data = G[drop][neighbor].copy()
+            G.remove_edge(drop, neighbor)
+            if not G.has_edge(keep, neighbor):
+                G.add_edge(keep, neighbor, **edge_data)
+
+        G.remove_node(drop)
+        merged.add(drop)
+        logger.debug(
+            "Merged junction node %d into %d (dist=%.0fpx, deg %d+%d)",
+            drop,
+            keep,
+            dist,
+            deg1,
+            deg2,
+        )
+
+    if merged:
+        logger.info("Junction merge: merged %d node pairs (radius=%.0fpx)", len(merged), min_dist)
 
 
 def _merge_close_nodes(G: nx.Graph, min_dist: float) -> None:
