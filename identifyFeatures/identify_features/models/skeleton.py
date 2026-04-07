@@ -111,8 +111,8 @@ def build_skeleton_graph(
         prune_threshold = prune_min_length_px
     else:
         prune_threshold = max(10, int(median_vein_width * config.prune_min_length_vein_widths))
-    skel = _prune_branches(skel, min_length=prune_threshold)
-    logger.info("After basic pruning (min=%dpx): %d pixels", prune_threshold, np.count_nonzero(skel))
+    skel = _prune_branches(skel, min_length=prune_threshold, distance_map=distance_map)
+    logger.info("After basic pruning (cap=%dpx, local half-width): %d pixels", prune_threshold, np.count_nonzero(skel))
 
     # Step 5: Advanced pruning methods (applied sequentially)
     for method in prune_methods:
@@ -458,8 +458,15 @@ def _in_bounds(r: int, c: int, shape: tuple[int, ...]) -> bool:
 def _prune_branches(
     skeleton: np.ndarray,
     min_length: int = 30,
+    distance_map: "np.ndarray | None" = None,
 ) -> np.ndarray:
-    """Remove short terminal branches iteratively."""
+    """Remove short terminal branches iteratively.
+
+    If *distance_map* is provided, the prune threshold at each branch is
+    the local half-vein-width at the junction pixel, capped at *min_length*.
+    This preserves short branches at thin veins (distal wing tip) while
+    still pruning noise at thick veins (hinge).
+    """
     skel = skeleton.copy()
     pruned = True
     while pruned:
@@ -467,7 +474,19 @@ def _prune_branches(
         endpoints = _find_endpoints(skel)
         for r, c in endpoints:
             branch = _trace_branch(skel, r, c)
-            if len(branch) < min_length:
+
+            threshold = min_length
+            if distance_map is not None and len(branch) > 0:
+                last_r, last_c = branch[-1]
+                branch_set = set(branch)
+                for dr, dc in _NEIGHBORS_8:
+                    nr, nc = last_r + dr, last_c + dc
+                    if _in_bounds(nr, nc, skel.shape) and skel[nr, nc] > 0 and (nr, nc) not in branch_set:
+                        local_hw = float(distance_map[nr, nc])
+                        threshold = max(10, min(int(local_hw), min_length))
+                        break
+
+            if len(branch) < threshold:
                 for br, bc in branch:
                     skel[br, bc] = 0
                 pruned = True
