@@ -72,6 +72,8 @@ class PipelineConfig:
     crossvein_proximity_px: float = 100.0
     crossvein_min_angle: float = 40.0
     crossvein_max_length_frac: float = 0.15
+    crossvein_min_length_vw: float = 4.0  # Min crossvein length as × median vein width
+    crossvein_max_length_vw: float = 25.0  # Max crossvein length as × median vein width
 
     # -- Intervein naming --
     vein_buffer_px: float = 25.0

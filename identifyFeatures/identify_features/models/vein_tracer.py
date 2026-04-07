@@ -86,6 +86,9 @@ def trace_veins_from_landmarks(
     # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5)
     _detect_crossveins(G, edge_labels)
 
+    # Phase 4b: Fallback crossvein detection using crossvein landmarks
+    _detect_crossveins_fallback(G, edge_labels, landmarks, config, skel_graph.median_vein_width_px)
+
     # Phase 5: Build VeinIdentification objects
     merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
     veins = _build_vein_identifications(G, edge_labels, max_merge_gap_px=merge_gap)
@@ -733,6 +736,140 @@ def _node_vein_distance(
         return min_dist
 
     return None
+
+
+def _detect_crossveins_fallback(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    landmarks: dict[str, Landmark],
+    config: "PipelineConfig",
+    median_vein_width: float,
+) -> None:
+    """Fallback crossvein detection using crossvein landmark points.
+
+    Runs after primary detection. For each crossvein not yet found:
+    - Tier 2: Use the more reliable landmark (ACV.p for ACV, PCV.a for PCV)
+    - Tier 3: Use the less reliable landmark (ACV.a for ACV, PCV.p for PCV)
+
+    Candidates are scored by length (prefer crossvein-sized) and
+    perpendicularity to nearby labeled longitudinals.
+    """
+    from identify_features.utils.geometry_utils import (
+        angle_between_vectors,
+        line_direction,
+    )
+
+    min_len = median_vein_width * config.crossvein_min_length_vw
+    max_len = median_vein_width * config.crossvein_max_length_vw
+    search_radius = config.snap_radius
+    sample_px = config.departure_sample
+
+    # Build labeled vein lines for perpendicularity checks
+    vein_lines: dict[str, list[LineString]] = defaultdict(list)
+    for (u, v), label in edge_labels.items():
+        if G.has_edge(u, v):
+            line = G[u][v].get("line")
+            if line:
+                vein_lines[label].append(line)
+
+    # Crossvein landmark tiers: (cv_name, [(landmark_name, adjacent_longitudinals), ...])
+    cv_tiers = {
+        "ACV": [("ACV.p", ["L3", "L4"]), ("ACV.a", ["L3", "L4"])],
+        "PCV": [("PCV.a", ["L4", "L5"]), ("PCV.p", ["L4", "L5"])],
+    }
+
+    for cv_name, tiers in cv_tiers.items():
+        # Skip if already found by primary detection
+        if any(label == cv_name for label in edge_labels.values()):
+            continue
+
+        for lm_name, adj_veins in tiers:
+            lm = landmarks.get(lm_name)
+            if lm is None:
+                continue
+
+            # Find unlabeled edges near this landmark
+            candidates = []
+            for u, v, data in G.edges(data=True):
+                key = _edge_key(u, v)
+                if key in edge_labels:
+                    continue
+                line = data.get("line")
+                if line is None:
+                    continue
+                length = data.get("length_px", 0)
+
+                # Length filter
+                if length < min_len or length > max_len:
+                    continue
+
+                # Distance to landmark
+                dist = line.distance(lm.point)
+                if dist > search_radius:
+                    continue
+
+                # Perpendicularity score against adjacent longitudinals
+                perp_score = 0.0
+                perp_count = 0
+                edge_dir = line_direction(line, sample_px=line.length)
+
+                for adj_vein in adj_veins:
+                    for adj_line in vein_lines.get(adj_vein, []):
+                        # Find direction of longitudinal at nearest point to candidate
+                        mid = line.interpolate(0.5, normalized=True)
+                        proj_dist = adj_line.project(mid)
+                        if proj_dist <= 0 or proj_dist >= adj_line.length:
+                            continue
+                        # Sample longitudinal direction at the projected point
+                        half_win = min(sample_px / 2, proj_dist, adj_line.length - proj_dist)
+                        if half_win < 1:
+                            continue
+                        pt_a = adj_line.interpolate(proj_dist - half_win)
+                        pt_b = adj_line.interpolate(proj_dist + half_win)
+                        long_dir = (pt_b.x - pt_a.x, pt_b.y - pt_a.y)
+                        mag = (long_dir[0] ** 2 + long_dir[1] ** 2) ** 0.5
+                        if mag < 1e-6:
+                            continue
+                        long_dir = (long_dir[0] / mag, long_dir[1] / mag)
+
+                        angle = angle_between_vectors(edge_dir, long_dir)
+                        # Normalize to 0-90 (direction doesn't matter)
+                        if angle > 90:
+                            angle = 180 - angle
+                        # Score: 1.0 at 90° (perfect perp), 0.0 at 0° (parallel)
+                        perp_score += angle / 90.0
+                        perp_count += 1
+
+                if perp_count > 0:
+                    perp_score /= perp_count
+                else:
+                    perp_score = 0.5  # no longitudinal to check — neutral
+
+                # Length score: 1.0 at ideal length, lower at extremes
+                ideal_len = (min_len + max_len) / 2
+                length_score = 1.0 - abs(length - ideal_len) / ideal_len
+                length_score = max(0.0, length_score)
+
+                # Combined: proximity + perpendicularity + length
+                score = dist + (1 - perp_score) * 200 + (1 - length_score) * 100
+                candidates.append((key, score, length, dist, perp_score))
+
+            if candidates:
+                candidates.sort(key=lambda c: c[1])
+                best_key, best_score, best_len, best_dist, best_perp = candidates[0]
+                edge_labels[best_key] = cv_name
+                u, v = best_key
+                logger.info(
+                    "Detected %s (fallback via %s): edge %d↔%d, %.0fpx, dist=%.0f, perp=%.2f",
+                    cv_name,
+                    lm_name,
+                    u,
+                    v,
+                    best_len,
+                    best_dist,
+                    best_perp,
+                )
+                break  # Found it, don't try next tier
 
 
 def _edge_key(u: int, v: int) -> tuple[int, int]:
