@@ -102,6 +102,7 @@ class LandmarkDataset(Dataset):
         cfg: dict,
         indices: Optional[list[int]] = None,
         train: bool = True,
+        interactive: bool = True,
     ) -> None:
         """Load annotation list and configure transforms."""
         self.annotation_dir = Path(annotation_dir)
@@ -123,6 +124,7 @@ class LandmarkDataset(Dataset):
 
         # Verify matching images exist
         self.samples = []
+        self.fuzzy_matches: list[tuple[str, str]] = []  # (geojson_name, image_name)
         for geojson_path in all_files:
             # filename: foo.tif.geojson → image: foo.tif
             image_name = geojson_path.stem  # foo.tif
@@ -133,16 +135,19 @@ class LandmarkDataset(Dataset):
             if not image_path.exists():
                 match = _find_similar_file(self.image_dir, image_name)
                 if match:
-                    answer = (
-                        input(f"Image not found for '{geojson_path.name}'.\n" f"  Did you mean '{match.name}'? [Y/n] ")
-                        .strip()
-                        .lower()
-                    )
-                    if answer in ("", "y", "yes"):
-                        image_path = match
-                    else:
-                        print(f"Skipping {geojson_path.name}")
-                        continue
+                    if interactive:
+                        answer = (
+                            input(
+                                f"Image not found for '{geojson_path.name}'.\n" f"  Did you mean '{match.name}'? [Y/n] "
+                            )
+                            .strip()
+                            .lower()
+                        )
+                        if answer not in ("", "y", "yes"):
+                            print(f"Skipping {geojson_path.name}")
+                            continue
+                    image_path = match
+                    self.fuzzy_matches.append((geojson_path.name, match.name))
                 else:
                     print(f"Warning: skipping {geojson_path.name} — no matching image in {self.image_dir}")
                     continue

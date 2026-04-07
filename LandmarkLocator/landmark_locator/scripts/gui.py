@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QStatusBar,
@@ -64,6 +66,35 @@ MODEL_W, MODEL_H = 512, 352
 HEATMAP_SIGMA = 5
 HEATMAP_THUMB_W, HEATMAP_THUMB_H = 240, 165
 IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
+
+
+def _find_geojson_for_image(gt_dir: Path, image_name: str) -> tuple[Optional[Path], bool]:
+    """Find the GeoJSON annotation file matching an image name, tolerating whitespace.
+
+    Returns (path, fuzzy) where fuzzy is True if the match required whitespace tolerance.
+    """
+    # Exact match first
+    candidate = gt_dir / (image_name + ".geojson")
+    if candidate.exists():
+        return candidate, False
+    # Fuzzy match: compare with whitespace stripped
+    target_clean = re.sub(r"\s+", "", image_name + ".geojson").lower()
+    for f in gt_dir.iterdir():
+        if not f.is_file() or f.suffix.lower() != ".geojson":
+            continue
+        if re.sub(r"\s+", "", f.name).lower() == target_clean:
+            return f, True
+    return None, False
+
+
+def _truncate_pair(name_a: str, name_b: str, max_len: int = 30) -> tuple[str, str]:
+    """Truncate two filenames to the same length for aligned display."""
+    limit = max(max_len, 8)
+
+    def _trunc(s: str) -> str:
+        return s if len(s) <= limit else s[: limit - 3] + "..."
+
+    return _trunc(name_a), _trunc(name_b)
 
 
 def _make_display_name(internal_name: str) -> str:
@@ -310,6 +341,12 @@ class HeatmapPanel(QScrollArea):
         self._layout.setAlignment(Qt.AlignTop)
         self.setWidget(self._container)
 
+        # GT directory label
+        self._gt_dir_label = QLabel("GT: (none)")
+        self._gt_dir_label.setStyleSheet("color: #aaa; font-size: 10px; padding: 2px;")
+        self._gt_dir_label.setWordWrap(False)
+        self._layout.addWidget(self._gt_dir_label)
+
         # GT cross toggle
         self._show_gt = QCheckBox("Show GT cross")
         self._show_gt.setChecked(True)
@@ -347,6 +384,10 @@ class HeatmapPanel(QScrollArea):
         # Cached state for refresh on toggle
         self._cur_pred_heatmaps: Optional[np.ndarray] = None
         self._cur_gt_coords: Optional[dict[str, tuple[float, float]]] = None
+
+    def set_gt_dir_label(self, text: str) -> None:
+        """Update the GT directory label."""
+        self._gt_dir_label.setText(text)
 
     def set_landmarks(self, landmark_order: list[str]) -> None:
         """Rebuild heatmap thumbnail slots for a new set of landmarks."""
@@ -517,14 +558,16 @@ class TrainingThread(QThread):
             _populate_landmark_config(cfg, annotation_dir)
             splits = create_cv_splits(annotation_dir, cfg["cv"]["n_folds"])
             train_idx, val_idx = splits[0]
-            print(f"Fold 0: {len(train_idx)} train, {len(val_idx)} val")
+            print(f"{self._model_name}_Fold0: {len(train_idx)} train, {len(val_idx)} val")
 
-            def _on_epoch(epoch, mean_error, landmark_errors):
+            def _on_epoch(epoch, mean_error, landmark_errors, train_loss, val_loss):
                 self.epoch_data.emit(
                     {
                         "epoch": epoch,
                         "mean_error": mean_error,
                         "landmark_errors": landmark_errors.copy(),
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
                     }
                 )
 
@@ -537,6 +580,8 @@ class TrainingThread(QThread):
                 device,
                 epoch_callback=_on_epoch,
                 checkpoint_name=self._model_name,
+                interactive=False,
+                display_name=self._model_name,
             )
 
             name = self._model_name if self._model_name.endswith(".pt") else self._model_name + ".pt"
@@ -552,7 +597,7 @@ class TrainingThread(QThread):
 class TrainingDialog(QDialog):
     """Modal dialog showing live training log output and error chart."""
 
-    def __init__(self, model_name: str = "", landmark_order: list[str] | None = None, parent=None):
+    def __init__(self, model_name: str = "", landmark_order: list[str] | None = None, max_epochs: int = 0, parent=None):
         super().__init__(parent)
         title = f"Training — {model_name}" if model_name else "Training"
         self.setWindowTitle(title)
@@ -561,18 +606,27 @@ class TrainingDialog(QDialog):
 
         self._landmark_order = landmark_order or []
         self._qcolors = _make_qcolors(self._landmark_order)
+        self._max_epochs = max_epochs
+
+        # Epoch counter label
+        self._epoch_label = QLabel(f"Epoch 0/{max_epochs}" if max_epochs else "Epoch 0")
+        self._epoch_label.setStyleSheet("color: #ddd; font-size: 12px; font-weight: bold; padding: 2px;")
+        layout.addWidget(self._epoch_label)
 
         # Per-landmark data series (must init before _setup_chart)
         self._epochs: list[int] = []
         self._series: dict[str, list[float]] = {name: [] for name in self._landmark_order}
         self._mean_series: list[float] = []
+        self._train_loss_series: list[float] = []
+        self._val_loss_series: list[float] = []
         self._lines: dict[str, object] = {}
         self._last_chart_draw = 0.0
         self._chart_dirty = False
 
         # Matplotlib chart with navigation toolbar for pan/zoom
         self._fig = Figure(figsize=(7, 3), facecolor="#1e1e1e")
-        self._ax = self._fig.add_subplot(111)
+        self._ax_error = self._fig.add_subplot(121)
+        self._ax_loss = self._fig.add_subplot(122)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self._nav_toolbar = NavigationToolbar2QT(self._canvas, self)
         self._nav_toolbar.setStyleSheet("background: #333; border: none;")
@@ -594,27 +648,37 @@ class TrainingDialog(QDialog):
 
     def _setup_chart(self) -> None:
         """Configure the chart axes and style."""
-        ax = self._ax
-        ax.set_facecolor("#252526")
-        ax.set_xlabel("Epoch", color="#aaa", fontsize=9)
-        ax.set_ylabel("Pixel Error", color="#aaa", fontsize=9)
-        ax.set_title("Validation Error by Landmark", color="#ddd", fontsize=10)
-        ax.tick_params(colors="#888", labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color("#444")
-        ax.grid(True, color="#333", linewidth=0.5)
 
-        # Create lines for each landmark + mean
+        def _style_axis(ax, title, ylabel):
+            ax.set_facecolor("#252526")
+            ax.set_xlabel("Epoch", color="#aaa", fontsize=9)
+            ax.set_ylabel(ylabel, color="#aaa", fontsize=9)
+            ax.set_title(title, color="#ddd", fontsize=10)
+            ax.tick_params(colors="#888", labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_color("#444")
+            ax.grid(True, color="#333", linewidth=0.5)
+
+        # Left chart: validation error by landmark
+        _style_axis(self._ax_error, "Validation Error by Landmark", "Pixel Error")
         for name in self._landmark_order:
             qc = self._qcolors.get(name, QColor(200, 200, 200))
             color = qc.name()
             display = _make_display_name(name)
-            (line,) = ax.plot([], [], color=color, linewidth=1.2, label=display)
+            (line,) = self._ax_error.plot([], [], color=color, linewidth=1.2, label=display)
             self._lines[name] = line
-        (mean_line,) = ax.plot([], [], color="#ffffff", linewidth=2, linestyle="--", label="Mean")
+        (mean_line,) = self._ax_error.plot([], [], color="#ffffff", linewidth=2, linestyle="--", label="Mean")
         self._lines["_mean"] = mean_line
+        self._ax_error.legend(loc="upper right", fontsize=7, facecolor="#333", edgecolor="#555", labelcolor="#ccc")
 
-        ax.legend(loc="upper right", fontsize=7, facecolor="#333", edgecolor="#555", labelcolor="#ccc")
+        # Right chart: train/val loss
+        _style_axis(self._ax_loss, "Loss", "MSE Loss")
+        (train_line,) = self._ax_loss.plot([], [], color="#4ec9b0", linewidth=1.5, label="Train")
+        (val_line,) = self._ax_loss.plot([], [], color="#ce9178", linewidth=1.5, label="Val")
+        self._lines["_train_loss"] = train_line
+        self._lines["_val_loss"] = val_line
+        self._ax_loss.legend(loc="upper right", fontsize=7, facecolor="#333", edgecolor="#555", labelcolor="#ccc")
+
         self._fig.tight_layout()
 
         # Track when user manually zooms/pans so we stop auto-scaling
@@ -624,24 +688,42 @@ class TrainingDialog(QDialog):
         """Add one epoch's data and redraw the chart (throttled to ~2 Hz)."""
         epoch = data["epoch"]
         self._epochs.append(epoch)
+        if self._max_epochs:
+            self._epoch_label.setText(f"Epoch {epoch + 1}/{self._max_epochs}")
+        else:
+            self._epoch_label.setText(f"Epoch {epoch + 1}")
         self._mean_series.append(data["mean_error"])
+        self._train_loss_series.append(data.get("train_loss", 0.0))
+        self._val_loss_series.append(data.get("val_loss", 0.0))
         for name in self._landmark_order:
             if name not in self._series:
                 self._series[name] = []
             self._series[name].append(data["landmark_errors"].get(name, 0.0))
 
-        # Update line data
+        # Update error chart lines
         for name in self._landmark_order:
             self._lines[name].set_data(self._epochs, self._series[name])
         self._lines["_mean"].set_data(self._epochs, self._mean_series)
 
+        # Update loss chart lines
+        self._lines["_train_loss"].set_data(self._epochs, self._train_loss_series)
+        self._lines["_val_loss"].set_data(self._epochs, self._val_loss_series)
+
         # Auto-rescale unless user has manually zoomed/panned
         if not self._user_zoomed:
-            self._ax.set_xlim(0, max(self._epochs[-1], 1))
+            xmax = max(self._epochs[-1], 1)
+
+            self._ax_error.set_xlim(0, xmax)
             all_vals = self._mean_series + [v for s in self._series.values() for v in s]
             if all_vals:
                 ymax = max(all_vals) * 1.1
-                self._ax.set_ylim(0, max(ymax, 1))
+                self._ax_error.set_ylim(0, max(ymax, 1))
+
+            self._ax_loss.set_xlim(0, xmax)
+            all_loss = self._train_loss_series + self._val_loss_series
+            if all_loss:
+                ymax = max(all_loss) * 1.1
+                self._ax_loss.set_ylim(0, max(ymax, 1e-6))
 
         # Throttle redraws — matplotlib canvas draws are expensive
         now = time.monotonic()
@@ -727,17 +809,24 @@ class LandmarkGUI(QMainWindow):
         act_gt.triggered.connect(self._on_set_gt_dir)
         tb.addAction(act_gt)
 
-        act_output = QAction("Set Output", self)
-        act_output.triggered.connect(self._on_set_output)
-        tb.addAction(act_output)
-
-        act_train = QAction("Train Model", self)
-        act_train.triggered.connect(self._on_train_model)
-        tb.addAction(act_train)
-
-        act_save = QAction("Save All", self)
+        act_save = QAction("Save", self)
         act_save.triggered.connect(self._on_save_all)
         tb.addAction(act_save)
+
+        # Push Train Model button to the right
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+
+        train_btn = QPushButton("TRAIN MODEL")
+        train_btn.setStyleSheet(
+            "QPushButton { background: #8b0000; color: #fff; font-weight: bold;"
+            " padding: 4px 16px; border: none; border-radius: 3px; }"
+            "QPushButton:hover { background: #a00000; }"
+            "QPushButton:pressed { background: #600000; }"
+        )
+        train_btn.clicked.connect(self._on_train_model)
+        tb.addWidget(train_btn)
 
     # ---- UI layout ----
     def _build_ui(self) -> None:
@@ -755,6 +844,11 @@ class LandmarkGUI(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._img_dir_label = QLabel("Images: (none)")
+        self._img_dir_label.setStyleSheet("color: #aaa; font-size: 10px; padding: 2px;")
+        self._img_dir_label.setWordWrap(False)
+        left_layout.addWidget(self._img_dir_label)
 
         self._image_list = QListWidget()
         self._image_list.currentRowChanged.connect(self._on_image_selected)
@@ -789,6 +883,10 @@ class LandmarkGUI(QMainWindow):
         self._opacity_label.setFixedWidth(32)
         slider_row.addWidget(self._opacity_label)
         center_layout.addLayout(slider_row)
+
+        self._model_label = QLabel("Model: (none)")
+        self._model_label.setStyleSheet("color: #aaa; font-size: 10px; padding: 2px;")
+        center_layout.addWidget(self._model_label)
 
         self._info_table = QTableWidget(0, 6)
         self._info_table.setHorizontalHeaderLabels(["Landmark", "Pred X", "Pred Y", "GT X", "GT Y", "Error (px)"])
@@ -830,19 +928,8 @@ class LandmarkGUI(QMainWindow):
 
     # ---- Auto-load ----
     def _auto_load(self) -> None:
-        """Auto-load training_data_pics + training_data if they exist."""
-        img_dir = _project_root / "training_data_pics"
-        gt_dir = _project_root / "training_data"
-        if img_dir.is_dir():
-            self._img_dir = img_dir
-            # Discover landmarks from annotations
-            if gt_dir.is_dir():
-                self._gt_dir = gt_dir
-                landmark_order, geojson_to_landmark = discover_landmarks(gt_dir)
-                if landmark_order:
-                    self._set_landmark_order(landmark_order, geojson_to_landmark)
-            self._load_image_folder(img_dir, self._gt_dir)
-            self.statusBar().showMessage(f"Auto-loaded {len(self._entries)} images from training_data_pics/")
+        """No auto-load — user must select folders explicitly."""
+        pass
 
     # ---- Actions ----
     def _on_load_model(self) -> None:
@@ -861,6 +948,7 @@ class LandmarkGUI(QMainWindow):
                 self._predictor.landmark_order,
                 self._predictor.geojson_to_landmark,
             )
+            self._model_label.setText(f"Model: {Path(path).name}")
             self.statusBar().showMessage(f"Model loaded: {Path(path).name}")
             # Clear cached predictions so they re-run
             for entry in self._entries:
@@ -873,22 +961,13 @@ class LandmarkGUI(QMainWindow):
 
     def _on_load_folder(self) -> None:
         """Load images from a user-selected folder."""
-        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder", str(_project_root))
+        start = str(self._img_dir) if self._img_dir else str(_project_root)
+        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder", start)
         if not folder:
             return
         folder = Path(folder)
         self._img_dir = folder
-        # Look for GT annotations: sibling training_data/ or same folder
-        gt_dir = None
-        for name in ("training_data", "training_data_new"):
-            candidate = folder.parent / name
-            if candidate.is_dir():
-                gt_dir = candidate
-                break
-        if gt_dir is None and list(folder.glob("*.geojson")):
-            gt_dir = folder
-        self._gt_dir = gt_dir
-        self._apply_gt_dir()
+        self._img_dir_label.setText(f"Images: {folder.name}/")
         self._load_image_folder(folder, self._gt_dir)
         self.statusBar().showMessage(f"Loaded {len(self._entries)} images from {folder.name}/")
 
@@ -899,16 +978,21 @@ class LandmarkGUI(QMainWindow):
         if not folder:
             return
         self._gt_dir = Path(folder)
+        self._heatmap_panel.set_gt_dir_label(f"GT: {self._gt_dir.name}/")
         self._apply_gt_dir()
         # Re-match GT paths to existing image entries
-        for entry in self._entries:
+        fuzzy_matches: list[tuple[int, str, str]] = []
+        for i, entry in enumerate(self._entries):
             entry.geojson_path = None
             entry.gt = None
             entry.gt_heatmaps = None
             entry._gt_loaded = False
-            candidate = self._gt_dir / (entry.path.name + ".geojson")
-            if candidate.exists():
-                entry.geojson_path = candidate
+            path, fuzzy = _find_geojson_for_image(self._gt_dir, entry.path.name)
+            entry.geojson_path = path
+            if fuzzy and path:
+                fuzzy_matches.append((i, entry.path.name, path.name))
+        if fuzzy_matches:
+            self._confirm_fuzzy_matches(fuzzy_matches)
         gt_count = sum(1 for e in self._entries if e.geojson_path)
         self.statusBar().showMessage(f"GT dir: {self._gt_dir.name}/ — matched {gt_count}/{len(self._entries)} images")
         # Refresh current view
@@ -934,17 +1018,44 @@ class LandmarkGUI(QMainWindow):
             self.statusBar().showMessage(f"Output directory: {self._output_dir}")
 
     def _on_save_all(self) -> None:
-        """Save annotated images for all entries."""
+        """Save outputs for all entries with user-selected options."""
         if not self._entries:
             self.statusBar().showMessage("No images loaded")
             return
-        if self._output_dir is None:
-            self._on_set_output()
-            if self._output_dir is None:
-                return
+
+        # Build a folder dialog with save-option checkboxes
+        dialog = QFileDialog(self, "Select Output Directory")
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        start = str(self._output_dir) if self._output_dir else str(_project_root)
+        dialog.setDirectory(start)
+
+        # Add checkboxes to the dialog layout
+        cb_geojson = QCheckBox("Save GeoJSONs")
+        cb_geojson.setChecked(True)
+        cb_images = QCheckBox("Save Labeled Images")
+        cb_images.setChecked(True)
+        opts_layout = QHBoxLayout()
+        opts_layout.addWidget(cb_geojson)
+        opts_layout.addWidget(cb_images)
+        dialog.layout().addLayout(opts_layout, dialog.layout().rowCount(), 0, 1, -1)
+
+        if not dialog.exec_():
+            return
+        folders = dialog.selectedFiles()
+        if not folders:
+            return
+
+        save_geojson = cb_geojson.isChecked()
+        save_images = cb_images.isChecked()
+        if not save_geojson and not save_images:
+            self.statusBar().showMessage("Nothing selected to save")
+            return
+
+        self._output_dir = Path(folders[0])
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        progress = QProgressDialog("Saving annotated images...", "Cancel", 0, len(self._entries), self)
+        progress = QProgressDialog("Saving...", "Cancel", 0, len(self._entries), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
 
@@ -969,16 +1080,15 @@ class LandmarkGUI(QMainWindow):
                 except Exception:
                     pass
 
-            vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
-            out_path = self._output_dir / f"{entry.path.stem}_landmarks.jpg"
-            cv2.imwrite(str(out_path), vis)
+            if save_images:
+                vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
+                out_path = self._output_dir / f"{entry.path.stem}_landmarks.jpg"
+                cv2.imwrite(str(out_path), vis)
 
-            # Write GeoJSON with predicted landmarks
-            if preds:
+            if save_geojson and preds:
                 features = []
+                reverse_map = {v: k for k, v in self._geojson_to_landmark.items()}
                 for name, (x, y) in preds.items():
-                    # Reverse lookup: internal name → GeoJSON name
-                    reverse_map = {v: k for k, v in self._geojson_to_landmark.items()}
                     geojson_name = reverse_map.get(name, name)
                     features.append(
                         {
@@ -994,7 +1104,12 @@ class LandmarkGUI(QMainWindow):
             saved += 1
 
         progress.setValue(len(self._entries))
-        self.statusBar().showMessage(f"Saved {saved} images + GeoJSON to {self._output_dir}")
+        parts = []
+        if save_images:
+            parts.append("images")
+        if save_geojson:
+            parts.append("GeoJSON")
+        self.statusBar().showMessage(f"Saved {saved} {' + '.join(parts)} to {self._output_dir}")
 
     def _on_train_model(self) -> None:
         """Launch training fold 0 in a background thread with live log dialog."""
@@ -1003,6 +1118,39 @@ class LandmarkGUI(QMainWindow):
         if gt_count == 0:
             self.statusBar().showMessage("No ground-truth annotations found — cannot train")
             return
+
+        # Pre-flight: check for geojson→image fuzzy matches (same direction as LandmarkDataset)
+        from landmark_locator.data.dataset import _find_similar_file
+
+        image_dir = Path(yaml.safe_load(open(_project_root / "configs" / "default.yaml"))["data"]["image_dir"])
+        if not image_dir.is_absolute():
+            image_dir = _project_root / image_dir
+        gt_dir = self._gt_dir or (_project_root / "training_data")
+        fuzzy_pairs: list[tuple[str, str]] = []
+        for gj in sorted(gt_dir.glob("*.geojson")):
+            img_name = gj.stem
+            img_path = image_dir / img_name
+            if not img_path.exists():
+                img_path = image_dir / img_name.strip()
+            if not img_path.exists():
+                match = _find_similar_file(image_dir, img_name)
+                if match:
+                    fuzzy_pairs.append((gj.name, match.name))
+        if fuzzy_pairs:
+            from PyQt5.QtWidgets import QMessageBox
+
+            lines = [f"  {a}  \u2192  {b}" for a, b in (_truncate_pair(gj, img) for gj, img in fuzzy_pairs)]
+            msg = QMessageBox(self)
+            msg.setStyleSheet("QLabel { min-width: 500px; }")
+            msg.setWindowTitle("Approximate Image Matches")
+            msg.setText(
+                f"{len(fuzzy_pairs)} annotation(s) matched to images by ignoring whitespace:\n\n" + "\n".join(lines)
+            )
+            msg.setInformativeText("Continue training with these matches?")
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.Yes)
+            if msg.exec_() != QMessageBox.Yes:
+                return
 
         # Prompt for model name
         from PyQt5.QtWidgets import QInputDialog
@@ -1017,7 +1165,12 @@ class LandmarkGUI(QMainWindow):
             return
         model_name = name.strip()
 
-        self._train_dialog = TrainingDialog(model_name, self._landmark_order, self)
+        config_path = _project_root / "configs" / "default.yaml"
+        with open(config_path) as f:
+            train_cfg = yaml.safe_load(f)
+        max_epochs = train_cfg.get("training", {}).get("epochs", 0)
+
+        self._train_dialog = TrainingDialog(model_name, self._landmark_order, max_epochs, self)
         self._train_thread = TrainingThread(model_name, self._gt_dir)
         self._train_thread.progress.connect(self._train_dialog.append_log)
         self._train_thread.epoch_data.connect(self._train_dialog.update_chart)
@@ -1051,6 +1204,7 @@ class LandmarkGUI(QMainWindow):
                 entry.prediction = None
             if self._current_idx >= 0:
                 self._on_image_selected(self._current_idx)
+            self._model_label.setText(f"Model: {Path(ckpt_path).name}")
             self.statusBar().showMessage(f"Model loaded from training: {Path(ckpt_path).name}")
         except Exception as e:
             self.statusBar().showMessage(f"Training done but failed to load checkpoint: {e}")
@@ -1109,19 +1263,41 @@ class LandmarkGUI(QMainWindow):
 
         image_files = sorted(f for f in img_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS)
 
+        fuzzy_matches: list[tuple[int, str, str]] = []  # (index, image_name, geojson_name)
         for img_path in image_files:
             geojson_path = None
             if gt_dir:
-                # Convention: image.tif → image.tif.geojson
-                candidate = gt_dir / (img_path.name + ".geojson")
-                if candidate.exists():
-                    geojson_path = candidate
+                geojson_path, fuzzy = _find_geojson_for_image(gt_dir, img_path.name)
+                if fuzzy and geojson_path:
+                    fuzzy_matches.append((len(self._entries), img_path.name, geojson_path.name))
             entry = ImageEntry(path=img_path, geojson_path=geojson_path)
             self._entries.append(entry)
             self._image_list.addItem(img_path.name)
 
+        if fuzzy_matches:
+            self._confirm_fuzzy_matches(fuzzy_matches)
+
         if self._entries:
             self._image_list.setCurrentRow(0)
+
+    def _confirm_fuzzy_matches(self, fuzzy_matches: list[tuple[int, str, str]]) -> None:
+        """Show a dialog asking the user to accept or reject fuzzy GT matches."""
+        from PyQt5.QtWidgets import QMessageBox
+
+        lines = [f"  {a}  \u2192  {b}" for a, b in (_truncate_pair(img, gj) for _, img, gj in fuzzy_matches)]
+        msg = QMessageBox(self)
+        msg.setStyleSheet("QLabel { min-width: 500px; }")
+        msg.setWindowTitle("Approximate GT Matches")
+        msg.setText(
+            f"{len(fuzzy_matches)} annotation file(s) matched by ignoring whitespace differences:\n\n"
+            + "\n".join(lines)
+        )
+        msg.setInformativeText("Accept these matches?")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
+        if msg.exec_() != QMessageBox.Yes:
+            for idx, _, _ in fuzzy_matches:
+                self._entries[idx].geojson_path = None
 
     # ---- Image selection ----
     def _on_image_selected(self, row: int) -> None:

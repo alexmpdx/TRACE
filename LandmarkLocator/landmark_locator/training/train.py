@@ -65,15 +65,18 @@ def train_fold(
     device: torch.device,
     epoch_callback: Optional[callable] = None,
     checkpoint_name: Optional[str] = None,
+    interactive: bool = True,
+    display_name: Optional[str] = None,
 ) -> dict:
     """Train one fold and return best validation metrics."""
+    label = f"{display_name}_Fold{fold}" if display_name else f"Fold{fold}"
     project_root = Path(__file__).resolve().parent.parent.parent
     annotation_dir = project_root / cfg["data"]["annotation_dir"]
     image_dir = project_root / cfg["data"]["image_dir"]
 
     # Create datasets
-    train_ds = LandmarkDataset(annotation_dir, image_dir, cfg, train_indices, train=True)
-    val_ds = LandmarkDataset(annotation_dir, image_dir, cfg, val_indices, train=False)
+    train_ds = LandmarkDataset(annotation_dir, image_dir, cfg, train_indices, train=True, interactive=interactive)
+    val_ds = LandmarkDataset(annotation_dir, image_dir, cfg, val_indices, train=False, interactive=interactive)
 
     train_loader = DataLoader(
         train_ds,
@@ -143,7 +146,7 @@ def train_fold(
                 T_max=train_cfg["epochs"] - freeze_epochs,
                 eta_min=train_cfg["scheduler"]["eta_min"],
             )
-            print(f"  Epoch {epoch}: unfreezing encoder with {train_cfg['encoder_lr_factor']}× LR")
+            print(f"  {label} Epoch {epoch}: unfreezing encoder with {train_cfg['encoder_lr_factor']}× LR")
 
         # --- Train phase ---
         model.train()
@@ -208,15 +211,17 @@ def train_fold(
 
         # Epoch callback for live monitoring
         if epoch_callback is not None:
-            epoch_callback(epoch, mean_error, landmark_errors)
+            epoch_callback(epoch, mean_error, landmark_errors, train_loss, val_loss)
 
         # Log progress
         if epoch % 10 == 0 or epoch == train_cfg["epochs"] - 1:
             print(
-                f"  Fold {fold} Epoch {epoch:3d}: "
+                f"  {label} Epoch {epoch:3d}: "
                 f"train_loss={train_loss:.6f} val_loss={val_loss:.6f} "
                 f"mean_px_error={mean_error:.1f}px"
             )
+            per_lm = " | ".join(f"{n}: {landmark_errors[n]:.1f}px" for n in landmark_order)
+            print(f"    {per_lm}")
 
         # Checkpointing
         if mean_error < best_val_error:
@@ -245,10 +250,10 @@ def train_fold(
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"  Fold {fold}: early stopping at epoch {epoch}")
+                print(f"  {label}: early stopping at epoch {epoch}")
                 break
 
-    print(f"  Fold {fold} best: epoch={best_metrics['epoch']}, " f"mean_error={best_metrics['mean_pixel_error']:.1f}px")
+    print(f"  {label} best: epoch={best_metrics['epoch']}, " f"mean_error={best_metrics['mean_pixel_error']:.1f}px")
     for name, err in best_metrics["per_landmark_error"].items():
         print(f"    {name}: {err:.1f}px")
 
@@ -260,6 +265,7 @@ def run_training(
     output_dir: Path,
     device_str: Optional[str] = None,
     fold: Optional[int] = None,
+    name: Optional[str] = None,
 ) -> None:
     """Run full cross-validation training."""
     with open(config_path) as f:
@@ -287,11 +293,12 @@ def run_training(
     all_metrics = {}
     for f_idx in folds_to_train:
         train_idx, val_idx = splits[f_idx]
+        fold_label = f"{name}_Fold{f_idx}" if name else f"Fold{f_idx}"
         print(f"\n{'='*60}")
-        print(f"Fold {f_idx}: {len(train_idx)} train, {len(val_idx)} val")
+        print(f"{fold_label}: {len(train_idx)} train, {len(val_idx)} val")
         print(f"{'='*60}")
 
-        metrics = train_fold(cfg, f_idx, train_idx, val_idx, output_dir, device)
+        metrics = train_fold(cfg, f_idx, train_idx, val_idx, output_dir, device, display_name=name)
         all_metrics[f_idx] = metrics
 
     # Summary

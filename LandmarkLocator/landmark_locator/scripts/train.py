@@ -36,9 +36,15 @@ def main() -> None:
         default=None,
         help="Device: mps, cuda, cpu. Default: auto-detect.",
     )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Model name used in log output. Default: None (logs show Fold0, Fold1, etc.)",
+    )
     args = parser.parse_args()
 
-    run_training(args.config, args.output_dir, args.device, args.fold)
+    run_training(args.config, args.output_dir, args.device, args.fold, args.name)
 
 
 if __name__ == "__main__":
