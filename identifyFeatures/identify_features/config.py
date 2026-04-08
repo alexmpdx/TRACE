@@ -45,6 +45,7 @@ class PipelineConfig:
     bridge_on_axis_max_angle: float = 45.0  # Strict on-axis angle for longer edge (degrees)
     bridge_on_axis_relaxed_cap: float = 45.0  # Cap for relaxed angle on shorter edge (degrees)
     bridge_min_facing_angle: float = 150.0  # Min angle between opposing directions (degrees)
+    bridge_direction_max_edge_fraction: float = 0.25  # Max fraction of edge length for direction window (long edges)
 
     # -- Gap bridging (second pass, after cleanup) --
     bridge2_max_gap_um: float = 200.0

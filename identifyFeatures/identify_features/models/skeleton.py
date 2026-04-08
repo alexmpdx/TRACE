@@ -1242,7 +1242,13 @@ def _full_edge_direction(
 
     Samples the edge from (endpoint - window_px) to endpoint, giving
     the direction the vein was heading when it terminated.
+
+    For long edges (>= min_combined_length), the window is capped at
+    ``bridge_direction_max_edge_fraction`` of the edge length so that
+    terminal curvature is preserved rather than averaged away.
+    Short edges use 80% of their length to get as much data as possible.
     """
+    from identify_features.config import PipelineConfig
     from identify_features.utils.graph_utils import edge_line_from_node
 
     neighbor = list(G.neighbors(endpoint))[0]
@@ -1251,8 +1257,10 @@ def _full_edge_direction(
     if line.length < 2:
         return None
 
-    # Use up to window_px of the edge's tail
-    sample_len = min(window_px, line.length * 0.8)
+    _cfg = PipelineConfig()
+    min_combined = _cfg.to_px(_cfg.bridge_min_combined_length_um)
+    length_cap = _cfg.bridge_direction_max_edge_fraction if line.length >= min_combined else 0.8
+    sample_len = min(window_px, line.length * length_cap)
     pt_a = line.interpolate(line.length - sample_len)
     pt_b = line.interpolate(line.length)  # = endpoint position
 
