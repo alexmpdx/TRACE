@@ -58,9 +58,18 @@ class PipelineConfig:
     bridge2_on_axis_relaxed_cap: float = 45.0
     bridge2_min_facing_angle: float = 150.0
 
+    # -- Gap bridging (third pass, relaxed facing for short stubs) --
+    bridge3_max_gap_vw: float = 4.0  # Max gap as × median vein width
+    bridge3_short_edge_vw: float = 3.0  # "Short edge" threshold (× median vein width)
+    bridge3_relaxed_facing_angle: float = 120.0  # Relaxed facing angle for qualifying pairs
+    bridge3_direction_window_um: float = 100.0
+    bridge3_on_axis_max_angle: float = 45.0
+    bridge3_on_axis_relaxed_cap: float = 45.0
+
     # -- Landmark anchoring --
     snap_radius_um: float = 100.0  # Max distance to snap landmark to graph node (µm)
     snap_radius_px: float = 207.0  # Fallback if um_per_px not set
+    snap_radius_vw: float = 2.0  # Snap radius as × median vein width (overrides _um/_px)
 
     # -- Vein tracing --
     departure_sample_um: float = 100.0  # µm along edge to compute departure direction

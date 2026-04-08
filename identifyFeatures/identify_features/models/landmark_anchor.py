@@ -25,6 +25,7 @@ def anchor_landmarks(
     landmarks: dict[str, Landmark],
     snap_radius: float = 80.0,
     prefer_junction_radius: float = 160.0,
+    snap_radius_vw: float = 4.0,
 ) -> dict[str, Landmark]:
     """Snap each reliable landmark to the nearest appropriate graph node.
 
@@ -36,12 +37,19 @@ def anchor_landmarks(
         landmarks: Dict of landmarks by name.
         snap_radius: Maximum distance to snap a landmark to a node.
         prefer_junction_radius: Search radius for preferring junction nodes.
+        snap_radius_vw: Snap radius as × median vein width (overrides snap_radius).
 
     Returns:
         Updated landmarks dict with snapped_node and snap_distance set.
     """
     G = skel_graph.graph
     result = dict(landmarks)  # shallow copy
+
+    # Use vein-width-based snap radius when median vein width is available
+    if skel_graph.median_vein_width_px > 0:
+        snap_radius = skel_graph.median_vein_width_px * snap_radius_vw
+        prefer_junction_radius = snap_radius * 2
+        logger.info("Snap radius: %.0fpx (%.1f × vein width)", snap_radius, snap_radius_vw)
 
     for name, lm in result.items():
         if not lm.reliable:

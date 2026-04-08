@@ -205,12 +205,46 @@ def build_skeleton_graph(
         min_gap_px=median_vein_width * config.bridge2_min_gap_vw,
     )
 
-    # Step 14: Final single-pass stub removal
-    # Last step before snapping — removes tiny dead-end stubs that survived
-    # earlier cleanup. Single sweep, no simplify after, no cascade.
-    _remove_stubs_single_pass(graph, max_length=median_vein_width * config.final_stub_vein_widths)
+    # Step 14: Cleanup before final bridge pass (no stub removal — stubs are bridge candidates)
+    _remove_redundant_edges(graph)
+    graph = _simplify_graph(graph)
+    _absorb_tiny_segments(graph, min_length=median_vein_width)
+    graph = _simplify_graph(graph)
+    _merge_close_nodes(graph, min_dist=median_vein_width)
+    graph = _simplify_graph(graph)
+    _remove_small_fragments(graph, min_length=median_vein_width * 4)
+    isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
+    graph.remove_nodes_from(isolated)
 
-    # Step 15: Snap edge LineString endpoints to node positions
+    # Step 15: Third bridge pass — relaxed facing angle for short stubs near junctions.
+    # Runs after cleanup to minimize false bridges, but before stub removal so
+    # short stubs are still available as bridge candidates.
+    graph = _bridge_and_simplify(
+        graph,
+        max_gap_px=median_vein_width * config.bridge3_max_gap_vw,
+        gap_fraction=1.0,
+        direction_window_px=config.to_px(config.bridge3_direction_window_um),
+        min_combined_length_px=0,
+        min_facing_angle=config.bridge3_relaxed_facing_angle,
+        max_on_axis_angle=config.bridge3_on_axis_max_angle,
+        on_axis_relaxed_cap=config.bridge3_on_axis_relaxed_cap,
+        collinear_min_angle=collinear_min_angle,
+        collinear_min_edge_length=median_vein_width * 2,
+        prune_min_length=prune_threshold,
+        do_collinear_merge=False,
+        median_vein_width=median_vein_width,
+        short_edge_vw=config.bridge3_short_edge_vw,
+    )
+
+    # Step 16: Final stub removal (local vein width from distance map)
+    _remove_stubs_single_pass(
+        graph,
+        max_length=median_vein_width * config.final_stub_vein_widths,
+        distance_map=distance_map,
+        vein_width_multiplier=config.final_stub_vein_widths,
+    )
+
+    # Step 17: Snap edge LineString endpoints to node positions
     _snap_edge_endpoints(graph)
 
     logger.info("Final graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
@@ -1036,6 +1070,8 @@ def _bridge_and_simplify(
     max_iterations: int = 10,
     do_collinear_merge: bool = True,
     min_gap_px: float = 0.0,
+    median_vein_width: float = 0.0,
+    short_edge_vw: float = 3.0,
 ) -> nx.Graph:
     """Bridge nearby endpoint gaps and re-simplify, hierarchically.
 
@@ -1044,6 +1080,9 @@ def _bridge_and_simplify(
 
     Gap distance is adaptive: min(max_gap_px, gap_fraction * max(edge_lengths)).
     On-axis angle is asymmetric: strict for the longer edge, relaxed for shorter.
+
+    When median_vein_width > 0, the facing angle check is relaxed for pairs
+    where at least one edge is shorter than short_edge_vw × median_vein_width.
     """
     result = G.copy()
 
@@ -1058,6 +1097,8 @@ def _bridge_and_simplify(
             max_on_axis_angle=max_on_axis_angle,
             on_axis_relaxed_cap=on_axis_relaxed_cap,
             min_gap_px=min_gap_px,
+            median_vein_width=median_vein_width,
+            short_edge_vw=short_edge_vw,
         )
 
         if bridges_added == 0:
@@ -1089,6 +1130,8 @@ def _bridge_pass(
     max_on_axis_angle: float,
     on_axis_relaxed_cap: float,
     min_gap_px: float = 0.0,
+    median_vein_width: float = 0.0,
+    short_edge_vw: float = 3.0,
 ) -> int:
     """Single pass: find and add valid bridge edges. Returns count added.
 
@@ -1167,7 +1210,14 @@ def _bridge_pass(
             # Facing check
             facing_angle = angle_between_vectors(d1, d2)
             if facing_angle < min_facing_angle:
-                continue
+                # When median_vein_width is set, require at least one short edge
+                # to qualify for the relaxed facing threshold
+                if median_vein_width > 0:
+                    short_threshold = short_edge_vw * median_vein_width
+                    if ep1["edge_len"] >= short_threshold and ep2["edge_len"] >= short_threshold:
+                        continue  # both edges long — skip
+                else:
+                    continue
 
             # Asymmetric on-axis check
             ab = (ep2["x"] - ep1["x"], ep2["y"] - ep1["y"])
@@ -1545,23 +1595,48 @@ def _remove_small_fragments(G: nx.Graph, min_length: float) -> None:
             )
 
 
-def _remove_stubs_single_pass(G: nx.Graph, max_length: float) -> None:
+def _remove_stubs_single_pass(
+    G: nx.Graph,
+    max_length: float,
+    distance_map: "np.ndarray | None" = None,
+    vein_width_multiplier: float = 3.0,
+) -> None:
     """Remove degree-1 stubs at junctions in a single pass (no cascade).
 
     Collects all eligible stubs first, then removes them all at once.
     This prevents the cascade where removing one stub demotes a junction
     to degree-2, which then gets contracted, exposing more stubs.
+
+    When *distance_map* is provided, the threshold at each stub is
+    max(max_length, 2 * local_half_width * vein_width_multiplier),
+    so stubs in thick-vein areas (e.g. hinge) are removed more aggressively.
     """
     to_remove = []
     for u, v, data in G.edges(data=True):
         length = data.get("length_px", 0)
-        if length >= max_length:
-            continue
         deg_u = G.degree(u)
         deg_v = G.degree(v)
-        if (deg_u == 1 and deg_v >= 3) or (deg_v == 1 and deg_u >= 3):
-            free_node = u if deg_u == 1 else v
-            to_remove.append((free_node, u, v, length))
+        if not ((deg_u == 1 and deg_v >= 3) or (deg_v == 1 and deg_u >= 3)):
+            continue
+
+        # Compute local threshold from distance map at the junction node
+        threshold = max_length
+        if distance_map is not None:
+            junc_node = v if deg_u == 1 else u
+            jnd = G.nodes[junc_node]
+            jy = int(round(jnd["y"]))
+            jx = int(round(jnd["x"]))
+            h, w = distance_map.shape
+            if 0 <= jy < h and 0 <= jx < w:
+                local_hw = float(distance_map[jy, jx])
+                local_threshold = 2 * local_hw * vein_width_multiplier
+                threshold = max(threshold, local_threshold)
+
+        if length >= threshold:
+            continue
+
+        free_node = u if deg_u == 1 else v
+        to_remove.append((free_node, u, v, length))
 
     for free_node, u, v, length in to_remove:
         if free_node in G:
