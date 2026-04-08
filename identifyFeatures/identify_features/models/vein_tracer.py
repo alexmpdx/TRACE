@@ -115,8 +115,19 @@ def trace_veins_from_landmarks(
     # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5)
     _detect_crossveins(G, edge_labels)
 
+    # Phase 4a: Junction-based crossvein detection (trace unlabeled paths between longitudinals)
+    _detect_crossveins_via_junctions(G, edge_labels)
+
     # Phase 4b: Fallback crossvein detection using crossvein landmarks
     _detect_crossveins_fallback(G, edge_labels, landmarks, config, skel_graph.median_vein_width_px)
+
+    # Phase 4c: Re-propagate labels through degree-2 nodes after crossvein labeling
+    _propagate_through_degree2(
+        G,
+        edge_labels,
+        costa_band=costa_band,
+        costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+    )
 
     # Phase 5: Build VeinIdentification objects
     merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
@@ -942,6 +953,93 @@ def _detect_crossveins(
             logger.info("Detected %s: edge %d↔%d, %.0fpx (score=%.1f)", cv_name, u, v, length, best_score)
         else:
             logger.info("No candidate found for %s", cv_name)
+
+
+def _detect_crossveins_via_junctions(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+) -> None:
+    """Detect crossveins by tracing unlabeled paths between longitudinal junctions.
+
+    Analogous to _extend_to_distal_landmarks for longitudinals: instead of
+    using landmark points, finds degree-3+ nodes on labeled longitudinals
+    that have unlabeled branches, then traces unlabeled paths between them.
+
+    ACV: unlabeled path from a junction on L3 to a junction on L4.
+    PCV: unlabeled path from a junction on L4 to a junction on L5.
+
+    Handles multi-edge crossveins that pass through degree-2 nodes.
+    """
+    from identify_features.models.topology import CROSSVEIN_CONNECTIONS
+
+    # Build node sets for each labeled vein
+    vein_nodes: dict[str, set[int]] = defaultdict(set)
+    for (u, v), label in edge_labels.items():
+        if G.has_edge(u, v):
+            vein_nodes[label].add(u)
+            vein_nodes[label].add(v)
+
+    for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
+        # Skip if already found
+        if any(label == cv_name for label in edge_labels.values()):
+            continue
+
+        nodes_a = vein_nodes.get(vein_a, set())
+        nodes_b = vein_nodes.get(vein_b, set())
+        if not nodes_a or not nodes_b:
+            continue
+
+        # Find degree-3+ junctions on vein_a with unlabeled branches
+        starts: list[tuple[int, int, tuple]] = []  # (junction_node, first_nbr, edge_key)
+        for node in nodes_a:
+            if G.degree(node) < 3:
+                continue
+            for nbr in G.neighbors(node):
+                key = _edge_key(node, nbr)
+                if key not in edge_labels:
+                    starts.append((node, nbr, key))
+
+        # BFS from each unlabeled branch to find paths reaching vein_b
+        best_path: list[tuple] | None = None
+        best_length = float("inf")
+
+        for start_node, first_nbr, first_key in starts:
+            visited_nodes = {start_node}
+            # Queue: (current_node, list_of_edge_keys, total_length)
+            queue = [(first_nbr, [first_key], G[start_node][first_nbr].get("length_px", 0))]
+
+            while queue:
+                current, path, total_len = queue.pop(0)
+                if current in visited_nodes:
+                    continue
+                visited_nodes.add(current)
+
+                # Check if we reached vein_b
+                if current in nodes_b:
+                    if total_len < best_length:
+                        best_length = total_len
+                        best_path = path
+                    continue  # Don't explore further past vein_b
+
+                # Continue BFS through unlabeled edges only
+                for nbr in G.neighbors(current):
+                    if nbr in visited_nodes:
+                        continue
+                    key = _edge_key(current, nbr)
+                    if key in edge_labels:
+                        continue  # Don't cross labeled edges
+                    edge_len = G[current][nbr].get("length_px", 0)
+                    queue.append((nbr, path + [key], total_len + edge_len))
+
+        if best_path is not None:
+            for key in best_path:
+                edge_labels[key] = cv_name
+            logger.info(
+                "Detected %s (via junctions): %d edges, %.0fpx total",
+                cv_name,
+                len(best_path),
+                best_length,
+            )
 
 
 def _node_vein_distance(
