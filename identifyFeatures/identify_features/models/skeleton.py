@@ -1382,7 +1382,24 @@ def _merge_junction_nodes(G: nx.Graph, min_dist: float) -> None:
         if G.has_edge(keep, drop):
             G.remove_edge(keep, drop)
 
-        # Transfer drop's edges to keep
+        # Snap keep's existing edges to keep's (possibly updated) position
+        keep_pos = (G.nodes[keep]["x"], G.nodes[keep]["y"])
+        for neighbor in list(G.neighbors(keep)):
+            line = G[keep][neighbor].get("line")
+            if line is not None:
+                from shapely.geometry import LineString
+
+                coords = list(line.coords)
+                d_start = (coords[0][0] - keep_pos[0]) ** 2 + (coords[0][1] - keep_pos[1]) ** 2
+                d_end = (coords[-1][0] - keep_pos[0]) ** 2 + (coords[-1][1] - keep_pos[1]) ** 2
+                if d_start <= d_end:
+                    coords[0] = keep_pos
+                else:
+                    coords[-1] = keep_pos
+                G[keep][neighbor]["line"] = LineString(coords)
+
+        # Transfer drop's edges to keep, snapping LineString endpoints
+        drop_pos = (G.nodes[drop]["x"], G.nodes[drop]["y"])
         for neighbor in list(G.neighbors(drop)):
             if neighbor == keep:
                 continue
@@ -1390,6 +1407,19 @@ def _merge_junction_nodes(G: nx.Graph, min_dist: float) -> None:
             G.remove_edge(drop, neighbor)
             if not G.has_edge(keep, neighbor):
                 G.add_edge(keep, neighbor, **edge_data)
+                # Snap the LineString endpoint from drop's position to keep's
+                line = G[keep][neighbor].get("line")
+                if line is not None:
+                    from shapely.geometry import LineString
+
+                    coords = list(line.coords)
+                    d_start = (coords[0][0] - drop_pos[0]) ** 2 + (coords[0][1] - drop_pos[1]) ** 2
+                    d_end = (coords[-1][0] - drop_pos[0]) ** 2 + (coords[-1][1] - drop_pos[1]) ** 2
+                    if d_start <= d_end:
+                        coords[0] = keep_pos
+                    else:
+                        coords[-1] = keep_pos
+                    G[keep][neighbor]["line"] = LineString(coords)
 
         G.remove_node(drop)
         merged.add(drop)
