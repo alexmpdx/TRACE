@@ -66,9 +66,11 @@ class PipelineConfig:
     departure_sample_px: float = 80.0  # Fallback
     tangent_continuity_max_angle: float = 90.0  # Max deflection (degrees) at junctions
     merge_max_gap_um: float = 50.0  # Max gap between line segments when merging (µm)
+    distal_landmark_search_vw: float = 2.0  # Search radius for distal landmark extension (× vein width)
 
     # -- Costa detection --
     costa_min_in_band_fraction: float = 0.5  # Edge must have ≥50% in margin band to be costa
+    costa_propagation_max_distance_vw: float = 4.0  # Max distance from band for costa propagation (× vein width)
 
     # -- Crossvein detection --
     crossvein_proximity_px: float = 100.0

@@ -70,10 +70,11 @@ def trace_veins_from_landmarks(
     G = skel_graph.graph
 
     # Phase 1: Detect costa edges using margin band (on the merged graph)
+    costa_band = None
     if wing_outline is not None:
         from identify_features.models.costa_detector import detect_costa_edges
 
-        costa_keys, _ = detect_costa_edges(skel_graph, landmarks, wing_outline, config)
+        costa_keys, costa_band = detect_costa_edges(skel_graph, landmarks, wing_outline, config)
         for key in costa_keys:
             edge_labels[key] = "costa"
 
@@ -81,7 +82,23 @@ def trace_veins_from_landmarks(
     _label_landmark_edges(G, landmarks, edge_labels, config)
 
     # Phase 2b: Propagate labels through degree-2 pass-through nodes
-    _propagate_through_degree2(G, edge_labels)
+    _propagate_through_degree2(
+        G,
+        edge_labels,
+        costa_band=costa_band,
+        costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+    )
+
+    # Phase 2c: Extend longitudinals to distal landmarks if they don't reach
+    _extend_to_distal_landmarks(G, edge_labels, landmarks, skel_graph.median_vein_width_px, config)
+
+    # Phase 2d: Re-propagate after extension
+    _propagate_through_degree2(
+        G,
+        edge_labels,
+        costa_band=costa_band,
+        costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+    )
 
     # Phase 3: Detect L6 (short posterior branch off L5 near L4-L5)
     _detect_l6(G, edge_labels, landmarks)
@@ -554,12 +571,39 @@ def _merge_nearby_lines(
 def _propagate_through_degree2(
     G: nx.Graph,
     edge_labels: dict[tuple, str],
+    costa_band: "np.ndarray | None" = None,
+    costa_max_dist: float = 96.0,
 ) -> None:
     """Propagate vein labels through degree-2 pass-through nodes.
 
     At any degree-2 node where one edge is labeled and the other is not,
     the unlabeled edge gets the same label. Repeats until stable.
+
+    Costa propagation is restricted: if any part of the new edge runs
+    ≥ costa_max_dist pixels from the nearest costa band pixel,
+    propagation is blocked (the edge has left the wing margin).
     """
+    from scipy import ndimage
+
+    # Precompute distance-from-band map for costa checks
+    band_dist = None
+    if costa_band is not None:
+        band_dist = ndimage.distance_transform_edt(costa_band == 0)
+
+    def _edge_in_costa_band(u, v):
+        """Check if entire edge stays within costa_max_dist of the band."""
+        if band_dist is None:
+            return True
+        line = G[u][v].get("line")
+        if line is None:
+            return True
+        for cx, cy in line.coords:
+            row, col = int(round(cy)), int(round(cx))
+            if 0 <= row < band_dist.shape[0] and 0 <= col < band_dist.shape[1]:
+                if band_dist[row, col] >= costa_max_dist:
+                    return False  # this point is too far from the band
+        return True
+
     changed = True
     while changed:
         changed = False
@@ -573,13 +617,90 @@ def _propagate_through_degree2(
             lbl1 = edge_labels.get(key1)
 
             if lbl0 is not None and lbl1 is None:
+                # Costa check: don't propagate costa outside the band
+                if lbl0 == "costa" and not _edge_in_costa_band(node, neighbors[1]):
+                    continue
                 edge_labels[key1] = lbl0
                 changed = True
                 logger.debug("Propagated %s through deg-2 node %d", lbl0, node)
             elif lbl1 is not None and lbl0 is None:
+                if lbl1 == "costa" and not _edge_in_costa_band(node, neighbors[0]):
+                    continue
                 edge_labels[key0] = lbl1
                 changed = True
                 logger.debug("Propagated %s through deg-2 node %d", lbl1, node)
+
+
+def _extend_to_distal_landmarks(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    landmarks: dict[str, "Landmark"],
+    median_vein_width: float,
+    config: "PipelineConfig",
+) -> None:
+    """Extend longitudinal veins to their distal landmark if they don't reach.
+
+    For each of L2/L3/L4/L5, checks if the labeled edges reach the
+    corresponding distal landmark (L2.d, DTip, L4.d, L5.d). If not,
+    finds the nearest unlabeled edge within search_radius of the
+    landmark and labels it.
+    """
+    search_radius = median_vein_width * config.distal_landmark_search_vw
+
+    # Vein → distal landmark mapping
+    vein_landmarks = {
+        "L2": "L2.d",
+        "L3": "DTip",
+        "L4": "L4.d",
+        "L5": "L5.d",
+    }
+
+    for vein_id, lm_name in vein_landmarks.items():
+        lm = landmarks.get(lm_name)
+        if lm is None:
+            continue
+
+        # Check if vein already reaches the landmark
+        vein_reaches = False
+        for (u, v), label in edge_labels.items():
+            if label != vein_id or not G.has_edge(u, v):
+                continue
+            line = G[u][v].get("line")
+            if line is not None and line.distance(lm.point) <= search_radius:
+                vein_reaches = True
+                break
+
+        if vein_reaches:
+            continue
+
+        # Vein doesn't reach — find nearest unlabeled edge to the landmark
+        best_key = None
+        best_dist = float("inf")
+        for u, v, data in G.edges(data=True):
+            key = _edge_key(u, v)
+            if key in edge_labels:
+                continue
+            line = data.get("line")
+            if line is None:
+                continue
+            dist = line.distance(lm.point)
+            if dist < best_dist and dist <= search_radius:
+                best_dist = dist
+                best_key = key
+
+        if best_key is not None:
+            edge_labels[best_key] = vein_id
+            u, v = best_key
+            length = G[u][v].get("length_px", 0)
+            logger.info(
+                "Extended %s to %s: edge %d↔%d (%.0fpx, dist=%.0fpx)",
+                vein_id,
+                lm_name,
+                u,
+                v,
+                length,
+                best_dist,
+            )
 
 
 def _detect_l6(
