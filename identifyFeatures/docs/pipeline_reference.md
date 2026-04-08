@@ -10,7 +10,7 @@ A step-by-step guide to the landmark-anchored Drosophila wing vein identificatio
 2. [Input Parsing](#2-input-parsing)
 3. [Skeleton Building](#3-skeleton-building) (17 steps)
 4. [Landmark Anchoring](#4-landmark-anchoring)
-5. [Vein Labeling](#5-vein-labeling) (Phases 0-5)
+5. [Vein Labeling](#5-vein-labeling) (Phases 0-5, including 4a-4c)
 6. [Output](#6-output)
 7. [Parameter Reference](#7-parameter-reference)
 
@@ -878,6 +878,33 @@ for each crossvein (ACV: L3↔L4, PCV: L4↔L5):
 - Returns geometric distance if node is within 50px of the vein's LineString
 - Returns None if node is too far (not connected to that vein)
 
+### Phase 4a: Junction-based crossvein detection
+
+**Source**: `_detect_crossveins_via_junctions()`
+
+**What**: Detects crossveins by tracing unlabeled paths between degree-3+ junctions on labeled longitudinal veins. Runs after Phase 4 for any crossveins not yet found.
+
+**Why**: Phase 4 only finds single-edge crossveins where both endpoints touch the longitudinals. Phase 4a handles multi-edge crossveins that pass through degree-2 nodes, or crossveins whose attachment points are embedded in the longitudinal graph rather than being direct endpoint-to-endpoint connections.
+
+**Algorithm**:
+```
+for each crossvein (ACV: L3↔L4, PCV: L4↔L5):
+    if already detected by Phase 4:
+        skip
+
+    find degree-3+ nodes on vein_a with unlabeled branches → starts
+    find node set for vein_b → targets
+
+    for each (junction, unlabeled_neighbor) in starts:
+        BFS through unlabeled edges from unlabeled_neighbor
+        if BFS reaches a node in targets:
+            record path and total length
+
+    shortest path → label all edges as crossvein name
+```
+
+**Analogous to** `_extend_to_distal_landmarks` for longitudinals: instead of landmark points, uses degree-3+ junctions on the longitudinals as anchor points.
+
 ### Phase 4b: Fallback crossvein detection using landmarks
 
 **Source**: `_detect_crossveins_fallback()`
@@ -902,6 +929,14 @@ for each unlabeled edge near the tier landmark:
 ```
 
 The scoring heavily weights perpendicularity (crossveins cross longitudinals at ~90°) and proximity to the landmark.
+
+### Phase 4c: Post-crossvein degree-2 propagation
+
+**Source**: `_propagate_through_degree2()` (same function as Phase 2b)
+
+**What**: Re-runs degree-2 label propagation after all crossvein detection phases. At any degree-2 node where one edge is now labeled (including newly labeled crossveins) and the other is not, the unlabeled edge inherits the label.
+
+**Why**: Crossvein detection (Phases 4/4a/4b) may label edges that create new degree-2 propagation opportunities. For example, a short unlabeled stub at a PCV endpoint becomes propagatable once the adjacent PCV edge is labeled.
 
 ### Phase 5: Build VeinIdentification objects
 

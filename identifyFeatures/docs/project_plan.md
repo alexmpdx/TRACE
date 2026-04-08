@@ -162,7 +162,9 @@ Six phases, each building on previous results:
 - **Phase 2e:** Connect disconnected vein fragments via shortest unlabeled path
 - **Phase 3:** Detect L6 (short posterior branch off L5, 0.5-1.5× Rs length, near L4-L5)
 - **Phase 4:** Detect crossveins by endpoint connectivity (ACV: L3↔L4, PCV: L4↔L5)
+- **Phase 4a:** Junction-based crossvein detection — BFS through unlabeled paths between degree-3+ junctions on longitudinals
 - **Phase 4b:** Fallback crossvein detection using unreliable landmarks (tiered: ACV.p → ACV.a, PCV.a → PCV.p)
+- **Phase 4c:** Post-crossvein degree-2 propagation (absorbs unlabeled stubs at crossvein endpoints)
 - **Phase 5:** Build VeinIdentification objects with merged centerlines
 
 **Result:** 30/30 specimens correctly identify all 10 canonical veins.
