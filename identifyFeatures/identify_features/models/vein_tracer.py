@@ -80,6 +80,9 @@ def trace_veins_from_landmarks(
     # Phase 2: Label edges at landmark positions (on the merged graph)
     _label_landmark_edges(G, landmarks, edge_labels, config)
 
+    # Phase 2b: Propagate labels through degree-2 pass-through nodes
+    _propagate_through_degree2(G, edge_labels)
+
     # Phase 3: Detect L6 (short posterior branch off L5 near L4-L5)
     _detect_l6(G, edge_labels, landmarks)
 
@@ -546,6 +549,37 @@ def _merge_nearby_lines(
             result_coords = result_coords + next_coords[1:]
 
     return LineString(result_coords)
+
+
+def _propagate_through_degree2(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+) -> None:
+    """Propagate vein labels through degree-2 pass-through nodes.
+
+    At any degree-2 node where one edge is labeled and the other is not,
+    the unlabeled edge gets the same label. Repeats until stable.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for node in G.nodes():
+            if G.degree(node) != 2:
+                continue
+            neighbors = list(G.neighbors(node))
+            key0 = _edge_key(node, neighbors[0])
+            key1 = _edge_key(node, neighbors[1])
+            lbl0 = edge_labels.get(key0)
+            lbl1 = edge_labels.get(key1)
+
+            if lbl0 is not None and lbl1 is None:
+                edge_labels[key1] = lbl0
+                changed = True
+                logger.debug("Propagated %s through deg-2 node %d", lbl0, node)
+            elif lbl1 is not None and lbl0 is None:
+                edge_labels[key0] = lbl1
+                changed = True
+                logger.debug("Propagated %s through deg-2 node %d", lbl1, node)
 
 
 def _detect_l6(
