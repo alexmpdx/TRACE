@@ -49,8 +49,10 @@ class PipelineConfig:
     # -- Gap bridging (second pass, after cleanup) --
     bridge2_max_gap_um: float = 200.0
     bridge2_gap_fraction: float = 0.5
+    bridge2_min_gap_vw: float = 2.0  # Floor on adaptive gap as × median vein width
     bridge2_direction_window_um: float = 100.0
-    bridge2_min_combined_length_um: float = 100.0
+    bridge2_min_combined_length_um: float = 100.0  # Used if bridge2_min_combined_length_vw is None
+    bridge2_min_combined_length_vw: float | None = 3.5  # Min combined as × median vein width (overrides _um)
     bridge2_on_axis_max_angle: float = 45.0
     bridge2_on_axis_relaxed_cap: float = 45.0
     bridge2_min_facing_angle: float = 150.0

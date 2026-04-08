@@ -190,7 +190,11 @@ def build_skeleton_graph(
         max_gap_px=config.to_px(config.bridge2_max_gap_um),
         gap_fraction=config.bridge2_gap_fraction,
         direction_window_px=config.to_px(config.bridge2_direction_window_um),
-        min_combined_length_px=config.to_px(config.bridge2_min_combined_length_um),
+        min_combined_length_px=(
+            median_vein_width * config.bridge2_min_combined_length_vw
+            if config.bridge2_min_combined_length_vw is not None
+            else config.to_px(config.bridge2_min_combined_length_um)
+        ),
         min_facing_angle=config.bridge2_min_facing_angle,
         max_on_axis_angle=config.bridge2_on_axis_max_angle,
         on_axis_relaxed_cap=config.bridge2_on_axis_relaxed_cap,
@@ -198,6 +202,7 @@ def build_skeleton_graph(
         collinear_min_edge_length=median_vein_width * 2,
         prune_min_length=prune_threshold,
         do_collinear_merge=False,
+        min_gap_px=median_vein_width * config.bridge2_min_gap_vw,
     )
 
     # Step 14: Final single-pass stub removal
@@ -1030,6 +1035,7 @@ def _bridge_and_simplify(
     prune_min_length: int = 30,
     max_iterations: int = 10,
     do_collinear_merge: bool = True,
+    min_gap_px: float = 0.0,
 ) -> nx.Graph:
     """Bridge nearby endpoint gaps and re-simplify, hierarchically.
 
@@ -1051,6 +1057,7 @@ def _bridge_and_simplify(
             min_facing_angle=min_facing_angle,
             max_on_axis_angle=max_on_axis_angle,
             on_axis_relaxed_cap=on_axis_relaxed_cap,
+            min_gap_px=min_gap_px,
         )
 
         if bridges_added == 0:
@@ -1081,10 +1088,11 @@ def _bridge_pass(
     min_facing_angle: float,
     max_on_axis_angle: float,
     on_axis_relaxed_cap: float,
+    min_gap_px: float = 0.0,
 ) -> int:
     """Single pass: find and add valid bridge edges. Returns count added.
 
-    Gap distance is adaptive: min(max_gap_px, gap_fraction * max(edge_lengths)).
+    Gap distance is adaptive: max(min_gap_px, min(max_gap_px, gap_fraction * max(edge_lengths))).
     On-axis angle is asymmetric: strict for longer edge, relaxed for shorter.
     Bridges longest-edge pairs first (sorted by combined length descending).
     """
@@ -1145,7 +1153,7 @@ def _bridge_pass(
 
             # Adaptive gap distance: fraction of the longer edge, capped
             longer_len = max(ep1["edge_len"], ep2["edge_len"])
-            adaptive_gap = min(max_gap_px, gap_fraction * longer_len)
+            adaptive_gap = max(min_gap_px, min(max_gap_px, gap_fraction * longer_len))
 
             dist = math.hypot(ep2["x"] - ep1["x"], ep2["y"] - ep1["y"])
             if dist > adaptive_gap or dist < 0.5:
