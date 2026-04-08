@@ -100,6 +100,15 @@ def trace_veins_from_landmarks(
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
     )
 
+    # Phase 2e: Connect disconnected vein fragments via shortest unlabeled path
+    _connect_vein_fragments(G, edge_labels)
+    _propagate_through_degree2(
+        G,
+        edge_labels,
+        costa_band=costa_band,
+        costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+    )
+
     # Phase 3: Detect L6 (short posterior branch off L5 near L4-L5)
     _detect_l6(G, edge_labels, landmarks)
 
@@ -701,6 +710,82 @@ def _extend_to_distal_landmarks(
                 length,
                 best_dist,
             )
+
+
+def _connect_vein_fragments(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+) -> None:
+    """Connect disconnected fragments of the same vein via shortest unlabeled path.
+
+    For each longitudinal vein with multiple disconnected edge groups,
+    finds the shortest path of unlabeled edges between the closest
+    endpoints of the fragments and labels it.
+    """
+    from collections import defaultdict
+
+    for vein_id in ["L2", "L3", "L4", "L5"]:
+        # Collect nodes that are endpoints of this vein's labeled edges
+        vein_nodes: set[int] = set()
+        for (u, v), label in edge_labels.items():
+            if label == vein_id and G.has_edge(u, v):
+                vein_nodes.add(u)
+                vein_nodes.add(v)
+
+        if len(vein_nodes) < 2:
+            continue
+
+        # Find connected components of this vein's edges
+        vein_subgraph = nx.Graph()
+        for (u, v), label in edge_labels.items():
+            if label == vein_id and G.has_edge(u, v):
+                vein_subgraph.add_edge(u, v)
+
+        components = list(nx.connected_components(vein_subgraph))
+        if len(components) < 2:
+            continue
+
+        # Build subgraph of unlabeled edges (weighted by length)
+        unlabeled = nx.Graph()
+        for u, v, data in G.edges(data=True):
+            key = _edge_key(u, v)
+            if key not in edge_labels:
+                unlabeled.add_edge(u, v, weight=data.get("length_px", 1.0))
+
+        # Try to connect each pair of components via shortest unlabeled path
+        for i in range(len(components)):
+            for j in range(i + 1, len(components)):
+                # Find closest endpoint pair between the two components
+                best_path = None
+                best_length = float("inf")
+
+                for n1 in components[i]:
+                    if n1 not in unlabeled:
+                        continue
+                    for n2 in components[j]:
+                        if n2 not in unlabeled:
+                            continue
+                        try:
+                            path = nx.shortest_path(unlabeled, n1, n2, weight="weight")
+                            path_length = sum(unlabeled[path[k]][path[k + 1]]["weight"] for k in range(len(path) - 1))
+                            if path_length < best_length:
+                                best_length = path_length
+                                best_path = path
+                        except nx.NetworkXNoPath:
+                            continue
+
+                if best_path is not None:
+                    # Label the path edges
+                    for k in range(len(best_path) - 1):
+                        key = _edge_key(best_path[k], best_path[k + 1])
+                        if key not in edge_labels:
+                            edge_labels[key] = vein_id
+                    logger.info(
+                        "Connected %s fragments: %d edges, %.0fpx path",
+                        vein_id,
+                        len(best_path) - 1,
+                        best_length,
+                    )
 
 
 def _detect_l6(
