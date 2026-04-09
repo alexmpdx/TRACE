@@ -135,6 +135,9 @@ def trace_veins_from_landmarks(
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
     )
 
+    # Phase 4d: Promote remaining unlabeled edges to ectopic veins (EV1, EV2, …)
+    _label_ectopic_edges(G, edge_labels, skel_graph.median_vein_width_px)
+
     # Phase 5: Build VeinIdentification objects
     merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
     veins = _build_vein_identifications(G, edge_labels, max_merge_gap_px=merge_gap)
@@ -513,23 +516,19 @@ def _build_vein_identifications(
         else:
             merged = None
 
+        is_ectopic = vein_id.startswith("EV")
         vein = VeinIdentification(
             vein_id=vein_id,
             vein_type=_vein_type(vein_id),
-            status=VeinStatus.IDENTIFIED,
+            status=VeinStatus.ECTOPIC if is_ectopic else VeinStatus.IDENTIFIED,
             centerline=merged,
             edge_ids=[G[u][v].get("edge_id", -1) for u, v in edges],
             length_px=sum(l.length for l in lines),
             evidence=[f"{len(edges)} edges"],
         )
         veins.append(vein)
-        logger.info("Identified %s: %.0fpx (%d edges)", vein_id, vein.length_px, len(edges))
-
-    # Report unlabeled
-    all_keys = {_edge_key(u, v) for u, v in G.edges()}
-    unlabeled = all_keys - set(edge_labels.keys())
-    if unlabeled:
-        logger.info("%d edges remain unlabeled", len(unlabeled))
+        label = "Ectopic" if is_ectopic else "Identified"
+        logger.info("%s %s: %.0fpx (%d edges)", label, vein_id, vein.length_px, len(edges))
 
     return veins
 
@@ -1221,6 +1220,61 @@ def _detect_crossveins_fallback(
                     best_perp,
                 )
                 break  # Found it, don't try next tier
+
+
+_EV_MIN_LENGTH_FALLBACK_PX = 50.0
+
+
+def _label_ectopic_edges(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    median_vein_width_px: float,
+) -> int:
+    """Promote still-unlabeled edges to ectopic veins (EV1, EV2, ...).
+
+    Each connected component of unlabeled edges becomes one EV. Components
+    whose total length falls below the noise floor are silently dropped,
+    matching the pre-existing behavior for unlabeled edges. Ordering is
+    deterministic: longest component first, tie-break on minimum node id.
+    """
+    noise_floor = max(
+        (median_vein_width_px or 0.0) * 2.0,
+        _EV_MIN_LENGTH_FALLBACK_PX,
+    )
+
+    unlabeled_edges = [
+        (u, v) for u, v in G.edges() if _edge_key(u, v) not in edge_labels and G[u][v].get("line") is not None
+    ]
+    if not unlabeled_edges:
+        return 0
+
+    H = nx.Graph()
+    H.add_edges_from(unlabeled_edges)
+    components = list(nx.connected_components(H))
+
+    def _comp_length(nodes: set[int]) -> float:
+        return sum(G[u][v]["line"].length for u, v in H.subgraph(nodes).edges())
+
+    scored = [(c, _comp_length(c)) for c in components]
+    kept = [(c, L) for c, L in scored if L >= noise_floor]
+    dropped = len(scored) - len(kept)
+    if dropped:
+        logger.info(
+            "Dropped %d sub-threshold unlabeled components (<%.0fpx)",
+            dropped,
+            noise_floor,
+        )
+
+    kept.sort(key=lambda cL: (-cL[1], min(cL[0])))
+
+    for idx, (nodes, length) in enumerate(kept, start=1):
+        name = f"EV{idx}"
+        sub = H.subgraph(nodes)
+        for u, v in sub.edges():
+            edge_labels[_edge_key(u, v)] = name
+        logger.info("%s: %d edges, %.0fpx total", name, sub.number_of_edges(), length)
+
+    return len(kept)
 
 
 def _edge_key(u: int, v: int) -> tuple[int, int]:
