@@ -10,7 +10,8 @@ A step-by-step guide to the landmark-anchored Drosophila wing vein identificatio
 2. [Input Parsing](#2-input-parsing)
 3. [Skeleton Building](#3-skeleton-building) (17 steps)
 4. [Landmark Anchoring](#4-landmark-anchoring)
-5. [Vein Labeling](#5-vein-labeling) (Phases 0-5, including 4a-4c)
+5. [Vein Labeling](#5-vein-labeling) (Phases 0-5, including 4a-4d)
+5.5. [Intervein Polygon Splitting](#55-intervein-polygon-splitting-morphological-open-under-constraint)
 6. [Output](#6-output)
 7. [Parameter Reference](#7-parameter-reference)
 
@@ -1005,6 +1006,68 @@ for each unique label in edge_labels:
         evidence = [f"{len(edges)} edges"],
     )
 ```
+
+---
+
+## 5.5. Intervein Polygon Splitting (morphological open-under-constraint)
+
+**Source**: `models/intervein_splitter.py`, function `split_merged_intervein_polygons()`
+
+**What**: Preprocessing pass that runs between vein labeling (Step 5) and intervein region naming (Step 6). The pixel classifier occasionally fuses adjacent intervein regions where a crossvein is short or interrupted. This pass physically re-splits such polygons using a raster erode-then-watershed pipeline.
+
+**Why**: Downstream region naming (`intervein_namer.py`) can only label the polygons it's given. If the classifier merged discal and 2nd posterior into one blob, the namer can at best report a `"discal + 2nd posterior"` merge label. This stage attempts to produce two separate polygons so each region gets its own entry.
+
+**Pipeline** (all raster at full image resolution):
+
+```
+# Step 1: barrier mask
+wing_mask = rasterize(wing_outline)
+wing_mask = distance_transform_edt(wing_mask) > wing_buffer_px   # inset edge
+
+barrier = rasterize(canonical vein centerlines, excluding L6 and EV*)
+vein_barrier = distance_transform_edt(barrier == 0) <= vein_barrier_px
+
+interior_mask = wing_mask & ~vein_barrier
+
+# Step 2: seeds from eroded polygons
+for each intervein_poly:
+    poly_mask = rasterize(poly)
+    eroded = distance_transform_edt(poly_mask) > erode_radius_px
+    if eroded is empty:
+        record poly as lost — candidate for reseed pass
+    else:
+        for each connected component of eroded:
+            assign a new seed label
+
+# Step 3: competitive dilation
+surface = -distance_transform_edt(interior_mask)
+labels_out = watershed(surface, markers=seeds, mask=interior_mask)
+
+# Step 4: reseed lost polygons
+for each lost poly mask:
+    if area >= reseed_min_area_px:
+        drop a single seed at an interior point of the original mask
+re-run watershed if any reseeds happened
+
+# Step 5: raster → polygons
+for each label:
+    contour = findContours(labels_out == label)
+    emit Polygon(contour)
+```
+
+**Why raster, not vector**: "Erode by R, then competitively dilate all pieces until collision" has no clean primitive in shapely. Using `distance_transform_edt` instead of `cv2.erode` with a huge kernel makes the erosion O(H·W) regardless of radius — a 300 µm / 620 px erosion is as cheap as a 10 px one.
+
+**Excluded barriers**: `L6` (a short stub off L5 — not a region divider) and any `EV*` ectopic vein (noisy tissue shouldn't carve territory). Everything else canonical (L1-L5, Rs, ACV, PCV, costa) acts as a buffered barrier.
+
+**Reseed rationale**: Small polygons like the costal cell or 1st basal can be smaller than the erosion kernel and vanish entirely during Step 2. If their original footprint is larger than the reseed threshold (default 10,000 µm²), they get a fresh single-pixel seed in Step 4 and reclaim their territory in the second watershed.
+
+**Parameters**:
+- `intervein_split_erode_um` (default 100) — erosion radius in µm
+- `intervein_split_reseed_min_area_um2` (default 10,000) — minimum original area (µm²) to trigger a reseed
+- `intervein_split_vein_barrier_vw` (default 1.0) — vein centerline buffer radius as × median vein width
+- `intervein_split_wing_buffer_vw` (default 1.0) — wing outline inset as × median vein width
+
+**Debug overlay**: passing `debug_out=<path>` to `split_merged_intervein_polygons` writes a diagnostic PNG showing the barrier mask (red tint), watershed label boundaries (cyan), and unbuffered canonical vein centerlines with endpoint markers (yellow). Useful for diagnosing leaks at junction gaps.
 
 ---
 
