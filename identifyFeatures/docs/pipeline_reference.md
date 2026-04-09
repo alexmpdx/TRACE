@@ -836,15 +836,22 @@ for each unlabeled edge:
     if min_dist_to_l4l5 > search_radius:
         skip
 
-    # Direction filter: must head substantially posteriorly (downward in image)
-    dy = abs(end_y - start_y)
-    if dy < edge_length * 0.3:
-        skip  # not heading substantially in Y direction
+    # Direction filter: must head substantially posteriorly.
+    # With a WingAxis, project the edge onto the AP unit vector
+    # (rotation-invariant). Without one, fall back to abs(dy).
+    if wing_axis is not None:
+        posterior_component = abs(dot(edge_vec, wing_axis.ap_vector))
+    else:
+        posterior_component = abs(end_y - start_y)
+    if posterior_component < edge_length * 0.3:
+        skip  # not heading substantially posterior
 
     score = min_dist_to_l4l5  # prefer closer to junction
 
 best scoring candidate → label as "L6"
 ```
+
+**Why the axis projection**: The legacy check assumed the wing was upright in the image (posterior = +Y). When a specimen is rotated, that assumption breaks and L6 can be rejected on valid wings. The `WingAxis.ap_vector` is derived from the alula notch → DTip PD axis rotated 90°, so the posterior direction travels with the wing regardless of image orientation.
 
 ### Phase 4: Detect crossveins (primary method)
 

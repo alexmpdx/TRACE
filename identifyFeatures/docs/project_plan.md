@@ -67,7 +67,8 @@ identifyFeatures/
       junction_resolver.py           # [DONE] Merge longitudinals through crossvein junctions
       costa_detector.py              # [DONE] Costa detection via margin band
       vein_tracer.py                 # [DONE] Trace veins + crossvein detection (Phases 0-5)
-      intervein_namer.py             # [TODO] Name intervein regions by adjacency
+      wing_axis.py                   # [DONE] Derive proximal/distal axis from alula notch → DTip
+      intervein_namer.py             # [DONE] Name intervein regions by adjacency (with PD tie-break)
       trajectory_completer.py        # [TODO] Extrapolate partial veins, split merged regions
       confidence.py                  # [TODO] Multi-factor confidence scoring
 
@@ -173,17 +174,17 @@ Six phases, each building on previous results:
 
 Originally planned as a separate `crossvein_detector.py`. Implemented as Phases 4 and 4b inside `vein_tracer.py` because crossvein detection depends on the labeled longitudinals produced by earlier phases. No separate module needed.
 
-### Step 6: Name Intervein Regions — TODO
+### Step 6: Name Intervein Regions — DONE
 
-**Planned file:** `models/intervein_namer.py`
+**File:** `models/intervein_namer.py`, entry point `name_intervein_regions()`
 
-For each unnamed intervein polygon from the detection GeoJSON:
-- Buffer each identified vein LineString slightly (~25px)
-- Determine which veins are adjacent to each polygon boundary (intersection length ≥30px)
-- Look up vein-set in `topology.REGION_EXPECTED_VEINS` → region name
-- Disambiguate crossvein-split pairs (1st_basal vs 1st_posterior, discal vs 2nd_posterior) using `topology.REGION_DISAMBIGUATION` by proximal/distal position relative to ACV/PCV
-
-**Note:** The previous WingVeinAnalyzer project has a working implementation of this logic that can be adapted. Key functions: `_build_poly_veins_spatial()`, Jaccard scoring, area-based disambiguation.
+For each intervein polygon from the detection GeoJSON:
+- Buffer each identified vein LineString and collect the set of veins adjacent to the polygon
+- Match the adjacent set against `topology.REGION_EXPECTED_VEINS`, keeping the most specific candidates
+- If multiple candidates tie (currently only discal vs 2nd posterior, which share `{L4, L5, PCV}`), defer the polygon to a second pass
+- **Proximal/distal tie resolver**: `_resolve_pd_ties()` groups deferred polygons by their tied set, looks it up in `topology.REGION_PD_PAIRS`, sorts members by `WingAxis.project(centroid)`, and assigns the proximal name to the smallest-PD polygon and the distal name to the largest-PD polygon
+- `WingAxis` is computed once per specimen by `models/wing_axis.py:compute_wing_axis()` from the anchored alula notch → DTip landmarks; if either landmark is missing the resolver degrades gracefully and deferred polygons fall through to `_check_merged()`
+- `_detect_absorbed_merges()` then labels remaining polygons with fused (`"A + B"`) names, and `_absorb_ectopic_fragments()` sweeps stray fragments into their best-matching neighbor
 
 ### Step 7: Complete Partial Veins & Split Merged Regions — TODO
 
@@ -350,25 +351,23 @@ Single source of truth for wing vein biology:
 
 The core vein identification pipeline is complete. Remaining work is output-facing:
 
-1. **`controllers/pipeline.py`** — Orchestrate Steps 1–4 into `identify_wing()`. Wire up the existing model functions into a clean public API.
+1. **`controllers/pipeline.py`** — Orchestrate Steps 1–6 into `identify_wing()`. Wire up the existing model functions (including `compute_wing_axis` and `name_intervein_regions`) into a clean public API.
 
-2. **`models/intervein_namer.py`** — Name the 8 intervein regions using vein adjacency. Adapt logic from WingVeinAnalyzer's `_build_poly_veins_spatial()`.
+2. **`views/geojson_export.py`** — Export named veins + regions as GeoJSON in GT_naming format.
 
-3. **`views/geojson_export.py`** — Export named veins + regions as GeoJSON in GT_naming format.
+3. **`views/overlay.py`** — Render named veins + regions on wing image with color coding.
 
-4. **`views/overlay.py`** — Render named veins + regions on wing image with color coding.
+4. **`cli.py`** — Wire up the CLI entry point. Support single-specimen and batch modes.
 
-5. **`cli.py`** — Wire up the CLI entry point. Support single-specimen and batch modes.
+5. **`tests/test_evaluate.py`** — IoU evaluation against GT_naming ground truth. Automated regression suite.
 
-6. **`tests/test_evaluate.py`** — IoU evaluation against GT_naming ground truth. Automated regression suite.
+6. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 already works.
 
-7. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 already works.
+7. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
 
-8. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
+8. **Ectopic vein flagging** — Flag long unassigned edges as ectopic. Lower priority for wildtype, important for mutants.
 
-9. **Ectopic vein flagging** — Flag long unassigned edges as ectopic. Lower priority for wildtype, important for mutants.
-
-10. **Vein tissue polygon assignment** — Partition vein tissue polygons by named centerlines. Lower priority.
+9. **Vein tissue polygon assignment** — Partition vein tissue polygons by named centerlines. Lower priority.
 
 ---
 
