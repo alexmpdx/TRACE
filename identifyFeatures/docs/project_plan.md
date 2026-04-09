@@ -337,10 +337,9 @@ Single source of truth for wing vein biology:
 | `SOFT_LANDMARKS` | {DTip, L2.d, L4.d, L5.d} |
 | `UNRELIABLE_LANDMARKS` | {ACV.a, ACV.p, PCV.a, PCV.p} |
 | `JUNCTION_TOPOLOGY` | Which veins meet at each landmark junction |
-| `TRACE_RULES` | Start landmark + trace direction for each vein |
 | `CROSSVEIN_CONNECTIONS` | ACV→(L3,L4), PCV→(L4,L5) |
 | `REGION_EXPECTED_VEINS` | Which veins bound each of the 8 intervein regions |
-| `REGION_DISAMBIGUATION` | Proximal/distal rules for 1st_basal/1st_posterior and discal/2nd_posterior |
+| `REGION_PD_PAIRS` | Proximal→distal tie-break pairs (e.g. discal/2nd posterior) |
 | `VEIN_AP_ORDER` | Anterior-to-posterior ordering of all veins |
 | `REGION_AP_ORDER` | Anterior-to-posterior ordering of 8 regions |
 | `VEIN_COLORS` / `REGION_COLORS` | Display colors matching GT_naming format |

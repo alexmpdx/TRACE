@@ -85,43 +85,6 @@ JUNCTION_TOPOLOGY: dict[str, dict[str, list[str]]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Trace rules — how to trace each vein from its landmark anchor
-# ---------------------------------------------------------------------------
-
-TRACE_RULES: dict[str, dict] = {
-    "L1": {
-        "start_landmark": "L1-Rs",
-        "trace_toward": "subcostal break",
-        "direction": "proximal",  # L1 goes proximal from junction
-    },
-    "Rs": {
-        "start_landmark": "L1-Rs",
-        "trace_toward": "L2-L3",
-        "direction": "distal",
-    },
-    "L2": {
-        "start_landmark": "L2-L3",
-        "trace_toward": "anterior_margin",
-        "direction": "distal-anterior",
-    },
-    "L3": {
-        "start_landmark": "L2-L3",
-        "trace_toward": "DTip",
-        "direction": "distal",
-    },
-    "L4": {
-        "start_landmark": "L4-L5",
-        "trace_toward": "distal-anterior",
-        "direction": "distal-anterior",
-    },
-    "L5": {
-        "start_landmark": "L4-L5",
-        "trace_toward": "posterior_margin",
-        "direction": "distal-posterior",
-    },
-}
-
-# ---------------------------------------------------------------------------
 # Crossvein connectivity
 # ---------------------------------------------------------------------------
 
@@ -134,9 +97,10 @@ CROSSVEIN_CONNECTIONS: dict[str, tuple[str, str]] = {
 # Intervein regions
 # ---------------------------------------------------------------------------
 
-# 8 canonical intervein regions in anterior-to-posterior order
+# 7 canonical intervein regions in anterior-to-posterior order.
+# The costal cell is removed in preprocessing and never appears in the
+# intervein polygon list, so it is intentionally omitted.
 REGION_AP_ORDER: list[str] = [
-    "costal",
     "marginal",
     "submarginal",
     "1st basal",
@@ -146,40 +110,34 @@ REGION_AP_ORDER: list[str] = [
     "3rd posterior",
 ]
 
-# Which veins bound each region (used for naming by adjacency)
+# Which veins bound each region (used for naming by adjacency).
+# No entry for the costal cell — it is removed in preprocessing.
 REGION_EXPECTED_VEINS: dict[str, set[str]] = {
-    "costal": {"costa", "L1"},
-    "marginal": {"L1", "L2"},
-    "submarginal": {"L2", "L3"},
-    "1st basal": {"L3", "L4", "ACV"},
-    "1st posterior": {"L3", "L4", "ACV"},
+    "marginal": {"L1", "L2", "costa", "Rs"},
+    "submarginal": {"L2", "L3", "costa"},
+    "1st basal": {"L3", "L4", "ACV", "Rs"},
+    "1st posterior": {"L3", "L4", "ACV", "costa"},
     "discal": {"L4", "L5", "PCV"},
     "2nd posterior": {"L4", "L5", "PCV"},
     "3rd posterior": {"L5"},
 }
 
+# Tied-region pairs ordered proximal → distal. Used by intervein_namer to
+# break ties when two candidate regions share an identical expected vein set.
+# The first element is proximal, the second is distal.
+REGION_PD_PAIRS: list[tuple[str, str]] = [
+    ("discal", "2nd posterior"),
+]
+
 # Vein boundary pairs — each vein separates these region pairs
 VEIN_BOUNDARIES: dict[str, list[tuple[str, str]]] = {
-    "L1": [("costal", "marginal")],
     "L2": [("marginal", "submarginal")],
+    "Rs": [("marginal", "1st basal")],
     "L3": [("submarginal", "1st basal"), ("submarginal", "1st posterior")],
     "ACV": [("1st basal", "1st posterior")],
     "L4": [("1st basal", "discal"), ("discal", "1st posterior"), ("1st posterior", "2nd posterior")],
     "PCV": [("discal", "2nd posterior")],
     "L5": [("discal", "3rd posterior"), ("2nd posterior", "3rd posterior")],
-}
-
-# Disambiguation rules for regions with identical bounding vein sets.
-# The key is the frozenset of bounding veins; value maps position to name.
-REGION_DISAMBIGUATION: dict[frozenset[str], dict[str, str]] = {
-    frozenset({"L3", "L4", "ACV"}): {
-        "proximal": "1st basal",
-        "distal": "1st posterior",
-    },
-    frozenset({"L4", "L5", "PCV"}): {
-        "proximal": "discal",
-        "distal": "2nd posterior",
-    },
 }
 
 # ---------------------------------------------------------------------------

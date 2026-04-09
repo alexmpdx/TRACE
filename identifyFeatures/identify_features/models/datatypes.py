@@ -79,6 +79,47 @@ class Landmark:
 
 
 # ---------------------------------------------------------------------------
+# Wing axis
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WingAxis:
+    """Wing-level proximal/distal reference axis.
+
+    Defined by two landmarks (conventionally alula notch → DTip). Provides
+    a signed scalar PD coordinate for any point in the wing frame: 0 at the
+    proximal anchor, 1 at the distal anchor, linear in between, extrapolating
+    beyond when needed.
+    """
+
+    proximal_point: Point
+    distal_point: Point
+    unit_vector: tuple[float, float]  # pointing proximal → distal
+    length: float  # pixel distance between the two anchors
+
+    def project(self, point: Point) -> float:
+        """Return the normalized PD coordinate of a point (0=proximal, 1=distal)."""
+        dx = point.x - self.proximal_point.x
+        dy = point.y - self.proximal_point.y
+        scalar = dx * self.unit_vector[0] + dy * self.unit_vector[1]
+        return scalar / self.length if self.length > 0 else 0.0
+
+    @property
+    def ap_vector(self) -> tuple[float, float]:
+        """Unit vector perpendicular to the PD axis, pointing posterior.
+
+        Derived by rotating ``unit_vector`` 90° via (dx, dy) → (-dy, dx).
+        Sign convention: when the wing is un-rotated in the image frame
+        (alula left, DTip right → PD ≈ (+1, 0)), this yields (0, +1),
+        which is positive-Y in image coordinates — i.e. "down" in the
+        image, which is posterior for a standard upright wing.
+        """
+        dx, dy = self.unit_vector
+        return (-dy, dx)
+
+
+# ---------------------------------------------------------------------------
 # Skeleton graph
 # ---------------------------------------------------------------------------
 

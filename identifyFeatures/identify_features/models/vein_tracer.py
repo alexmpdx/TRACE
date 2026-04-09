@@ -26,6 +26,7 @@ from identify_features.models.datatypes import (
     VeinIdentification,
     VeinStatus,
     VeinType,
+    WingAxis,
 )
 from identify_features.utils.geometry_utils import (
     angle_between_vectors,
@@ -45,6 +46,7 @@ def trace_veins_from_landmarks(
     landmarks: dict[str, Landmark],
     wing_outline: "Polygon | None" = None,
     config: PipelineConfig | None = None,
+    wing_axis: Optional[WingAxis] = None,
 ) -> list[VeinIdentification]:
     """Identify veins in the skeleton graph using landmarks.
 
@@ -53,6 +55,10 @@ def trace_veins_from_landmarks(
         landmarks: Anchored landmarks dict.
         wing_outline: Wing outline polygon for costa detection.
         config: Pipeline configuration.
+        wing_axis: Optional wing proximal/distal axis. When provided, L6
+            detection uses the axis's AP vector for rotation-invariant
+            "posterior heading" checks instead of assuming positive-Y is
+            posterior.
     """
     if config is None:
         config = PipelineConfig()
@@ -110,7 +116,7 @@ def trace_veins_from_landmarks(
     )
 
     # Phase 3: Detect L6 (short posterior branch off L5 near L4-L5)
-    _detect_l6(G, edge_labels, landmarks)
+    _detect_l6(G, edge_labels, landmarks, wing_axis)
 
     # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5)
     _detect_crossveins(G, edge_labels)
@@ -803,12 +809,17 @@ def _detect_l6(
     G: nx.Graph,
     edge_labels: dict[tuple, str],
     landmarks: dict[str, Landmark],
+    wing_axis: Optional[WingAxis] = None,
 ) -> None:
     """Detect L6: a short posterior branch off L5 near L4-L5.
 
     L6 branches from L5 near the proximal end (within 0.5-1.5× Rs length
     from L4-L5) and heads posteriorly. It's similar in length to Rs/L1
     and may be absent.
+
+    When ``wing_axis`` is provided, the "heads posteriorly" check uses the
+    axis's AP vector (rotation-invariant). Otherwise, falls back to the
+    legacy positive-Y assumption.
     """
     # Need Rs length as reference
     rs_length = None
@@ -859,21 +870,23 @@ def _detect_l6(
         if min_dist > max_dist_from_l4l5:
             continue
 
-        # Check direction: must head posteriorly (positive Y)
+        # Check direction: must head posteriorly.
+        # With a wing axis, project onto the AP vector (rotation-invariant).
+        # Without one, fall back to positive-Y = posterior.
         line = data.get("line")
         if line is None:
             continue
         start = line.coords[0]
         end = line.coords[-1]
-        dy = end[1] - start[1]
-        # Positive dy = heading posteriorly (down in image)
-        if abs(dy) < length * 0.3:
-            continue  # not heading substantially in Y direction
-        if dy < 0:
-            # Check reversed
-            dy = -dy
-            if dy < length * 0.3:
-                continue
+        dx_edge = end[0] - start[0]
+        dy_edge = end[1] - start[1]
+        if wing_axis is not None:
+            ap_x, ap_y = wing_axis.ap_vector
+            posterior_component = abs(dx_edge * ap_x + dy_edge * ap_y)
+        else:
+            posterior_component = abs(dy_edge)
+        if posterior_component < length * 0.3:
+            continue
 
         # Score: prefer edges closer to L4-L5 and more posterior
         score = min_dist
