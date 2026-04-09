@@ -92,6 +92,7 @@ class PipelineConfig:
     # -- Intervein naming --
     vein_buffer_px: float = 25.0
     adjacency_min_length_px: float = 30.0
+    max_merge_size: int | None = None  # Max regions in an N-way merge; None = no cap
 
     # -- Intervein splitter (morphological open-under-constraint) --
     intervein_split_erode_um: float = 100.0  # Erosion radius for breaking weak classifier bridges

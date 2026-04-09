@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from itertools import combinations
 from typing import Optional
 
 from identify_features.config import PipelineConfig
@@ -12,28 +13,39 @@ from identify_features.models.datatypes import (
     VeinIdentification,
     WingAxis,
 )
-from identify_features.models.topology import REGION_EXPECTED_VEINS, REGION_PD_PAIRS
+from identify_features.models.topology import (
+    REGION_AP_ORDER,
+    REGION_EXPECTED_VEINS,
+    REGION_PD_PAIRS,
+    VEIN_BOUNDARIES,
+)
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
 
-# Mergeable adjacent region pairs: (region_a, region_b, separator_vein)
-# Derived from topology.VEIN_BOUNDARIES — every vein-separated region pair.
-# Costal is omitted because the costal cell is removed in preprocessing.
-_MERGEABLE_PAIRS: list[tuple[str, str, str]] = [
-    ("1st basal", "1st posterior", "ACV"),
-    ("discal", "2nd posterior", "PCV"),
-    ("2nd posterior", "3rd posterior", "L5"),
-    ("discal", "3rd posterior", "L5"),
-    ("1st basal", "discal", "L4"),
-    ("1st posterior", "2nd posterior", "L4"),
-    ("discal", "1st posterior", "L4"),
-    ("marginal", "submarginal", "L2"),
-    ("marginal", "1st basal", "Rs"),
-    ("submarginal", "1st basal", "L3"),
-    ("submarginal", "1st posterior", "L3"),
-]
+
+def _build_region_adjacency() -> tuple[
+    dict[str, dict[str, str]],
+    dict[frozenset[str], str],
+]:
+    """Derive the region adjacency graph from topology.VEIN_BOUNDARIES.
+
+    Returns (neighbors, edge_separator):
+        - neighbors[r][n] = vein that separates region r from neighbor n
+        - edge_separator[frozenset({r, n})] = same, keyed by unordered pair
+    """
+    neighbors: dict[str, dict[str, str]] = {}
+    edge_sep: dict[frozenset[str], str] = {}
+    for vein, pairs in VEIN_BOUNDARIES.items():
+        for a, b in pairs:
+            neighbors.setdefault(a, {})[b] = vein
+            neighbors.setdefault(b, {})[a] = vein
+            edge_sep[frozenset({a, b})] = vein
+    return neighbors, edge_sep
+
+
+_REGION_ADJACENCY, _REGION_EDGE_SEPARATOR = _build_region_adjacency()
 
 
 def name_intervein_regions(
@@ -146,7 +158,7 @@ def name_intervein_regions(
 
         if name is None:
             # Try merged region detection
-            name, status = _check_merged(detected, vein_map, effective_expected)
+            name, status = _check_merged(detected, vein_map, effective_expected, config.max_merge_size)
 
         if name is None:
             # Coverage fallback: what fraction of expected veins are present?
@@ -179,7 +191,7 @@ def name_intervein_regions(
     # or a lone polygon spanning both regions) falls through to the old
     # merge/coverage fallback path.
     for _, poly, detected, _tied in unresolved_ties:
-        name, status = _check_merged(detected, vein_map, effective_expected)
+        name, status = _check_merged(detected, vein_map, effective_expected, config.max_merge_size)
         if name is None:
             name, status = _coverage_fallback(detected, effective_expected)
         if name is None:
@@ -385,7 +397,7 @@ def _detect_absorbed_merges(
     with 2 veins), the neighbor is missing from results. This pass detects
     such absorptions by checking if any named region's bounding veins are a
     superset of a missing region's expected veins, constrained to valid
-    adjacent pairs from _MERGEABLE_PAIRS.
+    adjacent pairs from the region adjacency graph.
     """
     # Collect all region names already found (including parts of merged names)
     found_names: set[str] = set()
@@ -397,11 +409,8 @@ def _detect_absorbed_merges(
     if not missing:
         return
 
-    # Build adjacency lookup from _MERGEABLE_PAIRS
-    merge_partners: dict[str, set[str]] = {}
-    for a, b, _sep in _MERGEABLE_PAIRS:
-        merge_partners.setdefault(a, set()).add(b)
-        merge_partners.setdefault(b, set()).add(a)
+    # Adjacency lookup derived from topology.VEIN_BOUNDARIES
+    merge_partners: dict[str, set[str]] = {r: set(nbrs.keys()) for r, nbrs in _REGION_ADJACENCY.items()}
 
     for missing_name in sorted(missing):
         missing_veins = frozenset(effective_expected.get(missing_name, set()))
@@ -431,45 +440,110 @@ def _detect_absorbed_merges(
                 break
 
 
+def _is_connected(nodes: set[str], adjacency: dict[str, dict[str, str]]) -> bool:
+    """Return True if `nodes` forms a connected subgraph under `adjacency`."""
+    if len(nodes) <= 1:
+        return True
+    start = next(iter(nodes))
+    seen = {start}
+    stack = [start]
+    while stack:
+        cur = stack.pop()
+        for nb in adjacency.get(cur, {}):
+            if nb in nodes and nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return seen == nodes
+
+
+def _enumerate_merge_candidates(
+    detected: frozenset[str],
+    effective_expected: dict[str, set[str]],
+    max_merge_size: Optional[int] = None,
+) -> Optional[tuple[tuple[str, ...], frozenset[str], set[str]]]:
+    """Find the best connected subset of regions matching a detected vein set.
+
+    Enumerates all connected subgraphs of the region adjacency graph of size
+    2..N (where N = ``max_merge_size`` or the region count), computes each
+    candidate's merged expected veins (union of per-region expected minus
+    internal separators), and returns the best match whose merged expected
+    set is a subset of ``detected``.
+
+    Scoring (descending):
+        1. ``len(merged_expected)`` — prefer the most specific match (largest
+           set of bounding veins the merge "explains").
+        2. ``-subset_size`` — among equal-specificity matches, prefer the
+           smallest merge (avoid absorbing extra regions we don't need).
+        3. AP-ordered region tuple — deterministic final tie-break.
+
+    Returns ``(ap_ordered_regions, merged_expected, internal_separators)`` or
+    ``None`` if no connected subset matches.
+    """
+    all_regions = [r for r in REGION_AP_ORDER if r in effective_expected]
+    if not all_regions:
+        return None
+    upper = max_merge_size if max_merge_size is not None else len(all_regions)
+    upper = min(upper, len(all_regions))
+    if upper < 2:
+        return None
+
+    best: Optional[tuple[tuple[str, ...], frozenset[str], set[str]]] = None
+    best_score: Optional[tuple[int, int, tuple[str, ...]]] = None
+
+    for size in range(2, upper + 1):
+        for combo in combinations(all_regions, size):
+            subset = set(combo)
+            if not _is_connected(subset, _REGION_ADJACENCY):
+                continue
+            # Internal separators = veins bounding pairs both inside the subset
+            internal_seps: set[str] = set()
+            for r1, r2 in combinations(subset, 2):
+                sep = _REGION_EDGE_SEPARATOR.get(frozenset({r1, r2}))
+                if sep is not None:
+                    internal_seps.add(sep)
+            merged: set[str] = set()
+            for r in subset:
+                merged |= effective_expected.get(r, set())
+            merged -= internal_seps
+            if not merged <= detected:
+                continue
+            ap_tuple = tuple(r for r in REGION_AP_ORDER if r in subset)
+            score = (len(merged), -len(subset), ap_tuple)
+            if best_score is None or score > best_score:
+                best_score = score
+                best = (ap_tuple, frozenset(merged), internal_seps)
+
+    return best
+
+
 def _check_merged(
     detected: frozenset[str],
     vein_map: dict[str, VeinIdentification],
     effective_expected: dict[str, set[str]],
+    max_merge_size: Optional[int] = None,
 ) -> tuple[Optional[str], str]:
-    """Check if a vein set matches a merged region pair.
+    """Detect an N-way merged region matching the given vein set.
 
-    A merge occurs when two adjacent regions fuse because the separating
-    vein is absent or partial. The detected set should match the union of
-    both regions' expected sets minus the separator.
-
-    Uses subset logic: the merged expected set must be a subset of detected.
+    Delegates enumeration to ``_enumerate_merge_candidates``. A merge occurs
+    when two or more adjacent regions fuse because one or more separator
+    veins along the chain are absent or partial. Any connected subset of
+    the region adjacency graph is a valid candidate; the largest/highest-
+    specificity match wins.
     """
-    best_name: Optional[str] = None
-    best_specificity = 0
+    result = _enumerate_merge_candidates(detected, effective_expected, max_merge_size=max_merge_size)
+    if result is None:
+        return None, ""
 
-    for region_a, region_b, separator in _MERGEABLE_PAIRS:
-        expected_a = frozenset(effective_expected.get(region_a, set()))
-        expected_b = frozenset(effective_expected.get(region_b, set()))
+    regions, _merged_expected, internal_seps = result
+    reasons = []
+    for sep in sorted(internal_seps):
+        tag = "partial" if sep in vein_map else "absent"
+        reasons.append(f"{tag} {sep}")
+    reason = ", ".join(reasons) if reasons else "no internal separators"
 
-        # Merged expected set = union minus separator
-        merged_expected = (expected_a | expected_b) - {separator}
-
-        if merged_expected <= detected:  # subset check
-            specificity = len(merged_expected)
-            if specificity > best_specificity:
-                best_specificity = specificity
-
-                if separator in vein_map:
-                    reason = f"partial {separator}"
-                else:
-                    reason = f"absent {separator}"
-
-                best_name = f"{region_a} + {region_b}"
-                logger.info("Merged region detected: %s (%s)", best_name, reason)
-
-    if best_name is not None:
-        return best_name, "merged"
-    return None, ""
+    name = " + ".join(regions)
+    logger.info("Merged region detected: %s (%s)", name, reason)
+    return name, "merged"
 
 
 def _coverage_fallback(
