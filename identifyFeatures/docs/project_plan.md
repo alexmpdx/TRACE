@@ -66,7 +66,7 @@ identifyFeatures/
       landmark_anchor.py             # [DONE] Snap landmarks to skeleton graph nodes
       junction_resolver.py           # [DONE] Merge longitudinals through crossvein junctions
       costa_detector.py              # [DONE] Costa detection via margin band
-      vein_tracer.py                 # [DONE] Trace veins + crossvein detection (Phases 0-5)
+      vein_tracer.py                 # [DONE] Trace veins + crossvein + ectopic labeling (Phases 0-5)
       wing_axis.py                   # [DONE] Derive proximal/distal axis from alula notch → DTip
       intervein_namer.py             # [DONE] Name intervein regions by adjacency (with PD tie-break)
       trajectory_completer.py        # [TODO] Extrapolate partial veins, split merged regions

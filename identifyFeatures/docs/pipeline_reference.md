@@ -945,6 +945,36 @@ The scoring heavily weights perpendicularity (crossveins cross longitudinals at 
 
 **Why**: Crossvein detection (Phases 4/4a/4b) may label edges that create new degree-2 propagation opportunities. For example, a short unlabeled stub at a PCV endpoint becomes propagatable once the adjacent PCV edge is labeled.
 
+### Phase 4d: Label ectopic veins (EV1, EV2, …)
+
+**Source**: `_label_ectopic_edges()`
+
+**What**: Promotes every still-unlabeled edge to an ectopic vein label. Each connected component of unlabeled edges becomes one `EV<N>`; the downstream `_build_vein_identifications()` then materializes them as `VeinIdentification` objects with `status=VeinStatus.ECTOPIC`.
+
+**Why**: Previously, edges that failed every labeling phase were logged and discarded. On mutant wings this silently dropped real vein tissue — genuine ectopic veins and stray fragments — so downstream stages (region naming, overlay, measurement) never saw it. Preserving them as first-class EV veins lets adjacency/forbidden-region logic reason about the extra tissue.
+
+**Algorithm**:
+```
+noise_floor = max(median_vein_width_px * 2, 50px)
+
+unlabeled = [edges with no label and a valid LineString]
+H = subgraph over unlabeled edges
+components = connected_components(H)
+
+# Drop noise, preserve significant runs
+kept = [c for c in components if total_length(c) >= noise_floor]
+
+# Deterministic: longest first, tie-break on minimum node id
+kept.sort(key=(-total_length, min(nodes)))
+
+for idx, component in enumerate(kept, start=1):
+    label every edge in component as f"EV{idx}"
+```
+
+**Noise floor**: reuses the same heuristic as `intervein_namer.py`'s `frag_buffer` (`max(median_vein_width_px * 2, 50px)`). Sub-threshold components are silently dropped — identical behavior to the pre-change "log and drop".
+
+**Downstream contract**: After Phase 4d, every surviving graph edge has a label. `EV*` labels flow through `_build_vein_identifications()` unchanged except that the per-vein build loop assigns `VeinStatus.ECTOPIC` when `vein_id.startswith("EV")`. `_vein_type()` falls EVs through to `VeinType.LONGITUDINAL` — the status field is the canonical signal.
+
 ### Phase 5: Build VeinIdentification objects
 
 **Source**: `_build_vein_identifications()`
