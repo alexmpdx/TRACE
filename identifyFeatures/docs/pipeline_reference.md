@@ -12,6 +12,7 @@ A step-by-step guide to the landmark-anchored Drosophila wing vein identificatio
 4. [Landmark Anchoring](#4-landmark-anchoring)
 5. [Vein Labeling](#5-vein-labeling) (Phases 0-5, including 4a-4d)
 5.5. [Intervein Polygon Splitting](#55-intervein-polygon-splitting-morphological-open-under-constraint)
+5.6. [Intervein Region Naming](#56-intervein-region-naming)
 6. [Output](#6-output)
 7. [Parameter Reference](#7-parameter-reference)
 
@@ -1071,6 +1072,51 @@ for each label:
 
 ---
 
+## 5.6. Intervein Region Naming
+
+**Source**: `models/intervein_namer.py`, function `name_intervein_regions()`
+
+**What**: Assigns a region name (marginal, submarginal, 1st basal, 1st posterior, discal, 2nd posterior, 3rd posterior) to each intervein polygon output by Step 5.5 by matching the polygon's adjacent veins against `topology.REGION_EXPECTED_VEINS`.
+
+**Pipeline**:
+1. **Adjacency**: buffer each identified vein centerline by `vein_buffer_px` and compute the set of veins whose buffered footprint intersects the polygon boundary by at least `adjacency_min_length_px`.
+2. **Primary match**: find every region in `REGION_EXPECTED_VEINS` whose expected vein set is a subset of the detected set. Pick the highest-specificity match (largest expected set).
+3. **PD tie resolver**: if the top specificity is tied between multiple regions (currently only `discal` vs `2nd posterior`), defer the polygon. After the main loop, `_resolve_pd_ties()` groups deferred polygons by their tied candidate set, looks up `topology.REGION_PD_PAIRS`, and assigns names by sorting members along the wing PD axis (proximal → distal).
+4. **Merge detection** (`_check_merged`): if no single region matches, run N-way merge enumeration. Details below.
+5. **Coverage fallback**: if no merge matches either, pick the region with the highest per-region coverage (fraction of its expected veins present); threshold 0.5.
+6. **Absorbed merge detection**: `_detect_absorbed_merges()` walks already-named regions and checks whether any missing region's expected veins are a superset of a current region's bounding veins — if so, it appends `" + <missing>"` to the name and marks it merged. The adjacency constraint (derived from the same region graph) prevents non-adjacent concatenation.
+7. **Ectopic fragment absorption**: `_absorb_ectopic_fragments()` sweeps small unnamed or tiny-named polygons into the adjacent named region sharing the most boundary.
+
+### N-way merge detection
+
+`_check_merged()` delegates to `_enumerate_merge_candidates()`, which brute-forces over all connected subsets of a region adjacency graph derived once from `topology.VEIN_BOUNDARIES`:
+
+```python
+# Built at module import:
+_REGION_ADJACENCY: dict[str, dict[str, str]]       # region -> {neighbor: separator_vein}
+_REGION_EDGE_SEPARATOR: dict[frozenset[str], str]  # {r1, r2} -> separator
+```
+
+For each subset size from 2 up to `max_merge_size` (default: no cap, so up to all 7 regions):
+1. Skip subsets that are not connected in `_REGION_ADJACENCY`.
+2. Compute the internal separator veins — every vein whose `VEIN_BOUNDARIES` pair lies entirely inside the subset.
+3. Compute `merged_expected = union(effective_expected[r] for r in subset) - internal_separators`.
+4. Keep the subset only if `merged_expected ⊆ detected`.
+
+Scoring (descending):
+1. `len(merged_expected)` — prefer the merge that "explains" the most bounding veins (most specific match).
+2. `-subset_size` — among equal-specificity candidates, prefer the smallest subset (avoid overclaiming).
+3. AP-ordered region tuple — final deterministic tie-break.
+
+This correctly handles 3+ region fusions that pair-only detection missed, e.g. `marginal + submarginal + 1st posterior` when both L2 and L3 are absent. The returned name is AP-ordered (`" + ".join(regions)`) for stable output.
+
+**Parameters**:
+- `vein_buffer_px` (default 25) — buffer radius around each vein centerline for adjacency testing
+- `adjacency_min_length_px` (default 30) — minimum shared boundary length for a vein to count as adjacent
+- `max_merge_size` (default `None`) — cap on N-way merge size; `None` = no cap, any connected subset of the 7 regions is a candidate
+
+---
+
 ## 6. Output
 
 Each run produces a `list[VeinIdentification]` with 10 entries (one per canonical vein):
@@ -1160,3 +1206,10 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 | `departure_sample_um` | 100µm | Direction sampling window |
 | `distal_landmark_search_vw` | 2.0 | Search radius for distal extension (× vein width) |
 | `merge_max_gap_um` | 50µm | Max gap for line merging in output |
+
+### Intervein region naming
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `vein_buffer_px` | 25 | Buffer radius for adjacency testing |
+| `adjacency_min_length_px` | 30 | Min shared boundary length to count as adjacent |
+| `max_merge_size` | None | Cap on N-way merge size; None = no cap |

@@ -188,7 +188,7 @@ Preprocessing pass that sits between vein tracing and intervein naming. Addresse
 - **Reseed lost polygons**: any input polygon whose erosion mask was empty but whose original footprint exceeds `intervein_split_reseed_min_area_um2` (default 10,000 µm²) gets a new single-pixel seed at its interior, and the watershed runs again so thin regions like 1st basal aren't silently absorbed by neighbors.
 - **Raster → polygons** via `cv2.findContours` for each label. Output is a plain `list[Polygon]` that shadows the original `intervein_polys` for the namer.
 
-The existing merge-detection (`_check_merged` / `_MERGEABLE_PAIRS` in `intervein_namer.py`) stays in place as a safety net for merges the morphological pass misses.
+The existing merge-detection (`_check_merged` in `intervein_namer.py`) stays in place as a safety net for merges the morphological pass misses.
 
 ### Step 6: Name Intervein Regions — DONE
 
@@ -201,6 +201,7 @@ For each intervein polygon from the detection GeoJSON (after the splitter has pr
 - **Proximal/distal tie resolver**: `_resolve_pd_ties()` groups deferred polygons by their tied set, looks it up in `topology.REGION_PD_PAIRS`, sorts members by `WingAxis.project(centroid)`, and assigns the proximal name to the smallest-PD polygon and the distal name to the largest-PD polygon
 - `WingAxis` is computed once per specimen by `models/wing_axis.py:compute_wing_axis()` from the anchored alula notch → DTip landmarks; if either landmark is missing the resolver degrades gracefully and deferred polygons fall through to `_check_merged()`
 - `_detect_absorbed_merges()` then labels remaining polygons with fused (`"A + B"`) names, and `_absorb_ectopic_fragments()` sweeps stray fragments into their best-matching neighbor
+- **N-way merge detection**: `_check_merged()` delegates to `_enumerate_merge_candidates()`, which brute-forces over all connected subsets of the region adjacency graph (derived once from `topology.VEIN_BOUNDARIES` into `_REGION_ADJACENCY` / `_REGION_EDGE_SEPARATOR`). A candidate is a connected subset whose merged expected vein set — the union of per-region expected veins minus the internal separators of the subset — is a subset of the polygon's detected veins. Scoring prefers max `len(merged_expected)` (specificity), then smallest subset size (avoid overclaiming), then AP-ordered region tuple for determinism. This handles 3+ region merges like `marginal + submarginal + 1st posterior` when both L2 and L3 are absent, which the old pair-only detector could not see. `PipelineConfig.max_merge_size` caps the search depth (default `None` = no cap)
 
 ### Step 7: Complete Partial Veins & Split Merged Regions — TODO
 
