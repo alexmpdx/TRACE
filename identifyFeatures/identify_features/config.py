@@ -93,6 +93,12 @@ class PipelineConfig:
     vein_buffer_px: float = 25.0
     adjacency_min_length_px: float = 30.0
 
+    # -- Intervein splitter (morphological open-under-constraint) --
+    intervein_split_erode_um: float = 100.0  # Erosion radius for breaking weak classifier bridges
+    intervein_split_reseed_min_area_um2: float = 10_000.0  # Reseed threshold for large absorbed regions
+    intervein_split_vein_barrier_vw: float = 1.0  # Vein centerline buffer radius (× median vein width)
+    intervein_split_wing_buffer_vw: float = 1.0  # Wing outline inset (× median vein width)
+
     # -- Ectopic detection --
     ectopic_min_length_px: float = 50.0
 

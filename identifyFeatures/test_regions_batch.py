@@ -13,6 +13,7 @@ from identify_features.models.geojson_io import (
     load_landmarks_geojson,
 )
 from identify_features.models.intervein_namer import name_intervein_regions
+from identify_features.models.intervein_splitter import split_merged_intervein_polygons
 from identify_features.models.landmark_anchor import anchor_landmarks
 from identify_features.models.skeleton import build_skeleton_graph
 from identify_features.models.topology import REGION_COLORS, VEIN_COLORS
@@ -126,6 +127,14 @@ def main():
             anchor_landmarks(skel, landmarks, config)
             wing_axis = compute_wing_axis(landmarks)
             veins = trace_veins_from_landmarks(skel, landmarks, wing_outline, config, wing_axis=wing_axis)
+            intervein_polys = split_merged_intervein_polygons(
+                intervein_polys,
+                veins,
+                wing_outline,
+                image_shape,
+                skel.median_vein_width_px,
+                config,
+            )
             regions = name_intervein_regions(
                 intervein_polys,
                 veins,
