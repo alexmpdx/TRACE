@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 from identify_features.config import PipelineConfig
 from identify_features.controllers.pipeline import identify_wing
+from identify_features.views.csv_export import export_csv
 from identify_features.views.geojson_export import export_geojson
 from identify_features.views.overlay import render_overlay_to_file
 
@@ -57,8 +58,16 @@ def _process_one(args_tuple):
 
         result = identify_wing(det_path, lm_path, img_path, config=config, specimen_id=stem)
 
-        out_path = output_dir / f"{stem}_output.geojson"
-        export_geojson(result.veins, result.intervein_regions, out_path, um_per_px=config.um_per_px)
+        export_geojson(
+            result.veins, result.intervein_regions, output_dir / f"{stem}_output.geojson", um_per_px=config.um_per_px
+        )
+        export_csv(
+            result.veins,
+            result.intervein_regions,
+            output_dir / f"{stem}_measurements.csv",
+            um_per_px=config.um_per_px,
+            specimen_id=stem,
+        )
 
         if overlay and img_path is not None:
             base_img = cv2.imread(str(img_path))
@@ -161,6 +170,16 @@ def _run_single(args):
 
     out_path = args.output_dir / f"{result.specimen_id}_output.geojson"
     export_geojson(result.veins, result.intervein_regions, out_path, um_per_px=config.um_per_px)
+
+    csv_path = args.output_dir / f"{result.specimen_id}_measurements.csv"
+    export_csv(
+        result.veins,
+        result.intervein_regions,
+        csv_path,
+        um_per_px=config.um_per_px,
+        specimen_id=result.specimen_id,
+    )
+    print(f"CSV: {csv_path}")
 
     if args.overlay and args.image is not None:
         base_img = cv2.imread(str(args.image))
