@@ -57,8 +57,8 @@ identifyFeatures/
     pipeline_reference.md            # Comprehensive pipeline documentation
     project_plan.md                  # This file
   identify_features/
-    __init__.py                      # [TODO] Public API: identify_wing()
-    cli.py                           # [TODO] CLI entry point
+    __init__.py
+    cli.py                           # [DONE] CLI entry point (single + batch)
     config.py                        # [DONE] PipelineConfig dataclass + defaults
 
     models/
@@ -79,7 +79,7 @@ identifyFeatures/
 
     controllers/
       __init__.py
-      pipeline.py                    # [TODO] Main orchestrator: identify_wing()
+      pipeline.py                    # [DONE] Main orchestrator: identify_wing()
 
     views/
       __init__.py
@@ -242,25 +242,22 @@ Buffers each vein's centerline by `median_vein_width_px × intervein_split_vein_
 
 ## Remaining Infrastructure
 
-### CLI (`cli.py`) — TODO
+### CLI (`cli.py`) — DONE
 
 ```
 identify-features <detection_geojson> <landmarks_geojson> [image]
-    --output-dir DIR              Output directory [default: ./output]
+    --output-dir DIR, -o          Output directory [default: ./output]
     --um-per-px FLOAT             Microns per pixel [default: 0.483]
-    --skeleton-method METHOD      ridge|medial-axis|voronoi|boundary-smooth
-    --snap-radius-um FLOAT        Landmark snap radius in µm [default: 100]
-    --smooth-sigma FLOAT          Boundary smoothing sigma [default: 2.0]
     --batch                       Batch mode: args are directories
-    --no-overlay                  Skip overlay image generation
-    --verbose                     Increase logging
+    --workers N                   Parallel workers for batch mode
+    --verbose, -v                 Increase logging
 ```
 
 Entry point defined in pyproject.toml: `identify-features = "identify_features.cli:main"`
 
-### Pipeline Controller (`controllers/pipeline.py`) — TODO
+### Pipeline Controller (`controllers/pipeline.py`) — DONE
 
-Orchestrates Steps 1–10 into a single `identify_wing()` function. This becomes the public API.
+`identify_wing()` orchestrates Steps 1–6 (parse → skeleton → anchor → trace → tissue assign → split → name) into a single function returning `WingResult`.
 
 ### Views — PARTIAL
 
@@ -368,14 +365,14 @@ Single source of truth for wing vein biology:
 
 The core pipeline and evaluation are complete. Remaining work:
 
-1. **`controllers/pipeline.py`** — Orchestrate all steps into `identify_wing()` public API.
-2. **`cli.py`** — CLI entry point (single + batch mode).
-3. **`views/overlay.py`** — Extract overlay rendering from test scripts into a proper module.
-4. **`views/csv_export.py`** — Measurements CSV export.
-5. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 works.
-6. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
+1. **`views/overlay.py`** — Extract overlay rendering from test scripts into a proper module.
+2. **`views/csv_export.py`** — Measurements CSV export.
+3. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 works.
+4. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
 
 **Done (this round):**
+- ~~`controllers/pipeline.py`~~ — `identify_wing()` orchestrator
+- ~~`cli.py`~~ — CLI entry point (single + batch mode, parallel processing)
 - ~~`views/geojson_export.py`~~ — GeoJSON export in GT_naming format
 - ~~`test_evaluate.py`~~ — IoU evaluation (mean region IoU 0.91, mean vein IoU 0.61, 98.8% detection)
 - ~~Ectopic vein flagging~~ — Phase 4d in vein_tracer

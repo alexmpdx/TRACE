@@ -45,8 +45,22 @@ Landmarks GeoJSON ──┘
                               [Vein Labeling] ─→ edge_labels: {(u,v): "L3", ...}
                                               │
                                               ▼
-                                [Output] ─→ list[VeinIdentification]
+                      [Tissue Polygon Assignment] ─→ buffered centerlines clipped to wing
+                                              │
+                                              ▼
+                      [Intervein Polygon Splitting] ─→ split fused regions via watershed
+                                              │
+                                              ▼
+                      [Intervein Region Naming] ─→ 7 named regions by vein adjacency
+                                              │
+                                              ▼
+                                [Output] ─→ WingResult (veins + regions + GeoJSON)
 ```
+
+**Entry points:**
+- **CLI**: `identify-features <det.geojson> <lm.geojson> [image] -o output/`
+- **Batch**: `identify-features --batch <det_dir> <lm_dir> [img_dir] -o output/`
+- **Python API**: `from identify_features.controllers.pipeline import identify_wing`
 
 ### The 10 canonical veins
 
