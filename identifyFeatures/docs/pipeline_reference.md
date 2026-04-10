@@ -1200,6 +1200,21 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 - `properties.classification.color`: RGB array from `VEIN_COLORS` / `REGION_COLORS`
 - `properties.measurements`: area in pixels, area in µm² (if `um_per_px` provided), vein length in pixels/µm
 
+### 6.4 CSV export
+
+**Source**: `views/csv_export.py`
+
+**Two formats** depending on mode:
+
+**Single mode** (`export_csv()`): Long format, one row per feature. Columns: `specimen`, `feature`, `category`, `type`, `status`, `area_px`, `area_um2`, `length_px`, `length_um`. Includes wing-level measurements (wing area, wing length, crossvein distance) as rows with `category: "wing"`.
+
+**Batch mode** (`export_csv_batch()`): Wide format, one row per specimen. All measurements as columns in canonical AP order. Wing-level columns first (`wing area_px`, `wing area_um2`, `wing length_px`, `wing length_um`, `crossvein distance_px`, `crossvein distance_um`), then per-vein length columns, then per-region area columns. Ectopic veins are omitted from the wide format.
+
+**Wing-level measurements**:
+- **Wing area**: `wing_outline.area` (union of all detection polygons)
+- **Wing length**: Euclidean distance between landmarks L1-Rs and DTip
+- **Crossvein distance**: Euclidean distance between landmarks ACV.p and PCV.a
+
 ---
 
 ## 7. Parameter Reference

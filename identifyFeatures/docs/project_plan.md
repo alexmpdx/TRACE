@@ -262,7 +262,7 @@ Entry point defined in pyproject.toml: `identify-features = "identify_features.c
 
 - `views/geojson_export.py` — DONE: Export in GT_naming format
 - `views/overlay.py` — DONE: Render veins + regions color overlay (used by CLI `--overlay` and test scripts)
-- `views/csv_export.py` — DONE: Export measurements CSV (area, length, bounding veins)
+- `views/csv_export.py` — DONE: Export measurements CSV. Single mode: long format (one row per feature). Batch mode: wide format (one row per specimen). Wing-level measurements: wing area, wing length (L1-Rs↔DTip), crossvein distance (ACV.p↔PCV.a).
 
 ### Tests — PARTIAL
 
@@ -372,7 +372,7 @@ The core pipeline and evaluation are complete. Remaining work:
 - ~~`cli.py`~~ — CLI entry point (single + batch mode, parallel processing, `--overlay`)
 - ~~`views/geojson_export.py`~~ — GeoJSON export in GT_naming format
 - ~~`views/overlay.py`~~ — Render veins + regions color overlay
-- ~~`views/csv_export.py`~~ — Measurements CSV (area, length, bounding veins)
+- ~~`views/csv_export.py`~~ — Measurements CSV (long format single, wide format batch, wing-level measurements)
 - ~~`test_evaluate.py`~~ — IoU evaluation (mean region IoU 0.91, mean vein IoU 0.61, 98.8% detection)
 - ~~Ectopic vein flagging~~ — Phase 4d in vein_tracer
 - ~~Vein tissue polygon assignment~~ — `assign_vein_tissue_polygons()` in intervein_splitter
