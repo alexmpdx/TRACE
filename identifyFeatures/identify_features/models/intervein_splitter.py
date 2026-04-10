@@ -280,3 +280,35 @@ def _write_debug_overlay(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), canvas)
     logger.info("Intervein splitter debug overlay → %s", out_path)
+
+
+def assign_vein_tissue_polygons(
+    veins: list[VeinIdentification],
+    median_vein_width_px: float,
+    config: PipelineConfig,
+    wing_outline: Optional[Polygon] = None,
+) -> None:
+    """Populate tissue_polygon on each vein by buffering its centerline.
+
+    Uses the same buffer radius as the intervein splitter barrier mask
+    (``median_vein_width_px * config.intervein_split_vein_barrier_vw``),
+    clipped to the wing outline.
+    """
+    buffer_px = max(1, round(median_vein_width_px * config.intervein_split_vein_barrier_vw))
+    for v in veins:
+        if v.centerline is None:
+            continue
+        tissue = v.centerline.buffer(buffer_px)
+        if wing_outline is not None:
+            tissue = tissue.intersection(wing_outline)
+        if tissue.is_empty:
+            continue
+        if isinstance(tissue, MultiPolygon):
+            tissue = max(tissue.geoms, key=lambda g: g.area)
+        v.tissue_polygon = tissue
+    logger.info(
+        "Assigned tissue polygons to %d/%d veins (buffer=%dpx)",
+        sum(1 for v in veins if v.tissue_polygon is not None),
+        len(veins),
+        buffer_px,
+    )

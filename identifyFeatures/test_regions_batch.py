@@ -16,12 +16,16 @@ from identify_features.models.geojson_io import (
     load_landmarks_geojson,
 )
 from identify_features.models.intervein_namer import name_intervein_regions
-from identify_features.models.intervein_splitter import split_merged_intervein_polygons
+from identify_features.models.intervein_splitter import (
+    assign_vein_tissue_polygons,
+    split_merged_intervein_polygons,
+)
 from identify_features.models.landmark_anchor import anchor_landmarks
 from identify_features.models.skeleton import build_skeleton_graph
 from identify_features.models.topology import REGION_COLORS, VEIN_COLORS
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
+from identify_features.views.geojson_export import export_geojson
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -80,14 +84,25 @@ def render_overlay(stem, img_path, veins, regions):
     # Blend regions
     img_out = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
 
-    # Draw vein centerlines
+    # Draw vein tissue polygons as semi-transparent fills
+    vein_overlay = img_out.copy()
+    for v in veins:
+        if v.tissue_polygon is None:
+            continue
+        rgb = VEIN_COLORS.get(v.vein_id, [128, 128, 128])
+        bgr = (rgb[2], rgb[1], rgb[0])
+        coords = np.array(v.tissue_polygon.exterior.coords, dtype=np.int32)
+        cv2.fillPoly(vein_overlay, [coords], bgr)
+    img_out = cv2.addWeighted(vein_overlay, 0.5, img_out, 0.5, 0)
+
+    # Draw vein centerlines on top
     for v in veins:
         if v.centerline is None:
             continue
         rgb = VEIN_COLORS.get(v.vein_id, [128, 128, 128])
         bgr = (rgb[2], rgb[1], rgb[0])
         pts = np.array(v.centerline.coords, dtype=np.int32)
-        cv2.polylines(img_out, [pts], False, bgr, 3)
+        cv2.polylines(img_out, [pts], False, bgr, 2)
 
     # Add region labels
     for r in regions:
@@ -126,6 +141,7 @@ def process_one_specimen(stem, det_path, lm_path, img_path):
         anchor_landmarks(skel, landmarks, config)
         wing_axis = compute_wing_axis(landmarks)
         veins = trace_veins_from_landmarks(skel, landmarks, wing_outline, config, wing_axis=wing_axis)
+        assign_vein_tissue_polygons(veins, skel.median_vein_width_px, config, wing_outline)
         intervein_polys = split_merged_intervein_polygons(
             intervein_polys,
             veins,
@@ -149,6 +165,7 @@ def process_one_specimen(stem, det_path, lm_path, img_path):
         l6_found = any(v.vein_id == "L6" for v in veins if v.centerline is not None)
 
         render_overlay(stem, img_path, veins, regions)
+        export_geojson(veins, regions, VIZ_OUT / f"{stem}_output.geojson", um_per_px=config.um_per_px)
 
         line = f"{stem}: {len(regions)}/7 regions"
         if merged:

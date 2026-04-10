@@ -28,17 +28,19 @@ Landmark-anchored replacement for WingVeinAnalyzer. Vein identity flows outward 
 
 **Outputs (current):**
 - Named vein centerlines (LineStrings) with VeinIdentification metadata
+- Named vein tissue polygons (buffered centerlines clipped to wing outline)
+- Named intervein region polygons (from splitter + namer)
+- Ectopic veins (EV1, EV2, ...) with centerlines and tissue polygons
+- 7 named intervein regions (30/30 specimens, 7/7 regions)
 
 **Outputs (planned, not yet implemented):**
-- Named vein tissue polygons
-- Named intervein region polygons
 - GeoJSON matching GT_naming format: `{classification: {name: "...", color: [...]}}`
 - Measurements CSV
-- Overlay images
+- Overlay images (formal pipeline — test scripts already generate them)
 
-**Features identified (current):** costa, L1, L2, L3, L4, L5, L6, Rs, ACV, PCV
+**Features identified (current):** costa, L1, L2, L3, L4, L5, L6, Rs, ACV, PCV, EV1-N, 7 intervein regions
 
-**Features planned:** 8 intervein regions, ectopic veins, confidence scores
+**Features planned:** confidence scores
 
 **Test data:** 30 specimens across 4 genotypes (CTRL ×9, BMP ×6, PknCG736 ×10, en-PknRNAi ×5), with GT_naming ground truth
 
@@ -213,13 +215,11 @@ For each intervein polygon from the detection GeoJSON (after the splitter has pr
 
 **Note:** The previous WingVeinAnalyzer had `partition_by_vein_extension()` and `_clip_regions_by_extension()` that implemented vein-extension-based region splitting. This logic can be adapted.
 
-### Step 8: Flag Ectopic Veins — TODO
+### Step 8: Flag Ectopic Veins — DONE
 
-After all canonical veins identified:
-- Collect unassigned skeleton edges, merge connected components
-- Filter short fragments (< 50px) as noise
-- Long unassigned paths → flag as ectopic veins (EV1, EV2, ...)
-- Record position, connectivity, orientation for each
+**File:** `models/vein_tracer.py`, Phase 4d
+
+After all canonical veins identified, every still-unlabeled edge is promoted to an ectopic vein label. Each connected component of unlabeled edges becomes one EV<N> (`EV1`, `EV2`, ...) materialized as a `VeinIdentification` with `status=ECTOPIC`. Short fragments below `ectopic_min_length_px` (default 50px) are filtered as noise.
 
 ### Step 9: Score Confidence — TODO
 
@@ -230,12 +230,11 @@ Multi-factor scoring (0.0–1.0) for every identification:
 - **Crossveins:** connectivity to expected longitudinals, orientation, length, position
 - **Regions:** all bounding veins identified, area within range, AP position correct
 
-### Step 10: Assign Vein Tissue Polygons — TODO
+### Step 10: Assign Vein Tissue Polygons — DONE
 
-Map skeleton-identified vein centerlines back to the original vein tissue polygons:
-- For each vein polygon from detection GeoJSON, determine which named centerlines pass through it
-- If a single vein polygon contains multiple named veins (likely — vein tissue is often one connected mass), partition using centerlines as guides
-- Output named vein polygons alongside centerlines
+**File:** `models/intervein_splitter.py`, function `assign_vein_tissue_polygons()`
+
+Buffers each vein's centerline by `median_vein_width_px × intervein_split_vein_barrier_vw` (same radius as the intervein splitter barrier mask), clips to the wing outline, and assigns to `VeinIdentification.tissue_polygon`. All veins with centerlines get tissue polygons, including L6 and ectopic veins.
 
 ---
 

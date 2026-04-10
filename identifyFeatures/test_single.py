@@ -13,12 +13,16 @@ from identify_features.models.geojson_io import (
     load_landmarks_geojson,
 )
 from identify_features.models.intervein_namer import name_intervein_regions
-from identify_features.models.intervein_splitter import split_merged_intervein_polygons
+from identify_features.models.intervein_splitter import (
+    assign_vein_tissue_polygons,
+    split_merged_intervein_polygons,
+)
 from identify_features.models.landmark_anchor import anchor_landmarks
 from identify_features.models.skeleton import build_skeleton_graph
 from identify_features.models.topology import REGION_COLORS, VEIN_COLORS
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
+from identify_features.views.geojson_export import export_geojson
 
 logging.basicConfig(level=logging.INFO)
 
@@ -51,6 +55,8 @@ print(f"\nVein tracer output ({len(veins)} entries):")
 for v in veins:
     length_str = f"{v.centerline.length:.0f}px" if v.centerline is not None else "no centerline"
     print(f"  {v.vein_id:8s} status={v.status.value:12s} type={v.vein_type.value:12s} {length_str}")
+
+assign_vein_tissue_polygons(veins, skel.median_vein_width_px, config, wing_outline)
 
 VIZ_OUT = BASE / "viz_output"
 VIZ_OUT.mkdir(exist_ok=True)
@@ -91,16 +97,30 @@ for r in regions:
     coords = np.array(r.polygon.exterior.coords, dtype=np.int32)
     cv2.fillPoly(overlay, [coords], bgr)
 img_out = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
+# Draw vein tissue polygons as semi-transparent fills
+vein_overlay = img_out.copy()
+for v in veins:
+    if v.tissue_polygon is None:
+        continue
+    if v.vein_id.startswith("EV"):
+        bgr = (255, 0, 255)
+    else:
+        rgb = VEIN_COLORS.get(v.vein_id, [128, 128, 128])
+        bgr = (rgb[2], rgb[1], rgb[0])
+    coords = np.array(v.tissue_polygon.exterior.coords, dtype=np.int32)
+    cv2.fillPoly(vein_overlay, [coords], bgr)
+img_out = cv2.addWeighted(vein_overlay, 0.5, img_out, 0.5, 0)
+# Draw vein centerlines on top
 for v in veins:
     if v.centerline is None:
         continue
     if v.vein_id.startswith("EV"):
-        bgr = (255, 0, 255)  # magenta for ectopic
+        bgr = (255, 0, 255)
     else:
         rgb = VEIN_COLORS.get(v.vein_id, [128, 128, 128])
         bgr = (rgb[2], rgb[1], rgb[0])
     pts = np.array(v.centerline.coords, dtype=np.int32)
-    cv2.polylines(img_out, [pts], False, bgr, 10)
+    cv2.polylines(img_out, [pts], False, bgr, 3)
     if v.vein_id.startswith("EV"):
         mx, my = int(v.centerline.centroid.x), int(v.centerline.centroid.y)
         cv2.putText(img_out, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 12)
@@ -125,3 +145,8 @@ for r in regions:
 out_path = VIZ_OUT / f"{stem}_regions.png"
 cv2.imwrite(str(out_path), img_out)
 print(f"\nOverlay saved: {out_path}")
+
+# Export GeoJSON
+geojson_path = VIZ_OUT / f"{stem}_output.geojson"
+export_geojson(veins, regions, geojson_path, um_per_px=config.um_per_px)
+print(f"GeoJSON saved: {geojson_path}")
