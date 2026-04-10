@@ -18,7 +18,7 @@ from pathlib import Path
 import cv2
 from identify_features.config import PipelineConfig
 from identify_features.controllers.pipeline import identify_wing
-from identify_features.views.csv_export import export_csv
+from identify_features.views.csv_export import export_csv, export_csv_batch
 from identify_features.views.geojson_export import export_geojson
 from identify_features.views.overlay import render_overlay_to_file
 
@@ -61,13 +61,6 @@ def _process_one(args_tuple):
         export_geojson(
             result.veins, result.intervein_regions, output_dir / f"{stem}_output.geojson", um_per_px=config.um_per_px
         )
-        export_csv(
-            result.veins,
-            result.intervein_regions,
-            output_dir / f"{stem}_measurements.csv",
-            um_per_px=config.um_per_px,
-            specimen_id=stem,
-        )
 
         if overlay and img_path is not None:
             base_img = cv2.imread(str(img_path))
@@ -78,9 +71,9 @@ def _process_one(args_tuple):
 
         n_veins = sum(1 for v in result.veins if v.centerline is not None)
         n_regions = len(result.intervein_regions)
-        return stem, True, f"{stem}: {n_veins} veins, {n_regions}/7 regions"
+        return stem, True, f"{stem}: {n_veins} veins, {n_regions}/7 regions", result
     except Exception as e:
-        return stem, False, f"{stem}: ERROR — {e}"
+        return stem, False, f"{stem}: ERROR — {e}", None
 
 
 def main():
@@ -178,6 +171,7 @@ def _run_single(args):
         csv_path,
         um_per_px=config.um_per_px,
         specimen_id=result.specimen_id,
+        wing_result=result,
     )
     print(f"CSV: {csv_path}")
 
@@ -222,12 +216,20 @@ def _run_batch(args):
     print(f"Completed in {elapsed:.0f}s ({elapsed / 60:.1f} min)\n")
 
     successes = 0
-    for stem, ok, line in results:
+    csv_rows = []
+    for stem, ok, line, wing_result in results:
         print(line)
         if ok:
             successes += 1
+            csv_rows.append((stem, wing_result))
 
-    print(f"\n{successes}/{len(results)} succeeded")
+    # Write combined measurements CSV
+    um = args.um_per_px if args.um_per_px is not None else PipelineConfig().um_per_px
+    csv_path = args.output_dir / "measurements.csv"
+    export_csv_batch(csv_rows, csv_path, um_per_px=um)
+    print(f"\nCSV: {csv_path}")
+
+    print(f"{successes}/{len(results)} succeeded")
     print(f"Output directory: {args.output_dir}")
 
 
