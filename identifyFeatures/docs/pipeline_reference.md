@@ -1122,19 +1122,69 @@ This correctly handles 3+ region fusions that pair-only detection missed, e.g. `
 
 ---
 
+## 5.7. Vein Tissue Polygon Assignment
+
+**Source**: `models/intervein_splitter.py`, function `assign_vein_tissue_polygons()`
+
+**What**: Populates `VeinIdentification.tissue_polygon` on every vein that has a centerline, by buffering the centerline to tissue width and clipping to the wing outline.
+
+**Why**: Downstream GeoJSON export and overlay rendering need filled polygons representing vein tissue, not just centerlines. The buffer radius is the same as the intervein splitter barrier mask (`median_vein_width_px × intervein_split_vein_barrier_vw`), ensuring geometric consistency between vein tissue boundaries and intervein region boundaries.
+
+**Algorithm**:
+```
+buffer_px = round(median_vein_width_px × config.intervein_split_vein_barrier_vw)
+for each vein with a centerline:
+    tissue = centerline.buffer(buffer_px)
+    tissue = tissue.intersection(wing_outline)  # clip to wing
+    if MultiPolygon: keep largest piece
+    vein.tissue_polygon = tissue
+```
+
+**Scope**: All veins with centerlines get tissue polygons — including L6 and ectopic veins (EV*). Veins with no centerline (e.g., `status=ABSENT`) are skipped.
+
+---
+
 ## 6. Output
 
-Each run produces a `list[VeinIdentification]` with 10 entries (one per canonical vein):
+### 6.1 VeinIdentification objects
+
+Each run produces a `list[VeinIdentification]` — one per canonical vein plus any ectopic veins (EV1, EV2, ...):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `vein_id` | str | "L1", "L2", ..., "costa", "ACV", etc. |
+| `vein_id` | str | "L1", "L2", ..., "costa", "ACV", "EV1", etc. |
 | `vein_type` | VeinType | LONGITUDINAL, CROSSVEIN, COSTA, RADIAL_SECTOR |
-| `status` | VeinStatus | IDENTIFIED (always, for now) |
+| `status` | VeinStatus | IDENTIFIED, ECTOPIC, ABSENT |
 | `centerline` | LineString | Merged centerline geometry |
+| `tissue_polygon` | Polygon | Buffered centerline clipped to wing outline |
 | `edge_ids` | list[int] | Graph edge IDs comprising this vein |
 | `length_px` | float | Total length in pixels |
 | `evidence` | list[str] | How the vein was identified (e.g., "3 edges") |
+
+### 6.2 InterveinRegion objects
+
+The naming stage produces a `list[InterveinRegion]` with 7 entries (one per canonical region):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | str | "marginal", "submarginal", "1st basal", etc. |
+| `polygon` | Polygon | Region boundary |
+| `area_px2` | float | Area in pixels² |
+| `bounding_veins` | set[str] | Veins adjacent to this region |
+| `status` | str | "identified", "merged", "inferred" |
+
+### 6.3 GeoJSON export (GT_naming format)
+
+**Source**: `views/geojson_export.py`, function `export_geojson()`
+
+**What**: Writes veins and regions as a GeoJSON FeatureCollection matching the GT_naming annotation format used by QuPath and ground-truth files.
+
+**Format**: Each feature has:
+- `geometry`: Polygon (tissue polygon for veins, region polygon for regions)
+- `properties.objectType`: `"annotation"`
+- `properties.classification.name`: feature name (e.g., "L3", "discal")
+- `properties.classification.color`: RGB array from `VEIN_COLORS` / `REGION_COLORS`
+- `properties.measurements`: area in pixels, area in µm² (if `um_per_px` provided), vein length in pixels/µm
 
 ---
 

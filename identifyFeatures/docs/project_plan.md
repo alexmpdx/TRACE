@@ -34,9 +34,11 @@ Landmark-anchored replacement for WingVeinAnalyzer. Vein identity flows outward 
 - 7 named intervein regions (30/30 specimens, 7/7 regions)
 
 **Outputs (planned, not yet implemented):**
-- GeoJSON matching GT_naming format: `{classification: {name: "...", color: [...]}}`
 - Measurements CSV
 - Overlay images (formal pipeline — test scripts already generate them)
+
+**Outputs (done):**
+- GeoJSON export in GT_naming format (`views/geojson_export.py`): FeatureCollection with `classification: {name, color}` and area/length measurements
 
 **Features identified (current):** costa, L1, L2, L3, L4, L5, L6, Rs, ACV, PCV, EV1-N, 7 intervein regions
 
