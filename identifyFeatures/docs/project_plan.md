@@ -34,8 +34,7 @@ Landmark-anchored replacement for WingVeinAnalyzer. Vein identity flows outward 
 - 7 named intervein regions (30/30 specimens, 7/7 regions)
 
 **Outputs (planned, not yet implemented):**
-- Measurements CSV
-- Overlay images (formal pipeline — test scripts already generate them)
+- (none — all output formats implemented)
 
 **Outputs (done):**
 - GeoJSON export in GT_naming format (`views/geojson_export.py`): FeatureCollection with `classification: {name, color}` and area/length measurements
@@ -85,7 +84,7 @@ identifyFeatures/
       __init__.py
       overlay.py                     # [DONE] Render veins + regions color overlay
       geojson_export.py              # [DONE] Export named features as GeoJSON
-      csv_export.py                  # [TODO] Export measurements CSV
+      csv_export.py                  # [DONE] Export measurements CSV
 
     utils/
       __init__.py
@@ -263,7 +262,7 @@ Entry point defined in pyproject.toml: `identify-features = "identify_features.c
 
 - `views/geojson_export.py` — DONE: Export in GT_naming format
 - `views/overlay.py` — DONE: Render veins + regions color overlay (used by CLI `--overlay` and test scripts)
-- `views/csv_export.py` — TODO: Export measurements table
+- `views/csv_export.py` — DONE: Export measurements CSV (area, length, bounding veins)
 
 ### Tests — PARTIAL
 
@@ -365,15 +364,15 @@ Single source of truth for wing vein biology:
 
 The core pipeline and evaluation are complete. Remaining work:
 
-1. **`views/csv_export.py`** — Measurements CSV export.
-2. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 works.
-3. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
+1. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 works.
+2. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
 
 **Done (this round):**
 - ~~`controllers/pipeline.py`~~ — `identify_wing()` orchestrator
 - ~~`cli.py`~~ — CLI entry point (single + batch mode, parallel processing, `--overlay`)
 - ~~`views/geojson_export.py`~~ — GeoJSON export in GT_naming format
 - ~~`views/overlay.py`~~ — Render veins + regions color overlay
+- ~~`views/csv_export.py`~~ — Measurements CSV (area, length, bounding veins)
 - ~~`test_evaluate.py`~~ — IoU evaluation (mean region IoU 0.91, mean vein IoU 0.61, 98.8% detection)
 - ~~Ectopic vein flagging~~ — Phase 4d in vein_tracer
 - ~~Vein tissue polygon assignment~~ — `assign_vein_tissue_polygons()` in intervein_splitter
