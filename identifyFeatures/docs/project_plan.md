@@ -84,7 +84,7 @@ identifyFeatures/
     views/
       __init__.py
       overlay.py                     # [TODO] Render skeleton + rainbow overlays
-      geojson_export.py              # [TODO] Export named features as GeoJSON
+      geojson_export.py              # [DONE] Export named features as GeoJSON
       csv_export.py                  # [TODO] Export measurements CSV
 
     utils/
@@ -94,7 +94,7 @@ identifyFeatures/
       image_utils.py                 # [DONE] Image loading, mask rasterization
 
   tests/
-    test_evaluate.py                 # [TODO] IoU evaluation against GT_naming
+    test_evaluate.py                 # [DONE] IoU evaluation against GT_naming (in project root)
 ```
 
 ---
@@ -262,16 +262,16 @@ Entry point defined in pyproject.toml: `identify-features = "identify_features.c
 
 Orchestrates Steps 1–10 into a single `identify_wing()` function. This becomes the public API.
 
-### Views — TODO
+### Views — PARTIAL
 
-- `views/overlay.py` — Render named veins + regions on wing image
-- `views/geojson_export.py` — Export in GT_naming format
-- `views/csv_export.py` — Export measurements table
+- `views/geojson_export.py` — DONE: Export in GT_naming format
+- `views/overlay.py` — TODO: Render named veins + regions on wing image (test scripts have working overlay code)
+- `views/csv_export.py` — TODO: Export measurements table
 
-### Tests — TODO
+### Tests — PARTIAL
 
-- `tests/test_evaluate.py` — IoU evaluation against GT_naming ground truth
-- Automated regression tests for 30/30 specimen suite
+- `test_evaluate.py` — DONE: IoU evaluation against GT_naming ground truth (25 specimens, mean region IoU 0.91, mean vein IoU 0.61, 98.8% detection rate at threshold 0.5)
+- Automated regression tests for 30/30 specimen suite — partially done via `test_regions_batch.py`
 
 ---
 
@@ -366,31 +366,27 @@ Single source of truth for wing vein biology:
 
 ## Implementation Order (remaining work)
 
-The core vein identification pipeline is complete. Remaining work is output-facing:
+The core pipeline and evaluation are complete. Remaining work:
 
-1. **`controllers/pipeline.py`** — Orchestrate Steps 1–6 into `identify_wing()`. Wire up the existing model functions (including `compute_wing_axis` and `name_intervein_regions`) into a clean public API.
+1. **`controllers/pipeline.py`** — Orchestrate all steps into `identify_wing()` public API.
+2. **`cli.py`** — CLI entry point (single + batch mode).
+3. **`views/overlay.py`** — Extract overlay rendering from test scripts into a proper module.
+4. **`views/csv_export.py`** — Measurements CSV export.
+5. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 works.
+6. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
 
-2. **`views/geojson_export.py`** — Export named veins + regions as GeoJSON in GT_naming format.
-
-3. **`views/overlay.py`** — Render named veins + regions on wing image with color coding.
-
-4. **`cli.py`** — Wire up the CLI entry point. Support single-specimen and batch modes.
-
-5. **`tests/test_evaluate.py`** — IoU evaluation against GT_naming ground truth. Automated regression suite.
-
-6. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 already works.
-
-7. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
-
-8. **Ectopic vein flagging** — Flag long unassigned edges as ectopic. Lower priority for wildtype, important for mutants.
-
-9. **Vein tissue polygon assignment** — Partition vein tissue polygons by named centerlines. Lower priority.
+**Done (this round):**
+- ~~`views/geojson_export.py`~~ — GeoJSON export in GT_naming format
+- ~~`test_evaluate.py`~~ — IoU evaluation (mean region IoU 0.91, mean vein IoU 0.61, 98.8% detection)
+- ~~Ectopic vein flagging~~ — Phase 4d in vein_tracer
+- ~~Vein tissue polygon assignment~~ — `assign_vein_tissue_polygons()` in intervein_splitter
 
 ---
 
 ## Verification
 
-1. Run on all 30 specimens — expect 10/10 veins per specimen (currently passing)
-2. Compare output GeoJSON against GT_naming via IoU per feature
+1. Run on all 30 specimens — expect 10/10 veins, 7/7 regions per specimen (currently passing)
+2. IoU evaluation: `python test_evaluate.py` — 25 specimens, mean region IoU 0.91, 98.8% detection rate
 3. Visually inspect overlays for correct vein tracing
 4. Run on mutant specimens (en-PknRNAi) — verify graceful handling of missing/ectopic veins
+5. Known issue: specimen `-CTRL_PknRNAi_108870_0003` has 2nd/3rd posterior swapped vs GT (cross-IoU 0.96)
