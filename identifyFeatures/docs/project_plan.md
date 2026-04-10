@@ -83,7 +83,7 @@ identifyFeatures/
 
     views/
       __init__.py
-      overlay.py                     # [TODO] Render skeleton + rainbow overlays
+      overlay.py                     # [DONE] Render veins + regions color overlay
       geojson_export.py              # [DONE] Export named features as GeoJSON
       csv_export.py                  # [TODO] Export measurements CSV
 
@@ -262,7 +262,7 @@ Entry point defined in pyproject.toml: `identify-features = "identify_features.c
 ### Views — PARTIAL
 
 - `views/geojson_export.py` — DONE: Export in GT_naming format
-- `views/overlay.py` — TODO: Render named veins + regions on wing image (test scripts have working overlay code)
+- `views/overlay.py` — DONE: Render veins + regions color overlay (used by CLI `--overlay` and test scripts)
 - `views/csv_export.py` — TODO: Export measurements table
 
 ### Tests — PARTIAL
@@ -365,15 +365,15 @@ Single source of truth for wing vein biology:
 
 The core pipeline and evaluation are complete. Remaining work:
 
-1. **`views/overlay.py`** — Extract overlay rendering from test scripts into a proper module.
-2. **`views/csv_export.py`** — Measurements CSV export.
-3. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 works.
-4. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
+1. **`views/csv_export.py`** — Measurements CSV export.
+2. **`models/trajectory_completer.py`** — Extend partial veins, split merged regions. Lower priority since 30/30 works.
+3. **`models/confidence.py`** — Multi-factor confidence scoring. Lower priority.
 
 **Done (this round):**
 - ~~`controllers/pipeline.py`~~ — `identify_wing()` orchestrator
-- ~~`cli.py`~~ — CLI entry point (single + batch mode, parallel processing)
+- ~~`cli.py`~~ — CLI entry point (single + batch mode, parallel processing, `--overlay`)
 - ~~`views/geojson_export.py`~~ — GeoJSON export in GT_naming format
+- ~~`views/overlay.py`~~ — Render veins + regions color overlay
 - ~~`test_evaluate.py`~~ — IoU evaluation (mean region IoU 0.91, mean vein IoU 0.61, 98.8% detection)
 - ~~Ectopic vein flagging~~ — Phase 4d in vein_tracer
 - ~~Vein tissue polygon assignment~~ — `assign_vein_tissue_polygons()` in intervein_splitter
