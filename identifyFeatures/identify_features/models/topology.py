@@ -122,6 +122,20 @@ REGION_EXPECTED_VEINS: dict[str, set[str]] = {
     "3rd posterior": {"L5"},
 }
 
+
+def build_region_forbidden_veins(
+    expected: dict[str, set[str]] | None = None,
+) -> dict[str, set[str]]:
+    """Return forbidden = ALL_CANONICAL_VEINS - expected[R] for each region.
+
+    Parameterized on ``expected`` so callers can pass the runtime-augmented
+    effective_expected (e.g. 3rd posterior with L6 added).
+    """
+    src = expected if expected is not None else REGION_EXPECTED_VEINS
+    canonical = set(ALL_CANONICAL_VEINS)
+    return {region: canonical - veins for region, veins in src.items()}
+
+
 # Tied-region pairs ordered proximal → distal. Used by intervein_namer to
 # break ties when two candidate regions share an identical expected vein set.
 # The first element is proximal, the second is distal.

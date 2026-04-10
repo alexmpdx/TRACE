@@ -18,6 +18,7 @@ from identify_features.models.topology import (
     REGION_EXPECTED_VEINS,
     REGION_PD_PAIRS,
     VEIN_BOUNDARIES,
+    build_region_forbidden_veins,
 )
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
@@ -390,16 +391,12 @@ def _detect_absorbed_merges(
     results: list[InterveinRegion],
     effective_expected: dict[str, set[str]],
 ) -> None:
-    """Detect regions absorbed into a higher-specificity neighbor.
+    """Split duplicate-name polygons via forbidden-adjacency, falling back
+    to append-style merge naming when no split signal is available.
 
-    When a polygon matches a high-specificity region (e.g. discal with 3 veins)
-    but also contains a lower-specificity neighbor's veins (e.g. 3rd posterior
-    with 2 veins), the neighbor is missing from results. This pass detects
-    such absorptions by checking if any named region's bounding veins are a
-    superset of a missing region's expected veins, constrained to valid
-    adjacent pairs from the region adjacency graph.
+    Runs as a post-pass after all first-tier naming, tie resolution, and
+    per-polygon _check_merged() calls. Modifies ``results`` in place.
     """
-    # Collect all region names already found (including parts of merged names)
     found_names: set[str] = set()
     for r in results:
         for part in r.name.split(" + "):
@@ -409,8 +406,143 @@ def _detect_absorbed_merges(
     if not missing:
         return
 
-    # Adjacency lookup derived from topology.VEIN_BOUNDARIES
+    # --- Phase A: forbidden-adjacency split of duplicate names ---
+    forbidden = build_region_forbidden_veins(effective_expected)
+    changed = _split_duplicates_by_forbidden(results, missing, effective_expected, forbidden)
+
+    # Recompute found/missing after any splits
+    if changed:
+        found_names = set()
+        for r in results:
+            for part in r.name.split(" + "):
+                found_names.add(part)
+        missing = set(effective_expected.keys()) - found_names
+        if not missing:
+            return
+
+    # --- Phase B: legacy append-style fallback for anything still missing ---
+    _append_missing_to_neighbor(results, missing, effective_expected)
+
+    # Log final state
+    found_final: set[str] = set()
+    for r in results:
+        for part in r.name.split(" + "):
+            found_final.add(part)
+    still_missing = set(effective_expected.keys()) - found_final
+    if still_missing:
+        logger.info("Unresolved missing regions: %s", sorted(still_missing))
+
+
+def _split_duplicates_by_forbidden(
+    results: list[InterveinRegion],
+    missing: set[str],
+    effective_expected: dict[str, set[str]],
+    forbidden: dict[str, set[str]],
+) -> bool:
+    """For each duplicated canonical name, try to rename one of the
+    duplicates to a missing region via forbidden-adjacency.
+
+    A duplicate polygon is eligible for renaming if its bounding_veins
+    contains at least one vein that is forbidden for the name it currently
+    holds. The target missing region is chosen by best-matching expected
+    set against bounding_veins.
+
+    Returns True if any result was renamed.
+    """
+    any_change = False
+
+    # Build {canonical_name: [indices of results whose parsed parts contain it]}
+    dup_groups: dict[str, list[int]] = {}
+    for idx, r in enumerate(results):
+        for part in r.name.split(" + "):
+            dup_groups.setdefault(part, []).append(idx)
+
+    for dup_name, indices in list(dup_groups.items()):
+        if len(indices) < 2:
+            continue
+        if dup_name not in forbidden:
+            continue
+
+        forbidden_here = forbidden[dup_name]
+
+        # Candidate indices: polygons whose bounding_veins trip a forbidden vein
+        eligible = [i for i in indices if results[i].bounding_veins & forbidden_here]
+        if not eligible:
+            continue
+
+        for i in eligible:
+            poly_veins = results[i].bounding_veins
+            target = _best_missing_match(poly_veins, missing, effective_expected)
+            if target is None:
+                continue
+
+            old_name = results[i].name
+            parts = [p for p in old_name.split(" + ") if p != dup_name]
+            parts.append(target)
+            results[i].name = " + ".join(parts) if len(parts) > 1 else parts[0]
+            results[i].status = "identified" if len(parts) == 1 else "merged"
+            missing.discard(target)
+            any_change = True
+            logger.info(
+                "Split duplicate %r → %r (forbidden veins: %s)",
+                old_name,
+                results[i].name,
+                sorted(poly_veins & forbidden_here),
+            )
+            break
+
+    return any_change
+
+
+def _best_missing_match(
+    poly_veins: set[str],
+    missing: set[str],
+    effective_expected: dict[str, set[str]],
+) -> str | None:
+    """Return the missing region whose expected set best matches poly_veins.
+
+    Ranking:
+      1. Largest |expected ∩ poly_veins| (most of its veins present)
+      2. Largest |expected|              (most specific wins ties)
+      3. REGION_AP_ORDER index           (deterministic final tie-break)
+    Returns None if no missing region has any overlap with poly_veins.
+    """
+    best: tuple[int, int, int] | None = None
+    best_name: str | None = None
+    for name in missing:
+        expected = effective_expected.get(name, set())
+        if not expected:
+            continue
+        overlap = len(expected & poly_veins)
+        if overlap == 0:
+            continue
+        specificity = len(expected)
+        ap_idx = -REGION_AP_ORDER.index(name) if name in REGION_AP_ORDER else -999
+        score = (overlap, specificity, ap_idx)
+        if best is None or score > best:
+            best = score
+            best_name = name
+    return best_name
+
+
+def _append_missing_to_neighbor(
+    results: list[InterveinRegion],
+    missing: set[str],
+    effective_expected: dict[str, set[str]],
+) -> None:
+    """Legacy fallback: append missing region name to an adjacent neighbor.
+
+    When a region is missing from results and one of the existing named
+    regions has all of the missing region's expected veins in its adjacency,
+    append the missing name to produce a merged label (e.g. "discal + 3rd
+    posterior"). Only valid adjacency-graph neighbors are considered.
+    """
     merge_partners: dict[str, set[str]] = {r: set(nbrs.keys()) for r, nbrs in _REGION_ADJACENCY.items()}
+
+    found_names: set[str] = set()
+    for r in results:
+        for part in r.name.split(" + "):
+            found_names.add(part)
 
     for missing_name in sorted(missing):
         missing_veins = frozenset(effective_expected.get(missing_name, set()))
@@ -420,12 +552,10 @@ def _detect_absorbed_merges(
         valid_partners = merge_partners.get(missing_name, set())
 
         for r in results:
-            # Check if this result is a valid merge partner
             result_parts = set(r.name.split(" + "))
             if not result_parts & valid_partners:
                 continue
 
-            # Check if the missing region's expected veins are all adjacent
             if missing_veins <= r.bounding_veins:
                 r.name = f"{r.name} + {missing_name}"
                 r.status = "merged"
@@ -435,7 +565,6 @@ def _detect_absorbed_merges(
                     missing_veins,
                     r.name,
                 )
-                # Update found_names so we don't double-merge
                 found_names.add(missing_name)
                 break
 
