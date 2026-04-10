@@ -68,7 +68,7 @@ identifyFeatures/
       costa_detector.py              # [DONE] Costa detection via margin band
       vein_tracer.py                 # [DONE] Trace veins + crossvein + ectopic labeling (Phases 0-5)
       wing_axis.py                   # [DONE] Derive proximal/distal axis from alula notch → DTip
-      intervein_splitter.py          # [DONE] Split classifier-merged intervein polygons via morphological open-under-constraint
+      intervein_splitter.py          # [DONE] Split classifier-merged intervein polygons via h-maxima seed detection + watershed
       intervein_namer.py             # [DONE] Name intervein regions by adjacency (with PD tie-break)
       trajectory_completer.py        # [TODO] Extrapolate partial veins, split merged regions
       confidence.py                  # [TODO] Multi-factor confidence scoring
@@ -179,13 +179,12 @@ Originally planned as a separate `crossvein_detector.py`. Implemented as Phases 
 
 **File:** `models/intervein_splitter.py`, entry point `split_merged_intervein_polygons()`
 
-Preprocessing pass that sits between vein tracing and intervein naming. Addresses classifier-merged intervein polygons where a crossvein is short, interrupted, or missed. Pure raster implementation — distance transforms are O(H·W) so the big-radius operations are cheap even on 5440×3648 images.
+Preprocessing pass that sits between vein tracing and intervein naming. Addresses classifier-merged intervein polygons where a crossvein is short, interrupted, or missed. Uses h-maxima peak detection on the Euclidean distance transform to find adaptive seeds, then watershed for competitive dilation. Pure raster implementation — distance transforms are O(H·W) so the operations are cheap even on 5440×3648 images.
 
-- **Erode each intervein polygon** by `intervein_split_erode_um` (default 100 µm) via `distance_transform_edt > radius`. Weakly-connected classifier blobs split into multiple pieces; well-separated regions stay contiguous.
-- **Connected components** inside each eroded polygon become seed labels.
 - **Build barrier mask**: inset wing outline by `intervein_split_wing_buffer_vw × median_vein_width_px`, then add buffered canonical vein centerlines (`intervein_split_vein_barrier_vw × median_vein_width_px`). L6 and `EV*` ectopic veins are explicitly excluded from the barrier per spec — they are not region dividers.
+- **Detect seeds via h-maxima**: for each intervein polygon, compute the EDT (inscribed-radius landscape), smooth with `gaussian_filter(sigma=median_vein_width_px)` to eliminate plateau ripples, then find peaks via `h_maxima(edt_smooth, h)` where `h = median_vein_width_px × intervein_split_h_vw` (default 2.0). Peaks that rise at least `h` above their nearest saddle become seeds. Adaptive: uniform strips get 1 seed, fused polygons with a bottleneck get 2+ seeds at exactly the right locations.
 - **Competitive dilation** via `skimage.segmentation.watershed` using the seed labels as markers, with the barrier mask as the constraint. Labels flood outward from their seeds until they meet each other or a barrier.
-- **Reseed lost polygons**: any input polygon whose erosion mask was empty but whose original footprint exceeds `intervein_split_reseed_min_area_um2` (default 10,000 µm²) gets a new single-pixel seed at its interior, and the watershed runs again so thin regions like 1st basal aren't silently absorbed by neighbors.
+- **Reseed lost polygons**: any input polygon whose EDT landscape is entirely flat (no h-maxima peaks) but whose original footprint exceeds `intervein_split_reseed_min_area_um2` (default 10,000 µm²) gets a new single-pixel seed at its interior, and the watershed runs again so thin regions like 1st basal aren't silently absorbed by neighbors.
 - **Raster → polygons** via `cv2.findContours` for each label. Output is a plain `list[Polygon]` that shadows the original `intervein_polys` for the namer.
 
 The existing merge-detection (`_check_merged` in `intervein_namer.py`) stays in place as a safety net for merges the morphological pass misses.

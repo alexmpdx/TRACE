@@ -1,17 +1,19 @@
-"""Split merged intervein polygons via morphological open-under-constraint.
+"""Split merged intervein polygons via h-maxima seed detection + watershed.
 
 The pixel classifier occasionally fuses adjacent intervein regions where a
 crossvein is short, interrupted, or missed. This module re-splits such
-polygons by (1) eroding each input polygon to break weak pixel bridges,
-(2) competitively dilating every surviving seed outward until it meets a
-barrier (canonical vein centerlines excluding L6/EVs, or the wing outline),
-and (3) reseeding any large originally-intervein area that ended up
-unclaimed so small-but-real regions like the costal cell aren't lost.
+polygons by (1) detecting significant peaks in each polygon's distance
+transform via h-maxima filtering — peaks that rise at least ``h`` pixels
+above the nearest saddle point become seeds, (2) competitively dilating
+every seed outward until it meets a barrier (canonical vein centerlines
+excluding L6/EVs, or the wing outline), and (3) reseeding any large
+originally-intervein area that ended up unclaimed so small-but-real
+regions like the costal cell aren't lost.
 
-The implementation is fully raster-based. Distance transforms are O(H*W)
-regardless of kernel radius, so a 300 µm (~620 px) erosion is as cheap as
-a 10 px erosion — this would be infeasible with explicit cv2.erode kernels
-on the 5440x3648 wing images.
+The h-maxima approach is adaptive: a uniform thin strip has no deep
+saddle, so it produces one seed regardless of width. A fused polygon
+with a fat body and a thin bridge has a deep saddle between two peaks,
+producing two seeds — exactly where the split should occur.
 """
 
 from __future__ import annotations
@@ -25,8 +27,9 @@ import numpy as np
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import VeinIdentification
 from identify_features.utils.image_utils import rasterize_polygons
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, gaussian_filter
 from shapely.geometry import MultiPolygon, Polygon
+from skimage.morphology import h_maxima
 from skimage.segmentation import find_boundaries, watershed
 
 logger = logging.getLogger(__name__)
@@ -53,7 +56,7 @@ def split_merged_intervein_polygons(
         image_shape: (height, width) of the working raster.
         median_vein_width_px: Used to buffer barrier centerlines to actual
             tissue width.
-        config: Pipeline configuration; reads ``intervein_split_erode_um``
+        config: Pipeline configuration; reads ``intervein_split_h_vw``
             and ``intervein_split_reseed_min_area_um2``.
         debug_out: If set, write a diagnostic PNG showing the barrier mask
             and watershed label boundaries. Used to spot barrier leaks.
@@ -69,7 +72,7 @@ def split_merged_intervein_polygons(
         raise ValueError("split_merged_intervein_polygons requires a wing_outline")
 
     H, W = image_shape
-    erode_radius_px = max(1, round(config.to_px(config.intervein_split_erode_um)))
+    h_maxima_h = max(1, round(median_vein_width_px * config.intervein_split_h_vw))
     if config.um_per_px is not None and config.um_per_px > 0:
         reseed_min_area_px = max(1, round(config.intervein_split_reseed_min_area_um2 / (config.um_per_px**2)))
     else:
@@ -102,20 +105,30 @@ def split_merged_intervein_polygons(
     vein_barrier = distance_transform_edt(barrier_centerlines == 0) <= vein_barrier_px
     interior_mask = wing_mask & ~vein_barrier
 
-    # --- Step 2: build seeds by eroding each polygon ------------------------
+    # --- Step 2: build seeds via h-maxima peak detection ---------------------
+    # For each polygon, compute the EDT (inscribed-radius landscape) and find
+    # peaks that rise at least h pixels above the nearest saddle.  Each such
+    # peak becomes one seed.  Uniform thin strips have no deep saddle → 1 seed.
+    # Fused polygons with a fat body and a thin bridge have a deep saddle → 2+
+    # seeds at exactly the right locations.
     seeds = np.zeros((H, W), dtype=np.int32)
     next_label = 1
-    lost_poly_masks: list[np.ndarray] = []  # masks of polys that eroded to nothing
+    lost_poly_masks: list[np.ndarray] = []  # masks of polys with no peaks
 
     for poly in intervein_polys:
         poly_mask = rasterize_polygons([poly], (H, W)) > 0
         if not poly_mask.any():
             continue
-        eroded = distance_transform_edt(poly_mask) > erode_radius_px
-        if not eroded.any():
+        edt = distance_transform_edt(poly_mask)
+        # Smooth the EDT to eliminate plateau ripples that cause spurious
+        # 1-pixel peaks on flat ridges.  Sigma = median vein width keeps
+        # real bottlenecks intact while merging near-identical peak pixels.
+        edt_smooth = gaussian_filter(edt, sigma=median_vein_width_px)
+        peaks = h_maxima(edt_smooth, h_maxima_h)
+        if not peaks.any():
             lost_poly_masks.append(poly_mask)
             continue
-        num, comp_labels = cv2.connectedComponents(eroded.astype(np.uint8))
+        num, comp_labels = cv2.connectedComponents((peaks > 0).astype(np.uint8))
         for comp in range(1, num):
             seeds[comp_labels == comp] = next_label
             next_label += 1
@@ -127,8 +140,9 @@ def split_merged_intervein_polygons(
     labels_out = watershed(surface, markers=seeds, mask=interior_mask)
 
     # --- Step 4: reseed large "lost" polygons and re-run --------------------
-    # A polygon is "lost" if its erosion mask was empty — its territory is
-    # now claimed by neighboring labels. If the original footprint was big
+    # A polygon is "lost" if h-maxima found no significant peaks — its EDT
+    # landscape is flat (max inscribed radius < h). Its territory is now
+    # claimed by neighboring labels. If the original footprint was big
     # enough to be a real region (>= reseed threshold), drop a single seed
     # in its interior so it can reclaim that territory.
     reseed_count = 0
@@ -181,10 +195,11 @@ def split_merged_intervein_polygons(
 
     logger.info(
         "Intervein splitter: %d input polys → %d output polys "
-        "(erode=%dpx, vein_buffer=%dpx, wing_inset=%dpx, reseed_min=%dpx², reseeded=%d)",
+        "(h=%dpx [%.1f×vw], vein_buffer=%dpx, wing_inset=%dpx, reseed_min=%dpx², reseeded=%d)",
         len(intervein_polys),
         len(out),
-        erode_radius_px,
+        h_maxima_h,
+        config.intervein_split_h_vw,
         vein_barrier_px,
         wing_buffer_px,
         reseed_min_area_px,
@@ -198,6 +213,7 @@ def split_merged_intervein_polygons(
             image_shape=(H, W),
             wing_mask=wing_mask,
             vein_barrier=vein_barrier,
+            seeds=seeds,
             labels_out=labels_out,
             veins=veins,
         )
@@ -211,10 +227,11 @@ def _write_debug_overlay(
     image_shape: tuple[int, int],
     wing_mask: np.ndarray,
     vein_barrier: np.ndarray,
+    seeds: np.ndarray,
     labels_out: np.ndarray,
     veins: list[VeinIdentification],
 ) -> None:
-    """Render a diagnostic PNG showing barrier mask + watershed boundaries."""
+    """Render a diagnostic PNG showing barrier mask, seeds, and watershed boundaries."""
     H, W = image_shape
     if base_image is not None and base_image.shape[:2] == (H, W):
         canvas = base_image.copy()
@@ -232,11 +249,21 @@ def _write_debug_overlay(
         canvas,
     )
 
-    # Layer 2: cyan outlines of watershed labels (boundary between any two labels)
+    # Layer 2: green tint for erosion seed pixels (surviving eroded regions)
+    seed_mask = seeds > 0
+    green = np.zeros_like(canvas)
+    green[..., 1] = 255
+    canvas = np.where(
+        seed_mask[..., None],
+        (canvas.astype(np.float32) * 0.5 + green.astype(np.float32) * 0.5).astype(np.uint8),
+        canvas,
+    )
+
+    # Layer 3: cyan outlines of watershed labels (boundary between any two labels)
     boundaries = find_boundaries(labels_out, mode="thick")
     canvas[boundaries] = (255, 255, 0)  # BGR cyan
 
-    # Layer 3: thin yellow unbuffered canonical vein centerlines so we can see
+    # Layer 4: thin yellow unbuffered canonical vein centerlines so we can see
     # the tracer's actual geometry vs. the buffered barrier footprint
     for v in veins:
         if v.centerline is None:

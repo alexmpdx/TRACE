@@ -95,7 +95,7 @@ class PipelineConfig:
     max_merge_size: int | None = None  # Max regions in an N-way merge; None = no cap
 
     # -- Intervein splitter (morphological open-under-constraint) --
-    intervein_split_erode_um: float = 100.0  # Erosion radius for breaking weak classifier bridges
+    intervein_split_h_vw: float = 2.0  # h-maxima depth threshold as × median vein width
     intervein_split_reseed_min_area_um2: float = 10_000.0  # Reseed threshold for large absorbed regions
     intervein_split_vein_barrier_vw: float = 1.0  # Vein centerline buffer radius (× median vein width)
     intervein_split_wing_buffer_vw: float = 1.0  # Wing outline inset (× median vein width)

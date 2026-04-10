@@ -1010,11 +1010,11 @@ for each unique label in edge_labels:
 
 ---
 
-## 5.5. Intervein Polygon Splitting (morphological open-under-constraint)
+## 5.5. Intervein Polygon Splitting (h-maxima seed detection + watershed)
 
 **Source**: `models/intervein_splitter.py`, function `split_merged_intervein_polygons()`
 
-**What**: Preprocessing pass that runs between vein labeling (Step 5) and intervein region naming (Step 6). The pixel classifier occasionally fuses adjacent intervein regions where a crossvein is short or interrupted. This pass physically re-splits such polygons using a raster erode-then-watershed pipeline.
+**What**: Preprocessing pass that runs between vein labeling (Step 5) and intervein region naming (Step 6). The pixel classifier occasionally fuses adjacent intervein regions where a crossvein is short or interrupted. This pass physically re-splits such polygons using h-maxima peak detection on the distance transform, followed by constrained watershed.
 
 **Why**: Downstream region naming (`intervein_namer.py`) can only label the polygons it's given. If the classifier merged discal and 2nd posterior into one blob, the namer can at best report a `"discal + 2nd posterior"` merge label. This stage attempts to produce two separate polygons so each region gets its own entry.
 
@@ -1030,14 +1030,17 @@ vein_barrier = distance_transform_edt(barrier == 0) <= vein_barrier_px
 
 interior_mask = wing_mask & ~vein_barrier
 
-# Step 2: seeds from eroded polygons
+# Step 2: seeds via h-maxima peak detection
+h = median_vein_width_px × intervein_split_h_vw
 for each intervein_poly:
     poly_mask = rasterize(poly)
-    eroded = distance_transform_edt(poly_mask) > erode_radius_px
-    if eroded is empty:
+    edt = distance_transform_edt(poly_mask)
+    edt_smooth = gaussian_filter(edt, sigma=median_vein_width_px)
+    peaks = h_maxima(edt_smooth, h)
+    if no peaks:
         record poly as lost — candidate for reseed pass
     else:
-        for each connected component of eroded:
+        for each connected component of peaks:
             assign a new seed label
 
 # Step 3: competitive dilation
@@ -1056,19 +1059,21 @@ for each label:
     emit Polygon(contour)
 ```
 
-**Why raster, not vector**: "Erode by R, then competitively dilate all pieces until collision" has no clean primitive in shapely. Using `distance_transform_edt` instead of `cv2.erode` with a huge kernel makes the erosion O(H·W) regardless of radius — a 300 µm / 620 px erosion is as cheap as a 10 px one.
+**Why h-maxima, not fixed-radius erosion**: The original approach eroded each polygon by a fixed radius and used connected components as seeds. This caused catastrophic over-segmentation on thin polygons — a long strip with minor width variations would fracture into many disconnected pieces, each becoming a phantom seed. h-maxima is adaptive: it finds peaks in the EDT (inscribed-radius landscape) that rise at least `h` pixels above their nearest saddle. A uniform thin strip has no deep saddle and produces exactly one seed regardless of width. A genuinely fused polygon with a fat body and a thin bridge has a deep saddle between two peaks, producing two seeds at exactly the right split location.
+
+**Gaussian smoothing**: The raw EDT can have plateau ripples — floating-point noise on flat ridges where many pixels share nearly identical inscribed radii. Without smoothing, `h_maxima` finds spurious 1-pixel peaks on these plateaus. Smoothing with `sigma = median_vein_width_px` eliminates ripples while preserving real bottlenecks (saddles between genuinely distinct peaks).
 
 **Excluded barriers**: `L6` (a short stub off L5 — not a region divider) and any `EV*` ectopic vein (noisy tissue shouldn't carve territory). Everything else canonical (L1-L5, Rs, ACV, PCV, costa) acts as a buffered barrier.
 
-**Reseed rationale**: Small polygons like the costal cell or 1st basal can be smaller than the erosion kernel and vanish entirely during Step 2. If their original footprint is larger than the reseed threshold (default 10,000 µm²), they get a fresh single-pixel seed in Step 4 and reclaim their territory in the second watershed.
+**Reseed rationale**: Polygons whose EDT landscape is entirely flat (max inscribed radius < h) produce no h-maxima peaks and are "lost" — their territory gets claimed by neighboring labels. If the original footprint is larger than the reseed threshold (default 10,000 µm²), a fresh single-pixel seed is dropped in Step 4 and the polygon reclaims its territory in the second watershed.
 
 **Parameters**:
-- `intervein_split_erode_um` (default 100) — erosion radius in µm
+- `intervein_split_h_vw` (default 2.0) — h-maxima depth threshold as × median vein width
 - `intervein_split_reseed_min_area_um2` (default 10,000) — minimum original area (µm²) to trigger a reseed
 - `intervein_split_vein_barrier_vw` (default 1.0) — vein centerline buffer radius as × median vein width
 - `intervein_split_wing_buffer_vw` (default 1.0) — wing outline inset as × median vein width
 
-**Debug overlay**: passing `debug_out=<path>` to `split_merged_intervein_polygons` writes a diagnostic PNG showing the barrier mask (red tint), watershed label boundaries (cyan), and unbuffered canonical vein centerlines with endpoint markers (yellow). Useful for diagnosing leaks at junction gaps.
+**Debug overlay**: passing `debug_out=<path>` to `split_merged_intervein_polygons` writes a diagnostic PNG showing the barrier mask (red tint), seed pixels (green tint), watershed label boundaries (cyan), and unbuffered canonical vein centerlines with endpoint markers (yellow). Useful for diagnosing barrier leaks or seed placement issues.
 
 ---
 

@@ -23,7 +23,7 @@ from identify_features.models.wing_axis import compute_wing_axis
 logging.basicConfig(level=logging.INFO)
 
 BASE = Path(__file__).parent
-stem = "0003"
+stem = sys.argv[1] if len(sys.argv) > 1 else "0003"
 
 det_path = BASE / "geojsons" / f"{stem}_detections.geojson"
 lm_path = BASE / "LandmarkLocator_output" / f"{stem}_landmarks.geojson"
@@ -47,10 +47,10 @@ anchor_landmarks(skel, landmarks, config)
 wing_axis = compute_wing_axis(landmarks)
 veins = trace_veins_from_landmarks(skel, landmarks, wing_outline, config, wing_axis=wing_axis)
 
-print(f"\nVeins found:")
+print(f"\nVein tracer output ({len(veins)} entries):")
 for v in veins:
-    if v.centerline is not None:
-        print(f"  {v.vein_id}: {v.centerline.length:.0f}px")
+    length_str = f"{v.centerline.length:.0f}px" if v.centerline is not None else "no centerline"
+    print(f"  {v.vein_id:8s} status={v.status.value:12s} type={v.vein_type.value:12s} {length_str}")
 
 VIZ_OUT = BASE / "viz_output"
 VIZ_OUT.mkdir(exist_ok=True)
