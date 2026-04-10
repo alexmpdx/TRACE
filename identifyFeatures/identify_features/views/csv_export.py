@@ -8,20 +8,135 @@ Two formats:
 from __future__ import annotations
 
 import csv
+import logging
 import math
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 from identify_features.models.datatypes import InterveinRegion, VeinIdentification
 from identify_features.models.topology import REGION_AP_ORDER, VEIN_AP_ORDER
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
+from shapely.ops import split
 
 if TYPE_CHECKING:
     from identify_features.models.datatypes import Landmark, WingResult
+
+logger = logging.getLogger(__name__)
 
 # Display name mapping (internal id → CSV column name) for wide format
 _VEIN_DISPLAY = {v: ("costal vein" if v == "costa" else v) for v in VEIN_AP_ORDER}
 
 NOT_IDENTIFIED = "not identified"
+
+
+def _compute_ap_areas(
+    wing_result: Optional[WingResult],
+) -> tuple[Optional[float], Optional[float]]:
+    """Split wing into anterior/posterior compartments along L4 axis.
+
+    Algorithm:
+    1. Get L4 centerline and its minimum rotated bounding box.
+    2. Take the anterior long edge (closer to L3) of the bounding box.
+    3. Extend that edge to bisect the entire wing outline.
+    4. Split the wing; label halves by proximity to L3 (anterior) vs L5 (posterior).
+
+    Returns (anterior_area_px, posterior_area_px) or (None, None).
+    """
+    if wing_result is None or wing_result.wing_outline is None:
+        return None, None
+
+    # Find L4 and L3 centerlines
+    veins_by_id = {v.vein_id: v for v in wing_result.veins}
+    l4 = veins_by_id.get("L4")
+    if l4 is None or l4.centerline is None:
+        return None, None
+
+    l4_line = l4.centerline
+    outline = wing_result.wing_outline
+
+    # Step 1: minimum rotated bounding box around L4 centerline
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        bbox = l4_line.minimum_rotated_rectangle
+    coords = list(bbox.exterior.coords)[:4]  # 4 corners
+
+    # Step 2: extract 4 edges and find the 2 longest
+    edges = []
+    for i in range(4):
+        p1, p2 = np.array(coords[i]), np.array(coords[(i + 1) % 4])
+        length = np.linalg.norm(p2 - p1)
+        midpoint = (p1 + p2) / 2
+        edges.append((p1, p2, length, midpoint))
+
+    edges.sort(key=lambda e: e[2], reverse=True)
+    long_edges = edges[:2]  # the two longest edges
+
+    # Step 3: pick the anterior edge (closer to L3 centroid)
+    # Fall back to L2 or L1 if L3 is missing
+    anterior_ref = None
+    for vid in ("L3", "L2", "L1"):
+        v = veins_by_id.get(vid)
+        if v is not None and v.centerline is not None:
+            anterior_ref = np.array(v.centerline.centroid.coords[0])
+            break
+
+    if anterior_ref is None:
+        return None, None
+
+    # Pick the long edge whose midpoint is closer to the anterior reference
+    d0 = np.linalg.norm(long_edges[0][3] - anterior_ref)
+    d1 = np.linalg.norm(long_edges[1][3] - anterior_ref)
+    ant_edge = long_edges[0] if d0 < d1 else long_edges[1]
+
+    # Step 4: extend the anterior edge to fully bisect the wing
+    p1, p2 = ant_edge[0], ant_edge[1]
+    direction = p2 - p1
+    direction = direction / np.linalg.norm(direction)
+
+    # Extend by 2x the wing bounding box diagonal in each direction
+    minx, miny, maxx, maxy = outline.bounds
+    diag = math.hypot(maxx - minx, maxy - miny)
+    extend = diag * 2
+
+    midpt = (p1 + p2) / 2
+    ext_p1 = midpt - direction * extend
+    ext_p2 = midpt + direction * extend
+    split_line = LineString([ext_p1.tolist(), ext_p2.tolist()])
+
+    # Step 5: split the wing outline
+    try:
+        parts = split(outline.buffer(0), split_line)
+        polygons = [g for g in parts.geoms if isinstance(g, (Polygon, MultiPolygon)) and g.area > 0]
+    except Exception:
+        logger.debug("AP split failed via shapely.ops.split, trying difference approach")
+        polygons = []
+
+    # Fallback: thin-rectangle difference
+    if len(polygons) < 2:
+        thin_rect = split_line.buffer(0.5)
+        remainder = outline.buffer(0).difference(thin_rect)
+        if isinstance(remainder, MultiPolygon):
+            polygons = [g for g in remainder.geoms if g.area > 0]
+        elif isinstance(remainder, Polygon) and remainder.area > 0:
+            polygons = [remainder]
+        else:
+            return None, None
+
+    if len(polygons) < 2:
+        return None, None
+
+    # Take the two largest pieces
+    polygons.sort(key=lambda g: g.area, reverse=True)
+    half_a, half_b = polygons[0], polygons[1]
+
+    # Step 6: label anterior (contains L3 centroid) vs posterior
+    ref_point = Point(anterior_ref.tolist())
+    if half_a.distance(ref_point) < half_b.distance(ref_point):
+        return half_a.area, half_b.area
+    else:
+        return half_b.area, half_a.area
 
 
 def _wing_measurements(
@@ -67,6 +182,21 @@ def _wing_measurements(
     else:
         vals["crossvein_distance_px"] = ""
         vals["crossvein_distance_um"] = ""
+
+    # Anterior/posterior compartment areas
+    ant_area, post_area = _compute_ap_areas(wing_result)
+    if ant_area is not None:
+        vals["anterior_area_px"] = f"{ant_area:.1f}"
+        vals["anterior_area_um2"] = f"{ant_area * scale**2:.1f}" if scale else ""
+    else:
+        vals["anterior_area_px"] = ""
+        vals["anterior_area_um2"] = ""
+    if post_area is not None:
+        vals["posterior_area_px"] = f"{post_area:.1f}"
+        vals["posterior_area_um2"] = f"{post_area * scale**2:.1f}" if scale else ""
+    else:
+        vals["posterior_area_px"] = ""
+        vals["posterior_area_um2"] = ""
 
     return vals
 
@@ -135,6 +265,32 @@ def export_csv(
             "length_um": wm["crossvein_distance_um"],
         }
     )
+    rows.append(
+        {
+            "specimen": sid,
+            "feature": "anterior compartment",
+            "category": "wing",
+            "type": "",
+            "status": "",
+            "area_px": wm["anterior_area_px"],
+            "area_um2": wm["anterior_area_um2"],
+            "length_px": "",
+            "length_um": "",
+        }
+    )
+    rows.append(
+        {
+            "specimen": sid,
+            "feature": "posterior compartment",
+            "category": "wing",
+            "type": "",
+            "status": "",
+            "area_px": wm["posterior_area_px"],
+            "area_um2": wm["posterior_area_um2"],
+            "length_px": "",
+            "length_um": "",
+        }
+    )
 
     for v in veins:
         area_px = f"{v.tissue_polygon.area:.1f}" if v.tissue_polygon is not None else ""
@@ -197,6 +353,12 @@ def _build_fieldnames(include_um: bool) -> list[str]:
     fields.append("crossvein distance_px")
     if include_um:
         fields.append("crossvein distance_um")
+    fields.append("anterior area_px")
+    if include_um:
+        fields.append("anterior area_um2")
+    fields.append("posterior area_px")
+    if include_um:
+        fields.append("posterior area_um2")
     # Per-vein
     for vein_id in VEIN_AP_ORDER:
         name = _VEIN_DISPLAY[vein_id]
@@ -235,6 +397,12 @@ def _build_row(
     row["crossvein distance_px"] = wm["crossvein_distance_px"]
     if include_um:
         row["crossvein distance_um"] = wm["crossvein_distance_um"]
+    row["anterior area_px"] = wm["anterior_area_px"]
+    if include_um:
+        row["anterior area_um2"] = wm["anterior_area_um2"]
+    row["posterior area_px"] = wm["posterior_area_px"]
+    if include_um:
+        row["posterior area_um2"] = wm["posterior_area_um2"]
 
     # Index veins by id (skip ectopic)
     vein_map: dict[str, VeinIdentification] = {}
