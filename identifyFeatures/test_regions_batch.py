@@ -8,7 +8,6 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import cv2
-import numpy as np
 from identify_features.config import PipelineConfig
 from identify_features.models.geojson_io import (
     _compute_wing_outline,
@@ -22,10 +21,10 @@ from identify_features.models.intervein_splitter import (
 )
 from identify_features.models.landmark_anchor import anchor_landmarks
 from identify_features.models.skeleton import build_skeleton_graph
-from identify_features.models.topology import REGION_COLORS, VEIN_COLORS
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
 from identify_features.views.geojson_export import export_geojson
+from identify_features.views.overlay import render_overlay_to_file
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -69,62 +68,7 @@ def render_overlay(stem, img_path, veins, regions):
     img = cv2.imread(str(img_path))
     if img is None:
         return
-    overlay = img.copy()
-
-    # Draw regions as semi-transparent fills
-    for r in regions:
-        if r.polygon is None:
-            continue
-        color_key = r.name.split(" + ")[0]  # Use first region name for color
-        rgb = REGION_COLORS.get(color_key, [128, 128, 128])
-        bgr = (rgb[2], rgb[1], rgb[0])
-        coords = np.array(r.polygon.exterior.coords, dtype=np.int32)
-        cv2.fillPoly(overlay, [coords], bgr)
-
-    # Blend regions
-    img_out = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
-
-    # Draw vein tissue polygons as semi-transparent fills
-    vein_overlay = img_out.copy()
-    for v in veins:
-        if v.tissue_polygon is None:
-            continue
-        rgb = VEIN_COLORS.get(v.vein_id, [128, 128, 128])
-        bgr = (rgb[2], rgb[1], rgb[0])
-        coords = np.array(v.tissue_polygon.exterior.coords, dtype=np.int32)
-        cv2.fillPoly(vein_overlay, [coords], bgr)
-    img_out = cv2.addWeighted(vein_overlay, 0.5, img_out, 0.5, 0)
-
-    # Draw vein centerlines on top
-    for v in veins:
-        if v.centerline is None:
-            continue
-        rgb = VEIN_COLORS.get(v.vein_id, [128, 128, 128])
-        bgr = (rgb[2], rgb[1], rgb[0])
-        pts = np.array(v.centerline.coords, dtype=np.int32)
-        cv2.polylines(img_out, [pts], False, bgr, 2)
-
-    # Add region labels
-    for r in regions:
-        if r.polygon is None:
-            continue
-        cx, cy = int(r.polygon.centroid.x), int(r.polygon.centroid.y)
-        label = r.name
-        if r.status == "merged":
-            label += " [M]"
-        elif r.status == "inferred":
-            label += " [I]"
-        font_scale = 2.0
-        thickness_bg = 8
-        thickness_fg = 3
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness_fg)
-        tx = cx - tw // 2
-        ty = cy + th // 2
-        cv2.putText(img_out, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness_bg)
-        cv2.putText(img_out, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness_fg)
-
-    out_path = VIZ_OUT / f"{stem}_regions.png"
-    cv2.imwrite(str(out_path), img_out)
+    render_overlay_to_file(img, veins, regions, VIZ_OUT / f"{stem}_regions.png")
 
 
 def process_one_specimen(stem, det_path, lm_path, img_path):

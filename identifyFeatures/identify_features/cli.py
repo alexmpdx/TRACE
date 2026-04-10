@@ -15,9 +15,11 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import cv2
 from identify_features.config import PipelineConfig
 from identify_features.controllers.pipeline import identify_wing
 from identify_features.views.geojson_export import export_geojson
+from identify_features.views.overlay import render_overlay_to_file
 
 
 def _find_batch_specimens(
@@ -45,7 +47,7 @@ def _find_batch_specimens(
 
 def _process_one(args_tuple):
     """Process a single specimen (for parallel execution)."""
-    stem, det_path, lm_path, img_path, output_dir, um_per_px, verbose = args_tuple
+    stem, det_path, lm_path, img_path, output_dir, um_per_px, verbose, overlay = args_tuple
     try:
         config = PipelineConfig()
         if um_per_px is not None:
@@ -57,6 +59,13 @@ def _process_one(args_tuple):
 
         out_path = output_dir / f"{stem}_output.geojson"
         export_geojson(result.veins, result.intervein_regions, out_path, um_per_px=config.um_per_px)
+
+        if overlay and img_path is not None:
+            base_img = cv2.imread(str(img_path))
+            if base_img is not None:
+                render_overlay_to_file(
+                    base_img, result.veins, result.intervein_regions, output_dir / f"{stem}_overlay.png"
+                )
 
         n_veins = sum(1 for v in result.veins if v.centerline is not None)
         n_regions = len(result.intervein_regions)
@@ -112,6 +121,11 @@ def main():
         help="Parallel workers for batch mode (default: half of CPU count)",
     )
     parser.add_argument(
+        "--overlay",
+        action="store_true",
+        help="Generate overlay PNG images (requires image input)",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -148,6 +162,13 @@ def _run_single(args):
     out_path = args.output_dir / f"{result.specimen_id}_output.geojson"
     export_geojson(result.veins, result.intervein_regions, out_path, um_per_px=config.um_per_px)
 
+    if args.overlay and args.image is not None:
+        base_img = cv2.imread(str(args.image))
+        if base_img is not None:
+            overlay_path = args.output_dir / f"{result.specimen_id}_overlay.png"
+            render_overlay_to_file(base_img, result.veins, result.intervein_regions, overlay_path)
+            print(f"Overlay: {overlay_path}")
+
     n_veins = sum(1 for v in result.veins if v.centerline is not None)
     print(f"{result.specimen_id}: {n_veins} veins, {len(result.intervein_regions)}/7 regions")
     print(f"Output: {out_path}")
@@ -170,7 +191,8 @@ def _run_batch(args):
 
     t0 = time.time()
     work_items = [
-        (stem, det, lm, img, args.output_dir, args.um_per_px, args.verbose) for stem, det, lm, img in specimens
+        (stem, det, lm, img, args.output_dir, args.um_per_px, args.verbose, args.overlay)
+        for stem, det, lm, img in specimens
     ]
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
