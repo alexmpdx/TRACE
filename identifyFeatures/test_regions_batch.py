@@ -1,7 +1,10 @@
 """Batch test: run intervein region naming on all 30 specimens."""
 
 import logging
+import os
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -109,59 +112,78 @@ def render_overlay(stem, img_path, veins, regions):
     cv2.imwrite(str(out_path), img_out)
 
 
+def process_one_specimen(stem, det_path, lm_path, img_path):
+    """Process a single specimen. Returns (stem, count, region_names, merged, l6_found, log_line)."""
+    try:
+        vein_polys, intervein_polys = load_detection_geojson(det_path)
+        landmarks = load_landmarks_geojson(lm_path)
+        all_polys = vein_polys + intervein_polys
+        wing_outline = _compute_wing_outline(all_polys)
+        img = cv2.imread(str(img_path))
+        image_shape = (img.shape[0], img.shape[1])
+
+        skel = build_skeleton_graph(vein_polys, image_shape, config)
+        anchor_landmarks(skel, landmarks, config)
+        wing_axis = compute_wing_axis(landmarks)
+        veins = trace_veins_from_landmarks(skel, landmarks, wing_outline, config, wing_axis=wing_axis)
+        intervein_polys = split_merged_intervein_polygons(
+            intervein_polys,
+            veins,
+            wing_outline,
+            image_shape,
+            skel.median_vein_width_px,
+            config,
+        )
+        regions = name_intervein_regions(
+            intervein_polys,
+            veins,
+            landmarks,
+            config,
+            skel.median_vein_width_px,
+            wing_outline,
+            wing_axis,
+        )
+
+        region_names = sorted(r.name for r in regions)
+        merged = [r.name for r in regions if r.status == "merged"]
+        l6_found = any(v.vein_id == "L6" for v in veins if v.centerline is not None)
+
+        render_overlay(stem, img_path, veins, regions)
+
+        line = f"{stem}: {len(regions)}/7 regions"
+        if merged:
+            line += " | merged: " + ", ".join(merged)
+        if l6_found:
+            line += " | L6 detected"
+        return (stem, len(regions), region_names, merged, l6_found, line)
+
+    except Exception as e:
+        return (stem, 0, [], [], False, f"{stem}: ERROR - {e}")
+
+
 def main():
     specimens = find_specimens()
     print(f"Found {len(specimens)} specimens\n")
 
+    max_workers = min(os.cpu_count() // 2, 8)
+    print(f"Processing with {max_workers} parallel workers...")
+    t0 = time.time()
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(process_one_specimen, stem, det_path, lm_path, img_path)
+            for stem, det_path, lm_path, img_path in specimens
+        ]
+        results = [f.result() for f in futures]
+
+    elapsed = time.time() - t0
+    print(f"Completed in {elapsed:.0f}s ({elapsed / 60:.1f} min)\n")
+
+    # Print per-specimen lines and build summary (in original order)
     summary = []
-    for stem, det_path, lm_path, img_path in specimens:
-        try:
-            vein_polys, intervein_polys = load_detection_geojson(det_path)
-            landmarks = load_landmarks_geojson(lm_path)
-            all_polys = vein_polys + intervein_polys
-            wing_outline = _compute_wing_outline(all_polys)
-            img = cv2.imread(str(img_path))
-            image_shape = (img.shape[0], img.shape[1])
-
-            skel = build_skeleton_graph(vein_polys, image_shape, config)
-            anchor_landmarks(skel, landmarks, config)
-            wing_axis = compute_wing_axis(landmarks)
-            veins = trace_veins_from_landmarks(skel, landmarks, wing_outline, config, wing_axis=wing_axis)
-            intervein_polys = split_merged_intervein_polygons(
-                intervein_polys,
-                veins,
-                wing_outline,
-                image_shape,
-                skel.median_vein_width_px,
-                config,
-            )
-            regions = name_intervein_regions(
-                intervein_polys,
-                veins,
-                landmarks,
-                config,
-                skel.median_vein_width_px,
-                wing_outline,
-                wing_axis,
-            )
-
-            region_names = sorted(r.name for r in regions)
-            merged = [r.name for r in regions if r.status == "merged"]
-            l6_found = any(v.vein_id == "L6" for v in veins if v.centerline is not None)
-
-            render_overlay(stem, img_path, veins, regions)
-
-            line = f"{stem}: {len(regions)}/7 regions"
-            if merged:
-                line += " | merged: " + ", ".join(merged)
-            if l6_found:
-                line += " | L6 detected"
-            print(line)
-            summary.append((stem, len(regions), region_names, merged, l6_found))
-
-        except Exception as e:
-            print(f"{stem}: ERROR - {e}")
-            summary.append((stem, 0, [], [], False))
+    for stem, count, region_names, merged, l6_found, line in results:
+        print(line)
+        summary.append((stem, count, region_names, merged, l6_found))
 
     # Summary
     print(f"\n--- Summary ---")
