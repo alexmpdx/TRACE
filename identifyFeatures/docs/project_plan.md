@@ -262,7 +262,7 @@ Entry point defined in pyproject.toml: `identify-features = "identify_features.c
 
 - `views/geojson_export.py` — DONE: Export in GT_naming format
 - `views/overlay.py` — DONE: Render veins + regions color overlay (used by CLI `--overlay` and test scripts)
-- `views/csv_export.py` — DONE: Export measurements CSV. Single mode: long format (one row per feature). Batch mode: wide format (one row per specimen). Wing-level measurements: wing area, wing length (L1-Rs↔DTip), crossvein distance (ACV.p↔PCV.a).
+- `views/csv_export.py` — DONE: Export measurements CSV. Single mode: long format (one row per feature). Batch mode: wide format (one row per specimen). Wing-level measurements: wing area, wing length (L1-Rs↔DTip), crossvein distance (ACV.p↔PCV.a), anterior/posterior compartment areas (split along L4 axis).
 
 ### Tests — PARTIAL
 
