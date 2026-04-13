@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
 )
 
 from preprocessing.pipeline import discover_images
-from TRACE.pipeline import MEASUREMENT_GROUPS, trace_folder
+from TRACE.pipeline import OUTPUT_TYPES, trace_folder
 
 # ---------------------------------------------------------------------------
 # Worker thread
@@ -43,7 +43,7 @@ class TraceWorker(QThread):
     """Runs trace_folder() in a background thread."""
 
     progress = pyqtSignal(int, int, str, str, str)  # idx, total, name, stage, detail
-    all_done = pyqtSignal(list, str)  # results, csv_path (or "")
+    all_done = pyqtSignal(list)  # results
     error = pyqtSignal(str)
 
     def __init__(self, kwargs):
@@ -63,10 +63,10 @@ class TraceWorker(QThread):
                 self.progress.emit(idx, total, name, stage, detail)
 
             self.kwargs["progress_callback"] = _progress
-            results, csv_path = trace_folder(**self.kwargs)
-            self.all_done.emit(results, str(csv_path) if csv_path else "")
+            results = trace_folder(**self.kwargs)
+            self.all_done.emit(results)
         except InterruptedError:
-            self.all_done.emit([], "")
+            self.all_done.emit([])
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
 
@@ -170,27 +170,16 @@ class TraceWindow(QMainWindow):
         sg.addWidget(self.scale_spin, stretch=1)
         left_layout.addWidget(scale_group)
 
-        # -- Measurement checkboxes --
-        meas_group = QGroupBox("CSV Measurements")
-        ml = QVBoxLayout(meas_group)
-        self.meas_checks: OrderedDict[str, QCheckBox] = OrderedDict()
-        for key, label in MEASUREMENT_GROUPS.items():
+        # -- Output selection --
+        out_group = QGroupBox("Outputs")
+        ol = QVBoxLayout(out_group)
+        self.output_checks: OrderedDict[str, QCheckBox] = OrderedDict()
+        for key, label in OUTPUT_TYPES.items():
             chk = QCheckBox(label)
             chk.setChecked(True)
-            self.meas_checks[key] = chk
-            ml.addWidget(chk)
-
-        # Select-all / Deselect-all row
-        sel_row = QHBoxLayout()
-        btn_all = QPushButton("Select All")
-        btn_all.clicked.connect(lambda: self._set_all_checks(True))
-        btn_none = QPushButton("Deselect All")
-        btn_none.clicked.connect(lambda: self._set_all_checks(False))
-        sel_row.addWidget(btn_all)
-        sel_row.addWidget(btn_none)
-        ml.addLayout(sel_row)
-
-        left_layout.addWidget(meas_group)
+            self.output_checks[key] = chk
+            ol.addWidget(chk)
+        left_layout.addWidget(out_group)
 
         # -- Run / Cancel --
         btn_layout = QHBoxLayout()
@@ -263,18 +252,11 @@ class TraceWindow(QMainWindow):
             self.seg_edit.setText(folder)
 
     # -----------------------------------------------------------------------
-    # Checkbox helpers
-    # -----------------------------------------------------------------------
-    def _set_all_checks(self, state: bool):
-        for chk in self.meas_checks.values():
-            chk.setChecked(state)
-
-    def _selected_measurement_groups(self) -> set[str]:
-        return {key for key, chk in self.meas_checks.items() if chk.isChecked()}
-
-    # -----------------------------------------------------------------------
     # Settings persistence
     # -----------------------------------------------------------------------
+    def _selected_outputs(self) -> set[str]:
+        return {key for key, chk in self.output_checks.items() if chk.isChecked()}
+
     def _save_settings(self):
         s = self.settings
         s.setValue("input_folder", self.input_edit.text())
@@ -282,8 +264,8 @@ class TraceWindow(QMainWindow):
         s.setValue("landmark_model", self.lm_edit.text())
         s.setValue("segmentation_model", self.seg_edit.text())
         s.setValue("scale", self.scale_spin.value())
-        for key, chk in self.meas_checks.items():
-            s.setValue(f"meas/{key}", chk.isChecked())
+        for key, chk in self.output_checks.items():
+            s.setValue(f"output/{key}", chk.isChecked())
 
     def _restore_settings(self):
         s = self.settings
@@ -308,8 +290,8 @@ class TraceWindow(QMainWindow):
         scale = s.value("scale", None)
         if scale is not None:
             self.scale_spin.setValue(float(scale))
-        for key, chk in self.meas_checks.items():
-            saved = s.value(f"meas/{key}", None)
+        for key, chk in self.output_checks.items():
+            saved = s.value(f"output/{key}", None)
             if saved is not None:
                 chk.setChecked(saved == "true" or saved is True)
 
@@ -329,9 +311,6 @@ class TraceWindow(QMainWindow):
             return
         if not self.seg_edit.text():
             QMessageBox.warning(self, "Missing Model", "Please select a segmentation model folder.")
-            return
-        if not self._selected_measurement_groups():
-            QMessageBox.warning(self, "No Measurements", "Please select at least one measurement group.")
             return
 
         scale = self.scale_spin.value()
@@ -357,7 +336,7 @@ class TraceWindow(QMainWindow):
                 segmentation_model_dir=Path(self.seg_edit.text()),
                 scale=scale,
                 keep_intermediates=False,
-                measurement_groups=self._selected_measurement_groups(),
+                outputs=self._selected_outputs(),
             )
         )
         self.worker.progress.connect(self._on_progress)
@@ -385,7 +364,7 @@ class TraceWindow(QMainWindow):
         self.statusBar().showMessage(msg)
         self._log(msg)
 
-    def _on_all_done(self, results, csv_path):
+    def _on_all_done(self, results):
         self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
 
@@ -399,9 +378,6 @@ class TraceWindow(QMainWindow):
         summary = f"Done: {succeeded} succeeded, {failed} failed out of {len(results)} images."
         self._log(f"\n{summary}")
         self.statusBar().showMessage(summary)
-
-        if csv_path:
-            self._log(f"CSV: {csv_path}")
 
         if failed:
             self._log("\nFailed images:")

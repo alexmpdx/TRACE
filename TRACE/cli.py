@@ -5,7 +5,7 @@ import logging
 import sys
 from pathlib import Path
 
-from TRACE.pipeline import trace_folder
+from TRACE.pipeline import OUTPUT_TYPES, trace_folder
 
 
 def parse_args(argv=None):
@@ -46,12 +46,6 @@ def parse_args(argv=None):
         help="Microns per pixel (optional; omit for pixel-only measurements)",
     )
     parser.add_argument(
-        "--smooth",
-        type=float,
-        default=3.0,
-        help="Smoothing sigma for centerline extraction (default: 3.0)",
-    )
-    parser.add_argument(
         "--device",
         default=None,
         choices=["cpu", "cuda", "mps"],
@@ -61,6 +55,15 @@ def parse_args(argv=None):
         "--keep-intermediates",
         action="store_true",
         help="Keep preprocessing intermediate files in output/intermediates/",
+    )
+    parser.add_argument(
+        "--outputs",
+        default=",".join(OUTPUT_TYPES.keys()),
+        help=(
+            "Comma-separated Stage 2 outputs to produce. "
+            f"Valid keys: {','.join(OUTPUT_TYPES.keys())}. "
+            "Pass an empty string to skip Stage 2."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -121,15 +124,21 @@ def main(argv=None):
     print(f"Output: {args.output}")
     print()
 
-    results, csv_path = trace_folder(
+    outputs = {o.strip() for o in args.outputs.split(",") if o.strip()}
+    invalid = outputs - set(OUTPUT_TYPES.keys())
+    if invalid:
+        print(f"Error: unknown output keys: {sorted(invalid)}", file=sys.stderr)
+        sys.exit(1)
+
+    results = trace_folder(
         input_dir=args.input,
         output_dir=args.output,
         landmark_checkpoint=args.landmark_model,
         segmentation_model_dir=args.segmentation_model,
         scale=args.scale,
-        smooth_sigma=args.smooth,
         device=device,
         keep_intermediates=args.keep_intermediates,
+        outputs=outputs,
         progress_callback=_progress,
     )
 
@@ -138,9 +147,6 @@ def main(argv=None):
     failed = sum(1 for r in results if r.error is not None)
     print()
     print(f"Done: {succeeded} succeeded, {failed} failed out of {len(results)} images.")
-
-    if csv_path:
-        print(f"CSV: {csv_path}")
 
     if failed:
         print("\nFailed images:", file=sys.stderr)

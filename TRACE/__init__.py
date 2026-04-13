@@ -1,10 +1,10 @@
-"""TRACE — Combined preprocessing + WingVeinAnalyzer pipeline.
+"""TRACE — Wing analysis pipeline (preprocessing stage only; analysis TODO).
 
 Usage::
 
     from TRACE import trace_folder
 
-    results, csv_path = trace_folder(
+    results = trace_folder(
         input_dir="path/to/wings/",
         output_dir="path/to/output/",
         landmark_checkpoint="model.pt",
@@ -13,13 +13,9 @@ Usage::
     )
 """
 
-from TRACE.landmark_measures import LandmarkMeasurements, compute_landmark_measurements, draw_landmark_overlay
 from TRACE.pipeline import TraceResult, trace_folder
 
 __all__ = [
     "trace_folder",
     "TraceResult",
-    "LandmarkMeasurements",
-    "compute_landmark_measurements",
-    "draw_landmark_overlay",
 ]
