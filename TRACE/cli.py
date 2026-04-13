@@ -5,7 +5,7 @@ import logging
 import sys
 from pathlib import Path
 
-from TRACE.pipeline import OUTPUT_TYPES, trace_folder
+from TRACE.pipeline import DEFAULT_MAX_WORKERS, OUTPUT_TYPES, trace_folder
 
 
 def parse_args(argv=None):
@@ -75,6 +75,15 @@ def parse_args(argv=None):
             "Comma-separated Stage 2 outputs to produce. "
             f"Valid keys: {','.join(OUTPUT_TYPES.keys())}. "
             "Pass an empty string to skip Stage 2."
+        ),
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_MAX_WORKERS,
+        help=(
+            f"Number of Stage 2 wings to analyze in parallel (default: {DEFAULT_MAX_WORKERS}). "
+            "Stage 1 (GPU preprocessing) always runs sequentially. Pass 1 to disable parallelism."
         ),
     )
     return parser.parse_args(argv)
@@ -162,6 +171,10 @@ def main(argv=None):
     if args.scale is not None:
         config.um_per_px = args.scale if args.scale > 0 else None
 
+    if args.workers < 1:
+        print(f"Error: --workers must be >= 1, got {args.workers}", file=sys.stderr)
+        sys.exit(1)
+
     results = trace_folder(
         input_dir=args.input,
         output_dir=args.output,
@@ -171,6 +184,7 @@ def main(argv=None):
         device=device,
         keep_intermediates=args.keep_intermediates,
         outputs=outputs,
+        max_workers=args.workers,
         progress_callback=_progress,
     )
 

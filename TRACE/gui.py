@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -35,7 +36,7 @@ from PyQt5.QtWidgets import (
 
 from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
-from TRACE.pipeline import OUTPUT_TYPES, trace_folder
+from TRACE.pipeline import DEFAULT_MAX_WORKERS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,7 @@ class TraceWindow(QMainWindow):
         self.worker = None
         self._image_paths = []
         self.config = PipelineConfig()
+        self._workers_warning_shown = False
         self._build_ui()
         self._restore_settings()
 
@@ -203,6 +205,21 @@ class TraceWindow(QMainWindow):
             ol.addWidget(chk)
         left_layout.addWidget(out_group)
 
+        # -- Parallel workers --
+        workers_group = QGroupBox("Parallel processing")
+        wg = QHBoxLayout(workers_group)
+        wg.addWidget(QLabel("Workers:"))
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(1, 32)
+        self.workers_spin.setValue(DEFAULT_MAX_WORKERS)
+        self.workers_spin.setToolTip(
+            "Number of wings to analyze in parallel during Stage 2.\n"
+            "Stage 1 (GPU preprocessing) always runs sequentially."
+        )
+        self.workers_spin.valueChanged.connect(self._on_workers_changed)
+        wg.addWidget(self.workers_spin, stretch=1)
+        left_layout.addWidget(workers_group)
+
         # -- Run / Cancel --
         btn_layout = QHBoxLayout()
         self.btn_run = QPushButton("Run Pipeline")
@@ -279,6 +296,26 @@ class TraceWindow(QMainWindow):
     def _on_scale_changed(self, val: float):
         self.config.um_per_px = val if val > 0 else None
 
+    def _on_workers_changed(self, val: int):
+        if val <= DEFAULT_MAX_WORKERS or self._workers_warning_shown:
+            return
+        self._workers_warning_shown = True
+        QMessageBox.warning(
+            self,
+            "Parallel workers",
+            (
+                "You are enabling parallel Stage 2 analysis.\n\n"
+                "Each worker runs the full identifyFeatures pipeline on one wing "
+                "and uses significant CPU and RAM. Setting this value too high can:\n\n"
+                "  • Exhaust system RAM and cause the process to be killed\n"
+                "  • Saturate all CPU cores and freeze other applications\n"
+                "  • Trigger thermal throttling on laptops\n"
+                "  • Produce no speedup past the number of physical cores\n\n"
+                "A safe starting point is 2–4. Do not exceed your machine's "
+                "physical core count unless you know what you're doing."
+            ),
+        )
+
     def _open_settings_dialog(self):
         dlg = PipelineConfigDialog(self.config, self)
         if dlg.exec_() == QDialog.Accepted:
@@ -330,6 +367,7 @@ class TraceWindow(QMainWindow):
         s.setValue("landmark_model", self.lm_edit.text())
         s.setValue("segmentation_model", self.seg_edit.text())
         s.setValue("pipeline_config_json", config_to_json(self.config))
+        s.setValue("max_workers", self.workers_spin.value())
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
 
@@ -367,6 +405,15 @@ class TraceWindow(QMainWindow):
             saved = s.value(f"output/{key}", None)
             if saved is not None:
                 chk.setChecked(saved == "true" or saved is True)
+        workers_val = s.value("max_workers", None)
+        if workers_val is not None:
+            try:
+                self.workers_spin.blockSignals(True)
+                self.workers_spin.setValue(int(workers_val))
+            except (TypeError, ValueError):
+                pass
+            finally:
+                self.workers_spin.blockSignals(False)
 
     # -----------------------------------------------------------------------
     # Pipeline execution
@@ -406,6 +453,7 @@ class TraceWindow(QMainWindow):
                 config=self.config,
                 keep_intermediates=False,
                 outputs=self._selected_outputs(),
+                max_workers=self.workers_spin.value(),
             )
         )
         self.worker.progress.connect(self._on_progress)
