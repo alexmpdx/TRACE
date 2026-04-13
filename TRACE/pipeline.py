@@ -293,7 +293,7 @@ def _run(
         output_dir=preproc_dir,
         landmark_checkpoint=landmark_checkpoint,
         segmentation_model_dir=segmentation_model_dir,
-        stages=(True, True, True, True),
+        stages=(True, True, True),
         device=device,
         keep_chopped=("chopped_image" in outputs),
         progress_callback=_preproc_progress,

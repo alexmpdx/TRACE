@@ -4,6 +4,7 @@ Dark Fusion theme matching the preprocessing app. Runs the pipeline in a
 background QThread with progress reporting.
 """
 
+import logging
 import sys
 import traceback
 from collections import OrderedDict
@@ -44,10 +45,29 @@ from TRACE.settings_dialog import PipelineConfigDialog
 # ---------------------------------------------------------------------------
 
 
+_CAPTURED_LOGGERS = ("identify_features", "TRACE", "preprocessing")
+
+
+class _SignalLogHandler(logging.Handler):
+    """Logging handler that forwards records through a pyqtSignal."""
+
+    def __init__(self, signal):
+        super().__init__()
+        self._signal = signal
+        self.setFormatter(logging.Formatter("%(name)s %(levelname)s: %(message)s"))
+
+    def emit(self, record):
+        try:
+            self._signal.emit(self.format(record))
+        except Exception:
+            pass
+
+
 class TraceWorker(QThread):
     """Runs trace_folder() in a background thread."""
 
     progress = pyqtSignal(int, int, str, str, str)  # idx, total, name, stage, detail
+    log_message = pyqtSignal(str)  # forwarded log records from captured loggers
     all_done = pyqtSignal(list)  # results
     error = pyqtSignal(str)
 
@@ -60,6 +80,15 @@ class TraceWorker(QThread):
         self._cancel = True
 
     def run(self):
+        handler = _SignalLogHandler(self.log_message)
+        handler.setLevel(logging.INFO)
+        attached = []
+        for name in _CAPTURED_LOGGERS:
+            lg = logging.getLogger(name)
+            if lg.level == logging.NOTSET or lg.level > logging.INFO:
+                lg.setLevel(logging.INFO)
+            lg.addHandler(handler)
+            attached.append(lg)
         try:
 
             def _progress(idx, total, name, stage, detail):
@@ -74,6 +103,9 @@ class TraceWorker(QThread):
             self.all_done.emit([])
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
+        finally:
+            for lg in attached:
+                lg.removeHandler(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +489,7 @@ class TraceWindow(QMainWindow):
             )
         )
         self.worker.progress.connect(self._on_progress)
+        self.worker.log_message.connect(self._log)
         self.worker.all_done.connect(self._on_all_done)
         self.worker.error.connect(self._on_error)
         self.worker.start()

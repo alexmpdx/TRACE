@@ -1,11 +1,10 @@
 """
-Preprocessing pipeline — orchestrates LandmarkLocator, HingeChopper, modelTOjson, and add_wing.
+Preprocessing pipeline — orchestrates LandmarkLocator, HingeChopper, and modelTOjson.
 
-Processes a folder of wing images through four stages:
+Processes a folder of wing images through three stages:
   1. Landmark detection (LandmarkLocator)
   2. Hinge removal (HingeChopper)
   3. Segmentation to GeoJSON (modelTOjson)
-  4. Wing annotation (add_wing — union of all polygons)
 
 Each stage can be run independently or as part of the full pipeline.
 """
@@ -128,16 +127,6 @@ def save_segmentation_geojson(geojson_fc: dict, output_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stage 4: Wing annotation
-# ---------------------------------------------------------------------------
-def run_add_wing(geojson_path: Path) -> None:
-    """Add a wing feature (union of all polygons) to an existing GeoJSON file."""
-    from preprocessing.add_wing import add_wing
-
-    add_wing(str(geojson_path))
-
-
-# ---------------------------------------------------------------------------
 # Pipeline result and orchestration
 # ---------------------------------------------------------------------------
 @dataclass
@@ -167,7 +156,7 @@ def process_single_image(
     output_dir: Path,
     landmark_checkpoint: Optional[Path] = None,
     segmentation_model_dir: Optional[Path] = None,
-    stages: tuple[bool, bool, bool, bool] = (True, True, True, True),
+    stages: tuple[bool, bool, bool] = (True, True, True),
     predictor_cache: Optional[dict] = None,
     model_cache: Optional[dict] = None,
     device=None,
@@ -177,10 +166,10 @@ def process_single_image(
     """Run selected pipeline stages on a single image.
 
     Args:
-        stages: (landmarks, hinge_chop, segmentation, add_wing) booleans.
+        stages: (landmarks, hinge_chop, segmentation) booleans.
         progress_callback: callable(stage_name: str, detail: str)
     """
-    do_landmarks, do_hinge, do_segment, do_wing = stages
+    do_landmarks, do_hinge, do_segment = stages
     result = PipelineResult(image_path=image_path)
 
     if predictor_cache is None:
@@ -249,19 +238,6 @@ def process_single_image(
         result.segmentation_geojson_path = seg_path
         result.stages_completed.append("segmentation")
 
-    # Stage 4: Wing annotation
-    if do_wing:
-        seg_path = result.segmentation_geojson_path or output_dir / f"{stem}.geojson"
-        if seg_path.exists():
-            if progress_callback:
-                progress_callback("add_wing", f"Adding wing annotation to {seg_path.name}")
-            run_add_wing(seg_path)
-            result.stages_completed.append("add_wing")
-        else:
-            raise FileNotFoundError(
-                f"No segmentation GeoJSON found for wing annotation: {seg_path}. " f"Run segmentation stage first."
-            )
-
     # Clean up chopped temp file
     if chopped_path and chopped_path.exists() and not keep_chopped:
         chopped_path.unlink()
@@ -275,7 +251,7 @@ def process_folder(
     output_dir: Path,
     landmark_checkpoint: Optional[Path] = None,
     segmentation_model_dir: Optional[Path] = None,
-    stages: tuple[bool, bool, bool, bool] = (True, True, True, True),
+    stages: tuple[bool, bool, bool] = (True, True, True),
     device=None,
     keep_chopped: bool = False,
     progress_callback=None,

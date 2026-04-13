@@ -41,7 +41,7 @@ def parse_args(argv=None):
         "--stages",
         nargs="+",
         default=["all"],
-        choices=["all", "landmarks", "hinge", "segmentation", "add_wing"],
+        choices=["all", "landmarks", "hinge", "segmentation"],
         help="Which stages to run (default: all)",
     )
     parser.add_argument(
@@ -58,21 +58,20 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _resolve_stages(stage_names: list[str]) -> tuple[bool, bool, bool, bool]:
-    """Convert stage name list to (landmarks, hinge, segmentation, add_wing) booleans."""
+def _resolve_stages(stage_names: list[str]) -> tuple[bool, bool, bool]:
+    """Convert stage name list to (landmarks, hinge, segmentation) booleans."""
     if "all" in stage_names:
-        return (True, True, True, True)
+        return (True, True, True)
     return (
         "landmarks" in stage_names,
         "hinge" in stage_names,
         "segmentation" in stage_names,
-        "add_wing" in stage_names,
     )
 
 
-def _validate(args, stages: tuple[bool, bool, bool, bool]):
+def _validate(args, stages: tuple[bool, bool, bool]):
     """Validate that required models are provided for selected stages."""
-    do_lm, do_hinge, do_seg, _do_wing = stages
+    do_lm, do_hinge, do_seg = stages
 
     if (do_lm or do_hinge) and args.landmark_model is None:
         print("Error: --landmark-model is required for landmarks/hinge stages.", file=sys.stderr)
@@ -115,8 +114,6 @@ def main(argv=None):
         stage_names.append("hinge")
     if stages[2]:
         stage_names.append("segmentation")
-    if stages[3]:
-        stage_names.append("add_wing")
     print(f"Stages: {', '.join(stage_names)}")
     print()
 

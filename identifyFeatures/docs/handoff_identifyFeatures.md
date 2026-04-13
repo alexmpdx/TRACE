@@ -19,14 +19,12 @@ RAW WING IMAGES (.tif/.bmp)
        ↓
 [Stage 2] HingeChopper — blacks out proximal hinge region using landmark coords → {stem}_chopped.tif
        ↓
-[Stage 3] modelTOjson — semantic segmentation (Torch SMP or ONNX) → vein/intervein/hinge polygons
+[Stage 3] modelTOjson — semantic segmentation (Torch SMP or ONNX) → vein/intervein/hinge polygons → {stem}_detections.geojson
        ↓
-[Stage 4] add_wing — union of polygons → final {stem}_detections.geojson
-       ↓
-[Stage 5] identifyFeatures — landmark-anchored vein ID → named veins, regions, measurements, overlays
+[Stage 4] identifyFeatures — landmark-anchored vein ID → named veins, regions, measurements, overlays
 ```
 
-Stages 1–4 already exist as the `preprocessing` module. Stage 5 is `identifyFeatures`. The `TRACE` module was intended to orchestrate everything end-to-end but currently only runs preprocessing — vein analysis (Stage 5) is stubbed as TODO.
+Stages 1–3 already exist as the `preprocessing` module. Stage 4 is `identifyFeatures`. The `TRACE` module was intended to orchestrate everything end-to-end but currently only runs preprocessing — vein analysis (Stage 4) is stubbed as TODO.
 
 ### Existing modules (all under `/Users/alexmurphy/Desktop/claude_scripts/mapThemVeins/`)
 
@@ -35,7 +33,7 @@ Stages 1–4 already exist as the `preprocessing` module. Stage 5 is `identifyFe
 | `LandmarkLocator/` | Deep learning landmark detection (training + inference) | PyQt5 (training monitor) |
 | `HingeChopper/` | Blacks out hinge region using landmark coords | CLI only |
 | `modelTOjson/` | Segmentation inference with GeoJSON export | PyQt5 |
-| `preprocessing/` | Orchestrates stages 1–4 | PyQt5 + CLI |
+| `preprocessing/` | Orchestrates stages 1–3 | PyQt5 + CLI |
 | `TRACE/` | Master pipeline (currently preprocessing only, analysis TODO) | PyQt5 + CLI |
 | `WingVeinAnalyzer/` | Older vein analysis (spatial-prior based) — being replaced by identifyFeatures | PyQt5 + CLI |
 | `identifyFeatures/` | Landmark-anchored vein identification (the module you're integrating) | **CLI only — no GUI yet** |
