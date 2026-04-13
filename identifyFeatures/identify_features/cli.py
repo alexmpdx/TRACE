@@ -20,7 +20,11 @@ from identify_features.config import PipelineConfig
 from identify_features.controllers.pipeline import identify_wing
 from identify_features.views.csv_export import export_csv, export_csv_batch
 from identify_features.views.geojson_export import export_geojson
-from identify_features.views.overlay import render_overlay_to_file
+from identify_features.views.overlay import (
+    render_ap_overlay_to_file,
+    render_cv_ratio_overlay_to_file,
+    render_overlay_to_file,
+)
 
 
 def _find_batch_specimens(
@@ -67,6 +71,10 @@ def _process_one(args_tuple):
             if base_img is not None:
                 render_overlay_to_file(
                     base_img, result.veins, result.intervein_regions, output_dir / f"{stem}_overlay.png"
+                )
+                render_ap_overlay_to_file(base_img, result, output_dir / f"{stem}_ap_overlay.png")
+                render_cv_ratio_overlay_to_file(
+                    base_img, result, output_dir / f"{stem}_cv_ratio_overlay.png", um_per_px=config.um_per_px
                 )
 
         n_veins = sum(1 for v in result.veins if v.centerline is not None)
@@ -181,6 +189,14 @@ def _run_single(args):
             overlay_path = args.output_dir / f"{result.specimen_id}_overlay.png"
             render_overlay_to_file(base_img, result.veins, result.intervein_regions, overlay_path)
             print(f"Overlay: {overlay_path}")
+
+            ap_path = args.output_dir / f"{result.specimen_id}_ap_overlay.png"
+            if render_ap_overlay_to_file(base_img, result, ap_path):
+                print(f"AP overlay: {ap_path}")
+
+            cv_path = args.output_dir / f"{result.specimen_id}_cv_ratio_overlay.png"
+            if render_cv_ratio_overlay_to_file(base_img, result, cv_path, um_per_px=config.um_per_px):
+                print(f"CV ratio overlay: {cv_path}")
 
     n_veins = sum(1 for v in result.veins if v.centerline is not None)
     print(f"{result.specimen_id}: {n_veins} veins, {len(result.intervein_regions)}/7 regions")

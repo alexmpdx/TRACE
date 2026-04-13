@@ -31,23 +31,16 @@ _VEIN_DISPLAY = {v: ("costal vein" if v == "costa" else v) for v in VEIN_AP_ORDE
 NOT_IDENTIFIED = "not identified"
 
 
-def _compute_ap_areas(
+def compute_ap_split(
     wing_result: Optional[WingResult],
-) -> tuple[Optional[float], Optional[float]]:
-    """Split wing into anterior/posterior compartments along L4 axis.
+) -> tuple[Optional[Polygon], Optional[Polygon]]:
+    """Split wing into anterior/posterior compartment polygons along L4 axis.
 
-    Algorithm:
-    1. Get L4 centerline and its minimum rotated bounding box.
-    2. Take the anterior long edge (closer to L3) of the bounding box.
-    3. Extend that edge to bisect the entire wing outline.
-    4. Split the wing; label halves by proximity to L3 (anterior) vs L5 (posterior).
-
-    Returns (anterior_area_px, posterior_area_px) or (None, None).
+    Returns (anterior_polygon, posterior_polygon) or (None, None).
     """
     if wing_result is None or wing_result.wing_outline is None:
         return None, None
 
-    # Find L4 and L3 centerlines
     veins_by_id = {v.vein_id: v for v in wing_result.veins}
     l4 = veins_by_id.get("L4")
     if l4 is None or l4.centerline is None:
@@ -56,13 +49,11 @@ def _compute_ap_areas(
     l4_line = l4.centerline
     outline = wing_result.wing_outline
 
-    # Step 1: minimum rotated bounding box around L4 centerline
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         bbox = l4_line.minimum_rotated_rectangle
-    coords = list(bbox.exterior.coords)[:4]  # 4 corners
+    coords = list(bbox.exterior.coords)[:4]
 
-    # Step 2: extract 4 edges and find the 2 longest
     edges = []
     for i in range(4):
         p1, p2 = np.array(coords[i]), np.array(coords[(i + 1) % 4])
@@ -71,10 +62,8 @@ def _compute_ap_areas(
         edges.append((p1, p2, length, midpoint))
 
     edges.sort(key=lambda e: e[2], reverse=True)
-    long_edges = edges[:2]  # the two longest edges
+    long_edges = edges[:2]
 
-    # Step 3: pick the anterior edge (closer to L3 centroid)
-    # Fall back to L2 or L1 if L3 is missing
     anterior_ref = None
     for vid in ("L3", "L2", "L1"):
         v = veins_by_id.get(vid)
@@ -85,17 +74,14 @@ def _compute_ap_areas(
     if anterior_ref is None:
         return None, None
 
-    # Pick the long edge whose midpoint is closer to the anterior reference
     d0 = np.linalg.norm(long_edges[0][3] - anterior_ref)
     d1 = np.linalg.norm(long_edges[1][3] - anterior_ref)
     ant_edge = long_edges[0] if d0 < d1 else long_edges[1]
 
-    # Step 4: extend the anterior edge to fully bisect the wing
     p1, p2 = ant_edge[0], ant_edge[1]
     direction = p2 - p1
     direction = direction / np.linalg.norm(direction)
 
-    # Shift split line by one median L4 vein width toward anterior
     median_width = 0.0
     if l4.tissue_polygon is not None and l4_line.length > 0:
         median_width = l4.tissue_polygon.area / l4_line.length
@@ -107,7 +93,6 @@ def _compute_ap_areas(
             perp = perp_a
         else:
             perp = perp_b
-        # Only shift the DTip (distal) end
         landmarks = wing_result.landmarks if wing_result else {}
         dtip = landmarks.get("DTip")
         dtip_pt = np.array([dtip.x, dtip.y]) if dtip else np.array(l4_line.coords[-1])
@@ -116,7 +101,6 @@ def _compute_ap_areas(
         else:
             p2 = p2 + perp * median_width * 0.5
 
-    # Extend by 2x the wing bounding box diagonal in each direction
     minx, miny, maxx, maxy = outline.bounds
     diag = math.hypot(maxx - minx, maxy - miny)
     extend = diag * 2
@@ -126,7 +110,6 @@ def _compute_ap_areas(
     ext_p2 = midpt + direction * extend
     split_line = LineString([ext_p1.tolist(), ext_p2.tolist()])
 
-    # Step 5: split the wing outline
     try:
         parts = split(outline.buffer(0), split_line)
         polygons = [g for g in parts.geoms if isinstance(g, (Polygon, MultiPolygon)) and g.area > 0]
@@ -134,7 +117,6 @@ def _compute_ap_areas(
         logger.debug("AP split failed via shapely.ops.split, trying difference approach")
         polygons = []
 
-    # Fallback: thin-rectangle difference
     if len(polygons) < 2:
         thin_rect = split_line.buffer(0.5)
         remainder = outline.buffer(0).difference(thin_rect)
@@ -148,16 +130,24 @@ def _compute_ap_areas(
     if len(polygons) < 2:
         return None, None
 
-    # Take the two largest pieces
     polygons.sort(key=lambda g: g.area, reverse=True)
     half_a, half_b = polygons[0], polygons[1]
 
-    # Step 6: label anterior (contains L3 centroid) vs posterior
     ref_point = Point(anterior_ref.tolist())
     if half_a.distance(ref_point) < half_b.distance(ref_point):
-        return half_a.area, half_b.area
+        return half_a, half_b
     else:
-        return half_b.area, half_a.area
+        return half_b, half_a
+
+
+def _compute_ap_areas(
+    wing_result: Optional[WingResult],
+) -> tuple[Optional[float], Optional[float]]:
+    """Return (anterior_area_px, posterior_area_px) or (None, None)."""
+    anterior, posterior = compute_ap_split(wing_result)
+    if anterior is None:
+        return None, None
+    return anterior.area, posterior.area
 
 
 def _wing_measurements(

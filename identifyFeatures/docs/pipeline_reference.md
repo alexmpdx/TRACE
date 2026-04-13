@@ -1217,6 +1217,16 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 - **CV ratio**: Crossvein distance divided by wing length (dimensionless)
 - **Anterior/posterior compartment areas**: Wing split along L4 vein axis. Method: minimum rotated bounding box around L4 centerline → anterior long edge (closer to L3) → distal (DTip) end shifted anteriorly by 0.5× median L4 vein width to align with tissue edge → extended to bisect wing outline. Halves labeled by proximity to L3 (anterior) vs L5 (posterior).
 
+### 6.5 Overlay images
+
+**Source**: `views/overlay.py`
+
+Three overlay PNGs generated per specimen (with `--overlay` flag):
+
+- **`{stem}_overlay.png`** (`render_overlay_to_file`): Color-coded veins and intervein regions on wing image. Semi-transparent region fills, vein centerlines, ectopic vein labels, region name labels.
+- **`{stem}_ap_overlay.png`** (`render_ap_overlay_to_file`): Anterior/posterior compartment visualization. Blue tint = anterior, red/orange tint = posterior, with percentage labels. Clean view without construction geometry.
+- **`{stem}_cv_ratio_overlay.png`** (`render_cv_ratio_overlay_to_file`): Wing length (L1-Rs → DTip, yellow) and crossvein distance (ACV.p → PCV.a, cyan) measurement lines with labeled landmark dots. CV ratio displayed in upper-left corner.
+
 ---
 
 ## 7. Parameter Reference
