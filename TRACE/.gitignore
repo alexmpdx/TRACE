@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv-pipeline-map/
+pipeline_map*.png
+pipeline_map*.dot
+pipeline_map*.svg
