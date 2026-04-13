@@ -1214,6 +1214,7 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 - **Wing area**: `wing_outline.area` (union of all detection polygons)
 - **Wing length**: Euclidean distance between landmarks L1-Rs and DTip
 - **Crossvein distance**: Euclidean distance between landmarks ACV.p and PCV.a
+- **CV ratio**: Crossvein distance divided by wing length (dimensionless)
 - **Anterior/posterior compartment areas**: Wing split along L4 vein axis. Method: minimum rotated bounding box around L4 centerline → anterior long edge (closer to L3) → distal (DTip) end shifted anteriorly by 0.5× median L4 vein width to align with tissue edge → extended to bisect wing outline. Halves labeled by proximity to L3 (anterior) vs L5 (posterior).
 
 ---

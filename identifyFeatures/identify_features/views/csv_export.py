@@ -204,6 +204,13 @@ def _wing_measurements(
         vals["crossvein_distance_px"] = ""
         vals["crossvein_distance_um"] = ""
 
+    # CV ratio: crossvein distance / wing length (dimensionless)
+    if vals["crossvein_distance_px"] and vals["wing_length_px"]:
+        cv_ratio = float(vals["crossvein_distance_px"]) / float(vals["wing_length_px"])
+        vals["cv_ratio"] = f"{cv_ratio:.4f}"
+    else:
+        vals["cv_ratio"] = ""
+
     # Anterior/posterior compartment areas
     ant_area, post_area = _compute_ap_areas(wing_result)
     if ant_area is not None:
@@ -236,6 +243,7 @@ _LONG_FIELDS = [
     "area_um2",
     "length_px",
     "length_um",
+    "ratio",
 ]
 
 
@@ -284,6 +292,21 @@ def export_csv(
             "area_um2": "",
             "length_px": wm["crossvein_distance_px"],
             "length_um": wm["crossvein_distance_um"],
+            "ratio": "",
+        }
+    )
+    rows.append(
+        {
+            "specimen": sid,
+            "feature": "CV ratio",
+            "category": "wing",
+            "type": "",
+            "status": "",
+            "area_px": "",
+            "area_um2": "",
+            "length_px": "",
+            "length_um": "",
+            "ratio": wm["cv_ratio"],
         }
     )
     rows.append(
@@ -374,6 +397,7 @@ def _build_fieldnames(include_um: bool) -> list[str]:
     fields.append("crossvein distance_px")
     if include_um:
         fields.append("crossvein distance_um")
+    fields.append("CV ratio")
     fields.append("anterior area_px")
     if include_um:
         fields.append("anterior area_um2")
@@ -418,6 +442,7 @@ def _build_row(
     row["crossvein distance_px"] = wm["crossvein_distance_px"]
     if include_um:
         row["crossvein distance_um"] = wm["crossvein_distance_um"]
+    row["CV ratio"] = wm["cv_ratio"]
     row["anterior area_px"] = wm["anterior_area_px"]
     if include_um:
         row["anterior area_um2"] = wm["anterior_area_um2"]
