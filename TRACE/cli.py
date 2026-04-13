@@ -43,7 +43,19 @@ def parse_args(argv=None):
         "--scale",
         type=float,
         default=None,
-        help="Microns per pixel (optional; omit for pixel-only measurements)",
+        help=(
+            "Microns per pixel. Overrides config.um_per_px if --config is also given. "
+            "Omit for pixel-only measurements."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a PipelineConfig JSON file (produced by the GUI 'Export...' "
+            "button or by hand). Any fields not present fall back to defaults."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -130,12 +142,32 @@ def main(argv=None):
         print(f"Error: unknown output keys: {sorted(invalid)}", file=sys.stderr)
         sys.exit(1)
 
+    # Build PipelineConfig: load from file if given, then apply --scale override.
+    from identify_features.config import PipelineConfig
+
+    from TRACE.config_io import load_config
+
+    if args.config is not None:
+        if not args.config.exists():
+            print(f"Error: config file not found: {args.config}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            config = load_config(args.config)
+        except Exception as e:
+            print(f"Error: failed to load config: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        config = PipelineConfig()
+
+    if args.scale is not None:
+        config.um_per_px = args.scale if args.scale > 0 else None
+
     results = trace_folder(
         input_dir=args.input,
         output_dir=args.output,
         landmark_checkpoint=args.landmark_model,
         segmentation_model_dir=args.segmentation_model,
-        scale=args.scale,
+        config=config,
         device=device,
         keep_intermediates=args.keep_intermediates,
         outputs=outputs,

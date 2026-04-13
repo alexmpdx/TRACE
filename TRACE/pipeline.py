@@ -4,6 +4,8 @@ Stage 1: preprocessing (landmarks, hinge chop, segmentation).
 Stage 2: identifyFeatures (landmark-anchored vein ID, measurements, overlays).
 """
 
+from __future__ import annotations
+
 import logging
 import tempfile
 import time
@@ -11,7 +13,10 @@ import traceback
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from identify_features.config import PipelineConfig
 
 logger = logging.getLogger("TRACE")
 
@@ -41,7 +46,7 @@ def trace_folder(
     output_dir: Path,
     landmark_checkpoint: Path,
     segmentation_model_dir: Path,
-    scale: Optional[float] = None,
+    config: Optional["PipelineConfig"] = None,
     device=None,
     keep_intermediates: bool = False,
     outputs: Optional[set[str]] = None,
@@ -54,7 +59,8 @@ def trace_folder(
         output_dir: Where to write results.
         landmark_checkpoint: Path to landmark model .pt file.
         segmentation_model_dir: Path to segmentation model directory.
-        scale: Microns per pixel (None for pixel-only measurements).
+        config: identifyFeatures PipelineConfig. None means use defaults.
+            Scale (µm/px) is read from config.um_per_px.
         device: Torch device (None for auto-detect).
         keep_intermediates: If True, keep preprocessing files in output/intermediates/.
         outputs: Which Stage 2 outputs to produce. Keys from OUTPUT_TYPES.
@@ -71,6 +77,11 @@ def trace_folder(
     if outputs is None:
         outputs = set(OUTPUT_TYPES.keys())
 
+    if config is None:
+        from identify_features.config import PipelineConfig
+
+        config = PipelineConfig()
+
     if keep_intermediates:
         preproc_dir = output_dir / "intermediates"
         preproc_dir.mkdir(parents=True, exist_ok=True)
@@ -86,7 +97,7 @@ def trace_folder(
             preproc_dir=preproc_dir,
             landmark_checkpoint=landmark_checkpoint.resolve(),
             segmentation_model_dir=segmentation_model_dir.resolve(),
-            scale=scale,
+            config=config,
             device=device,
             outputs=outputs,
             progress_callback=progress_callback,
@@ -102,7 +113,7 @@ def _run(
     preproc_dir: Path,
     landmark_checkpoint: Path,
     segmentation_model_dir: Path,
-    scale: Optional[float],
+    config: "PipelineConfig",
     device,
     outputs: set[str],
     progress_callback,
@@ -157,13 +168,12 @@ def _run(
     logger.info("=== Stage 2: identifyFeatures (outputs=%s) ===", sorted(outputs))
 
     import cv2
-    from identify_features.config import PipelineConfig
     from identify_features.controllers.pipeline import identify_wing
     from identify_features.views.csv_export import export_csv_batch
     from identify_features.views.geojson_export import export_geojson
     from identify_features.views.overlay import render_overlay_to_file
 
-    config = PipelineConfig(um_per_px=scale if scale is not None else 0.483)
+    scale = config.um_per_px
     batch_results: list[tuple[str, object]] = []  # (stem, WingResult)
 
     for i, preproc_result in enumerate(successful_preproc):

@@ -9,11 +9,13 @@ import traceback
 from collections import OrderedDict
 from pathlib import Path
 
+from identify_features.config import PipelineConfig
 from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -32,7 +34,9 @@ from PyQt5.QtWidgets import (
 )
 
 from preprocessing.pipeline import discover_images
+from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
 from TRACE.pipeline import OUTPUT_TYPES, trace_folder
+from TRACE.settings_dialog import PipelineConfigDialog
 
 # ---------------------------------------------------------------------------
 # Worker thread
@@ -84,6 +88,7 @@ class TraceWindow(QMainWindow):
         self.resize(1050, 750)
         self.worker = None
         self._image_paths = []
+        self.config = PipelineConfig()
         self._build_ui()
         self._restore_settings()
 
@@ -164,11 +169,28 @@ class TraceWindow(QMainWindow):
         self.scale_spin = QDoubleSpinBox()
         self.scale_spin.setDecimals(4)
         self.scale_spin.setRange(0.0, 100.0)
-        self.scale_spin.setValue(0.483)
+        self.scale_spin.setValue(self.config.um_per_px or 0.0)
         self.scale_spin.setSingleStep(0.001)
         self.scale_spin.setSpecialValueText("pixel only")
+        self.scale_spin.valueChanged.connect(self._on_scale_changed)
         sg.addWidget(self.scale_spin, stretch=1)
         left_layout.addWidget(scale_group)
+
+        # -- Pipeline settings --
+        settings_group = QGroupBox("Pipeline settings")
+        stg = QVBoxLayout(settings_group)
+        self.btn_settings = QPushButton("Edit settings...")
+        self.btn_settings.clicked.connect(self._open_settings_dialog)
+        stg.addWidget(self.btn_settings)
+        io_row = QHBoxLayout()
+        btn_import = QPushButton("Import...")
+        btn_import.clicked.connect(self._import_config)
+        btn_export = QPushButton("Export...")
+        btn_export.clicked.connect(self._export_config)
+        io_row.addWidget(btn_import)
+        io_row.addWidget(btn_export)
+        stg.addLayout(io_row)
+        left_layout.addWidget(settings_group)
 
         # -- Output selection --
         out_group = QGroupBox("Outputs")
@@ -252,6 +274,50 @@ class TraceWindow(QMainWindow):
             self.seg_edit.setText(folder)
 
     # -----------------------------------------------------------------------
+    # Pipeline settings (PipelineConfig)
+    # -----------------------------------------------------------------------
+    def _on_scale_changed(self, val: float):
+        self.config.um_per_px = val if val > 0 else None
+
+    def _open_settings_dialog(self):
+        dlg = PipelineConfigDialog(self.config, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self.config = dlg.get_config()
+            # Keep main-window scale spinner in sync.
+            val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
+            self.scale_spin.blockSignals(True)
+            self.scale_spin.setValue(val)
+            self.scale_spin.blockSignals(False)
+
+    def _import_config(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import Pipeline Config", "", "JSON (*.json);;All Files (*)")
+        if not path:
+            return
+        try:
+            self.config = load_config(Path(path))
+        except Exception as e:
+            QMessageBox.critical(self, "Import failed", f"Could not load config:\n{e}")
+            return
+        val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(val)
+        self.scale_spin.blockSignals(False)
+        self._log(f"Imported config from {path}")
+
+    def _export_config(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Pipeline Config", "pipeline_config.json", "JSON (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            save_config(self.config, Path(path))
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", f"Could not save config:\n{e}")
+            return
+        self._log(f"Exported config to {path}")
+
+    # -----------------------------------------------------------------------
     # Settings persistence
     # -----------------------------------------------------------------------
     def _selected_outputs(self) -> set[str]:
@@ -263,7 +329,7 @@ class TraceWindow(QMainWindow):
         s.setValue("output_folder", self.output_edit.text())
         s.setValue("landmark_model", self.lm_edit.text())
         s.setValue("segmentation_model", self.seg_edit.text())
-        s.setValue("scale", self.scale_spin.value())
+        s.setValue("pipeline_config_json", config_to_json(self.config))
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
 
@@ -287,9 +353,16 @@ class TraceWindow(QMainWindow):
         val = s.value("segmentation_model", "")
         if val:
             self.seg_edit.setText(val)
-        scale = s.value("scale", None)
-        if scale is not None:
-            self.scale_spin.setValue(float(scale))
+        cfg_json = s.value("pipeline_config_json", None)
+        if cfg_json:
+            try:
+                self.config = config_from_json(cfg_json)
+            except Exception:
+                self.config = PipelineConfig()
+        scale_val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(scale_val)
+        self.scale_spin.blockSignals(False)
         for key, chk in self.output_checks.items():
             saved = s.value(f"output/{key}", None)
             if saved is not None:
@@ -313,10 +386,6 @@ class TraceWindow(QMainWindow):
             QMessageBox.warning(self, "Missing Model", "Please select a segmentation model folder.")
             return
 
-        scale = self.scale_spin.value()
-        if scale == 0.0:
-            scale = None
-
         # UI state
         self.btn_run.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -334,7 +403,7 @@ class TraceWindow(QMainWindow):
                 output_dir=Path(self.output_edit.text()),
                 landmark_checkpoint=Path(self.lm_edit.text()),
                 segmentation_model_dir=Path(self.seg_edit.text()),
-                scale=scale,
+                config=self.config,
                 keep_intermediates=False,
                 outputs=self._selected_outputs(),
             )
