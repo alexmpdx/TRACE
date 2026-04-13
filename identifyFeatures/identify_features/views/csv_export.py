@@ -95,6 +95,27 @@ def _compute_ap_areas(
     direction = p2 - p1
     direction = direction / np.linalg.norm(direction)
 
+    # Shift split line by one median L4 vein width toward anterior
+    median_width = 0.0
+    if l4.tissue_polygon is not None and l4_line.length > 0:
+        median_width = l4.tissue_polygon.area / l4_line.length
+    if median_width > 0:
+        perp_a = np.array([-direction[1], direction[0]])
+        perp_b = np.array([direction[1], -direction[0]])
+        midpt = (p1 + p2) / 2
+        if np.linalg.norm(midpt + perp_a * 10 - anterior_ref) < np.linalg.norm(midpt + perp_b * 10 - anterior_ref):
+            perp = perp_a
+        else:
+            perp = perp_b
+        # Only shift the DTip (distal) end
+        landmarks = wing_result.landmarks if wing_result else {}
+        dtip = landmarks.get("DTip")
+        dtip_pt = np.array([dtip.x, dtip.y]) if dtip else np.array(l4_line.coords[-1])
+        if np.linalg.norm(p1 - dtip_pt) < np.linalg.norm(p2 - dtip_pt):
+            p1 = p1 + perp * median_width * 0.5
+        else:
+            p2 = p2 + perp * median_width * 0.5
+
     # Extend by 2x the wing bounding box diagonal in each direction
     minx, miny, maxx, maxy = outline.bounds
     diag = math.hypot(maxx - minx, maxy - miny)
