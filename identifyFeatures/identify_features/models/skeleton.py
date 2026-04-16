@@ -184,16 +184,22 @@ def build_skeleton_graph(
     median_vein_width = _compute_median_vein_width(skel, distance_map, vein_mask)
     logger.info("Median vein width: %.1fpx", median_vein_width)
 
-    # Step 4: Basic length-based pruning
-    # Use median vein width if no explicit pixel threshold was set
+    # Compute prune threshold (also reused by bridge passes)
     if prune_min_length_px is not None:
         prune_threshold = prune_min_length_px
     else:
         prune_threshold = max(10, int(median_vein_width * config.prune_min_length_vein_widths))
-    skel = _prune_branches(skel, min_length=prune_threshold, distance_map=distance_map)
-    logger.info("After basic pruning (cap=%dpx, local half-width): %d pixels", prune_threshold, np.count_nonzero(skel))
-    if dbg:
-        dbg.dump_skel(skel, "basic_prune")
+
+    # Step 4: Basic length-based pruning (optional)
+    if config.enable_basic_prune:
+        skel = _prune_branches(skel, min_length=prune_threshold, distance_map=distance_map)
+        logger.info(
+            "After basic pruning (cap=%dpx, local half-width): %d pixels", prune_threshold, np.count_nonzero(skel)
+        )
+        if dbg:
+            dbg.dump_skel(skel, "basic_prune")
+    else:
+        logger.info("Basic length-based pruning disabled (enable_basic_prune=False)")
 
     # Step 5: Advanced pruning methods (applied sequentially)
     for method in prune_methods:

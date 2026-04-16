@@ -50,6 +50,7 @@ class PipelineConfigDialog(QDialog):
     _KIND_OPT_INT = "opt_int"
     _KIND_ENUM_LIST = "enum_list"
     _KIND_FLOAT_LIST = "float_list"
+    _KIND_BOOL = "bool"
 
     def __init__(self, config: PipelineConfig, parent=None):
         super().__init__(parent)
@@ -92,6 +93,8 @@ class PipelineConfigDialog(QDialog):
                     kwargs[name] = []
                 else:
                     kwargs[name] = [float(x.strip()) for x in text.split(",") if x.strip()]
+            elif kind == self._KIND_BOOL:
+                kwargs[name] = widget.isChecked()
         return PipelineConfig(**kwargs)
 
     # -----------------------------------------------------------------------
@@ -151,6 +154,7 @@ class PipelineConfigDialog(QDialog):
 
         gb = QGroupBox("Pruning")
         form = QFormLayout(gb)
+        self._add_bool(form, "enable_basic_prune", "Basic length-based prune (step 4)")
         self._add_enum_list(form, "prune_methods", "Methods (empty = length-based only)", PruneMethod)
         self._add_opt_float(
             form, "prune_min_length_um", "Min branch length (µm)", 0.0, 50000.0, 2, 1.0, "auto (median vw)"
@@ -360,6 +364,11 @@ class PipelineConfigDialog(QDialog):
         form.addRow(label, edit)
         self._widgets[name] = (self._KIND_FLOAT_LIST, edit, None)
 
+    def _add_bool(self, form: QFormLayout, name: str, label: str):
+        check = QCheckBox()
+        form.addRow(label, check)
+        self._widgets[name] = (self._KIND_BOOL, check, None)
+
     # -----------------------------------------------------------------------
     # Load / reset
     # -----------------------------------------------------------------------
@@ -395,6 +404,8 @@ class PipelineConfigDialog(QDialog):
                     item.setCheckState(Qt.Checked if item.data(Qt.UserRole) in selected_values else Qt.Unchecked)
             elif kind == self._KIND_FLOAT_LIST:
                 widget.setText(", ".join(f"{x:g}" for x in val))
+            elif kind == self._KIND_BOOL:
+                widget.setChecked(bool(val))
 
     def _reset_defaults(self):
         self._load_from_config(PipelineConfig())

@@ -24,6 +24,7 @@ class PipelineConfig:
     smooth_sigma: float = 2.0  # Gaussian sigma for boundary smoothing
 
     # -- Pruning --
+    enable_basic_prune: bool = True  # Step 4 length-based branch prune; disable to keep short branches
     prune_methods: list[PruneMethod] = field(default_factory=list)  # Empty = length-based pruning only
     prune_min_length_um: float | None = None  # Minimum branch length to keep (µm; None = use median vein width)
     prune_min_length_vein_widths: float = 2.0  # Multiplier of median vein width for auto prune threshold
@@ -163,6 +164,7 @@ class PipelineConfig:
 PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
     "length-based": {
         # Pruning
+        "enable_basic_prune": True,
         "prune_methods": [],
         "prune_min_length_um": None,
         "prune_min_length_vein_widths": 2.0,
@@ -205,6 +207,7 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
     # here without disturbing the length-based preset.
     "distance-map": {
         # Pruning
+        "enable_basic_prune": False,
         "prune_methods": [PruneMethod.DISTANCE_MAP],
         "prune_min_length_um": None,
         "prune_min_length_vein_widths": 2.0,
