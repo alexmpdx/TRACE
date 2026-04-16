@@ -93,8 +93,8 @@ class PipelineConfig:
     crossvein_max_length_vw: float = 25.0  # Max crossvein length as × median vein width
 
     # -- Intervein naming --
-    vein_buffer_px: float = 25.0
-    adjacency_min_length_px: float = 30.0
+    vein_buffer_vw: float = 1.1  # Buffer radius around vein centerlines (× median vein width)
+    adjacency_min_length_vw: float = 1.3  # Min shared boundary length (× median vein width)
     max_merge_size: int | None = None  # Max regions in an N-way merge; None = no cap
 
     # -- Intervein splitter (morphological open-under-constraint) --

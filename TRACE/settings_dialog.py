@@ -253,8 +253,8 @@ class PipelineConfigDialog(QDialog):
 
         gb = QGroupBox("Region naming")
         form = QFormLayout(gb)
-        self._add_float(form, "vein_buffer_px", "Vein buffer (px)", 0.0, 10000.0, 1, 1.0)
-        self._add_float(form, "adjacency_min_length_px", "Min adjacency length (px)", 0.0, 10000.0, 1, 1.0)
+        self._add_float(form, "vein_buffer_vw", "Vein buffer (× vein width)", 0.0, 100.0, 2, 0.05)
+        self._add_float(form, "adjacency_min_length_vw", "Min adjacency length (× vein width)", 0.0, 100.0, 2, 0.05)
         self._add_opt_int(form, "max_merge_size", "Max N-way merge size", 0, 100, "no cap")
         layout.addWidget(gb)
 

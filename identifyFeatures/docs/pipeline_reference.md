@@ -1104,7 +1104,7 @@ for each label:
 **What**: Assigns a region name (marginal, submarginal, 1st basal, 1st posterior, discal, 2nd posterior, 3rd posterior) to each intervein polygon output by Step 5.5 by matching the polygon's adjacent veins against `topology.REGION_EXPECTED_VEINS`.
 
 **Pipeline**:
-1. **Adjacency**: buffer each identified vein centerline by `vein_buffer_px` and compute the set of veins whose buffered footprint intersects the polygon boundary by at least `adjacency_min_length_px`.
+1. **Adjacency**: buffer each identified vein centerline by `vein_buffer_vw × median vein width` and compute the set of veins whose buffered footprint intersects the polygon boundary by at least `adjacency_min_length_vw × median vein width`.
 2. **Primary match**: find every region in `REGION_EXPECTED_VEINS` whose expected vein set is a subset of the detected set. Pick the highest-specificity match (largest expected set).
 3. **PD tie resolver**: if the top specificity is tied between multiple regions (currently only `discal` vs `2nd posterior`), defer the polygon. After the main loop, `_resolve_pd_ties()` groups deferred polygons by their tied candidate set, looks up `topology.REGION_PD_PAIRS`, and assigns names by sorting members along the wing PD axis (proximal → distal).
 4. **Merge detection** (`_check_merged`): if no single region matches, run N-way merge enumeration. Details below.
@@ -1136,8 +1136,8 @@ Scoring (descending):
 This correctly handles 3+ region fusions that pair-only detection missed, e.g. `marginal + submarginal + 1st posterior` when both L2 and L3 are absent. The returned name is AP-ordered (`" + ".join(regions)`) for stable output.
 
 **Parameters**:
-- `vein_buffer_px` (default 25) — buffer radius around each vein centerline for adjacency testing
-- `adjacency_min_length_px` (default 30) — minimum shared boundary length for a vein to count as adjacent
+- `vein_buffer_vw` (default 1.1) — buffer radius around each vein centerline for adjacency testing, × median vein width
+- `adjacency_min_length_vw` (default 1.3) — minimum shared boundary length for a vein to count as adjacent, × median vein width
 - `max_merge_size` (default `None`) — cap on N-way merge size; `None` = no cap, any connected subset of the 7 regions is a candidate
 
 ---
@@ -1313,6 +1313,6 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 ### Intervein region naming
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `vein_buffer_px` | 25 | Buffer radius for adjacency testing |
-| `adjacency_min_length_px` | 30 | Min shared boundary length to count as adjacent |
+| `vein_buffer_vw` | 1.1 | Buffer radius for adjacency testing (× median vein width) |
+| `adjacency_min_length_vw` | 1.3 | Min shared boundary length (× median vein width) |
 | `max_merge_size` | None | Cap on N-way merge size; None = no cap |

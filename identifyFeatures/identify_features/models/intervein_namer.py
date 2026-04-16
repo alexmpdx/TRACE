@@ -83,8 +83,8 @@ def name_intervein_regions(
     Returns:
         List of named InterveinRegion objects.
     """
-    buffer_px = config.vein_buffer_px
-    min_length = config.adjacency_min_length_px
+    buffer_px = median_vein_width_px * config.vein_buffer_vw
+    min_length = median_vein_width_px * config.adjacency_min_length_vw
 
     # Build buffered vein centerlines
     vein_buffers: dict[str, Polygon] = {}
