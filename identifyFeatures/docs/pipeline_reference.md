@@ -296,7 +296,7 @@ for each pair:
 **LineString snapping**: When transferring edges, the first/last coordinate of each LineString is replaced with the kept node's position. This prevents geometric discontinuities.
 
 **Parameters**:
-- `junction_merge_vein_widths = 2.0` — Merge radius as multiple of median vein width.
+- `junction_merge_vein_widths = 0.0` — Merge radius as multiple of median vein width. Default `0.0` disables the step entirely; the tight merge collapses geometrically-distinct junctions and leaves crossed edges with no shared node (observed at the DTip under distance-map).
 
 ### 3.8 Gap bridging (first pass)
 
@@ -427,12 +427,15 @@ repeat until no merges:
 ### 3.12 Remove small isolated fragments
 
 ```python
-_remove_small_fragments(graph, min_length=median_vein_width * 4)
+if config.enable_small_fragment_removal:
+    _remove_small_fragments(graph, min_length=median_vein_width * 4)
 ```
 
 **What**: Removes connected components that have no degree-3+ junctions and total edge length less than 4x median vein width.
 
 **Why**: After all cleanup, some tiny disconnected fragments remain — short isolated edges that aren't connected to the main vein network. These are noise, not veins.
+
+**Toggle**: Gated on `enable_small_fragment_removal` (default `True`). Disable under distance-map and similar presets where mid-pipeline fragment removal risks dropping real vein tissue that hasn't been bridged yet. A final cleanup at the end of the pipeline (step 3.17) always keeps only the largest connected component, so orphans are still removed regardless of this toggle.
 
 **Algorithm**:
 ```
@@ -1253,9 +1256,11 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 ### Pruning
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `enable_basic_prune` | True | Gate on step 4 (length-based branch prune) |
+| `enable_small_fragment_removal` | True | Gate on steps 11/14 (small-fragment prune) |
 | `prune_min_length_vein_widths` | 2.0 | Cap for adaptive branch pruning (× vein width) |
 | `final_stub_vein_widths` | 3.0 | Max stub length for final removal (× vein width) |
-| `junction_merge_vein_widths` | 2.0 | Junction merge radius (× vein width) |
+| `junction_merge_vein_widths` | 0.0 | Junction merge radius (× vein width); `0` disables |
 
 ### Gap bridging (pass 1)
 | Parameter | Default | Description |

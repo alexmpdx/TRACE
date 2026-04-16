@@ -4,6 +4,11 @@
 
 Last updated: 2026-04-16
 
+**Recent changes:**
+- `junction_merge_vein_widths` default → 0.0 (step skipped); merging was collapsing distinct junctions and leaving crossed edges with no shared node (DTip under distance-map).
+- `enable_small_fragment_removal` toggle added for skeleton steps 11 / 14; distance-map preset disables it.
+- Final skeleton step always keeps only the largest connected component — orphan fragments are unreachable from landmark anchors.
+
 ---
 
 ## Context
