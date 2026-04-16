@@ -220,7 +220,7 @@ For each intervein polygon from the detection GeoJSON (after the splitter has pr
 
 **File:** `models/vein_tracer.py`, Phase 4d
 
-After all canonical veins identified, every still-unlabeled edge is promoted to an ectopic vein label. Each connected component of unlabeled edges becomes one EV<N> (`EV1`, `EV2`, ...) materialized as a `VeinIdentification` with `status=ECTOPIC`. Short fragments below `ectopic_min_length_px` (default 50px) are filtered as noise.
+After all canonical veins identified, every still-unlabeled edge is promoted to an ectopic vein label. Each connected component of unlabeled edges becomes one EV<N> (`EV1`, `EV2`, ...) materialized as a `VeinIdentification` with `status=ECTOPIC`. Short fragments below `ectopic_min_length_um` (default 25µm, or `ectopic_min_length_vw` × vein width when `um_per_px` is unavailable) are filtered as noise.
 
 ### Step 9: Score Confidence — TODO
 

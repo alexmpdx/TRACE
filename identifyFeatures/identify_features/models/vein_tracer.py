@@ -265,7 +265,7 @@ def trace_veins_from_landmarks(
         dbg.dump(G, edge_labels, "phase4c_repropagate")
 
     # Phase 4d: Promote remaining unlabeled edges to ectopic veins (EV1, EV2, …)
-    _label_ectopic_edges(G, edge_labels, skel_graph.median_vein_width_px)
+    _label_ectopic_edges(G, edge_labels, skel_graph.median_vein_width_px, config)
     if dbg:
         dbg.dump(G, edge_labels, "phase4d_ectopic")
 
@@ -1459,25 +1459,20 @@ def _detect_crossveins_fallback(
                 break  # Found it, don't try next tier
 
 
-_EV_MIN_LENGTH_FALLBACK_PX = 50.0
-
-
 def _label_ectopic_edges(
     G: nx.Graph,
     edge_labels: dict[tuple, str],
     median_vein_width_px: float,
+    config: "PipelineConfig",
 ) -> int:
     """Promote still-unlabeled edges to ectopic veins (EV1, EV2, ...).
 
     Each connected component of unlabeled edges becomes one EV. Components
-    whose total length falls below the noise floor are silently dropped,
-    matching the pre-existing behavior for unlabeled edges. Ordering is
-    deterministic: longest component first, tie-break on minimum node id.
+    whose total length falls below the config-driven noise floor are
+    silently dropped. Ordering is deterministic: longest component first,
+    tie-break on minimum node id.
     """
-    noise_floor = max(
-        (median_vein_width_px or 0.0) * 2.0,
-        _EV_MIN_LENGTH_FALLBACK_PX,
-    )
+    noise_floor = config.ectopic_min_length_px(median_vein_width_px)
 
     unlabeled_edges = [
         (u, v) for u, v in G.edges() if _edge_key(u, v) not in edge_labels and G[u][v].get("line") is not None

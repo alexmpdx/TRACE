@@ -240,7 +240,8 @@ class PipelineConfigDialog(QDialog):
 
         gb = QGroupBox("Ectopic detection")
         form = QFormLayout(gb)
-        self._add_float(form, "ectopic_min_length_px", "Min length (px)", 0.0, 10000.0, 1, 1.0)
+        self._add_float(form, "ectopic_min_length_um", "Min length (µm)", 0.0, 10000.0, 1, 1.0)
+        self._add_float(form, "ectopic_min_length_vw", "Min length fallback (× vein width)", 0.0, 100.0, 2, 0.1)
         layout.addWidget(gb)
 
         layout.addStretch()

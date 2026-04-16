@@ -104,7 +104,10 @@ class PipelineConfig:
     intervein_split_wing_buffer_vw: float = 1.0  # Wing outline inset (× median vein width)
 
     # -- Ectopic detection --
-    ectopic_min_length_px: float = 50.0
+    # Min length is primarily expressed in µm. The vein-width multiplier
+    # is the fallback used only when um_per_px is unavailable.
+    ectopic_min_length_um: float = 25.0  # Primary: absolute anatomical scale
+    ectopic_min_length_vw: float = 1.0  # Fallback: × median vein width (when um_per_px is None)
 
     def to_px(self, um: float) -> float:
         """Convert µm to pixels using um_per_px."""
@@ -137,3 +140,16 @@ class PipelineConfig:
         if median_vein_width_px > 0:
             return median_vein_width_px * self.departure_sample_vw
         return self.departure_sample_um  # degenerate: no scale, no vein width
+
+    def ectopic_min_length_px(self, median_vein_width_px: float = 0.0) -> float:
+        """Ectopic-vein noise floor in pixels.
+
+        Primary: ectopic_min_length_um converted via um_per_px. Fallback:
+        ectopic_min_length_vw × median_vein_width_px, used only when
+        um_per_px is unavailable (no scale calibration).
+        """
+        if self.um_per_px is not None and self.um_per_px > 0:
+            return self.to_px(self.ectopic_min_length_um)
+        if median_vein_width_px > 0:
+            return median_vein_width_px * self.ectopic_min_length_vw
+        return self.ectopic_min_length_um  # degenerate: no scale, no vein width
