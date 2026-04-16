@@ -16,11 +16,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from identify_features.config import PipelineConfig
+from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -31,6 +32,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -97,6 +99,18 @@ class PipelineConfigDialog(QDialog):
     # -----------------------------------------------------------------------
     def _build_ui(self):
         layout = QVBoxLayout(self)
+
+        # Preset row — replaces pruning + bridging fields with a named snapshot.
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Pruning / bridging preset:"))
+        self._preset_combo = QComboBox()
+        for preset_name in PIPELINE_PRESETS:
+            self._preset_combo.addItem(preset_name)
+        preset_row.addWidget(self._preset_combo, stretch=1)
+        apply_btn = QPushButton("Apply preset")
+        apply_btn.clicked.connect(self._apply_selected_preset)
+        preset_row.addWidget(apply_btn)
+        layout.addLayout(preset_row)
 
         tabs = QTabWidget()
         layout.addWidget(tabs, stretch=1)
@@ -384,3 +398,10 @@ class PipelineConfigDialog(QDialog):
 
     def _reset_defaults(self):
         self._load_from_config(PipelineConfig())
+
+    def _apply_selected_preset(self):
+        name = self._preset_combo.currentText()
+        if not name:
+            return
+        new_config = apply_preset(self.get_config(), name)
+        self._load_from_config(new_config)

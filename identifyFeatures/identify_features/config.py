@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 
@@ -153,3 +154,58 @@ class PipelineConfig:
         if median_vein_width_px > 0:
             return median_vein_width_px * self.ectopic_min_length_vw
         return self.ectopic_min_length_um  # degenerate: no scale, no vein width
+
+
+# Named presets covering pruning + bridging fields. Switching a preset replaces
+# only the fields listed here; other config fields are preserved. Each preset
+# is a known-good snapshot captured when the method produced a clean regression
+# — treat them as pinned references, not live copies of PipelineConfig defaults.
+PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
+    "length-based": {
+        # Pruning
+        "prune_methods": [],
+        "prune_min_length_um": None,
+        "prune_min_length_vein_widths": 2.0,
+        "final_stub_vein_widths": 3.0,
+        "junction_merge_vein_widths": 2.0,
+        "prune_radius_ratio_threshold": 0.3,
+        "prune_scale_sigmas": [2.0, 4.0, 8.0, 16.0],
+        "prune_single_scale_sigma": 4.0,
+        "collinear_min_angle": 150.0,
+        # Bridging — pass 1
+        "bridge_max_gap_um": 200.0,
+        "bridge_gap_fraction": 0.15,
+        "bridge_direction_window_um": 100.0,
+        "bridge_min_combined_length_um": 100.0,
+        "bridge_on_axis_max_angle": 45.0,
+        "bridge_on_axis_relaxed_cap": 45.0,
+        "bridge_min_facing_angle": 150.0,
+        "bridge_direction_max_edge_fraction": 0.25,
+        # Bridging — pass 2
+        "bridge2_max_gap_um": 200.0,
+        "bridge2_gap_fraction": 0.5,
+        "bridge2_min_gap_vw": 2.0,
+        "bridge2_direction_window_um": 100.0,
+        "bridge2_min_combined_length_um": 100.0,
+        "bridge2_min_combined_length_vw": 3.5,
+        "bridge2_on_axis_max_angle": 45.0,
+        "bridge2_on_axis_relaxed_cap": 45.0,
+        "bridge2_min_facing_angle": 150.0,
+        # Bridging — pass 3
+        "bridge3_max_gap_vw": 4.0,
+        "bridge3_short_edge_vw": 3.0,
+        "bridge3_relaxed_facing_angle": 120.0,
+        "bridge3_direction_window_um": 100.0,
+        "bridge3_on_axis_max_angle": 45.0,
+        "bridge3_on_axis_relaxed_cap": 45.0,
+    },
+}
+
+
+def apply_preset(config: PipelineConfig, name: str) -> PipelineConfig:
+    """Return a copy of `config` with preset fields overridden."""
+    if name not in PIPELINE_PRESETS:
+        raise KeyError(f"Unknown preset: {name!r} (available: {list(PIPELINE_PRESETS)})")
+    # Copy lists so callers can't mutate the preset in place.
+    updates = {k: (list(v) if isinstance(v, list) else v) for k, v in PIPELINE_PRESETS[name].items()}
+    return replace(config, **updates)
