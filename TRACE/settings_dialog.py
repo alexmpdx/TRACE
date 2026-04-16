@@ -155,6 +155,7 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Pruning")
         form = QFormLayout(gb)
         self._add_bool(form, "enable_basic_prune", "Basic length-based prune (step 4)")
+        self._add_bool(form, "enable_small_fragment_removal", "Small-fragment removal (steps 11 / 14)")
         self._add_enum_list(form, "prune_methods", "Methods (empty = length-based only)", PruneMethod)
         self._add_opt_float(
             form, "prune_min_length_um", "Min branch length (µm)", 0.0, 50000.0, 2, 1.0, "auto (median vw)"
