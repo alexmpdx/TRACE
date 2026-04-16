@@ -84,8 +84,14 @@ def trace_veins_from_landmarks(
         for key in costa_keys:
             edge_labels[key] = "costa"
 
+    # Phase 1b: Assign temporary chain IDs through degree-2 nodes so that
+    # landmark labeling can use full chain geometry for soft-landmark matching.
+    # Landmark nodes are chain boundaries even when degree-2.
+    landmark_nodes = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
+    chain_lines = _assign_chain_ids(G, edge_labels, boundary_nodes=landmark_nodes)
+
     # Phase 2: Label edges at landmark positions (on the merged graph)
-    _label_landmark_edges(G, landmarks, edge_labels, config)
+    _label_landmark_edges(G, landmarks, edge_labels, config, chain_lines)
 
     # Phase 2b: Propagate labels through degree-2 pass-through nodes
     _propagate_through_degree2(
@@ -150,8 +156,27 @@ def _label_landmark_edges(
     landmarks: dict[str, Landmark],
     edge_labels: dict[tuple, str],
     config: PipelineConfig,
+    chain_lines: dict[int, LineString] | None = None,
 ) -> None:
     """Label edges connected to landmark nodes."""
+    if chain_lines is None:
+        chain_lines = {}
+
+    # Helper: label an edge AND all siblings in its degree-2 chain
+    def _label_with_chain(key: tuple, vein_id: str):
+        edge_labels[key] = vein_id
+        u, v = key
+        if not G.has_edge(u, v):
+            return
+        cid = G[u][v].get("chain_id")
+        if cid is None:
+            return
+        for eu, ev, data in G.edges(data=True):
+            if data.get("chain_id") == cid:
+                ek = _edge_key(eu, ev)
+                if ek not in edge_labels:
+                    edge_labels[ek] = vein_id
+                    logger.info("Chain-propagated %s to edge %s (chain %d)", vein_id, ek, cid)
 
     # Helper: label the edge at a degree-1 landmark node
     def _label_endpoint_edge(landmark_name: str, vein_id: str):
@@ -164,7 +189,7 @@ def _label_landmark_edges(
         for neighbor in G.neighbors(node):
             key = _edge_key(node, neighbor)
             if key not in edge_labels:
-                edge_labels[key] = vein_id
+                _label_with_chain(key, vein_id)
                 logger.info("Labeled edge %s as %s (from %s landmark)", key, vein_id, landmark_name)
                 break
 
@@ -181,13 +206,16 @@ def _label_landmark_edges(
                 result.append(n)
         return result
 
-    # Helper: find the edge whose LineString passes closest to a landmark point
+    # Helper: find the edge whose chain geometry passes closest to a landmark point
     def _nearest_edge_to_landmark(node, neighbors, landmark):
-        """Among edges from node to neighbors, find which passes closest to landmark."""
+        """Among edges from node to neighbors, find which chain passes closest to landmark."""
         best_n = None
         best_dist = float("inf")
         for n in neighbors:
-            line = G[node][n].get("line")
+            cid = G[node][n].get("chain_id") if G.has_edge(node, n) else None
+            line = chain_lines.get(cid) if cid is not None else None
+            if line is None:
+                line = G[node][n].get("line")
             if line is None:
                 continue
             dist = line.distance(landmark.point)
@@ -232,7 +260,7 @@ def _label_landmark_edges(
                         best_l2 = scores_l2[0][0]
                         key = _edge_key(node, best_l2)
                         if key not in edge_labels:
-                            edge_labels[key] = "L2"
+                            _label_with_chain(key, "L2")
                             logger.info(
                                 "Labeled edge %s as L2 (from L2-L3, nearest to L2.d, dist=%.0f)", key, scores_l2[0][1]
                             )
@@ -245,7 +273,7 @@ def _label_landmark_edges(
                         best_l3 = scores_l3[0][0]
                         key = _edge_key(node, best_l3)
                         if key not in edge_labels:
-                            edge_labels[key] = "L3"
+                            _label_with_chain(key, "L3")
                             logger.info(
                                 "Labeled edge %s as L3 (from L2-L3, nearest to DTip, dist=%.0f)", key, scores_l3[0][2]
                             )
@@ -257,7 +285,7 @@ def _label_landmark_edges(
                     if best_l2 is not None and dist <= max_lm_dist:
                         key = _edge_key(node, best_l2)
                         if key not in edge_labels:
-                            edge_labels[key] = "L2"
+                            _label_with_chain(key, "L2")
                             logger.info("Labeled edge %s as L2 (from L2-L3, nearest to L2.d, dist=%.0f)", key, dist)
                             l2_assigned = True
 
@@ -275,7 +303,7 @@ def _label_landmark_edges(
                     scored.sort(key=lambda s: s[1])
                     key = _edge_key(node, scored[0][0])
                     if key not in edge_labels:
-                        edge_labels[key] = "L3"
+                        _label_with_chain(key, "L3")
                         logger.info("Labeled edge %s as L3 (from L2-L3, toward DTip fallback)", key)
 
                 # Remaining → Rs
@@ -283,7 +311,7 @@ def _label_landmark_edges(
                 for n in remaining:
                     key = _edge_key(node, n)
                     if key not in edge_labels:
-                        edge_labels[key] = "Rs"
+                        _label_with_chain(key, "Rs")
                         logger.info("Labeled edge %s as Rs (from L2-L3, remaining)", key)
 
     # L1-Rs junction
@@ -308,13 +336,13 @@ def _label_landmark_edges(
                     )
                     angle = angle_between_vectors(dep, toward_sc)
                     if angle < 60:
-                        edge_labels[key] = "L1"
+                        _label_with_chain(key, "L1")
                         logger.info("Labeled edge %s as L1 (from L1-Rs, toward SC)", key)
                     else:
-                        edge_labels[key] = "Rs"
+                        _label_with_chain(key, "Rs")
                         logger.info("Labeled edge %s as Rs (from L1-Rs, away from SC)", key)
                 else:
-                    edge_labels[key] = "Rs"
+                    _label_with_chain(key, "Rs")
 
     # Subcostal break → L1
     _label_endpoint_edge("subcostal break", "L1")
@@ -359,12 +387,12 @@ def _label_landmark_edges(
                             if key in edge_labels:
                                 continue
                             if n == best_for_l4[0]:
-                                edge_labels[key] = "L4"
+                                _label_with_chain(key, "L4")
                                 logger.info(
                                     "Labeled edge %s as L4 (from L4-L5, nearest to L4.d, dist=%.0f)", key, dist_l4
                                 )
                             else:
-                                edge_labels[key] = "L5"
+                                _label_with_chain(key, "L5")
                                 logger.info(
                                     "Labeled edge %s as L5 (from L4-L5, nearest to L5.d, dist=%.0f)", key, dist_l5
                                 )
@@ -379,12 +407,12 @@ def _label_landmark_edges(
                                 if key in edge_labels:
                                     continue
                                 if n == winner:
-                                    edge_labels[key] = "L4"
+                                    _label_with_chain(key, "L4")
                                     logger.info(
                                         "Labeled edge %s as L4 (from L4-L5, contested, L4.d closer: %.0f)", key, dist_l4
                                     )
                                 else:
-                                    edge_labels[key] = "L5"
+                                    _label_with_chain(key, "L5")
                                     logger.info(
                                         "Labeled edge %s as L5 (from L4-L5, contested, assigned remaining)", key
                                     )
@@ -395,12 +423,12 @@ def _label_landmark_edges(
                                 if key in edge_labels:
                                     continue
                                 if n == winner:
-                                    edge_labels[key] = "L5"
+                                    _label_with_chain(key, "L5")
                                     logger.info(
                                         "Labeled edge %s as L5 (from L4-L5, contested, L5.d closer: %.0f)", key, dist_l5
                                     )
                                 else:
-                                    edge_labels[key] = "L4"
+                                    _label_with_chain(key, "L4")
                                     logger.info(
                                         "Labeled edge %s as L4 (from L4-L5, contested, assigned remaining)", key
                                     )
@@ -421,12 +449,12 @@ def _label_landmark_edges(
                 scored.sort(key=lambda s: s[1])
                 key = _edge_key(node, scored[0][0])
                 if key not in edge_labels:
-                    edge_labels[key] = "L4"
+                    _label_with_chain(key, "L4")
                     logger.info("Labeled edge %s as L4 (from L4-L5, toward DTip fallback)", key)
                 if len(scored) >= 2:
                     key = _edge_key(node, scored[-1][0])
                     if key not in edge_labels:
-                        edge_labels[key] = "L5"
+                        _label_with_chain(key, "L5")
                         logger.info("Labeled edge %s as L5 (from L4-L5, remaining fallback)", key)
 
 
@@ -591,6 +619,114 @@ def _merge_nearby_lines(
             result_coords = result_coords + next_coords[1:]
 
     return LineString(result_coords)
+
+
+def _assign_chain_ids(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    boundary_nodes: set[int] | None = None,
+) -> dict[int, LineString]:
+    """Assign temporary chain IDs to edges connected through degree-2 nodes.
+
+    Each maximal chain of edges linked by degree-2 nodes gets a unique
+    integer ID.  Every edge in the chain is tagged with ``chain_id`` in
+    its data dict, and the function returns a mapping from chain ID to
+    merged LineString for distance queries.
+
+    Edges that already carry a label (e.g. costa) are excluded so that
+    named veins don't merge with unnamed chains.
+
+    *boundary_nodes* (e.g. landmark-snapped nodes) are treated as chain
+    terminators even when they have degree 2, preventing chains from
+    spanning semantic junction points.
+    """
+    if boundary_nodes is None:
+        boundary_nodes = set()
+    chain_id = 0
+    visited: set[tuple] = set()
+    chain_lines: dict[int, LineString] = {}
+
+    def _is_pass_through(node):
+        return G.degree(node) == 2 and node not in boundary_nodes
+
+    for u, v, data in G.edges(data=True):
+        key = _edge_key(u, v)
+        if key in visited or key in edge_labels:
+            continue
+
+        # Walk the chain in both directions from this edge
+        chain_edges = [key]
+        visited.add(key)
+
+        for start, direction in [(u, v), (v, u)]:
+            cur = start
+            prev = direction
+            # Walk backward from `start` through degree-2 nodes
+            while _is_pass_through(cur):
+                nxt = [n for n in G.neighbors(cur) if n != prev]
+                if not nxt:
+                    break
+                nxt = nxt[0]
+                nkey = _edge_key(cur, nxt)
+                if nkey in visited or nkey in edge_labels:
+                    break
+                chain_edges.append(nkey)
+                visited.add(nkey)
+                prev = cur
+                cur = nxt
+
+        # Tag every edge in this chain
+        for ek in chain_edges:
+            eu, ev = ek
+            if G.has_edge(eu, ev):
+                G[eu][ev]["chain_id"] = chain_id
+
+        # Build merged LineString for the chain by walking from one endpoint
+        # Find an endpoint node (degree != 2, or end of the chain)
+        edge_set = set(chain_edges)
+        chain_nodes: set[int] = set()
+        for eu, ev in chain_edges:
+            chain_nodes.add(eu)
+            chain_nodes.add(ev)
+        endpoints = [n for n in chain_nodes if G.degree(n) != 2]
+        if not endpoints:
+            endpoints = [chain_edges[0][0]]
+
+        start_node = endpoints[0]
+        coords: list[tuple] = []
+        walked: set[tuple] = set()
+        node = start_node
+
+        # Walk along chain edges from start_node
+        while True:
+            moved = False
+            for n in G.neighbors(node):
+                ek = _edge_key(node, n)
+                if ek in edge_set and ek not in walked:
+                    walked.add(ek)
+                    seg = G[node][n].get("line")
+                    if seg is not None:
+                        seg_coords = list(seg.coords)
+                        node_pt = (G.nodes[node]["x"], G.nodes[node]["y"])
+                        d0 = (seg_coords[0][0] - node_pt[0]) ** 2 + (seg_coords[0][1] - node_pt[1]) ** 2
+                        d1 = (seg_coords[-1][0] - node_pt[0]) ** 2 + (seg_coords[-1][1] - node_pt[1]) ** 2
+                        if d0 > d1:
+                            seg_coords = seg_coords[::-1]
+                        if not coords:
+                            coords.extend(seg_coords)
+                        else:
+                            coords.extend(seg_coords[1:])
+                    node = n
+                    moved = True
+                    break
+            if not moved:
+                break
+
+        if len(coords) >= 2:
+            chain_lines[chain_id] = LineString(coords)
+        chain_id += 1
+
+    return chain_lines
 
 
 def _propagate_through_degree2(
