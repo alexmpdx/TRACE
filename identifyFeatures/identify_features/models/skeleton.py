@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 
 import cv2
 import networkx as nx
@@ -41,6 +42,70 @@ _NEIGHBORS_8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1
 
 
 # ---------------------------------------------------------------------------
+# Debug dumper
+# ---------------------------------------------------------------------------
+
+
+class _DebugDumper:
+    """Save a labelled PNG after each skeleton-pipeline step."""
+
+    def __init__(self, out_dir: Path, image_shape: tuple[int, int]) -> None:
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.image_shape = image_shape
+        self.counter = 0
+
+    def _canvas(self) -> np.ndarray:
+        h, w = self.image_shape
+        return np.full((h, w, 3), 32, dtype=np.uint8)
+
+    def _label(self, img: np.ndarray, text: str) -> None:
+        cv2.putText(img, text, (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (255, 255, 255), 3, cv2.LINE_AA)
+
+    def _save(self, img: np.ndarray, name: str) -> None:
+        self.counter += 1
+        path = self.out_dir / f"{self.counter:02d}_{name}.png"
+        cv2.imwrite(str(path), img)
+        logger.info("Debug dump: %s", path)
+
+    def dump_mask(self, mask: np.ndarray, name: str) -> None:
+        canvas = self._canvas()
+        canvas[mask > 0] = (0, 200, 255)
+        self._label(canvas, f"{self.counter + 1:02d} {name}  mask_px={int(np.count_nonzero(mask))}")
+        self._save(canvas, name)
+
+    def dump_skel(self, skel: np.ndarray, name: str) -> None:
+        canvas = self._canvas()
+        canvas[skel > 0] = (0, 255, 255)
+        self._label(canvas, f"{self.counter + 1:02d} {name}  skel_px={int(np.count_nonzero(skel))}")
+        self._save(canvas, name)
+
+    def dump_graph(self, graph: "nx.Graph", name: str) -> None:
+        canvas = self._canvas()
+        for u, v, data in graph.edges(data=True):
+            line = data.get("line")
+            if line is None:
+                continue
+            pts = np.asarray(line.coords, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [pts], False, (0, 255, 255), 2, cv2.LINE_AA)
+        for node, nd in graph.nodes(data=True):
+            if isinstance(node, tuple) and len(node) >= 2:
+                x, y = int(node[0]), int(node[1])
+            elif "x" in nd and "y" in nd:
+                x, y = int(nd["x"]), int(nd["y"])
+            else:
+                continue
+            deg = graph.degree(node)
+            color = (0, 128, 255) if deg <= 2 else (255, 80, 255)
+            cv2.circle(canvas, (x, y), 5, color, -1)
+        self._label(
+            canvas,
+            f"{self.counter + 1:02d} {name}  nodes={graph.number_of_nodes()} edges={graph.number_of_edges()}",
+        )
+        self._save(canvas, name)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -49,11 +114,15 @@ def build_skeleton_graph(
     vein_polygons: list[Polygon | MultiPolygon],
     image_shape: tuple[int, int],
     config: "PipelineConfig | None" = None,
+    debug_dir: "Path | None" = None,
 ) -> SkeletonGraph:
     """Full pipeline: vein polygons → binary mask → skeleton → graph.
 
     All parameters are read from *config* (a PipelineConfig instance).
     If *config* is None a default PipelineConfig is created.
+
+    If *debug_dir* is given, a PNG is saved after each step with the current
+    skeleton (or graph) drawn over a grey canvas sized to *image_shape*.
 
     Returns:
         SkeletonGraph with the NetworkX graph and supporting arrays.
@@ -62,6 +131,8 @@ def build_skeleton_graph(
 
     if config is None:
         config = PipelineConfig()
+
+    dbg = _DebugDumper(debug_dir, image_shape) if debug_dir is not None else None
 
     methods = config.skeleton_methods
     smooth_sigma = config.smooth_sigma
@@ -82,11 +153,15 @@ def build_skeleton_graph(
     # Step 1: Rasterize vein polygons to binary mask
     vein_mask = rasterize_polygons(vein_polygons, image_shape)
     logger.info("Vein mask: %d non-zero pixels", np.count_nonzero(vein_mask))
+    if dbg:
+        dbg.dump_mask(vein_mask, "vein_mask")
 
     # Step 2: Optional boundary smoothing (preprocessing)
     if SkeletonMethod.BOUNDARY_SMOOTH in methods:
         vein_mask = _boundary_smooth(vein_mask, sigma=smooth_sigma)
         logger.info("After boundary smoothing (sigma=%.1f): %d pixels", smooth_sigma, np.count_nonzero(vein_mask))
+        if dbg:
+            dbg.dump_mask(vein_mask, "boundary_smooth")
 
     # Step 3: Skeletonize
     distance_map = None
@@ -100,6 +175,8 @@ def build_skeleton_graph(
         skel = _skeletonize_standard(vein_mask)
 
     logger.info("Skeleton: %d pixels", np.count_nonzero(skel))
+    if dbg:
+        dbg.dump_skel(skel, "skeleton_raw")
 
     # Compute median vein width from the raw skeleton (before pruning)
     median_vein_width = _compute_median_vein_width(skel, distance_map, vein_mask)
@@ -113,6 +190,8 @@ def build_skeleton_graph(
         prune_threshold = max(10, int(median_vein_width * config.prune_min_length_vein_widths))
     skel = _prune_branches(skel, min_length=prune_threshold, distance_map=distance_map)
     logger.info("After basic pruning (cap=%dpx, local half-width): %d pixels", prune_threshold, np.count_nonzero(skel))
+    if dbg:
+        dbg.dump_skel(skel, "basic_prune")
 
     # Step 5: Advanced pruning methods (applied sequentially)
     for method in prune_methods:
@@ -128,19 +207,27 @@ def build_skeleton_graph(
             skel = _prune_single_scale(vein_mask, sigma=prune_single_scale_sigma)
 
         logger.info("After %s pruning: %d pixels", method.value, np.count_nonzero(skel))
+        if dbg:
+            dbg.dump_skel(skel, f"prune_{method.value}")
 
     # Step 6: Build graph from skeleton
     graph = _skeleton_to_graph(skel)
     logger.info("Raw graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
+    if dbg:
+        dbg.dump_graph(graph, "graph_raw")
 
     # Step 7: Contract degree-2 nodes
     graph = _simplify_graph(graph)
     logger.info("Simplified graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
+    if dbg:
+        dbg.dump_graph(graph, "simplify_deg2")
 
     # Step 7b: Merge nearby degree-2/3 junction nodes (tight radius)
     # Nearly overlapping nodes at junctions cause bridging and labeling issues.
     _merge_junction_nodes(graph, min_dist=median_vein_width * config.junction_merge_vein_widths)
     graph = _simplify_graph(graph)
+    if dbg:
+        dbg.dump_graph(graph, "merge_junction_nodes")
 
     # Step 8: Gap bridging + re-simplify (iterative, hierarchical)
     # No collinear merge — preserves all degree-3 junctions.
@@ -158,19 +245,27 @@ def build_skeleton_graph(
         prune_min_length=prune_threshold,
         do_collinear_merge=False,
     )
+    if dbg:
+        dbg.dump_graph(graph, "bridge1")
 
     # Step 9: Remove overlapping/redundant edges
     _remove_redundant_edges(graph)
     graph = _simplify_graph(graph)
+    if dbg:
+        dbg.dump_graph(graph, "remove_redundant1")
 
     # Step 10: Absorb or remove tiny segments (1x median vein width)
     # Must be below the pruning threshold to avoid cascading collapse
     _absorb_tiny_segments(graph, min_length=median_vein_width)
     graph = _simplify_graph(graph)
+    if dbg:
+        dbg.dump_graph(graph, "absorb_tiny1")
 
     # Step 11: Merge nodes closer than median vein width
     _merge_close_nodes(graph, min_dist=median_vein_width)
     graph = _simplify_graph(graph)
+    if dbg:
+        dbg.dump_graph(graph, "merge_close1")
 
     # No final collinear merge or stub removal here — merge_through_junctions
     # in the vein tracer handles these with landmark-aware guards
@@ -182,6 +277,8 @@ def build_skeleton_graph(
     # Remove isolated nodes (degree 0)
     isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
     graph.remove_nodes_from(isolated)
+    if dbg:
+        dbg.dump_graph(graph, "remove_small_fragments1")
 
     # Step 13: Second bridging pass — cleanup may have exposed new bridgeable endpoints.
     # No collinear merge here — the vein tracer handles that with landmark guards.
@@ -204,6 +301,8 @@ def build_skeleton_graph(
         do_collinear_merge=False,
         min_gap_px=median_vein_width * config.bridge2_min_gap_vw,
     )
+    if dbg:
+        dbg.dump_graph(graph, "bridge2")
 
     # Step 14: Cleanup before final bridge pass (no stub removal — stubs are bridge candidates)
     _remove_redundant_edges(graph)
@@ -215,6 +314,8 @@ def build_skeleton_graph(
     _remove_small_fragments(graph, min_length=median_vein_width * 4)
     isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
     graph.remove_nodes_from(isolated)
+    if dbg:
+        dbg.dump_graph(graph, "cleanup2")
 
     # Step 15: Third bridge pass — relaxed facing angle for short stubs near junctions.
     # Runs after cleanup to minimize false bridges, but before stub removal so
@@ -235,6 +336,8 @@ def build_skeleton_graph(
         median_vein_width=median_vein_width,
         short_edge_vw=config.bridge3_short_edge_vw,
     )
+    if dbg:
+        dbg.dump_graph(graph, "bridge3")
 
     # Step 16: Final stub removal (local vein width from distance map)
     _remove_stubs_single_pass(
@@ -243,9 +346,13 @@ def build_skeleton_graph(
         distance_map=distance_map,
         vein_width_multiplier=config.final_stub_vein_widths,
     )
+    if dbg:
+        dbg.dump_graph(graph, "final_stubs")
 
     # Step 17: Snap edge LineString endpoints to node positions
     _snap_edge_endpoints(graph)
+    if dbg:
+        dbg.dump_graph(graph, "final")
 
     logger.info("Final graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
 

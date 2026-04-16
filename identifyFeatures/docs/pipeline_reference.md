@@ -730,10 +730,11 @@ if L4.d AND L5.d both available:
         give edge to whichever landmark is closer
         assign other landmark's vein to the remaining edge
 
-elif DTip available (fallback):
-    direction = vector from L4-L5 node toward DTip
-    edge with smallest angle to this direction → "L4" (anterior)
-    edge with largest angle → "L5" (posterior)
+# If L4.d/L5.d unavailable or only one unlabeled neighbor exists, no labels are
+# assigned here — Phase 2c (extend to distal landmarks) is responsible for
+# seeding L4/L5 in that case. The DTip-direction fallback was removed because
+# it reliably mis-labeled the sole departing chain when the L4-L5 anchor was
+# snapped to a degree-1 stub on the L5 chain.
 ```
 
 ### Phase 2b: Propagate labels through degree-2 nodes

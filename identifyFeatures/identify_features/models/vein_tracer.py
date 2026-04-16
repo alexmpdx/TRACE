@@ -16,9 +16,12 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
+from pathlib import Path
 from typing import Optional
 
+import cv2
 import networkx as nx
+import numpy as np
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import (
     Landmark,
@@ -28,6 +31,7 @@ from identify_features.models.datatypes import (
     VeinType,
     WingAxis,
 )
+from identify_features.models.topology import VEIN_COLORS
 from identify_features.utils.geometry_utils import (
     angle_between_vectors,
     direction_toward,
@@ -41,12 +45,90 @@ from shapely.geometry import LineString, Point
 logger = logging.getLogger(__name__)
 
 
+class _TracerDumper:
+    """Save a labelled PNG of the graph + edge labels after each tracer phase."""
+
+    def __init__(self, out_dir: Path, image_shape: tuple[int, int], landmarks: dict) -> None:
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.image_shape = image_shape
+        self.landmarks = landmarks
+        self.counter = 0
+
+    def dump(self, G: nx.Graph, edge_labels: dict, name: str) -> None:
+        self.counter += 1
+        h, w = self.image_shape
+        canvas = np.full((h, w, 3), 32, dtype=np.uint8)
+
+        for u, v, data in G.edges(data=True):
+            line = data.get("line")
+            if line is None:
+                continue
+            key = (u, v) if (u, v) in edge_labels else (v, u)
+            label = edge_labels.get(key)
+            if label is None:
+                color = (120, 120, 120)
+                thickness = 1
+            else:
+                base = VEIN_COLORS.get(label)
+                if base is None:
+                    base = [200, 255, 200]
+                color = (int(base[2]), int(base[1]), int(base[0]))
+                thickness = 3
+            pts = np.asarray(line.coords, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [pts], False, color, thickness, cv2.LINE_AA)
+
+            if label is not None:
+                mid_idx = len(line.coords) // 2
+                mx, my = line.coords[mid_idx]
+                cv2.putText(
+                    canvas, label, (int(mx), int(my)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA
+                )
+
+        for node, nd in G.nodes(data=True):
+            if isinstance(node, tuple) and len(node) >= 2:
+                x, y = int(node[0]), int(node[1])
+            elif "x" in nd and "y" in nd:
+                x, y = int(nd["x"]), int(nd["y"])
+            else:
+                continue
+            deg = G.degree(node)
+            color = (0, 128, 255) if deg <= 2 else (255, 80, 255)
+            cv2.circle(canvas, (x, y), 4, color, -1)
+
+        for lm_name, lm in self.landmarks.items():
+            if lm.point is None:
+                continue
+            lx, ly = int(lm.point.x), int(lm.point.y)
+            cv2.circle(canvas, (lx, ly), 12, (255, 255, 255), 2)
+            cv2.putText(
+                canvas, lm_name, (lx + 14, ly + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA
+            )
+
+        labeled = sum(1 for _ in edge_labels.values())
+        cv2.putText(
+            canvas,
+            f"{self.counter:02d} {name}  labeled={labeled}/{G.number_of_edges()}",
+            (30, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.6,
+            (255, 255, 255),
+            3,
+            cv2.LINE_AA,
+        )
+
+        path = self.out_dir / f"{self.counter:02d}_{name}.png"
+        cv2.imwrite(str(path), canvas)
+        logger.info("Tracer debug dump: %s", path)
+
+
 def trace_veins_from_landmarks(
     skel_graph: SkeletonGraph,
     landmarks: dict[str, Landmark],
     wing_outline: "Polygon | None" = None,
     config: PipelineConfig | None = None,
     wing_axis: Optional[WingAxis] = None,
+    debug_dir: Path | None = None,
 ) -> list[VeinIdentification]:
     """Identify veins in the skeleton graph using landmarks.
 
@@ -66,6 +148,10 @@ def trace_veins_from_landmarks(
     G = skel_graph.graph
     edge_labels: dict[tuple, str] = {}
 
+    dbg = _TracerDumper(debug_dir, skel_graph.image_shape, landmarks) if debug_dir is not None else None
+    if dbg:
+        dbg.dump(G, edge_labels, "initial")
+
     # Phase 0: Merge longitudinals through crossvein junctions (graph-level)
     # Done BEFORE labeling so merged edges get a single label.
     # Landmark nodes are protected from being contracted.
@@ -74,6 +160,8 @@ def trace_veins_from_landmarks(
     protected = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
     skel_graph.graph = merge_through_junctions(G, edge_labels, config, protected_nodes=protected)
     G = skel_graph.graph
+    if dbg:
+        dbg.dump(G, edge_labels, "phase0_merge_junctions")
 
     # Phase 1: Detect costa edges using margin band (on the merged graph)
     costa_band = None
@@ -83,6 +171,8 @@ def trace_veins_from_landmarks(
         costa_keys, costa_band = detect_costa_edges(skel_graph, landmarks, wing_outline, config)
         for key in costa_keys:
             edge_labels[key] = "costa"
+    if dbg:
+        dbg.dump(G, edge_labels, "phase1_costa")
 
     # Phase 1b: Assign temporary chain IDs through degree-2 nodes so that
     # landmark labeling can use full chain geometry for soft-landmark matching.
@@ -92,6 +182,8 @@ def trace_veins_from_landmarks(
 
     # Phase 2: Label edges at landmark positions (on the merged graph)
     _label_landmark_edges(G, landmarks, edge_labels, config, chain_lines)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase2_landmark_edges")
 
     # Phase 2b: Propagate labels through degree-2 pass-through nodes
     _propagate_through_degree2(
@@ -100,9 +192,13 @@ def trace_veins_from_landmarks(
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
     )
+    if dbg:
+        dbg.dump(G, edge_labels, "phase2b_propagate")
 
     # Phase 2c: Extend longitudinals to distal landmarks if they don't reach
     _extend_to_distal_landmarks(G, edge_labels, landmarks, skel_graph.median_vein_width_px, config)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase2c_extend_distal")
 
     # Phase 2d: Re-propagate after extension
     _propagate_through_degree2(
@@ -111,6 +207,8 @@ def trace_veins_from_landmarks(
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
     )
+    if dbg:
+        dbg.dump(G, edge_labels, "phase2d_repropagate")
 
     # Phase 2e: Connect disconnected vein fragments via shortest unlabeled path
     _connect_vein_fragments(G, edge_labels)
@@ -120,18 +218,28 @@ def trace_veins_from_landmarks(
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
     )
+    if dbg:
+        dbg.dump(G, edge_labels, "phase2e_connect_fragments")
 
     # Phase 3: Detect L6 (short posterior branch off L5 near L4-L5)
     _detect_l6(G, edge_labels, landmarks, wing_axis)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase3_l6")
 
     # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5)
     _detect_crossveins(G, edge_labels)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4_crossveins")
 
     # Phase 4a: Junction-based crossvein detection (trace unlabeled paths between longitudinals)
     _detect_crossveins_via_junctions(G, edge_labels)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4a_crossveins_junction")
 
     # Phase 4b: Fallback crossvein detection using crossvein landmarks
     _detect_crossveins_fallback(G, edge_labels, landmarks, config, skel_graph.median_vein_width_px)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4b_crossveins_fallback")
 
     # Phase 4c: Re-propagate labels through degree-2 nodes after crossvein labeling
     _propagate_through_degree2(
@@ -140,9 +248,13 @@ def trace_veins_from_landmarks(
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
     )
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4c_repropagate")
 
     # Phase 4d: Promote remaining unlabeled edges to ectopic veins (EV1, EV2, …)
     _label_ectopic_edges(G, edge_labels, skel_graph.median_vein_width_px)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4d_ectopic")
 
     # Phase 5: Build VeinIdentification objects
     merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
@@ -356,7 +468,6 @@ def _label_landmark_edges(
         node = lm_l4l5.snapped_node
         if node in G:
             neighbors = _unlabeled_neighbors(node)
-            used_soft = False
 
             if (
                 len(neighbors) >= 2
@@ -432,30 +543,6 @@ def _label_landmark_edges(
                                     logger.info(
                                         "Labeled edge %s as L4 (from L4-L5, contested, assigned remaining)", key
                                     )
-                    used_soft = True
-
-            if not used_soft and len(neighbors) >= 1 and lm_dtip:
-                # Fallback if no L4.d landmark: use DTip direction
-                toward_dtip = direction_toward(
-                    (G.nodes[node]["x"], G.nodes[node]["y"]),
-                    (lm_dtip.x, lm_dtip.y),
-                )
-                sample_px = config.departure_sample
-                scored = []
-                for n in neighbors:
-                    dep = edge_departure_direction(G, node, n, sample_px)
-                    angle = angle_between_vectors(dep, toward_dtip)
-                    scored.append((n, angle))
-                scored.sort(key=lambda s: s[1])
-                key = _edge_key(node, scored[0][0])
-                if key not in edge_labels:
-                    _label_with_chain(key, "L4")
-                    logger.info("Labeled edge %s as L4 (from L4-L5, toward DTip fallback)", key)
-                if len(scored) >= 2:
-                    key = _edge_key(node, scored[-1][0])
-                    if key not in edge_labels:
-                        _label_with_chain(key, "L5")
-                        logger.info("Labeled edge %s as L5 (from L4-L5, remaining fallback)", key)
 
 
 def _assign_by_proximity(
