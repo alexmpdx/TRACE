@@ -67,9 +67,11 @@ class PipelineConfig:
     bridge3_on_axis_relaxed_cap: float = 45.0
 
     # -- Landmark anchoring --
-    snap_radius_um: float = 100.0  # Max distance to snap landmark to graph node (µm)
-    snap_radius_px: float = 207.0  # Fallback if um_per_px not set
-    snap_radius_vw: float = 2.0  # Snap radius as × median vein width (overrides _um/_px)
+    # Snap radius is primarily expressed in µm (absolute anatomical scale).
+    # The vein-width multiplier is the fallback used only when um_per_px is
+    # unavailable (no scale calibration).
+    snap_radius_um: float = 100.0  # Snap radius in µm (primary)
+    snap_radius_vw: float = 4.0  # Fallback as × median vein width (when um_per_px is None)
 
     # -- Vein tracing --
     departure_sample_um: float = 100.0  # µm along edge to compute departure direction
@@ -109,12 +111,18 @@ class PipelineConfig:
             return um / self.um_per_px
         return um  # no conversion available
 
-    @property
-    def snap_radius(self) -> float:
-        """Snap radius in pixels."""
-        if self.um_per_px is not None:
+    def snap_radius_px(self, median_vein_width_px: float = 0.0) -> float:
+        """Snap radius in pixels.
+
+        Primary: snap_radius_um converted via um_per_px (absolute anatomical
+        scale). Fallback: snap_radius_vw × median_vein_width_px, used only
+        when um_per_px is unavailable (no scale calibration).
+        """
+        if self.um_per_px is not None and self.um_per_px > 0:
             return self.to_px(self.snap_radius_um)
-        return self.snap_radius_px
+        if median_vein_width_px > 0:
+            return median_vein_width_px * self.snap_radius_vw
+        return self.snap_radius_um  # degenerate: no scale, no vein width
 
     @property
     def departure_sample(self) -> float:

@@ -181,7 +181,14 @@ def trace_veins_from_landmarks(
     chain_lines = _assign_chain_ids(G, edge_labels, boundary_nodes=landmark_nodes)
 
     # Phase 2: Label edges at landmark positions (on the merged graph)
-    _label_landmark_edges(G, landmarks, edge_labels, config, chain_lines)
+    _label_landmark_edges(
+        G,
+        landmarks,
+        edge_labels,
+        config,
+        skel_graph.median_vein_width_px,
+        chain_lines,
+    )
     if dbg:
         dbg.dump(G, edge_labels, "phase2_landmark_edges")
 
@@ -268,6 +275,7 @@ def _label_landmark_edges(
     landmarks: dict[str, Landmark],
     edge_labels: dict[tuple, str],
     config: PipelineConfig,
+    median_vein_width: float,
     chain_lines: dict[int, LineString] | None = None,
 ) -> None:
     """Label edges connected to landmark nodes."""
@@ -341,7 +349,7 @@ def _label_landmark_edges(
     lm_dtip = landmarks.get("DTip")
     lm_l1rs = landmarks.get("L1-Rs")
     lm_l2d = landmarks.get("L2.d")
-    max_lm_dist = config.snap_radius
+    max_lm_dist = config.snap_radius_px(median_vein_width)
 
     if lm_l2l3 and lm_l2l3.snapped_node is not None:
         node = lm_l2l3.snapped_node
@@ -1334,7 +1342,7 @@ def _detect_crossveins_fallback(
 
     min_len = median_vein_width * config.crossvein_min_length_vw
     max_len = median_vein_width * config.crossvein_max_length_vw
-    search_radius = config.snap_radius
+    search_radius = config.snap_radius_px(median_vein_width)
     sample_px = config.departure_sample
 
     # Build labeled vein lines for perpendicularity checks

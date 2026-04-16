@@ -210,8 +210,7 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Landmark anchoring")
         form = QFormLayout(gb)
         self._add_float(form, "snap_radius_um", "Snap radius (µm)", 0.0, 10000.0, 1, 10.0)
-        self._add_float(form, "snap_radius_px", "Snap radius fallback (px)", 0.0, 10000.0, 1, 10.0)
-        self._add_float(form, "snap_radius_vw", "Snap radius (× vein width)", 0.0, 100.0, 2, 0.1)
+        self._add_float(form, "snap_radius_vw", "Snap radius fallback (× vein width)", 0.0, 100.0, 2, 0.1)
         layout.addWidget(gb)
 
         gb = QGroupBox("Vein tracing")

@@ -7,6 +7,7 @@ import math
 from typing import Optional
 
 import networkx as nx
+from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import Landmark, SkeletonGraph
 from identify_features.models.topology import RELIABLE_LANDMARKS
 from identify_features.utils.graph_utils import nearest_node
@@ -23,33 +24,32 @@ _ENDPOINT_LANDMARKS = {"subcostal break", "DTip"}
 def anchor_landmarks(
     skel_graph: SkeletonGraph,
     landmarks: dict[str, Landmark],
-    snap_radius: float = 80.0,
-    prefer_junction_radius: float = 160.0,
-    snap_radius_vw: float = 4.0,
+    config: PipelineConfig | None = None,
 ) -> dict[str, Landmark]:
     """Snap each reliable landmark to the nearest appropriate graph node.
 
     Junction landmarks (L1-Rs, L2-L3, L4-L5) prefer high-degree nodes (≥3).
     Endpoint landmarks (subcostal break, DTip) prefer degree-1 nodes.
 
-    Args:
-        skel_graph: The skeleton graph.
-        landmarks: Dict of landmarks by name.
-        snap_radius: Maximum distance to snap a landmark to a node.
-        prefer_junction_radius: Search radius for preferring junction nodes.
-        snap_radius_vw: Snap radius as × median vein width (overrides snap_radius).
-
-    Returns:
-        Updated landmarks dict with snapped_node and snap_distance set.
+    Snap radius is read from *config* (``snap_radius_vw`` × median vein width,
+    falling back to ``snap_radius_um`` when vein width is unavailable).
     """
+    if config is None:
+        config = PipelineConfig()
+
     G = skel_graph.graph
     result = dict(landmarks)  # shallow copy
 
-    # Use vein-width-based snap radius when median vein width is available
-    if skel_graph.median_vein_width_px > 0:
-        snap_radius = skel_graph.median_vein_width_px * snap_radius_vw
-        prefer_junction_radius = snap_radius * 2
-        logger.info("Snap radius: %.0fpx (%.1f × vein width)", snap_radius, snap_radius_vw)
+    snap_radius = config.snap_radius_px(skel_graph.median_vein_width_px)
+    prefer_junction_radius = snap_radius * 2
+    if config.um_per_px is not None and config.um_per_px > 0:
+        logger.info("Snap radius: %.0fpx (%.0f µm)", snap_radius, config.snap_radius_um)
+    else:
+        logger.info(
+            "Snap radius: %.0fpx (%.1f × vein width fallback)",
+            snap_radius,
+            config.snap_radius_vw,
+        )
 
     for name, lm in result.items():
         if not lm.reliable:

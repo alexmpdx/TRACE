@@ -558,7 +558,8 @@ for each reliable landmark:
 **Edge insertion**: If no suitable node exists nearby, we split the nearest edge at the point closest to the landmark. This creates a new node precisely where the landmark says a junction should be. The split preserves all edge attributes and creates two new edges.
 
 **Parameters**:
-- `snap_radius` — Maximum distance to snap. When median vein width is available, uses `snap_radius_vw × median_vein_width` (default: 2× vein width). Falls back to `snap_radius_um / um_per_px` (207px) when vein width is unavailable.
+- `snap_radius_um` (default 100 µm) — Primary: absolute anatomical scale, converted to px via `um_per_px`.
+- `snap_radius_vw` (default 4.0) — Fallback `× median_vein_width`, used only when `um_per_px` is unavailable.
 
 ---
 
@@ -1286,8 +1287,8 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 ### Landmark anchoring
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `snap_radius_vw` | 2.0 | Max snap distance (× vein width, primary) |
-| `snap_radius_um` | 100µm | Max snap distance (fallback when vein width unavailable) |
+| `snap_radius_um` | 100µm | Max snap distance (primary) |
+| `snap_radius_vw` | 4.0 | Max snap distance fallback (× vein width, when um_per_px unset) |
 
 ### Costa detection
 | Parameter | Default | Description |
