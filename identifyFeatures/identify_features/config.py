@@ -199,6 +199,48 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
         "bridge3_on_axis_max_angle": 45.0,
         "bridge3_on_axis_relaxed_cap": 45.0,
     },
+    # Sandbox: length-based defaults with DISTANCE_MAP layered on top.
+    # Length-based pruning always runs first (step 4 in skeleton.py); the
+    # methods list adds further passes. Iterate on prune_radius_ratio_threshold
+    # here without disturbing the length-based preset.
+    "distance-map": {
+        # Pruning
+        "prune_methods": [PruneMethod.DISTANCE_MAP],
+        "prune_min_length_um": None,
+        "prune_min_length_vein_widths": 2.0,
+        "final_stub_vein_widths": 3.0,
+        "junction_merge_vein_widths": 2.0,
+        "prune_radius_ratio_threshold": 0.3,
+        "prune_scale_sigmas": [2.0, 4.0, 8.0, 16.0],
+        "prune_single_scale_sigma": 4.0,
+        "collinear_min_angle": 150.0,
+        # Bridging — pass 1
+        "bridge_max_gap_um": 200.0,
+        "bridge_gap_fraction": 0.15,
+        "bridge_direction_window_um": 100.0,
+        "bridge_min_combined_length_um": 100.0,
+        "bridge_on_axis_max_angle": 45.0,
+        "bridge_on_axis_relaxed_cap": 45.0,
+        "bridge_min_facing_angle": 150.0,
+        "bridge_direction_max_edge_fraction": 0.25,
+        # Bridging — pass 2
+        "bridge2_max_gap_um": 200.0,
+        "bridge2_gap_fraction": 0.5,
+        "bridge2_min_gap_vw": 2.0,
+        "bridge2_direction_window_um": 100.0,
+        "bridge2_min_combined_length_um": 100.0,
+        "bridge2_min_combined_length_vw": 3.5,
+        "bridge2_on_axis_max_angle": 45.0,
+        "bridge2_on_axis_relaxed_cap": 45.0,
+        "bridge2_min_facing_angle": 150.0,
+        # Bridging — pass 3
+        "bridge3_max_gap_vw": 4.0,
+        "bridge3_short_edge_vw": 3.0,
+        "bridge3_relaxed_facing_angle": 120.0,
+        "bridge3_direction_window_um": 100.0,
+        "bridge3_on_axis_max_angle": 45.0,
+        "bridge3_on_axis_relaxed_cap": 45.0,
+    },
 }
 
 
