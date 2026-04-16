@@ -230,10 +230,12 @@ def build_skeleton_graph(
     if dbg:
         dbg.dump_graph(graph, "simplify_deg2")
 
-    # Step 7b: Merge nearby degree-2/3 junction nodes (tight radius)
-    # Nearly overlapping nodes at junctions cause bridging and labeling issues.
-    _merge_junction_nodes(graph, min_dist=median_vein_width * config.junction_merge_vein_widths)
-    graph = _simplify_graph(graph)
+    # Step 7b: Merge nearby degree-2/3 junction nodes (tight radius).
+    # Disabled when junction_merge_vein_widths == 0: merging collapses
+    # geometrically-distinct junctions and leaves crossed edges with no shared node.
+    if config.junction_merge_vein_widths > 0:
+        _merge_junction_nodes(graph, min_dist=median_vein_width * config.junction_merge_vein_widths)
+        graph = _simplify_graph(graph)
     if dbg:
         dbg.dump_graph(graph, "merge_junction_nodes")
 
@@ -280,11 +282,11 @@ def build_skeleton_graph(
     # (protected nodes, label protection, perpendicularity check).
 
     # Step 12: Remove isolated fragments shorter than 4x median vein width
-    _remove_small_fragments(graph, min_length=median_vein_width * 4)
-
-    # Remove isolated nodes (degree 0)
-    isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
-    graph.remove_nodes_from(isolated)
+    if config.enable_small_fragment_removal:
+        _remove_small_fragments(graph, min_length=median_vein_width * 4)
+        # Remove isolated nodes (degree 0)
+        isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
+        graph.remove_nodes_from(isolated)
     if dbg:
         dbg.dump_graph(graph, "remove_small_fragments1")
 
@@ -319,9 +321,10 @@ def build_skeleton_graph(
     graph = _simplify_graph(graph)
     _merge_close_nodes(graph, min_dist=median_vein_width)
     graph = _simplify_graph(graph)
-    _remove_small_fragments(graph, min_length=median_vein_width * 4)
-    isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
-    graph.remove_nodes_from(isolated)
+    if config.enable_small_fragment_removal:
+        _remove_small_fragments(graph, min_length=median_vein_width * 4)
+        isolated = [n for n in graph.nodes() if graph.degree(n) == 0]
+        graph.remove_nodes_from(isolated)
     if dbg:
         dbg.dump_graph(graph, "cleanup2")
 
@@ -357,8 +360,17 @@ def build_skeleton_graph(
     if dbg:
         dbg.dump_graph(graph, "final_stubs")
 
-    # Step 17: Snap edge LineString endpoints to node positions
+    # Step 17: Snap edge LineString endpoints to node positions.
+    # Keep only the largest connected component — any smaller component is an
+    # orphan fragment unreachable from landmark anchors. This runs regardless
+    # of enable_small_fragment_removal (which governs only intermediate pruning).
     _snap_edge_endpoints(graph)
+    components = list(nx.connected_components(graph))
+    if len(components) > 1:
+        largest = max(components, key=len)
+        for comp in components:
+            if comp is not largest:
+                graph.remove_nodes_from(comp)
     if dbg:
         dbg.dump_graph(graph, "final")
 
