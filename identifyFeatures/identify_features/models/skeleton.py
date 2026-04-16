@@ -1925,21 +1925,26 @@ def _simplify_graph(G: nx.Graph) -> nx.Graph:
                 changed = True
                 continue
 
+            # Preserve parallel paths: if n1↔n2 already exists, contracting
+            # this deg-2 node would silently drop the other path (nx.Graph
+            # can't hold parallel edges). Leave the node in place.
+            if simplified.has_edge(n1, n2):
+                continue
+
             e1_data = simplified[node][n1]
             e2_data = simplified[node][n2]
             merged_line = _merge_lines(e1_data["line"], e2_data["line"], node, simplified)
 
             simplified.remove_node(node)
-            if not simplified.has_edge(n1, n2):
-                simplified.add_edge(
-                    n1,
-                    n2,
-                    edge_id=next_edge_id,
-                    line=merged_line,
-                    length_px=merged_line.length,
-                    pixel_count=e1_data.get("pixel_count", 0) + e2_data.get("pixel_count", 0),
-                )
-                next_edge_id += 1
+            simplified.add_edge(
+                n1,
+                n2,
+                edge_id=next_edge_id,
+                line=merged_line,
+                length_px=merged_line.length,
+                pixel_count=e1_data.get("pixel_count", 0) + e2_data.get("pixel_count", 0),
+            )
+            next_edge_id += 1
             changed = True
 
     return simplified

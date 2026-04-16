@@ -260,10 +260,13 @@ graph = _simplify_graph(graph)
 ```
 repeat until no degree-2 nodes:
     for each degree-2 node n with neighbors n1, n2:
+        if edge(n1, n2) already exists: skip (preserve parallel path)
         merged_line = concatenate(line(n1,n), line(n,n2))
         remove node n and both edges
         add edge(n1, n2, line=merged_line)
 ```
+
+**Parallel-path guard**: The underlying `nx.Graph` cannot hold parallel edges. When the contraction target `(n1, n2)` already has a direct edge, contracting would silently drop one of the two paths. We skip the contraction and leave the degree-2 node in place, preserving both routes — important for wings whose cells form real cycles (e.g., L4/L5/PCV posterior box), which surface as parallel paths between the same two junctions.
 
 ### 3.7 Merge nearby junction nodes
 
