@@ -216,7 +216,7 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Vein tracing")
         form = QFormLayout(gb)
         self._add_float(form, "departure_sample_um", "Departure sample (µm)", 0.0, 10000.0, 1, 10.0)
-        self._add_float(form, "departure_sample_px", "Departure sample fallback (px)", 0.0, 10000.0, 1, 10.0)
+        self._add_float(form, "departure_sample_vw", "Departure sample fallback (× vein width)", 0.0, 100.0, 2, 0.1)
         self._add_float(form, "tangent_continuity_max_angle", "Tangent continuity max angle (deg)", 0.0, 180.0, 1, 1.0)
         self._add_float(form, "merge_max_gap_um", "Segment merge max gap (µm)", 0.0, 10000.0, 1, 1.0)
         self._add_float(form, "distal_landmark_search_vw", "Distal landmark search (× vein width)", 0.0, 100.0, 2, 0.1)

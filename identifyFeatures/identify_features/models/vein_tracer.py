@@ -158,7 +158,13 @@ def trace_veins_from_landmarks(
     from identify_features.models.junction_resolver import merge_through_junctions
 
     protected = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
-    skel_graph.graph = merge_through_junctions(G, edge_labels, config, protected_nodes=protected)
+    skel_graph.graph = merge_through_junctions(
+        G,
+        edge_labels,
+        config,
+        protected_nodes=protected,
+        median_vein_width_px=skel_graph.median_vein_width_px,
+    )
     G = skel_graph.graph
     if dbg:
         dbg.dump(G, edge_labels, "phase0_merge_junctions")
@@ -355,7 +361,7 @@ def _label_landmark_edges(
         node = lm_l2l3.snapped_node
         if node in G:
             neighbors = _unlabeled_neighbors(node)
-            sample_px = config.departure_sample
+            sample_px = config.departure_sample_px(median_vein_width)
 
             if len(neighbors) >= 1:
                 # Check if L3 already labeled at this junction (from DTip endpoint)
@@ -442,7 +448,7 @@ def _label_landmark_edges(
         node = lm_l1rs.snapped_node
         if node in G:
             neighbors = _unlabeled_neighbors(node)
-            sample_px = config.departure_sample
+            sample_px = config.departure_sample_px(median_vein_width)
 
             for n in neighbors:
                 key = _edge_key(node, n)
@@ -1343,7 +1349,7 @@ def _detect_crossveins_fallback(
     min_len = median_vein_width * config.crossvein_min_length_vw
     max_len = median_vein_width * config.crossvein_max_length_vw
     search_radius = config.snap_radius_px(median_vein_width)
-    sample_px = config.departure_sample
+    sample_px = config.departure_sample_px(median_vein_width)
 
     # Build labeled vein lines for perpendicularity checks
     vein_lines: dict[str, list[LineString]] = defaultdict(list)

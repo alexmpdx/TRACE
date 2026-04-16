@@ -74,8 +74,10 @@ class PipelineConfig:
     snap_radius_vw: float = 4.0  # Fallback as × median vein width (when um_per_px is None)
 
     # -- Vein tracing --
+    # Departure sample is primarily expressed in µm. The vein-width multiplier
+    # is the fallback used only when um_per_px is unavailable.
     departure_sample_um: float = 100.0  # µm along edge to compute departure direction
-    departure_sample_px: float = 80.0  # Fallback
+    departure_sample_vw: float = 4.0  # Fallback as × median vein width (when um_per_px is None)
     tangent_continuity_max_angle: float = 90.0  # Max deflection (degrees) at junctions
     merge_max_gap_um: float = 50.0  # Max gap between line segments when merging (µm)
     distal_landmark_search_vw: float = 2.0  # Search radius for distal landmark extension (× vein width)
@@ -124,9 +126,15 @@ class PipelineConfig:
             return median_vein_width_px * self.snap_radius_vw
         return self.snap_radius_um  # degenerate: no scale, no vein width
 
-    @property
-    def departure_sample(self) -> float:
-        """Departure sample distance in pixels."""
-        if self.um_per_px is not None:
+    def departure_sample_px(self, median_vein_width_px: float = 0.0) -> float:
+        """Departure sample distance in pixels.
+
+        Primary: departure_sample_um converted via um_per_px. Fallback:
+        departure_sample_vw × median_vein_width_px, used only when
+        um_per_px is unavailable (no scale calibration).
+        """
+        if self.um_per_px is not None and self.um_per_px > 0:
             return self.to_px(self.departure_sample_um)
-        return self.departure_sample_px
+        if median_vein_width_px > 0:
+            return median_vein_width_px * self.departure_sample_vw
+        return self.departure_sample_um  # degenerate: no scale, no vein width

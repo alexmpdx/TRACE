@@ -34,6 +34,7 @@ def resolve_junctions(
     G: nx.Graph,
     edge_labels: dict[tuple, str],
     config: PipelineConfig | None = None,
+    median_vein_width_px: float = 0.0,
     max_iterations: int = 20,
 ) -> None:
     """Propagate vein labels through degree-3+ junctions (in-place).
@@ -55,7 +56,7 @@ def resolve_junctions(
     if config is None:
         config = PipelineConfig()
 
-    direction_window = config.departure_sample
+    direction_window = config.departure_sample_px(median_vein_width_px)
 
     for iteration in range(max_iterations):
         # Snapshot: only resolve from labels that existed before this pass
@@ -187,6 +188,7 @@ def merge_through_junctions(
     edge_labels: dict[tuple, str] | None = None,
     config: PipelineConfig | None = None,
     protected_nodes: set[int] | None = None,
+    median_vein_width_px: float = 0.0,
 ) -> nx.Graph:
     """Merge longitudinal vein segments through crossvein junctions (graph-level).
 
@@ -217,7 +219,7 @@ def merge_through_junctions(
     if protected_nodes is None:
         protected_nodes = set()
 
-    direction_window = config.departure_sample
+    direction_window = config.departure_sample_px(median_vein_width_px)
     result = G.copy()
     next_edge_id = (
         max(

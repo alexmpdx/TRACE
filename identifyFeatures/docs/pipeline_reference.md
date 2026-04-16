@@ -1305,7 +1305,8 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 ### Vein tracing
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `departure_sample_um` | 100µm | Direction sampling window |
+| `departure_sample_um` | 100µm | Direction sampling window (primary; converted via `um_per_px`) |
+| `departure_sample_vw` | 4.0 | Fallback: × median vein width (when `um_per_px` is None) |
 | `distal_landmark_search_vw` | 2.0 | Search radius for distal extension (× vein width) |
 | `merge_max_gap_um` | 50µm | Max gap for line merging in output |
 
