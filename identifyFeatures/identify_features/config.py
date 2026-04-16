@@ -87,7 +87,6 @@ class PipelineConfig:
     costa_propagation_max_distance_vw: float = 4.0  # Max distance from band for costa propagation (× vein width)
 
     # -- Crossvein detection --
-    crossvein_proximity_px: float = 100.0
     crossvein_min_angle: float = 40.0
     crossvein_max_length_frac: float = 0.15
     crossvein_min_length_vw: float = 4.0  # Min crossvein length as × median vein width
