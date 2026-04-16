@@ -137,7 +137,9 @@ def build_skeleton_graph(
     methods = config.skeleton_methods
     smooth_sigma = config.smooth_sigma
     prune_methods = config.prune_methods
-    prune_min_length_px = config.prune_min_length_px  # None = auto from median vein width
+    prune_min_length_px = (
+        int(round(config.to_px(config.prune_min_length_um))) if config.prune_min_length_um is not None else None
+    )  # None = auto from median vein width
     prune_radius_ratio = config.prune_radius_ratio_threshold
     prune_scale_sigmas = config.prune_scale_sigmas
     prune_single_scale_sigma = config.prune_single_scale_sigma

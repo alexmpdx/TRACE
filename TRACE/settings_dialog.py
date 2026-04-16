@@ -138,7 +138,9 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Pruning")
         form = QFormLayout(gb)
         self._add_enum_list(form, "prune_methods", "Methods (empty = length-based only)", PruneMethod)
-        self._add_opt_int(form, "prune_min_length_px", "Min branch length (px)", 0, 100000, "auto (median vw)")
+        self._add_opt_float(
+            form, "prune_min_length_um", "Min branch length (µm)", 0.0, 50000.0, 2, 1.0, "auto (median vw)"
+        )
         self._add_float(form, "prune_min_length_vein_widths", "Min length (× vein width)", 0.0, 100.0, 2, 0.1)
         self._add_float(form, "final_stub_vein_widths", "Final stub removal (× vein width)", 0.0, 100.0, 2, 0.1)
         self._add_float(form, "junction_merge_vein_widths", "Junction merge (× vein width)", 0.0, 100.0, 2, 0.1)

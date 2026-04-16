@@ -221,6 +221,7 @@ repeat until no branches removed:
 
 **Parameters**:
 - `prune_min_length_vein_widths = 2.0` — Cap expressed as multiple of median vein width.
+- `prune_min_length_um = None` — Optional explicit cap in microns (converted via `um_per_px`). Overrides the vein-width auto threshold when set.
 
 ### 3.5 Build raw graph from skeleton
 

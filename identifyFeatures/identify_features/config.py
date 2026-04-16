@@ -24,7 +24,7 @@ class PipelineConfig:
 
     # -- Pruning --
     prune_methods: list[PruneMethod] = field(default_factory=list)  # Empty = length-based pruning only
-    prune_min_length_px: int | None = None  # Minimum branch length to keep (None = use median vein width)
+    prune_min_length_um: float | None = None  # Minimum branch length to keep (µm; None = use median vein width)
     prune_min_length_vein_widths: float = 2.0  # Multiplier of median vein width for auto prune threshold
     final_stub_vein_widths: float = 3.0  # Final stub removal: multiplier of median vein width
     junction_merge_vein_widths: float = 2.0  # Tight junction merge: merge deg-2/3 nodes within this × vein width
