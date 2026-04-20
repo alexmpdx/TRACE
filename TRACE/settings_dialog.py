@@ -141,7 +141,7 @@ class PipelineConfigDialog(QDialog):
 
         gb = QGroupBox("Skeletonization")
         form = QFormLayout(gb)
-        self._add_enum_list(form, "skeleton_methods", "Methods", SkeletonMethod)
+        self._add_enum_list(form, "skeleton_methods", "Methods", SkeletonMethod, allowed_values={"ridge"})
         self._add_float(form, "smooth_sigma", "Smoothing sigma", 0.0, 100.0, 2, 0.1)
         layout.addWidget(gb)
 
@@ -156,7 +156,9 @@ class PipelineConfigDialog(QDialog):
         form = QFormLayout(gb)
         self._add_bool(form, "enable_basic_prune", "Basic length-based prune (step 4)")
         self._add_bool(form, "enable_small_fragment_removal", "Small-fragment removal (steps 11 / 14)")
-        self._add_enum_list(form, "prune_methods", "Methods (empty = length-based only)", PruneMethod)
+        self._add_enum_list(
+            form, "prune_methods", "Methods (empty = length-based only)", PruneMethod, allowed_values={"distance-map"}
+        )
         self._add_opt_float(
             form, "prune_min_length_um", "Min branch length (µm)", 0.0, 50000.0, 2, 1.0, "auto (median vw)"
         )
@@ -347,7 +349,7 @@ class PipelineConfigDialog(QDialog):
         form.addRow(label, row)
         self._widgets[name] = (self._KIND_OPT_INT, row, (check, spin))
 
-    def _add_enum_list(self, form: QFormLayout, name: str, label: str, enum_cls: type):
+    def _add_enum_list(self, form: QFormLayout, name: str, label: str, enum_cls: type, allowed_values=None):
         lw = QListWidget()
         lw.setMaximumHeight(110)
         for member in enum_cls:
@@ -355,6 +357,8 @@ class PipelineConfigDialog(QDialog):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             item.setData(Qt.UserRole, member.value)
+            if allowed_values is not None and member.value not in allowed_values:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
             lw.addItem(item)
         form.addRow(label, lw)
         self._widgets[name] = (self._KIND_ENUM_LIST, lw, enum_cls)
