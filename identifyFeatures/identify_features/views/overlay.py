@@ -20,9 +20,8 @@ _DEFAULT_COLOR_BGR = (128, 128, 128)
 # Ectopic vein color (magenta)
 _EV_COLOR_BGR = (255, 0, 255)
 
-# Region rendering: black fill at this opacity, with an opaque colored outline.
-_REGION_FILL_OPACITY = 0.5
-_REGION_OUTLINE_THICKNESS = 10
+# Region rendering: light colored fill (low opacity) so the wing image shows through.
+_REGION_FILL_OPACITY = 0.2
 
 
 def _vein_bgr(vein_id: str) -> tuple[int, int, int]:
@@ -119,13 +118,12 @@ def render_overlay(
     """Render veins and regions as a color overlay on the wing image.
 
     Layers (bottom to top):
-    1. Semi-transparent BLACK fills inside intervein regions
-    2. Thick opaque colored outlines around each region
-    3. (optional) Vein tissue polygon fills if ``show_vein_tissue`` is True
-    4. Vein centerline strokes
-    5. Ectopic vein ID labels
-    6. Region name labels (with [M]/[I] status suffixes)
-    7. Color-key legend in the upper-left corner
+    1. Light-opacity colored fills inside intervein regions
+    2. (optional) Vein tissue polygon fills if ``show_vein_tissue`` is True
+    3. Vein centerline strokes
+    4. Ectopic vein ID labels
+    5. Region name labels (with [M]/[I] status suffixes)
+    6. Color-key legend in the upper-left corner
 
     Args:
         base_image: BGR base image (e.g. original wing photo).
@@ -139,20 +137,15 @@ def render_overlay(
     """
     img = base_image.copy()
 
-    # Layer 1: black fills under each region
+    # Layer 1: low-opacity colored region fills
     region_layer = img.copy()
-    for r in regions:
-        for ring in _polygon_rings(r.polygon):
-            cv2.fillPoly(region_layer, [ring], (0, 0, 0))
-    img = cv2.addWeighted(region_layer, _REGION_FILL_OPACITY, img, 1.0 - _REGION_FILL_OPACITY, 0)
-
-    # Layer 2: opaque colored outlines around each region
     for r in regions:
         color = _region_bgr(r.name)
         for ring in _polygon_rings(r.polygon):
-            cv2.polylines(img, [ring], True, color, _REGION_OUTLINE_THICKNESS)
+            cv2.fillPoly(region_layer, [ring], color)
+    img = cv2.addWeighted(region_layer, _REGION_FILL_OPACITY, img, 1.0 - _REGION_FILL_OPACITY, 0)
 
-    # Layer 3: optional vein tissue fills
+    # Layer 2: optional vein tissue fills
     if show_vein_tissue:
         vein_layer = img.copy()
         for v in veins:
@@ -162,14 +155,17 @@ def render_overlay(
                 cv2.fillPoly(vein_layer, [ring], _vein_bgr(v.vein_id))
         img = cv2.addWeighted(vein_layer, 0.5, img, 0.5, 0)
 
-    # Layer 4: vein centerlines
+    # Layer 3: vein centerlines — thickness scales with image size
+    h, w = img.shape[:2]
+    stroke_scale = max(1.0, min(h, w) / 1800.0)
+    vein_thickness = max(3, int(round(5 * stroke_scale)))
     for v in veins:
         if v.centerline is None:
             continue
         pts = np.array(v.centerline.coords, dtype=np.int32)
-        cv2.polylines(img, [pts], False, _vein_bgr(v.vein_id), 3)
+        cv2.polylines(img, [pts], False, _vein_bgr(v.vein_id), vein_thickness)
 
-    # Layer 5: ectopic vein labels
+    # Layer 4: ectopic vein labels
     for v in veins:
         if v.centerline is None or not v.vein_id.startswith("EV"):
             continue
@@ -177,7 +173,7 @@ def render_overlay(
         cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 12)
         cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, _EV_COLOR_BGR, 5)
 
-    # Layer 6: region labels
+    # Layer 5: region labels
     for r in regions:
         if r.polygon is None:
             continue
@@ -193,10 +189,10 @@ def render_overlay(
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness_fg)
         tx = cx - tw // 2
         ty = cy + th // 2
-        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness_bg)
-        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness_fg)
+        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness_bg)
+        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness_fg)
 
-    # Layer 7: color key
+    # Layer 6: color key
     _draw_color_key(img, veins)
 
     return img
