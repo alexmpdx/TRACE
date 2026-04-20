@@ -544,6 +544,11 @@ for each reliable landmark:
         if only degree-1 found: reject and try edge insertion
     elif landmark is an ENDPOINT type (subcostal break, DTip):
         find nearest node with degree == 1 within snap_radius
+        # Guard against snapping to a leaf of the wrong vein
+        if snapped to a degree-1 node:
+            compare node_distance to nearest_edge_distance
+            if an edge passes at ≤ 50% of node distance:
+                reject leaf and fall through to edge insertion
     elif landmark is "alula notch":
         skip (margin reference only, don't modify graph)
     else:
@@ -559,6 +564,8 @@ for each reliable landmark:
 **Why different preferences by type?** Junction landmarks should snap to actual junctions (degree-3+ nodes) — snapping them to a degree-1 endpoint would be incorrect. Endpoint landmarks (SC, DTip) should snap to degree-1 nodes where the vein terminates.
 
 **Edge insertion**: If no suitable node exists nearby, we split the nearest edge at the point closest to the landmark. This creates a new node precisely where the landmark says a junction should be. The split preserves all edge attributes and creates two new edges.
+
+**Leaf-vs-edge guard** (endpoint landmarks only): A landmark like DTip may have a nearby degree-1 leaf that belongs to a different vein (e.g., a costa fragment terminating near DTip while the real distal endpoint lies on an L3/L4 anastomosis edge passing only a few pixels away). Snapping to the wrong leaf can cause chain-based label propagation to mislabel long spans of skeleton. When a degree-1 leaf is selected, we compute the minimum distance from the landmark to any edge's geometry; if an edge passes at ≤ 50% of the leaf's distance, we reject the leaf and insert a new node on that edge instead.
 
 **Parameters**:
 - `snap_radius_um` (default 100 µm) — Primary: absolute anatomical scale, converted to px via `um_per_px`.

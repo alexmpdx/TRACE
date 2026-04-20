@@ -84,6 +84,23 @@ def anchor_landmarks(
                 prefer_degree=1,
                 prefer_degree_radius=snap_radius,
             )
+            # A leaf node near the landmark may belong to a different vein
+            # than the one the landmark represents (e.g., costa leaf near a
+            # wrapping L3/L4 anastomosis at DTip). When snapped to a degree-1
+            # leaf, if another edge passes substantially closer, prefer edge
+            # insertion so the landmark sits on the correct chain.
+            if node is not None and G.degree(node) == 1:
+                node_dist = math.hypot(G.nodes[node]["x"] - lm.x, G.nodes[node]["y"] - lm.y)
+                nearest_edge_dist = _nearest_edge_distance(G, lm.x, lm.y)
+                if nearest_edge_dist * 2 < node_dist:
+                    logger.info(
+                        "Landmark %r: leaf node %s at %.1fpx, but edge passes at %.1fpx — inserting on edge",
+                        name,
+                        node,
+                        node_dist,
+                        nearest_edge_dist,
+                    )
+                    node = None
         elif name == "alula notch":
             # Alula notch is a wing margin reference point — don't modify the graph
             logger.debug("Landmark %r: margin reference, skipping graph modification", name)
@@ -129,6 +146,22 @@ def anchor_landmarks(
                 )
 
     return result
+
+
+def _nearest_edge_distance(G: nx.Graph, x: float, y: float) -> float:
+    """Return the minimum distance from (x, y) to any edge's ``line`` geometry."""
+    from shapely.geometry import Point
+
+    target = Point(x, y)
+    best = float("inf")
+    for _u, _v, data in G.edges(data=True):
+        line = data.get("line")
+        if line is None:
+            continue
+        d = line.distance(target)
+        if d < best:
+            best = d
+    return best
 
 
 def _insert_node_on_nearest_edge(
