@@ -194,6 +194,7 @@ def trace_veins_from_landmarks(
         config,
         skel_graph.median_vein_width_px,
         chain_lines,
+        wing_axis=wing_axis,
     )
     if dbg:
         dbg.dump(G, edge_labels, "phase2_landmark_edges")
@@ -283,6 +284,7 @@ def _label_landmark_edges(
     config: PipelineConfig,
     median_vein_width: float,
     chain_lines: dict[int, LineString] | None = None,
+    wing_axis: Optional[WingAxis] = None,
 ) -> None:
     """Label edges connected to landmark nodes."""
     if chain_lines is None:
@@ -473,7 +475,9 @@ def _label_landmark_edges(
     # Subcostal break → L1
     _label_endpoint_edge("subcostal break", "L1")
 
-    # L4-L5 junction: simultaneous matching with L4.d and L5.d
+    # L4-L5 junction: simultaneous matching with L4.d and L5.d, with fallbacks
+    # mirroring the L2-L3 pattern. L4-L5 is a reliable hard landmark, so tracing
+    # should proceed even if soft distal landmarks fail to anchor.
     lm_l4l5 = landmarks.get("L4-L5")
     lm_l4d = landmarks.get("L4.d")
     lm_l5d = landmarks.get("L5.d")
@@ -483,80 +487,145 @@ def _label_landmark_edges(
         if node in G:
             neighbors = _unlabeled_neighbors(node)
 
-            if (
-                len(neighbors) >= 2
-                and lm_l4d
-                and lm_l5d
-                and lm_l4d.snapped_node is not None
-                and lm_l5d.snapped_node is not None
-            ):
-                # Simultaneous: for each edge, compute distance to both L4.d and L5.d
-                # Assign each edge to whichever landmark it's closer to
-                scores = []
-                for n in neighbors:
-                    _, dist_l4d = _nearest_edge_to_landmark(node, [n], lm_l4d)
-                    _, dist_l5d = _nearest_edge_to_landmark(node, [n], lm_l5d)
-                    scores.append((n, dist_l4d, dist_l5d))
+            if len(neighbors) >= 1:
+                l4d_ok = lm_l4d is not None and lm_l4d.snapped_node is not None
+                l5d_ok = lm_l5d is not None and lm_l5d.snapped_node is not None
 
-                # Only use soft landmarks if at least one edge is within snap radius
-                any_close = any(min(s[1], s[2]) <= max_lm_dist for s in scores)
-                if any_close:
-                    # Find the single best edge for each landmark
-                    best_for_l4 = min(scores, key=lambda s: s[1])
-                    best_for_l5 = min(scores, key=lambda s: s[2])
+                def _l4_assigned() -> bool:
+                    return any(edge_labels.get(_edge_key(node, n)) == "L4" for n in G.neighbors(node))
 
-                    if best_for_l4[0] != best_for_l5[0]:
-                        # Different edges — assign directly
-                        for n, dist_l4, dist_l5 in scores:
-                            key = _edge_key(node, n)
-                            if key in edge_labels:
-                                continue
-                            if n == best_for_l4[0]:
-                                _label_with_chain(key, "L4")
-                                logger.info(
-                                    "Labeled edge %s as L4 (from L4-L5, nearest to L4.d, dist=%.0f)", key, dist_l4
-                                )
-                            else:
-                                _label_with_chain(key, "L5")
-                                logger.info(
-                                    "Labeled edge %s as L5 (from L4-L5, nearest to L5.d, dist=%.0f)", key, dist_l5
-                                )
-                    else:
-                        # Both landmarks point to same edge — give it to whichever
-                        # landmark is closer, assign the other edge the other vein
-                        winner = best_for_l4[0]
-                        if best_for_l4[1] <= best_for_l5[2]:
-                            # L4.d is closer to this edge
+                def _l5_assigned() -> bool:
+                    return any(edge_labels.get(_edge_key(node, n)) == "L5" for n in G.neighbors(node))
+
+                # Tier 1: Simultaneous matching (both soft landmarks anchored and close)
+                if l4d_ok and l5d_ok and len(neighbors) >= 2:
+                    scores = []
+                    for n in neighbors:
+                        _, dist_l4d = _nearest_edge_to_landmark(node, [n], lm_l4d)
+                        _, dist_l5d = _nearest_edge_to_landmark(node, [n], lm_l5d)
+                        scores.append((n, dist_l4d, dist_l5d))
+
+                    any_close = any(min(s[1], s[2]) <= max_lm_dist for s in scores)
+                    if any_close:
+                        best_for_l4 = min(scores, key=lambda s: s[1])
+                        best_for_l5 = min(scores, key=lambda s: s[2])
+
+                        if best_for_l4[0] != best_for_l5[0]:
                             for n, dist_l4, dist_l5 in scores:
                                 key = _edge_key(node, n)
                                 if key in edge_labels:
                                     continue
-                                if n == winner:
+                                if n == best_for_l4[0]:
                                     _label_with_chain(key, "L4")
                                     logger.info(
-                                        "Labeled edge %s as L4 (from L4-L5, contested, L4.d closer: %.0f)", key, dist_l4
+                                        "Labeled edge %s as L4 (from L4-L5, nearest to L4.d, dist=%.0f)",
+                                        key,
+                                        dist_l4,
                                     )
                                 else:
                                     _label_with_chain(key, "L5")
                                     logger.info(
-                                        "Labeled edge %s as L5 (from L4-L5, contested, assigned remaining)", key
+                                        "Labeled edge %s as L5 (from L4-L5, nearest to L5.d, dist=%.0f)",
+                                        key,
+                                        dist_l5,
                                     )
                         else:
-                            # L5.d is closer
-                            for n, dist_l4, dist_l5 in scores:
-                                key = _edge_key(node, n)
-                                if key in edge_labels:
-                                    continue
-                                if n == winner:
-                                    _label_with_chain(key, "L5")
-                                    logger.info(
-                                        "Labeled edge %s as L5 (from L4-L5, contested, L5.d closer: %.0f)", key, dist_l5
-                                    )
-                                else:
+                            winner = best_for_l4[0]
+                            if best_for_l4[1] <= best_for_l5[2]:
+                                for n, dist_l4, dist_l5 in scores:
+                                    key = _edge_key(node, n)
+                                    if key in edge_labels:
+                                        continue
+                                    if n == winner:
+                                        _label_with_chain(key, "L4")
+                                        logger.info(
+                                            "Labeled edge %s as L4 (from L4-L5, contested, L4.d closer: %.0f)",
+                                            key,
+                                            dist_l4,
+                                        )
+                                    else:
+                                        _label_with_chain(key, "L5")
+                                        logger.info(
+                                            "Labeled edge %s as L5 (from L4-L5, contested, assigned remaining)",
+                                            key,
+                                        )
+                            else:
+                                for n, dist_l4, dist_l5 in scores:
+                                    key = _edge_key(node, n)
+                                    if key in edge_labels:
+                                        continue
+                                    if n == winner:
+                                        _label_with_chain(key, "L5")
+                                        logger.info(
+                                            "Labeled edge %s as L5 (from L4-L5, contested, L5.d closer: %.0f)",
+                                            key,
+                                            dist_l5,
+                                        )
+                                    else:
+                                        _label_with_chain(key, "L4")
+                                        logger.info(
+                                            "Labeled edge %s as L4 (from L4-L5, contested, assigned remaining)",
+                                            key,
+                                        )
+
+                # Tier 2: Single-landmark fallback (L4.d only), if L4 still unassigned
+                if l4d_ok and not _l4_assigned():
+                    remaining = _unlabeled_neighbors(node)
+                    best_l4, dist = _nearest_edge_to_landmark(node, remaining, lm_l4d)
+                    if best_l4 is not None and dist <= max_lm_dist:
+                        key = _edge_key(node, best_l4)
+                        if key not in edge_labels:
+                            _label_with_chain(key, "L4")
+                            logger.info("Labeled edge %s as L4 (from L4-L5, L4.d fallback, dist=%.0f)", key, dist)
+
+                # Tier 2b: Single-landmark fallback (L5.d only), if L5 still unassigned
+                if l5d_ok and not _l5_assigned():
+                    remaining = _unlabeled_neighbors(node)
+                    best_l5, dist = _nearest_edge_to_landmark(node, remaining, lm_l5d)
+                    if best_l5 is not None and dist <= max_lm_dist:
+                        key = _edge_key(node, best_l5)
+                        if key not in edge_labels:
+                            _label_with_chain(key, "L5")
+                            logger.info("Labeled edge %s as L5 (from L4-L5, L5.d fallback, dist=%.0f)", key, dist)
+
+                # Tier 3: AP-orientation fallback — fill whatever is still missing.
+                # ap_vector points posterior; project each unlabeled neighbor's far
+                # chain endpoint onto it. Most anterior (lowest AP) = L4; most posterior = L5.
+                if wing_axis is not None and (not _l4_assigned() or not _l5_assigned()):
+                    remaining = _unlabeled_neighbors(node)
+                    if remaining:
+                        ap_x, ap_y = wing_axis.ap_vector
+                        node_x = G.nodes[node]["x"]
+                        node_y = G.nodes[node]["y"]
+                        scored_ap: list[tuple] = []
+                        for n in remaining:
+                            cid = G[node][n].get("chain_id") if G.has_edge(node, n) else None
+                            line = chain_lines.get(cid) if cid is not None else None
+                            if line is None:
+                                line = G[node][n].get("line")
+                            if line is None:
+                                continue
+                            coords = list(line.coords)
+                            start_d = math.hypot(coords[0][0] - node_x, coords[0][1] - node_y)
+                            end_d = math.hypot(coords[-1][0] - node_x, coords[-1][1] - node_y)
+                            far = coords[-1] if end_d > start_d else coords[0]
+                            ap_comp = (far[0] - node_x) * ap_x + (far[1] - node_y) * ap_y
+                            scored_ap.append((n, ap_comp))
+
+                        if scored_ap:
+                            scored_ap.sort(key=lambda s: s[1])
+                            if not _l4_assigned():
+                                l4_n, l4_ap = scored_ap[0]
+                                key = _edge_key(node, l4_n)
+                                if key not in edge_labels:
                                     _label_with_chain(key, "L4")
-                                    logger.info(
-                                        "Labeled edge %s as L4 (from L4-L5, contested, assigned remaining)", key
-                                    )
+                                    logger.info("Labeled edge %s as L4 (from L4-L5, AP fallback, ap=%.1f)", key, l4_ap)
+                            if not _l5_assigned():
+                                l5_n, l5_ap = scored_ap[-1]
+                                key = _edge_key(node, l5_n)
+                                if key not in edge_labels:
+                                    _label_with_chain(key, "L5")
+                                    logger.info("Labeled edge %s as L5 (from L4-L5, AP fallback, ap=%.1f)", key, l5_ap)
 
 
 def _assign_by_proximity(
@@ -782,15 +851,24 @@ def _assign_chain_ids(
             if G.has_edge(eu, ev):
                 G[eu][ev]["chain_id"] = chain_id
 
-        # Build merged LineString for the chain by walking from one endpoint
-        # Find an endpoint node (degree != 2, or end of the chain)
+        # Build merged LineString for the chain by walking from one endpoint.
+        # A chain endpoint is a node that touches exactly one edge of THIS chain
+        # (interior nodes touch two). This is more reliable than using
+        # ``G.degree(n) != 2`` because landmark boundary nodes can still have
+        # graph degree 2 — they're chain boundaries by virtue of being in
+        # ``boundary_nodes``, not because of their graph degree.
         edge_set = set(chain_edges)
         chain_nodes: set[int] = set()
         for eu, ev in chain_edges:
             chain_nodes.add(eu)
             chain_nodes.add(ev)
-        endpoints = [n for n in chain_nodes if G.degree(n) != 2]
+        touch_count: dict[int, int] = {n: 0 for n in chain_nodes}
+        for eu, ev in chain_edges:
+            touch_count[eu] += 1
+            touch_count[ev] += 1
+        endpoints = [n for n, c in touch_count.items() if c == 1]
         if not endpoints:
+            # Closed loop or single-edge degenerate chain — start anywhere
             endpoints = [chain_edges[0][0]]
 
         start_node = endpoints[0]

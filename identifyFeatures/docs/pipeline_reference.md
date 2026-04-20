@@ -722,28 +722,57 @@ if SC landmark available:
 
 #### L4-L5 junction → L4, L5
 
+L4-L5 mirrors the L2-L3 progressive-fallback pattern. Tiers run in order; each
+tier only acts on veins still unassigned after the previous tier.
+
 ```
 unlabeled_edges = edges at L4-L5 node not already labeled
+max_lm_dist     = 2 × median_vein_width (snap_radius_px)
 
-if L4.d AND L5.d both available:
-    SIMULTANEOUS MATCHING (same approach as L2-L3):
-    for each edge:
-        dist_to_L4d = edge.LineString.distance(L4.d.point)
-        dist_to_L5d = edge.LineString.distance(L5.d.point)
+# Tier 1: simultaneous matching when both soft distal landmarks are usable
+if L4.d AND L5.d both anchored AND within max_lm_dist of their nearest edge
+   AND at least 2 unlabeled neighbors exist:
+    for each edge: dist = edge.chain_line.distance(landmark.point)
     best edge for L4.d → "L4"
     best edge for L5.d → "L5"
+    if same edge wins both: closer landmark keeps it; other landmark picks
+    the remaining edge
 
-    CONTESTED EDGE RESOLUTION:
-    if both landmarks point to same edge:
-        give edge to whichever landmark is closer
-        assign other landmark's vein to the remaining edge
+# Tier 2: single-landmark fallback (one of L4.d/L5.d unusable or Tier 1 skipped)
+if L4 unassigned AND L4.d usable:
+    label nearest remaining edge within max_lm_dist as "L4"
+if L5 unassigned AND L5.d usable:
+    label nearest remaining edge within max_lm_dist as "L5"
 
-# If L4.d/L5.d unavailable or only one unlabeled neighbor exists, no labels are
-# assigned here — Phase 2c (extend to distal landmarks) is responsible for
-# seeding L4/L5 in that case. The DTip-direction fallback was removed because
-# it reliably mis-labeled the sole departing chain when the L4-L5 anchor was
-# snapped to a degree-1 stub on the L5 chain.
+# Tier 3: AP-orientation fallback (both soft landmarks missing / unreliable)
+if wing_axis is known AND (L4 or L5 still unassigned):
+    for each remaining edge:
+        sample the edge mid-point, project (mid - landmark_pos) onto ap_vector
+    sort ascending by AP projection (ap_vector points posterior by convention):
+        lowest  → L4 (most anterior)
+        highest → L5 (most posterior)
 ```
+
+The `edge.chain_line` used in Tier 1/2 is the full stitched polyline for the
+edge's chain (see `_assign_chain_ids`), so distances reflect the whole vein
+run — not just the single edge segment touching the junction. This matters
+because L4.d / L5.d often land on an interior point of a multi-edge chain.
+
+The Tier 3 AP orientation uses `wing_axis.ap_vector`, the unit vector
+perpendicular to the proximal-distal axis, pointing posterior. This handles
+flipped wings correctly: if a wing is mirrored the AP vector flips with it,
+so "lowest AP projection → L4" stays biologically correct.
+
+**Chain endpoint fix (related).** `_assign_chain_ids` stitches chain edges
+into one LineString by walking from an endpoint. Endpoints are now detected
+by counting per-node touches within the chain (`touch_count == 1`), not by
+graph degree. Previously, chains bounded by two landmark-snapped nodes —
+which have graph degree 2 but are chain-terminators — produced an empty
+endpoint list and fell back to `chain_edges[0][0]`, which is often an
+interior node. The stitcher would then walk one direction and stop, silently
+dropping half the chain. That caused the L4-L5 Tier 1 distance query for
+0003 to see a 1380 px fragment instead of the true 4337 px polyline, so
+L4.d's true chain looked far away and L4/L5 mis-labeled.
 
 ### Phase 2b: Propagate labels through degree-2 nodes
 
