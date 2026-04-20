@@ -16,7 +16,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import cv2
-from identify_features.config import PipelineConfig
+from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
 from identify_features.controllers.pipeline import identify_wing
 from identify_features.views.csv_export import export_csv, export_csv_batch
 from identify_features.views.geojson_export import export_geojson
@@ -52,9 +52,11 @@ def _find_batch_specimens(
 
 def _process_one(args_tuple):
     """Process a single specimen (for parallel execution)."""
-    stem, det_path, lm_path, img_path, output_dir, um_per_px, verbose, overlay = args_tuple
+    stem, det_path, lm_path, img_path, output_dir, um_per_px, verbose, overlay, preset = args_tuple
     try:
         config = PipelineConfig()
+        if preset:
+            config = apply_preset(config, preset)
         if um_per_px is not None:
             config.um_per_px = um_per_px
         if verbose:
@@ -136,6 +138,13 @@ def main():
         help="Generate overlay PNG images (requires image input)",
     )
     parser.add_argument(
+        "--preset",
+        type=str,
+        default=None,
+        choices=sorted(PIPELINE_PRESETS.keys()),
+        help="Pipeline preset (default: built-in defaults)",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -159,6 +168,8 @@ def main():
 def _run_single(args):
     """Process a single specimen."""
     config = PipelineConfig()
+    if args.preset:
+        config = apply_preset(config, args.preset)
     if args.um_per_px is not None:
         config.um_per_px = args.um_per_px
 
@@ -220,7 +231,7 @@ def _run_batch(args):
 
     t0 = time.time()
     work_items = [
-        (stem, det, lm, img, args.output_dir, args.um_per_px, args.verbose, args.overlay)
+        (stem, det, lm, img, args.output_dir, args.um_per_px, args.verbose, args.overlay, args.preset)
         for stem, det, lm, img in specimens
     ]
 
