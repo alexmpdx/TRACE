@@ -1339,12 +1339,17 @@ def _detect_crossveins(
     branches whose endpoints sit on or near two different longitudinal
     veins.  ACV connects L3↔L4, PCV connects L4↔L5.
 
-    Detection: for each crossvein, find unlabeled edges where one
-    endpoint is near vein_a and the other near vein_b.  "Near" means
-    the node is an endpoint of a labeled edge (shared graph node) or
-    its coordinates lie on/close to a labeled vein LineString (typical
-    after junction merging contracts the junction node into the
-    longitudinal's line).
+    Detection: group unlabeled edges into chains by contracting
+    degree-2 pass-through nodes, then for each crossvein find the chain
+    whose two outer endpoints best match vein_a and vein_b.  This
+    handles multi-edge crossveins that pass through interior kinks
+    (e.g. the ACV on 20241205_en-PknRNAi_108870_0019 where a short chain
+    of 2 edges bridges L3 and L4 through a degree-2 kink node).  Chains
+    of length 1 degrade gracefully to the previous single-edge match.
+    "Near" means the node is an endpoint of a labeled edge (shared
+    graph node) or its coordinates lie on/close to a labeled vein
+    LineString (typical after junction merging contracts the junction
+    node into the longitudinal's line).
     """
     from identify_features.models.topology import CROSSVEIN_CONNECTIONS
 
@@ -1359,39 +1364,92 @@ def _detect_crossveins(
             vein_nodes[label].add(u)
             vein_nodes[label].add(v)
 
+    # Group unlabeled edges into chains via degree-2 contraction.
+    # A chain is a maximal run of unlabeled edges connected through
+    # degree-2 nodes; it terminates at any leaf or degree-3+ junction.
+    chains: list[dict] = []
+    visited: set[tuple] = set()
+    for u, v, data in G.edges(data=True):
+        key = _edge_key(u, v)
+        if key in visited or key in edge_labels:
+            continue
+        if data.get("line") is None:
+            continue
+
+        chain_edges = [key]
+        visited.add(key)
+        for start, direction in [(u, v), (v, u)]:
+            cur = start
+            prev = direction
+            while G.degree(cur) == 2:
+                nxt = [n for n in G.neighbors(cur) if n != prev]
+                if not nxt:
+                    break
+                nxt = nxt[0]
+                nkey = _edge_key(cur, nxt)
+                if nkey in visited or nkey in edge_labels:
+                    break
+                if G[cur][nxt].get("line") is None:
+                    break
+                chain_edges.append(nkey)
+                visited.add(nkey)
+                prev = cur
+                cur = nxt
+
+        # A chain endpoint is a node touched by exactly one chain edge.
+        touch_count: dict[int, int] = defaultdict(int)
+        for eu, ev in chain_edges:
+            touch_count[eu] += 1
+            touch_count[ev] += 1
+        endpoints = [n for n, c in touch_count.items() if c == 1]
+        if len(endpoints) != 2:
+            # Closed loop or degenerate — cannot match endpoint pair against a crossvein
+            continue
+
+        total_len = sum(G[a][b].get("length_px", 0) for a, b in chain_edges if G.has_edge(a, b))
+        chains.append(
+            {
+                "edges": chain_edges,
+                "endpoints": (endpoints[0], endpoints[1]),
+                "length": total_len,
+                "claimed": False,
+            }
+        )
+
     for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
         if vein_a not in vein_lines or vein_b not in vein_lines:
             logger.info("Cannot detect %s: %s or %s not labeled", cv_name, vein_a, vein_b)
             continue
 
-        best_key = None
+        best_chain = None
         best_score = float("inf")
 
-        for u, v, data in G.edges(data=True):
-            key = _edge_key(u, v)
-            if key in edge_labels:
+        for chain in chains:
+            if chain["claimed"]:
                 continue
-
-            if data.get("line") is None:
-                continue
-
-            # Try both orientations: u→vein_a / v→vein_b  and  u→vein_b / v→vein_a
-            for end_a, end_b in [(u, v), (v, u)]:
-                dist_a = _node_vein_distance(G, end_a, vein_a, vein_lines, vein_nodes)
-                dist_b = _node_vein_distance(G, end_b, vein_b, vein_lines, vein_nodes)
-
+            end_a, end_b = chain["endpoints"]
+            # Try both orientations
+            for ea, eb in [(end_a, end_b), (end_b, end_a)]:
+                dist_a = _node_vein_distance(G, ea, vein_a, vein_lines, vein_nodes)
+                dist_b = _node_vein_distance(G, eb, vein_b, vein_lines, vein_nodes)
                 if dist_a is not None and dist_b is not None:
                     score = dist_a + dist_b
                     if score < best_score:
                         best_score = score
-                        best_key = key
+                        best_chain = chain
                     break  # valid orientation found
 
-        if best_key is not None:
-            edge_labels[best_key] = cv_name
-            u, v = best_key
-            length = G[u][v].get("length_px", 0)
-            logger.info("Detected %s: edge %d↔%d, %.0fpx (score=%.1f)", cv_name, u, v, length, best_score)
+        if best_chain is not None:
+            for key in best_chain["edges"]:
+                edge_labels[key] = cv_name
+            best_chain["claimed"] = True
+            logger.info(
+                "Detected %s: %d-edge chain, %.0fpx total (score=%.1f)",
+                cv_name,
+                len(best_chain["edges"]),
+                best_chain["length"],
+                best_score,
+            )
         else:
             logger.info("No candidate found for %s", cv_name)
 

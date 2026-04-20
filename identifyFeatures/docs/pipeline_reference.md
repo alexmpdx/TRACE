@@ -937,28 +937,35 @@ best scoring candidate → label as "L6"
 
 **Source**: `_detect_crossveins()`
 
-**What**: Identifies ACV and PCV by finding unlabeled edges whose endpoints connect to the correct pair of longitudinal veins.
+**What**: Identifies ACV and PCV by contracting unlabeled edges into chains through degree-2 pass-through nodes, then matching each chain's outer endpoints against the correct pair of longitudinal veins.
 
 **Why**: Crossveins bridge two longitudinals:
 - **ACV** connects L3 ↔ L4
 - **PCV** connects L4 ↔ L5
 
-After junction merging (Phase 0), crossveins are typically short unlabeled branches at junctions. Their endpoints are geometrically close to (or shared with) the longitudinals they connect.
+After junction merging (Phase 0), a crossvein is usually a single unlabeled branch — but not always. Some crossveins carry an interior degree-2 kink (e.g. where the skeleton bent sharply across the vein mask); that interior node doesn't touch either longitudinal, so a pure single-edge match misses it and the chain falls through to ectopic labeling. Chain contraction collapses such runs so the two outer endpoints — which *do* touch the longitudinals — become the match candidates.
 
 **Algorithm**:
 ```
+# Step 1: build chains of unlabeled edges through degree-2 nodes
+for each unlabeled edge (u, v):
+    walk both directions through degree-2 nodes, collecting unlabeled edges
+    identify chain endpoints via touch_count == 1 (within the chain)
+
+# Step 2: match each chain against the canonical crossvein pair
 for each crossvein (ACV: L3↔L4, PCV: L4↔L5):
     if either required longitudinal is not labeled:
         skip
 
-    for each unlabeled edge (u, v):
+    for each chain with two outer endpoints (end_a, end_b):
         # Try both orientations
-        dist_a = distance(u, vein_a) + distance(v, vein_b)
-        dist_b = distance(u, vein_b) + distance(v, vein_a)
-        score = min(dist_a, dist_b)
+        score = distance(end_a, vein_a) + distance(end_b, vein_b)
+              or distance(end_a, vein_b) + distance(end_b, vein_a)
 
-    best scoring edge → label as crossvein name
+    best-scoring chain → label every edge in it as the crossvein name
 ```
+
+**Single-edge degeneracy**: a crossvein that is one unlabeled edge produces a 1-edge chain whose endpoints are `u` and `v`, reducing to the previous behavior.
 
 **Node-to-vein distance** (`_node_vein_distance`):
 - Returns 0.0 if the node is a graph endpoint of the labeled vein
