@@ -352,6 +352,69 @@ def _label_landmark_edges(
                 best_n = n
         return best_n, best_dist
 
+    # Helper: among neighbors of a junction, find which one reaches a target
+    # node cheapest, avoiding the junction itself. Used when a soft distal
+    # landmark has snapped reliably but lies past one or more branch points,
+    # so line-distance to the junction's immediate chain misses it.
+    #
+    # Default metric is "path_length" (Dijkstra over edge length_px) — this
+    # is robust to chains broken into many short edges by crossvein
+    # intersections, and to short-hop detours via ectopic crossveins that
+    # would mislead pure hop-counting. The "hops" metric (BFS) is retained
+    # as an option via config.soft_landmark_reach_metric.
+    reach_metric = getattr(config, "soft_landmark_reach_metric", "path_length")
+
+    def _neighbor_reach_costs(junction, neighbors, target_node):
+        """Return {neighbor: cost} under the configured metric.
+
+        The junction is masked out so paths cannot loop back through it.
+        Neighbors that cannot reach ``target_node`` get ``inf``.
+        """
+        if target_node is None or target_node == junction:
+            return {n: float("inf") for n in neighbors}
+        Gm = G.copy()
+        if Gm.has_node(junction):
+            Gm.remove_node(junction)
+        costs: dict[int, float] = {}
+        for n in neighbors:
+            if not Gm.has_node(n):
+                costs[n] = float("inf")
+                continue
+            if n == target_node:
+                costs[n] = 0.0
+                continue
+            try:
+                if reach_metric == "hops":
+                    c = nx.shortest_path_length(Gm, n, target_node)
+                else:
+                    c = nx.shortest_path_length(Gm, n, target_node, weight="length_px")
+                costs[n] = float(c)
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                costs[n] = float("inf")
+        return costs
+
+    def _neighbor_toward_node(junction, neighbors, target_node):
+        """Return (best_neighbor, cost) under the configured reach metric.
+
+        Backwards-compatible wrapper kept in case callers want a single-shot
+        query. Tier 2c uses ``_neighbor_reach_costs`` directly so it can
+        cross-compare L4.d and L5.d on the same neighbors.
+        """
+        costs = _neighbor_reach_costs(junction, neighbors, target_node)
+        if not costs:
+            return None, float("inf")
+        best_n = min(costs, key=costs.get)
+        return (best_n, costs[best_n]) if costs[best_n] != float("inf") else (None, float("inf"))
+
+    def _reliable_snap(lm):
+        """True if the landmark is snapped within the configured snap radius."""
+        return (
+            lm is not None
+            and lm.snapped_node is not None
+            and lm.snap_distance is not None
+            and lm.snap_distance <= max_lm_dist
+        )
+
     # L2-L3 junction: simultaneous matching with L2.d and DTip
     lm_l2l3 = landmarks.get("L2-L3")
     lm_dtip = landmarks.get("DTip")
@@ -587,6 +650,57 @@ def _label_landmark_edges(
                         if key not in edge_labels:
                             _label_with_chain(key, "L5")
                             logger.info("Labeled edge %s as L5 (from L4-L5, L5.d fallback, dist=%.0f)", key, dist)
+
+                # Tier 2c: Graph-reachability fallback. Fires when a soft
+                # landmark is reliably snapped but the junction's immediate
+                # chain terminates at another branch point before reaching
+                # the landmark's node — line distance misses it, but walking
+                # the graph past the branch point does not. Metric defaults
+                # to pixel path length (Dijkstra over edge length_px), which
+                # is robust to chains fragmented by crossvein intersections
+                # and to short-hop detours via ectopic crossveins. Hops is
+                # available as an option via config.soft_landmark_reach_metric.
+                l4d_costs_by_n: dict[int, float] = {}
+                l5d_costs_by_n: dict[int, float] = {}
+                remaining = _unlabeled_neighbors(node)
+                if remaining and _reliable_snap(lm_l4d) and not _l4_assigned():
+                    l4d_costs_by_n = _neighbor_reach_costs(node, remaining, lm_l4d.snapped_node)
+                if remaining and _reliable_snap(lm_l5d) and not _l5_assigned():
+                    l5d_costs_by_n = _neighbor_reach_costs(node, remaining, lm_l5d.snapped_node)
+
+                if l4d_costs_by_n and not _l4_assigned():
+                    best_l4 = min(l4d_costs_by_n, key=l4d_costs_by_n.get)
+                    # If L5.d is also reliable and prefers the same neighbor,
+                    # give it to whichever landmark has the smaller cost.
+                    if l5d_costs_by_n and l5d_costs_by_n.get(best_l4, float("inf")) < l4d_costs_by_n[best_l4]:
+                        pass  # Let L5.d claim it via its own block below
+                    elif l4d_costs_by_n[best_l4] != float("inf"):
+                        key = _edge_key(node, best_l4)
+                        if key not in edge_labels:
+                            _label_with_chain(key, "L4")
+                            logger.info(
+                                "Labeled edge %s as L4 (from L4-L5, L4.d graph-reach, metric=%s, cost=%.1f)",
+                                key,
+                                reach_metric,
+                                l4d_costs_by_n[best_l4],
+                            )
+
+                if l5d_costs_by_n and not _l5_assigned():
+                    candidates = {
+                        n: c for n, c in l5d_costs_by_n.items() if edge_labels.get(_edge_key(node, n)) != "L4"
+                    }
+                    if candidates:
+                        best_l5 = min(candidates, key=candidates.get)
+                        if candidates[best_l5] != float("inf"):
+                            key = _edge_key(node, best_l5)
+                            if key not in edge_labels:
+                                _label_with_chain(key, "L5")
+                                logger.info(
+                                    "Labeled edge %s as L5 (from L4-L5, L5.d graph-reach, metric=%s, cost=%.1f)",
+                                    key,
+                                    reach_metric,
+                                    candidates[best_l5],
+                                )
 
                 # Tier 3: AP-orientation fallback — fill whatever is still missing.
                 # ap_vector points posterior; project each unlabeled neighbor's far

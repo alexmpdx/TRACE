@@ -86,6 +86,13 @@ class PipelineConfig:
     tangent_continuity_max_angle: float = 90.0  # Max deflection (degrees) at junctions
     merge_max_gap_um: float = 50.0  # Max gap between line segments when merging (µm)
     distal_landmark_search_vw: float = 2.0  # Search radius for distal landmark extension (× vein width)
+    # Metric used by Tier 2c (graph-reach fallback) when deciding which L4-L5
+    # junction neighbor reaches a reliably-snapped soft landmark (L4.d / L5.d).
+    # "path_length" (default) uses Dijkstra over edge length_px — robust to
+    # chains fragmented by crossvein intersections and to short-hop detours
+    # through ectopic crossveins. "hops" uses BFS for cheaper but fragile
+    # topology-only counting.
+    soft_landmark_reach_metric: str = "path_length"  # "path_length" | "hops"
 
     # -- Costa detection --
     costa_min_in_band_fraction: float = 0.5  # Edge must have ≥50% in margin band to be costa

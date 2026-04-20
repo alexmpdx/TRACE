@@ -751,6 +751,21 @@ if L4 unassigned AND L4.d usable:
 if L5 unassigned AND L5.d usable:
     label nearest remaining edge within max_lm_dist as "L5"
 
+# Tier 2c: Graph-reachability fallback (soft landmark snapped but past a
+# branch point, so Tier 1/2 chain-line distance misses it).
+#
+# For each reliably-snapped soft landmark (snap_distance ≤ max_lm_dist),
+# measure how cheaply each remaining junction neighbor can reach the
+# landmark's snapped node, with the junction masked so paths cannot
+# cycle back through it. Metric defaults to pixel path length
+# (Dijkstra over edge length_px) — robust to chains fragmented by
+# crossvein intersections and to short-hop detours via ectopic
+# crossveins. Hops (BFS) available via PipelineConfig
+# .soft_landmark_reach_metric = "hops".
+#
+# If both L4.d and L5.d prefer the same neighbor, the landmark with the
+# smaller cost wins; the other falls through to Tier 3.
+
 # Tier 3: AP-orientation fallback (both soft landmarks missing / unreliable)
 if wing_axis is known AND (L4 or L5 still unassigned):
     for each remaining edge:
@@ -767,8 +782,12 @@ because L4.d / L5.d often land on an interior point of a multi-edge chain.
 
 The Tier 3 AP orientation uses `wing_axis.ap_vector`, the unit vector
 perpendicular to the proximal-distal axis, pointing posterior. This handles
-flipped wings correctly: if a wing is mirrored the AP vector flips with it,
-so "lowest AP projection → L4" stays biologically correct.
+flipped wings correctly: `compute_wing_axis` orients the AP vector using an
+anterior reference landmark (`subcostal break`, fallback `L1-Rs`) so the
+stored `ap_unit_vector` always points posterior regardless of wing
+chirality. Without this, the raw 90° rotation of the alula→DTip vector
+would only land on "posterior" for one chirality and Tier 3 would invert
+L4/L5 on the mirrored half of the dataset.
 
 **Chain endpoint fix (related).** `_assign_chain_ids` stitches chain edges
 into one LineString by walking from an endpoint. Endpoints are now detected

@@ -97,6 +97,12 @@ class WingAxis:
     distal_point: Point
     unit_vector: tuple[float, float]  # pointing proximal → distal
     length: float  # pixel distance between the two anchors
+    # Unit vector perpendicular to the PD axis, pointing posterior. When
+    # ``compute_wing_axis`` has an anterior reference landmark (subcostal
+    # break or L1-Rs) it orients this vector so that the anterior landmark
+    # always has a negative projection. None falls back to the raw 90°
+    # rotation, which only lands on "posterior" for one chirality of wing.
+    ap_unit_vector: Optional[tuple[float, float]] = None
 
     def project(self, point: Point) -> float:
         """Return the normalized PD coordinate of a point (0=proximal, 1=distal)."""
@@ -109,12 +115,12 @@ class WingAxis:
     def ap_vector(self) -> tuple[float, float]:
         """Unit vector perpendicular to the PD axis, pointing posterior.
 
-        Derived by rotating ``unit_vector`` 90° via (dx, dy) → (-dy, dx).
-        Sign convention: when the wing is un-rotated in the image frame
-        (alula left, DTip right → PD ≈ (+1, 0)), this yields (0, +1),
-        which is positive-Y in image coordinates — i.e. "down" in the
-        image, which is posterior for a standard upright wing.
+        Prefers ``ap_unit_vector`` when set (chirality-aware); otherwise
+        falls back to the raw 90° rotation ``(dx, dy) → (-dy, dx)``, which
+        only yields "posterior" for one wing chirality.
         """
+        if self.ap_unit_vector is not None:
+            return self.ap_unit_vector
         dx, dy = self.unit_vector
         return (-dy, dx)
 
