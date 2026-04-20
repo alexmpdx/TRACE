@@ -205,6 +205,7 @@ def trace_folder(
     keep_intermediates: bool = False,
     outputs: Optional[set[str]] = None,
     max_workers: int = DEFAULT_MAX_WORKERS,
+    show_vein_tissue: bool = False,
     progress_callback=None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
@@ -223,6 +224,8 @@ def trace_folder(
         max_workers: Number of Stage 2 wings to analyze in parallel. Stage 1
             (GPU preprocessing) always runs sequentially regardless of this
             setting. Values <=1 run Stage 2 sequentially.
+        show_vein_tissue: If True, the per-wing overlay PNG fills buffered vein
+            tissue polygons. Default False draws skeleton centerlines only.
         progress_callback: callable(image_index, total, image_name, stage, detail).
 
     Returns:
@@ -259,6 +262,7 @@ def trace_folder(
             device=device,
             outputs=outputs,
             max_workers=max(1, int(max_workers)),
+            show_vein_tissue=show_vein_tissue,
             progress_callback=progress_callback,
         )
     finally:
@@ -276,6 +280,7 @@ def _run(
     device,
     outputs: set[str],
     max_workers: int,
+    show_vein_tissue: bool,
     progress_callback,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
@@ -403,7 +408,13 @@ def _run(
 
             if "overlay" in outputs and base is not None and wing_result is not None:
                 ov_path = output_dir / f"{stem}_overlay.png"
-                render_overlay_to_file(base, wing_result.veins, wing_result.intervein_regions, ov_path)
+                render_overlay_to_file(
+                    base,
+                    wing_result.veins,
+                    wing_result.intervein_regions,
+                    ov_path,
+                    show_vein_tissue=show_vein_tissue,
+                )
                 trace_result.overlay_path = ov_path
 
             if "ap_overlay" in outputs and base is not None and wing_result is not None:

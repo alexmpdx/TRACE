@@ -52,7 +52,18 @@ def _find_batch_specimens(
 
 def _process_one(args_tuple):
     """Process a single specimen (for parallel execution)."""
-    stem, det_path, lm_path, img_path, output_dir, um_per_px, verbose, overlay, preset = args_tuple
+    (
+        stem,
+        det_path,
+        lm_path,
+        img_path,
+        output_dir,
+        um_per_px,
+        verbose,
+        overlay,
+        preset,
+        show_vein_tissue,
+    ) = args_tuple
     try:
         config = PipelineConfig()
         if preset:
@@ -72,7 +83,11 @@ def _process_one(args_tuple):
             base_img = cv2.imread(str(img_path))
             if base_img is not None:
                 render_overlay_to_file(
-                    base_img, result.veins, result.intervein_regions, output_dir / f"{stem}_overlay.png"
+                    base_img,
+                    result.veins,
+                    result.intervein_regions,
+                    output_dir / f"{stem}_overlay.png",
+                    show_vein_tissue=show_vein_tissue,
                 )
                 render_ap_overlay_to_file(base_img, result, output_dir / f"{stem}_ap_overlay.png")
                 render_cv_ratio_overlay_to_file(
@@ -138,6 +153,11 @@ def main():
         help="Generate overlay PNG images (requires image input)",
     )
     parser.add_argument(
+        "--show-vein-tissue",
+        action="store_true",
+        help="In the overlay PNG, fill buffered vein tissue polygons (default: skeleton lines only)",
+    )
+    parser.add_argument(
         "--preset",
         type=str,
         default=None,
@@ -198,7 +218,13 @@ def _run_single(args):
         base_img = cv2.imread(str(args.image))
         if base_img is not None:
             overlay_path = args.output_dir / f"{result.specimen_id}_overlay.png"
-            render_overlay_to_file(base_img, result.veins, result.intervein_regions, overlay_path)
+            render_overlay_to_file(
+                base_img,
+                result.veins,
+                result.intervein_regions,
+                overlay_path,
+                show_vein_tissue=args.show_vein_tissue,
+            )
             print(f"Overlay: {overlay_path}")
 
             ap_path = args.output_dir / f"{result.specimen_id}_ap_overlay.png"
@@ -231,7 +257,18 @@ def _run_batch(args):
 
     t0 = time.time()
     work_items = [
-        (stem, det, lm, img, args.output_dir, args.um_per_px, args.verbose, args.overlay, args.preset)
+        (
+            stem,
+            det,
+            lm,
+            img,
+            args.output_dir,
+            args.um_per_px,
+            args.verbose,
+            args.overlay,
+            args.preset,
+            args.show_vein_tissue,
+        )
         for stem, det, lm, img in specimens
     ]
 

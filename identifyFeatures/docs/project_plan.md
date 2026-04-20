@@ -2,9 +2,10 @@
 
 ## Status: Core Pipeline Complete (30/30 specimens, 10/10 veins)
 
-Last updated: 2026-04-19
+Last updated: 2026-04-20
 
 **Recent changes:**
+- Overlay redesign: intervein regions are now drawn as black-tinted fills with thick opaque colored outlines (instead of semi-transparent colored fills). Buffered vein tissue is no longer drawn by default — only skeleton centerlines — with a `show_vein_tissue` toggle exposed as `--show-vein-tissue` on the identify-features and TRACE CLIs and as a checkbox in the TRACE GUI. A vein color-key legend is drawn in the upper-left corner, scaled with image size.
 - L4-L5 junction now uses a 3-tier progressive fallback (simultaneous → single-landmark → AP-orientation) mirroring the L2-L3 pattern. Previously it had a single simultaneous-matching gate and would silently leave L4/L5 unlabeled when one soft landmark was orphaned, forcing Phase 2c to seed them in arbitrary order.
 - `_assign_chain_ids` now detects chain endpoints by within-chain touch count rather than graph degree. Chains bounded by two landmark-snapped nodes (graph degree 2 but chain-terminators) previously produced an empty endpoint list and fell back to `chain_edges[0][0]`, silently truncating the stitched polyline. This fixed a mis-label where L4.d's true chain looked ~2750 px from the landmark instead of ~4 px.
 - `junction_merge_vein_widths` default → 0.0 (step skipped); merging was collapsing distinct junctions and leaving crossed edges with no shared node (DTip under distance-map).

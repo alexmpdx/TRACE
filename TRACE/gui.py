@@ -235,6 +235,13 @@ class TraceWindow(QMainWindow):
             chk.setChecked(True)
             self.output_checks[key] = chk
             ol.addWidget(chk)
+        self.show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
+        self.show_vein_tissue_chk.setChecked(False)
+        self.show_vein_tissue_chk.setToolTip(
+            "When off (default), the per-wing overlay only shows vein skeleton "
+            "centerlines. When on, it also fills the buffered vein tissue polygons."
+        )
+        ol.addWidget(self.show_vein_tissue_chk)
         left_layout.addWidget(out_group)
 
         # -- Parallel workers --
@@ -400,6 +407,7 @@ class TraceWindow(QMainWindow):
         s.setValue("segmentation_model", self.seg_edit.text())
         s.setValue("pipeline_config_json", config_to_json(self.config))
         s.setValue("max_workers", self.workers_spin.value())
+        s.setValue("show_vein_tissue", self.show_vein_tissue_chk.isChecked())
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
 
@@ -437,6 +445,9 @@ class TraceWindow(QMainWindow):
             saved = s.value(f"output/{key}", None)
             if saved is not None:
                 chk.setChecked(saved == "true" or saved is True)
+        saved_svt = s.value("show_vein_tissue", None)
+        if saved_svt is not None:
+            self.show_vein_tissue_chk.setChecked(saved_svt == "true" or saved_svt is True)
         workers_val = s.value("max_workers", None)
         if workers_val is not None:
             try:
@@ -486,6 +497,7 @@ class TraceWindow(QMainWindow):
                 keep_intermediates=False,
                 outputs=self._selected_outputs(),
                 max_workers=self.workers_spin.value(),
+                show_vein_tissue=self.show_vein_tissue_chk.isChecked(),
             )
         )
         self.worker.progress.connect(self._on_progress)

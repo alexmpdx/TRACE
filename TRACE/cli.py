@@ -86,6 +86,11 @@ def parse_args(argv=None):
             "Stage 1 (GPU preprocessing) always runs sequentially. Pass 1 to disable parallelism."
         ),
     )
+    parser.add_argument(
+        "--show-vein-tissue",
+        action="store_true",
+        help="In the per-wing overlay PNG, fill buffered vein tissue polygons (default: skeleton lines only)",
+    )
     return parser.parse_args(argv)
 
 
@@ -185,6 +190,7 @@ def main(argv=None):
         keep_intermediates=args.keep_intermediates,
         outputs=outputs,
         max_workers=args.workers,
+        show_vein_tissue=args.show_vein_tissue,
         progress_callback=_progress,
     )
 

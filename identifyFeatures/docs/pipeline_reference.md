@@ -1261,7 +1261,7 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 
 Three overlay PNGs generated per specimen (with `--overlay` flag):
 
-- **`{stem}_overlay.png`** (`render_overlay_to_file`): Color-coded veins and intervein regions on wing image. Semi-transparent region fills, vein centerlines, ectopic vein labels, region name labels.
+- **`{stem}_overlay.png`** (`render_overlay_to_file`): Intervein regions shown as black-tinted fills with thick opaque colored outlines; vein centerline strokes on top; region and ectopic-vein labels; vein color-key legend in the upper-left corner. Pass `show_vein_tissue=True` (CLI: `--show-vein-tissue`; TRACE GUI: "Fill buffered vein tissue in overlay") to additionally fill buffered vein tissue polygons — off by default so the skeleton is easier to read.
 - **`{stem}_ap_overlay.png`** (`render_ap_overlay_to_file`): Anterior/posterior compartment visualization. Blue tint = anterior, red/orange tint = posterior, with percentage labels. Clean view without construction geometry.
 - **`{stem}_cv_ratio_overlay.png`** (`render_cv_ratio_overlay_to_file`): Wing length (L1-Rs → DTip, yellow) and crossvein distance (ACV.p → PCV.a, cyan) measurement lines with labeled landmark dots. CV ratio displayed in upper-left corner.
 
