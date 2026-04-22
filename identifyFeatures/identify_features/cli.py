@@ -63,6 +63,7 @@ def _process_one(args_tuple):
         overlay,
         preset,
         show_vein_tissue,
+        synthesize_missing_crossveins,
     ) = args_tuple
     try:
         config = PipelineConfig()
@@ -70,6 +71,7 @@ def _process_one(args_tuple):
             config = apply_preset(config, preset)
         if um_per_px is not None:
             config.um_per_px = um_per_px
+        config.synthesize_missing_crossveins = synthesize_missing_crossveins
         if verbose:
             logging.basicConfig(level=logging.INFO)
 
@@ -165,6 +167,13 @@ def main():
         help="Pipeline preset (default: built-in defaults)",
     )
     parser.add_argument(
+        "--no-synthesize-crossveins",
+        dest="synthesize_missing_crossveins",
+        action="store_false",
+        default=True,
+        help="Disable Phase 5b landmark-based ACV/PCV synthesis; preserves merged intervein regions when no crossvein is detected in the skeleton",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -192,6 +201,7 @@ def _run_single(args):
         config = apply_preset(config, args.preset)
     if args.um_per_px is not None:
         config.um_per_px = args.um_per_px
+    config.synthesize_missing_crossveins = args.synthesize_missing_crossveins
 
     result = identify_wing(
         args.detection,
@@ -268,6 +278,7 @@ def _run_batch(args):
             args.overlay,
             args.preset,
             args.show_vein_tissue,
+            args.synthesize_missing_crossveins,
         )
         for stem, det, lm, img in specimens
     ]

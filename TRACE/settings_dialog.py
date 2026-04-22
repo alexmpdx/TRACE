@@ -257,6 +257,11 @@ class PipelineConfigDialog(QDialog):
         self._add_float(form, "crossvein_max_length_frac", "Max length fraction", 0.0, 1.0, 3, 0.01)
         self._add_float(form, "crossvein_min_length_vw", "Min length (× vein width)", 0.0, 100.0, 2, 0.1)
         self._add_float(form, "crossvein_max_length_vw", "Max length (× vein width)", 0.0, 100.0, 2, 0.1)
+        self._add_bool(
+            form,
+            "synthesize_missing_crossveins",
+            "Synthesize ACV/PCV from landmarks when not detected",
+        )
         layout.addWidget(gb)
 
         gb = QGroupBox("Ectopic detection")

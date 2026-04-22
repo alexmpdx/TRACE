@@ -280,8 +280,10 @@ def trace_veins_from_landmarks(
     # every stub-based detection phase returns nothing. A synthetic centerline
     # drawn between the crossvein landmarks still serves as a barrier for
     # intervein polygon splitting and prevents spurious compound regions
-    # like "1st basal + 1st posterior".
-    _synthesize_crossveins_from_landmarks(G, edge_labels, landmarks, veins)
+    # like "1st basal + 1st posterior". Toggle off when the merged-region
+    # output is preferred (e.g. specimens with genuinely absent crossveins).
+    if config.synthesize_missing_crossveins:
+        _synthesize_crossveins_from_landmarks(G, edge_labels, landmarks, veins)
 
     return veins
 

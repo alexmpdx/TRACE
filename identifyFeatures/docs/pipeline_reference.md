@@ -10,9 +10,10 @@ A step-by-step guide to the landmark-anchored Drosophila wing vein identificatio
 2. [Input Parsing](#2-input-parsing)
 3. [Skeleton Building](#3-skeleton-building) (17 steps)
 4. [Landmark Anchoring](#4-landmark-anchoring)
-5. [Vein Labeling](#5-vein-labeling) (Phases 0-5, including 4a-4d)
+5. [Vein Labeling](#5-vein-labeling) (Phases 0-5b, including 4a-4d)
 5.5. [Intervein Polygon Splitting](#55-intervein-polygon-splitting-morphological-open-under-constraint)
 5.6. [Intervein Region Naming](#56-intervein-region-naming)
+5.7. [Vein Tissue Polygon Assignment](#57-vein-tissue-polygon-assignment)
 6. [Output](#6-output)
 7. [Parameter Reference](#7-parameter-reference)
 
@@ -611,6 +612,13 @@ for each degree-3 node:
 
 **Protected edges**: Already-labeled edges (e.g., from a previous pass) are not merged across label boundaries.
 
+**Stub exclusion (length gate)**: A degree-1 neighbor shorter than `max(5 × median_vein_width, stub_len_floor_px)` is flagged as a stub and excluded from the collinear-pair search. Without this, a short ectopic sprout that happens to depart along the same axis as a real vein can outscore the correct through-vein pairing — this is how L3 on 0004/0010 lost its proximal edge to an ectopic branch. The length gate prevents long degree-1 edges (typically real vein fragments whose distal tip was pruned or failed to reach a landmark) from being falsely classified as stubs: on 20241207_en_PknRNAi_108870_0009, a 608 px real L5 fragment terminating at a non-landmark leaf must be kept as a through-vein candidate.
+
+The floor `stub_len_floor_px` is derived anatomically, not hard-coded:
+- If `um_per_px` is available, it is `config.to_px(60.0)` (~60 µm — the empirical minimum length of a real vein fragment).
+- Otherwise it falls back to `2.5 × median_vein_width_px`.
+At the standard 0.483 µm/px this evaluates to ~124 px; on a 2× higher-resolution wing it rises to ~248 px, preserving the anatomical meaning across resolutions.
+
 ### Phase 1: Detect costa edges
 
 **Source**: `models/costa_detector.py`
@@ -1093,6 +1101,43 @@ for each unique label in edge_labels:
     )
 ```
 
+### Phase 5b: Synthesize crossveins from landmarks (fallback)
+
+**Source**: `vein_tracer.py`, function `_synthesize_crossveins_from_landmarks()`
+
+**What**: For each crossvein (ACV, PCV) still missing after Phases 4/4a/4b, draw a synthetic centerline between the crossvein's landmark points and attach it as a `VeinIdentification` with `status = VeinStatus.INFERRED`.
+
+**Why**: On wings where the pixel classifier fuses L3+ACV+L4 (or L4+PCV+L5) into a single tissue blob, the skeleton has no separate crossvein path at all — every stub-based detection phase (Phase 4, 4a, 4b) returns nothing. Without a crossvein centerline, downstream intervein splitting (§5.5) cannot use the crossvein as a barrier, and 1st-basal + 1st-posterior (or discal + 2nd-posterior) end up as a single fused region named `"1st basal + 1st posterior"`. A synthetic centerline drawn from `ACV.a → ACV.p` (or `PCV.a → PCV.p`) is geometrically close enough to the true crossvein location to serve as a splitter barrier, even when no actual skeleton tissue exists there.
+
+**Algorithm**:
+```
+for (crossvein_name, endpoint_landmarks) in [
+    ("ACV", ("ACV.a", "ACV.p")),
+    ("PCV", ("PCV.a", "PCV.p")),
+]:
+    if crossvein_name already in built veins: skip
+    if either landmark is missing: skip
+
+    centerline = LineString([anchor(ACV.a), anchor(ACV.p)])  # straight segment
+    veins.append(VeinIdentification(
+        vein_id = crossvein_name,
+        vein_type = CROSSVEIN,
+        status = INFERRED,        # <- distinguishes from IDENTIFIED
+        centerline = centerline,
+        edge_ids = [],
+        length_px = centerline.length,
+        evidence = ["synthesized from {lm_a} → {lm_b}"],
+    ))
+```
+
+**Toggle**: gated on `config.synthesize_missing_crossveins` (default `True`). Disable via `--no-synthesize-crossveins` on the CLI, or uncheck "Synthesize ACV/PCV from landmarks when not detected" in the TRACE GUI's *Crossvein detection* group, to preserve the fused intervein output for specimens where the crossvein is genuinely absent and a merged-region label is the desired truth.
+
+**Why `status=INFERRED` and not `IDENTIFIED`**: synthesized crossveins carry no graph-edge evidence. Downstream consumers (region naming, measurement CSV) treat them as adjacency hints rather than measured veins — length is reported as the straight-line landmark distance, not a traced centerline — and overlay rendering draws them differently. This makes the provenance visible in the output without breaking the expectation that `IDENTIFIED` means "backed by skeleton evidence".
+
+**Caveats**:
+- The crossvein landmarks (ACV.a, ACV.p, PCV.a, PCV.p) are in the *unreliable* landmark set — the deep-learning detector sometimes mis-places them. When the toggle is on and the landmarks are wildly off, Phase 5b can draw a synthetic crossvein in the wrong location; the user-facing toggle exists precisely so this can be disabled per-specimen or per-batch.
+- Phase 5b only fires if the crossvein was not found by Phases 4/4a/4b. It never overrides a real detection.
+
 ---
 
 ## 5.5. Intervein Polygon Splitting (h-maxima seed detection + watershed)
@@ -1320,9 +1365,15 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 |-----------|---------|-------------|
 | `enable_basic_prune` | True | Gate on step 4 (length-based branch prune) |
 | `enable_small_fragment_removal` | True | Gate on steps 11/14 (small-fragment prune) |
+| `prune_methods` | `[]` | Additional prune methods layered on top of length-based (e.g. `[DISTANCE_MAP]`) |
+| `prune_min_length_um` | None | Explicit branch-prune cap in µm; overrides vein-width auto-threshold when set |
 | `prune_min_length_vein_widths` | 2.0 | Cap for adaptive branch pruning (× vein width) |
 | `final_stub_vein_widths` | 3.0 | Max stub length for final removal (× vein width) |
-| `junction_merge_vein_widths` | 0.0 | Junction merge radius (× vein width); `0` disables |
+| `junction_merge_vein_widths` | 2.0 | Junction merge radius (× vein width); `0` disables |
+| `prune_radius_ratio_threshold` | 0.3 | Distance-map: `r_endpoint / r_junction` below this = noise |
+| `prune_scale_sigmas` | `[2,4,8,16]` | Multi-scale persistence sigmas |
+| `prune_single_scale_sigma` | 4.0 | Single-scale prune sigma |
+| `collinear_min_angle` | 150° | Minimum collinearity angle for edge-pair merging |
 
 ### Gap bridging (pass 1)
 | Parameter | Default | Description |
@@ -1366,16 +1417,29 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 ### Crossvein detection
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `crossvein_min_angle` | 40° | Min angle between a crossvein candidate and its longitudinals (rejects near-collinear edges) |
+| `crossvein_max_length_frac` | 0.15 | Max crossvein length as a fraction of the bounding longitudinal |
 | `crossvein_min_length_vw` | 4.0 | Min crossvein length (× vein width) |
 | `crossvein_max_length_vw` | 25.0 | Max crossvein length (× vein width) |
+| `synthesize_missing_crossveins` | True | Phase 5b: draw ACV/PCV from landmarks when skeleton detection fails; disable to preserve merged regions |
 
 ### Vein tracing
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `departure_sample_um` | 100µm | Direction sampling window (primary; converted via `um_per_px`) |
 | `departure_sample_vw` | 4.0 | Fallback: × median vein width (when `um_per_px` is None) |
+| `tangent_continuity_max_angle` | 90° | Max deflection at junctions for through-vein continuation |
 | `distal_landmark_search_vw` | 2.0 | Search radius for distal extension (× vein width) |
 | `merge_max_gap_um` | 50µm | Max gap for line merging in output |
+| `soft_landmark_reach_metric` | `"path_length"` | Tier 2c L4/L5 reach metric: `"path_length"` (Dijkstra over `length_px`) or `"hops"` (BFS) |
+
+### Intervein polygon splitting (§5.5)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `intervein_split_h_vw` | 2.0 | h-maxima depth threshold (× median vein width) for seed detection |
+| `intervein_split_reseed_min_area_um2` | 10,000 µm² | Minimum original area to trigger a reseed pass for lost polygons |
+| `intervein_split_vein_barrier_vw` | 1.0 | Vein centerline buffer radius (× median vein width); also used for tissue polygons |
+| `intervein_split_wing_buffer_vw` | 1.0 | Wing outline inset (× median vein width) |
 
 ### Intervein region naming
 | Parameter | Default | Description |
@@ -1383,3 +1447,9 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 | `vein_buffer_vw` | 1.1 | Buffer radius for adjacency testing (× median vein width) |
 | `adjacency_min_length_vw` | 1.3 | Min shared boundary length (× median vein width) |
 | `max_merge_size` | None | Cap on N-way merge size; None = no cap |
+
+### Ectopic detection
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ectopic_min_length_um` | 25 µm | Noise floor for `EV*` components (primary; converted via `um_per_px`) |
+| `ectopic_min_length_vw` | 1.0 | Fallback: × median vein width (when `um_per_px` is None) |

@@ -220,6 +220,16 @@ def merge_through_junctions(
         protected_nodes = set()
 
     direction_window = config.departure_sample_px(median_vein_width_px)
+    # Anatomical floor for the stub length gate (see the comment at the
+    # is_stub check below). 60 µm is the empirical floor for a "real vein
+    # fragment" — shorter than that is almost always an ectopic sprout.
+    # When um_per_px is unavailable, fall back to 2.5 × median vein width.
+    if config.um_per_px is not None and config.um_per_px > 0:
+        stub_len_floor_px = config.to_px(60.0)
+    elif median_vein_width_px > 0:
+        stub_len_floor_px = 2.5 * median_vein_width_px
+    else:
+        stub_len_floor_px = 0.0
     result = G.copy()
     next_edge_id = (
         max(
@@ -258,16 +268,27 @@ def merge_through_junctions(
                     min(direction_window, length * 0.8),
                 )
                 label = edge_labels.get(_edge_key(node, n))
-                # A non-landmark degree-1 neighbor is a dead-end stub (likely
-                # ectopic). Such edges should never be treated as the
+                # A SHORT non-landmark degree-1 neighbor is a dead-end stub
+                # (likely ectopic) and should not be treated as the
                 # through-vein continuation: a true vein crossing a junction
-                # connects two non-stub paths, and the third edge is the
+                # connects two non-stub paths, with the third edge being the
                 # crossvein/branch. Without this guard, a short stub whose
-                # initial direction happens to be collinear with one of the
-                # real vein edges can outscore the correct pairing — which is
-                # exactly how L3 on 0004/0010 loses its proximal edge to an
-                # ectopic branch.
-                is_stub = result.degree(n) == 1 and n not in protected_nodes
+                # initial direction happens to be collinear with a real vein
+                # edge can outscore the correct pairing — this is how L3 on
+                # 0004/0010 loses its proximal edge to an ectopic branch.
+                #
+                # Length gate: a degree-1 edge longer than ~5× the median
+                # vein width is almost never an ectopic branch — it is more
+                # likely a real vein fragment whose distal tip was pruned or
+                # failed to reach a landmark. Excluding such a long edge
+                # here breaks the through-vein at this node (e.g. L5 on
+                # 20241207_en_PknRNAi_108870_0009, where a 608 px segment
+                # terminated at a degree-1 node that was not L5.d). The
+                # floor is anatomical (60 µm via um_per_px, computed above)
+                # rather than a hard-coded pixel count so the gate scales
+                # across image resolutions.
+                stub_len_cap = max(5.0 * median_vein_width_px, stub_len_floor_px)
+                is_stub = result.degree(n) == 1 and n not in protected_nodes and length < stub_len_cap
                 edges_info.append((n, length, dep, label, is_stub))
 
             # Find the most collinear pair (angle closest to 180°)
