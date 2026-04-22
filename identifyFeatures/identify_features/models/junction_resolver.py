@@ -258,7 +258,17 @@ def merge_through_junctions(
                     min(direction_window, length * 0.8),
                 )
                 label = edge_labels.get(_edge_key(node, n))
-                edges_info.append((n, length, dep, label))
+                # A non-landmark degree-1 neighbor is a dead-end stub (likely
+                # ectopic). Such edges should never be treated as the
+                # through-vein continuation: a true vein crossing a junction
+                # connects two non-stub paths, and the third edge is the
+                # crossvein/branch. Without this guard, a short stub whose
+                # initial direction happens to be collinear with one of the
+                # real vein edges can outscore the correct pairing — which is
+                # exactly how L3 on 0004/0010 loses its proximal edge to an
+                # ectopic branch.
+                is_stub = result.degree(n) == 1 and n not in protected_nodes
+                edges_info.append((n, length, dep, label, is_stub))
 
             # Find the most collinear pair (angle closest to 180°)
             best_pair = None
@@ -266,11 +276,15 @@ def merge_through_junctions(
 
             for i in range(3):
                 for j in range(i + 1, 3):
-                    ni, li, di, lbl_i = edges_info[i]
-                    nj, lj, dj, lbl_j = edges_info[j]
+                    ni, li, di, lbl_i, stub_i = edges_info[i]
+                    nj, lj, dj, lbl_j, stub_j = edges_info[j]
 
                     # Don't merge edges with different labels
                     if lbl_i is not None and lbl_j is not None and lbl_i != lbl_j:
+                        continue
+
+                    # Don't pair a dead-end stub as the through-vein continuation
+                    if stub_i or stub_j:
                         continue
 
                     if di is not None and dj is not None:
@@ -283,12 +297,12 @@ def merge_through_junctions(
                 continue
 
             i, j = best_pair
-            n1, l1, d1, lbl1 = edges_info[i]
-            n2, l2, d2, lbl2 = edges_info[j]
+            n1, l1, d1, lbl1, _ = edges_info[i]
+            n2, l2, d2, lbl2, _ = edges_info[j]
 
             # The third edge (not in the pair) is the crossvein/branch
             third_idx = 3 - i - j
-            n3, l3, d3, lbl3 = edges_info[third_idx]
+            n3, l3, d3, lbl3, _ = edges_info[third_idx]
 
             # Additional check: the third edge should branch off at a
             # steep angle from the merged pair (not collinear with either)
