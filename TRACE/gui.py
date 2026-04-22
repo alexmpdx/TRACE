@@ -6,6 +6,7 @@ background QThread with progress reporting.
 
 import logging
 import sys
+import time
 import traceback
 from collections import OrderedDict
 from pathlib import Path
@@ -515,7 +516,7 @@ class TraceWindow(QMainWindow):
     # Logging and callbacks
     # -----------------------------------------------------------------------
     def _log(self, msg):
-        self.log_text.append(msg)
+        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
