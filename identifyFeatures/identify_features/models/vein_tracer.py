@@ -274,6 +274,15 @@ def trace_veins_from_landmarks(
     merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
     veins = _build_vein_identifications(G, edge_labels, max_merge_gap_px=merge_gap)
 
+    # Phase 5b: Synthesize crossveins from landmarks when graph detection failed.
+    # On wings where the pixel classifier fuses L3+ACV+L4 (or L4+PCV+L5) into
+    # a single tissue blob, the skeleton has no separate crossvein path and
+    # every stub-based detection phase returns nothing. A synthetic centerline
+    # drawn between the crossvein landmarks still serves as a barrier for
+    # intervein polygon splitting and prevents spurious compound regions
+    # like "1st basal + 1st posterior".
+    _synthesize_crossveins_from_landmarks(G, edge_labels, landmarks, veins)
+
     return veins
 
 
@@ -1772,3 +1781,108 @@ def _vein_type(vein_id: str) -> VeinType:
         return VeinType.COSTA
     else:
         return VeinType.LONGITUDINAL
+
+
+def _synthesize_crossveins_from_landmarks(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    landmarks: dict[str, Landmark],
+    veins: list[VeinIdentification],
+) -> None:
+    """Inject synthetic crossvein centerlines when graph detection failed.
+
+    Runs as the last stage of vein identification. For each unlabeled
+    crossvein (ACV, PCV), if both anchor landmarks are present AND both
+    adjacent longitudinals were identified, draw a centerline from the
+    projection of the anterior landmark onto the anterior longitudinal,
+    through both landmarks, to the projection of the posterior landmark
+    onto the posterior longitudinal. The result is marked INFERRED so
+    downstream consumers can distinguish a measured crossvein from an
+    axis-derived stand-in.
+
+    The centerline is used as a watershed barrier by the intervein
+    splitter, which is the whole point: it stops two adjacent regions
+    (e.g. 1st basal and 1st posterior) from fusing just because the
+    pixel classifier failed to resolve the crossvein as separate tissue.
+    """
+    from identify_features.models.topology import CROSSVEIN_CONNECTIONS
+
+    cv_landmarks = {
+        "ACV": ("ACV.a", "ACV.p"),
+        "PCV": ("PCV.a", "PCV.p"),
+    }
+
+    existing_ids = {v.vein_id for v in veins}
+
+    # Collect labeled vein lines per longitudinal
+    vein_lines: dict[str, list[LineString]] = defaultdict(list)
+    for (u, v), label in edge_labels.items():
+        if G.has_edge(u, v):
+            line = G[u][v].get("line")
+            if line is not None:
+                vein_lines[label].append(line)
+
+    def _project_to_nearest_line(pt: Point, lines: list[LineString]) -> Point | None:
+        best_point = None
+        best_dist = float("inf")
+        for line in lines:
+            proj = line.interpolate(line.project(pt))
+            d = proj.distance(pt)
+            if d < best_dist:
+                best_dist = d
+                best_point = proj
+        return best_point
+
+    for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
+        if cv_name in existing_ids:
+            continue
+
+        lm_a_name, lm_p_name = cv_landmarks[cv_name]
+        lm_a = landmarks.get(lm_a_name)
+        lm_p = landmarks.get(lm_p_name)
+        if lm_a is None or lm_p is None:
+            continue
+
+        lines_a = vein_lines.get(vein_a) or []
+        lines_b = vein_lines.get(vein_b) or []
+        if not lines_a or not lines_b:
+            continue
+
+        pt_a = _project_to_nearest_line(lm_a.point, lines_a)
+        pt_b = _project_to_nearest_line(lm_p.point, lines_b)
+        if pt_a is None or pt_b is None:
+            continue
+
+        coords = [
+            (pt_a.x, pt_a.y),
+            (lm_a.point.x, lm_a.point.y),
+            (lm_p.point.x, lm_p.point.y),
+            (pt_b.x, pt_b.y),
+        ]
+        # Drop duplicate adjacent points to keep LineString valid
+        deduped = [coords[0]]
+        for c in coords[1:]:
+            if c != deduped[-1]:
+                deduped.append(c)
+        if len(deduped) < 2:
+            continue
+        line = LineString(deduped)
+
+        veins.append(
+            VeinIdentification(
+                vein_id=cv_name,
+                vein_type=VeinType.CROSSVEIN,
+                status=VeinStatus.INFERRED,
+                centerline=line,
+                length_px=line.length,
+                evidence=[f"synthesized from {lm_a_name}+{lm_p_name}"],
+                landmark_anchors=[lm_a_name, lm_p_name],
+            )
+        )
+        logger.info(
+            "Synthesized %s from landmarks (%s+%s): %.0fpx",
+            cv_name,
+            lm_a_name,
+            lm_p_name,
+            line.length,
+        )

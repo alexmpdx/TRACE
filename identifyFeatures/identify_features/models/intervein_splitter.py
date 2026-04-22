@@ -119,7 +119,17 @@ def split_merged_intervein_polygons(
         poly_mask = rasterize_polygons([poly], (H, W)) > 0
         if not poly_mask.any():
             continue
-        edt = distance_transform_edt(poly_mask)
+        # EDT is computed on (polygon ∩ interior) rather than the raw polygon
+        # so vein-centerline barriers cutting through a fused polygon create
+        # a valley in the landscape, yielding one h-maxima peak per sub-region.
+        # Without this, a synthetic/partial crossvein cutting a compound
+        # polygon can't produce two seeds because the raw EDT still has one
+        # broad maximum spanning the fused body.
+        poly_interior = poly_mask & interior_mask
+        if not poly_interior.any():
+            lost_poly_masks.append(poly_mask)
+            continue
+        edt = distance_transform_edt(poly_interior)
         # Smooth the EDT to eliminate plateau ripples that cause spurious
         # 1-pixel peaks on flat ridges.  Sigma = median vein width keeps
         # real bottlenecks intact while merging near-identical peak pixels.
