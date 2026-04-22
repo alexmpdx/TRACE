@@ -30,7 +30,7 @@ class PipelineConfig:
     prune_min_length_vein_widths: float = 2.0  # Multiplier of median vein width for auto prune threshold
     final_stub_vein_widths: float = 3.0  # Final stub removal: multiplier of median vein width
     junction_merge_vein_widths: float = (
-        0.0  # Tight junction merge: merge deg-2/3 nodes within this × vein width (0 = disabled)
+        2.0  # Tight junction merge: merge deg-2/3 nodes within this × vein width (0 = disabled)
     )
     enable_small_fragment_removal: bool = True  # Steps 11/14 small-fragment prune; disable to keep isolated components
     prune_radius_ratio_threshold: float = 0.3  # For distance-map: r_endpoint/r_junction below this = noise
@@ -180,7 +180,7 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
         "prune_min_length_um": None,
         "prune_min_length_vein_widths": 2.0,
         "final_stub_vein_widths": 3.0,
-        "junction_merge_vein_widths": 0.0,
+        "junction_merge_vein_widths": 2.0,
         "prune_radius_ratio_threshold": 0.3,
         "prune_scale_sigmas": [2.0, 4.0, 8.0, 16.0],
         "prune_single_scale_sigma": 4.0,
