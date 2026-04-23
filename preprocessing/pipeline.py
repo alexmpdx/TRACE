@@ -186,6 +186,18 @@ def process_single_image(
     if not dest_image.exists() or dest_image != image_path:
         shutil.copy2(image_path, dest_image)
 
+    # Convert JPEG inputs to lossless TIF and use that for the rest of the pipeline.
+    if image_path.suffix.lower() in (".jpg", ".jpeg"):
+        import cv2
+
+        img = cv2.imread(str(dest_image), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(f"Failed to read JPEG image: {dest_image}")
+        tif_path = output_dir / f"{image_path.stem}.tif"
+        if not cv2.imwrite(str(tif_path), img):
+            raise IOError(f"Failed to write converted TIFF: {tif_path}")
+        image_path = tif_path
+
     stem = image_path.stem
     ext = image_path.suffix
 

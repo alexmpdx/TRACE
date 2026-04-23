@@ -477,6 +477,26 @@ class TraceWindow(QMainWindow):
             QMessageBox.warning(self, "Missing Model", "Please select a segmentation model folder.")
             return
 
+        # Warn on JPEG inputs (lossy compression)
+        jpg_images = [p for p in self._image_paths if p.suffix.lower() in (".jpg", ".jpeg")]
+        if jpg_images:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("JPEG Input Detected")
+            box.setTextFormat(Qt.RichText)
+            box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            box.setText(
+                "CAUTION: You are using .jpg image(s). Due to the limited amount of information "
+                "provided by this file type, TRACE may not function as intended."
+                "<br><br>Read about why: "
+                '<a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC4210356/">'
+                "https://pmc.ncbi.nlm.nih.gov/articles/PMC4210356/</a>"
+            )
+            box.setStandardButtons(QMessageBox.Ok | QMessageBox.Abort)
+            box.setDefaultButton(QMessageBox.Abort)
+            if box.exec_() == QMessageBox.Abort:
+                return
+
         # UI state
         self.btn_run.setEnabled(False)
         self.btn_cancel.setEnabled(True)
