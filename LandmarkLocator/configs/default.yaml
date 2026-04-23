@@ -2,7 +2,7 @@
 
 # Data paths (relative to project root)
 data:
-  annotation_dir: training_data
+  annotation_dir: trainingdata_new3
   image_dir: training_data_pics
   image_suffix: .tif
 
@@ -66,3 +66,47 @@ augmentation:
 output:
   checkpoint_dir: checkpoints
   log_dir: logs
+
+# Inference-time confidence gate
+# Applied by LandmarkPredictor.predict(). Thresholds calibrated from testinput_images
+# metric distributions; tune per deployment as needed.
+confidence:
+  # Minimum heatmap peak value. Unknown landmarks fall back to `global`.
+  peak:
+    global: 0.10
+    per_landmark:
+      acv_a: 0.20
+      acv_p: 0.20
+      pcv_a: 0.20
+      pcv_p: 0.20
+  # Minimum peak / mean(11x11 patch) ratio. Low values indicate diffuse heatmaps.
+  # This model produces broader-than-training Gaussians so observed ratios cluster
+  # around 1.2-1.6; thresholds are set just below the observed floor.
+  sharpness:
+    global: 1.15
+    per_landmark:
+      acv_a: 1.25
+      acv_p: 1.25
+      pcv_a: 1.25
+      pcv_p: 1.25
+  # Max allowed (second peak / first peak) after suppressing a disk around the primary.
+  # Lower is stricter (catches bimodal heatmaps, e.g. truncated crossveins projecting onto
+  # both the actual endpoint and the expected longitudinal-vein intersection).
+  second_peak_ratio:
+    global: 0.80
+    per_landmark:
+      acv_a: 0.65
+      acv_p: 0.65
+      pcv_a: 0.65
+      pcv_p: 0.65
+  # Suppression radius at model resolution (512x352). ~6x training heatmap sigma.
+  second_peak_suppression_radius_px: 30
+  # Landmarks whose failure aborts the image.
+  # Names match the checkpoint's landmark_order (normalized from GeoJSON names).
+  core_landmarks:
+    - subcostal_break
+    - alula_notch
+    - l1_rs
+    - l2_l3
+    - l4_l5
+    - dtip

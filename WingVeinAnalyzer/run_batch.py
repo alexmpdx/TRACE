@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument(
         "input_folder",
         type=Path,
-        help="Folder containing .tif images and matching .geojson annotations",
+        help="Folder containing wing images (.tif/.bmp/.png/.jpg/.psd) and matching .geojson annotations",
     )
     parser.add_argument(
         "-o",

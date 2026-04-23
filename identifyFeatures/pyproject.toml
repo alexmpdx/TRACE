@@ -15,6 +15,7 @@ dependencies = [
     "opencv-python>=4.8",
     "scipy>=1.10",
     "pandas>=2.0",
+    "psd-tools>=1.9",
 ]
 
 [project.optional-dependencies]

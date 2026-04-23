@@ -207,11 +207,12 @@ def trace_folder(
     max_workers: int = DEFAULT_MAX_WORKERS,
     show_vein_tissue: bool = False,
     progress_callback=None,
+    include_unreliable_landmarks: bool = False,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
     Args:
-        input_dir: Folder containing wing images (.tif, .bmp, .png, .jpg).
+        input_dir: Folder containing wing images (.tif, .bmp, .png, .jpg, .psd).
         output_dir: Where to write results.
         landmark_checkpoint: Path to landmark model .pt file.
         segmentation_model_dir: Path to segmentation model directory.
@@ -227,6 +228,9 @@ def trace_folder(
         show_vein_tissue: If True, the per-wing overlay PNG fills buffered vein
             tissue polygons. Default False draws skeleton centerlines only.
         progress_callback: callable(image_index, total, image_name, stage, detail).
+        include_unreliable_landmarks: If True, landmarks that fail the LandmarkLocator
+            confidence gate are still written to downstream stages (marked reliable=false).
+            Core-landmark failures always abort the image regardless of this flag.
 
     Returns:
         List of TraceResult, one per input image.
@@ -264,6 +268,7 @@ def trace_folder(
             max_workers=max(1, int(max_workers)),
             show_vein_tissue=show_vein_tissue,
             progress_callback=progress_callback,
+            include_unreliable_landmarks=include_unreliable_landmarks,
         )
     finally:
         if temp_dir_obj is not None:
@@ -282,6 +287,7 @@ def _run(
     max_workers: int,
     show_vein_tissue: bool,
     progress_callback,
+    include_unreliable_landmarks: bool = False,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import process_folder
@@ -302,17 +308,19 @@ def _run(
         device=device,
         keep_chopped=("chopped_image" in outputs),
         progress_callback=_preproc_progress,
+        include_unreliable_landmarks=include_unreliable_landmarks,
     )
 
     results: list[TraceResult] = []
     successful_preproc = []
     for r in preproc_results:
         if r.error is not None or not r.segmentation_geojson_path:
+            err_stage = r.error_stage or "preprocessing"
             results.append(
                 TraceResult(
                     image_path=r.image_path,
                     error=r.error or "No segmentation output produced",
-                    error_stage="preprocessing",
+                    error_stage=err_stage,
                 )
             )
         else:
@@ -402,7 +410,9 @@ def _run(
             base = None
             if needs_base:
                 img_path = image_in_preproc if image_in_preproc.exists() else preproc_result.image_path
-                base = cv2.imread(str(img_path))
+                from TRACE.psd_loader import imread_any
+
+                base = imread_any(img_path)
                 if base is None:
                     logger.warning("%s: could not read image for overlays, skipping PNG outputs", stem)
 

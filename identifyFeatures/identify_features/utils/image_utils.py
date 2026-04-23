@@ -7,14 +7,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from identify_features.utils.psd_loader import imread_any
 from shapely.geometry import MultiPolygon, Polygon
 
 logger = logging.getLogger(__name__)
 
 
 def load_image(path: Path) -> np.ndarray:
-    """Load an image file (TIFF, BMP, PNG, JPG) as BGR numpy array."""
-    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    """Load an image file (TIFF, BMP, PNG, JPG, PSD) as BGR numpy array."""
+    img = imread_any(path, cv2.IMREAD_COLOR)
     if img is None:
         raise FileNotFoundError(f"Could not load image: {path}")
     return img
@@ -22,7 +23,7 @@ def load_image(path: Path) -> np.ndarray:
 
 def get_image_shape(path: Path) -> tuple[int, int]:
     """Get (height, width) of an image without fully loading it."""
-    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    img = imread_any(path, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise FileNotFoundError(f"Could not load image: {path}")
     return img.shape[:2]

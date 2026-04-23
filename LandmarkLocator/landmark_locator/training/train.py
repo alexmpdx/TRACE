@@ -6,12 +6,11 @@ from typing import Optional
 import numpy as np
 import torch
 import yaml
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-
 from landmark_locator.data.dataset import LandmarkDataset, discover_landmarks, extract_genotype
 from landmark_locator.models.unet import LandmarkUNet
 from landmark_locator.training.losses import HeatmapMSELoss
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 
 def get_device(requested: Optional[str] = None) -> torch.device:
@@ -154,9 +153,12 @@ def train_fold(
         for batch in train_loader:
             images = batch["image"].to(device)
             targets = batch["heatmaps"].to(device)
+            mask = batch.get("presence")
+            if mask is not None:
+                mask = mask.to(device)
 
             pred = model(images)
-            loss = criterion(pred, targets)
+            loss = criterion(pred, targets, mask=mask)
 
             optimizer.zero_grad()
             loss.backward()
@@ -170,22 +172,25 @@ def train_fold(
         # --- Validation phase ---
         model.eval()
         val_loss = 0.0
-        all_errors = []  # per-landmark pixel errors in original coords
+        all_errors = []  # per-landmark pixel errors (only for landmarks present in GT)
 
         with torch.no_grad():
             for batch in val_loader:
                 images = batch["image"].to(device)
                 targets = batch["heatmaps"].to(device)
                 gt_landmarks = batch["landmarks"]  # (B, N, 2) at model resolution
+                presence = batch.get("presence")  # (B, N) or None
                 scale_x = batch["scale_x"]  # (B,)
                 scale_y = batch["scale_y"]  # (B,)
 
                 pred = model(images)
-                loss = criterion(pred, targets)
+                mask = presence.to(device) if presence is not None else None
+                loss = criterion(pred, targets, mask=mask)
                 val_loss += loss.item() * images.size(0)
 
-                # Extract predicted landmarks and compute pixel errors
+                # Extract predicted landmarks and compute pixel errors (skip absent GT)
                 pred_np = pred.cpu().numpy()
+                presence_np = presence.numpy() if presence is not None else None
                 for b in range(pred_np.shape[0]):
                     pred_coords = extract_landmarks_from_heatmaps(pred_np[b])
                     gt_coords = gt_landmarks[b].numpy()
@@ -193,9 +198,10 @@ def train_fold(
                     sy = scale_y[b].item()
 
                     for i in range(len(landmark_order)):
+                        if presence_np is not None and presence_np[b, i] == 0:
+                            continue
                         px, py = pred_coords[i]
                         gx, gy = gt_coords[i]
-                        # Error in original image pixels
                         err = np.sqrt(((px - gx) * sx) ** 2 + ((py - gy) * sy) ** 2)
                         all_errors.append((landmark_order[i], err))
 
@@ -266,8 +272,14 @@ def run_training(
     device_str: Optional[str] = None,
     fold: Optional[int] = None,
     name: Optional[str] = None,
+    interactive: bool = False,
 ) -> None:
-    """Run full cross-validation training."""
+    """Run full cross-validation training.
+
+    When `name` is provided, checkpoints are written under `output_dir / name /` so
+    every training run gets its own self-contained folder (fold checkpoints + chart).
+    When `interactive=False` (CLI default), fuzzy image/GeoJSON name matches are auto-accepted.
+    """
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -275,13 +287,17 @@ def run_training(
     print(f"Using device: {device}")
 
     project_root = Path(__file__).resolve().parent.parent.parent
-    annotation_dir = project_root / cfg["data"]["annotation_dir"]
+    annotation_dir = Path(cfg["data"]["annotation_dir"])
+    if not annotation_dir.is_absolute():
+        annotation_dir = project_root / annotation_dir
 
     # Auto-discover landmarks from annotation files
     _populate_landmark_config(cfg, annotation_dir)
 
     splits = create_cv_splits(annotation_dir, cfg["cv"]["n_folds"])
     output_dir = Path(output_dir)
+    if name:
+        output_dir = output_dir / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine which folds to train
@@ -298,7 +314,16 @@ def run_training(
         print(f"{fold_label}: {len(train_idx)} train, {len(val_idx)} val")
         print(f"{'='*60}")
 
-        metrics = train_fold(cfg, f_idx, train_idx, val_idx, output_dir, device, display_name=name)
+        metrics = train_fold(
+            cfg,
+            f_idx,
+            train_idx,
+            val_idx,
+            output_dir,
+            device,
+            display_name=name,
+            interactive=interactive,
+        )
         all_metrics[f_idx] = metrics
 
     # Summary

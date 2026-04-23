@@ -36,7 +36,7 @@ def discover_file_pairs(folder: Path) -> list[FilePair]:
     pairs: list[FilePair] = []
 
     # Collect all image and geojson files
-    image_exts = {".tif", ".tiff"}
+    image_exts = {".tif", ".tiff", ".psd", ".psb"}
     images: list[Path] = []
     geojsons: list[Path] = []
 

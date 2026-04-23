@@ -37,7 +37,9 @@ def euclidean(p1: tuple[float, float], p2: tuple[float, float]) -> float:
 
 def draw_overlay(jpg_path: Path, output_path: Path, landmarks: dict) -> None:
     """Draw measurement lines on the wing image and save."""
-    img = cv2.imread(str(jpg_path))
+    from ez_psd_loader import imread_any
+
+    img = imread_any(jpg_path)
     if img is None:
         print(f"  WARNING: could not read {jpg_path}, skipping overlay")
         return

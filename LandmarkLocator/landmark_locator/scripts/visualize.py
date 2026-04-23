@@ -10,7 +10,6 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-
 from landmark_locator.data.dataset import _normalize_name
 from landmark_locator.inference.predict import LandmarkPredictor
 
@@ -158,8 +157,10 @@ def main() -> None:
     landmark_order = predictor.landmark_order
     _ensure_colors(landmark_order)
 
+    from landmark_locator.data.psd_loader import imread_any
+
     for img_path in args.images:
-        image = cv2.imread(str(img_path))
+        image = imread_any(img_path)
         if image is None:
             print(f"Warning: could not load {img_path}")
             continue

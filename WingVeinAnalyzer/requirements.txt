@@ -6,3 +6,4 @@ opencv-python
 shapely
 scipy
 PyQt5
+psd-tools

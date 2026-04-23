@@ -243,6 +243,16 @@ class TraceWindow(QMainWindow):
             "centerlines. When on, it also fills the buffered vein tissue polygons."
         )
         ol.addWidget(self.show_vein_tissue_chk)
+
+        self.include_unreliable_landmarks_chk = QCheckBox("Include low-confidence landmarks")
+        self.include_unreliable_landmarks_chk.setChecked(False)
+        self.include_unreliable_landmarks_chk.setToolTip(
+            "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
+            "dropped from the output. When on, they are still emitted (marked reliable=false). "
+            "Core-landmark failures abort the image regardless of this setting."
+        )
+        ol.addWidget(self.include_unreliable_landmarks_chk)
+
         left_layout.addWidget(out_group)
 
         # -- Parallel workers --
@@ -409,6 +419,7 @@ class TraceWindow(QMainWindow):
         s.setValue("pipeline_config_json", config_to_json(self.config))
         s.setValue("max_workers", self.workers_spin.value())
         s.setValue("show_vein_tissue", self.show_vein_tissue_chk.isChecked())
+        s.setValue("include_unreliable_landmarks", self.include_unreliable_landmarks_chk.isChecked())
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
 
@@ -449,6 +460,9 @@ class TraceWindow(QMainWindow):
         saved_svt = s.value("show_vein_tissue", None)
         if saved_svt is not None:
             self.show_vein_tissue_chk.setChecked(saved_svt == "true" or saved_svt is True)
+        saved_iul = s.value("include_unreliable_landmarks", None)
+        if saved_iul is not None:
+            self.include_unreliable_landmarks_chk.setChecked(saved_iul == "true" or saved_iul is True)
         workers_val = s.value("max_workers", None)
         if workers_val is not None:
             try:
@@ -519,6 +533,7 @@ class TraceWindow(QMainWindow):
                 outputs=self._selected_outputs(),
                 max_workers=self.workers_spin.value(),
                 show_vein_tissue=self.show_vein_tissue_chk.isChecked(),
+                include_unreliable_landmarks=self.include_unreliable_landmarks_chk.isChecked(),
             )
         )
         self.worker.progress.connect(self._on_progress)

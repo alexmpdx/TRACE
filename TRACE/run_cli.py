@@ -17,6 +17,10 @@ _mtj_dir = str(Path(__file__).resolve().parent.parent / "modelTOjson")
 if _mtj_dir not in sys.path:
     sys.path.insert(0, _mtj_dir)
 
+_idf_dir = str(Path(__file__).resolve().parent.parent / "identifyFeatures")
+if _idf_dir not in sys.path:
+    sys.path.insert(0, _idf_dir)
+
 from TRACE.cli import main
 
 if __name__ == "__main__":

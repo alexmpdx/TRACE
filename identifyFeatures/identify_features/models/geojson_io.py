@@ -70,10 +70,14 @@ def load_landmarks_geojson(path: Path) -> dict[str, Landmark]:
             continue
 
         is_soft = name in SOFT_LANDMARKS
+        topology_reliable = name in RELIABLE_LANDMARKS or is_soft
+        # LandmarkLocator may tag a feature with properties.reliable=False when it
+        # fails the confidence gate. Respect that override (can only downgrade).
+        gate_reliable = props.get("reliable", True)
         landmarks[name] = Landmark(
             name=name,
             point=Point(coords[0], coords[1]),
-            reliable=name in RELIABLE_LANDMARKS or is_soft,
+            reliable=topology_reliable and bool(gate_reliable),
             soft=is_soft,
         )
 

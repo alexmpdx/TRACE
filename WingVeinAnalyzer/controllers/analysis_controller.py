@@ -122,7 +122,9 @@ def run_pipeline(
     stem = image_path.stem
 
     # Load image
-    image = cv2.imread(str(image_path))
+    from WingVeinAnalyzer.utils.psd_loader import imread_any
+
+    image = imread_any(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not load image: {image_path}")
 

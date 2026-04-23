@@ -8,15 +8,23 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from hinge_psd_loader import imread_any
 
 
 def load_landmarks(path):
-    """Parse GeoJSON landmarks, return dict of name → (x, y)."""
+    """Parse GeoJSON landmarks, return dict of name → (x, y).
+
+    Skips features where properties.reliable is explicitly False so optional
+    landmarks flagged low-confidence by LandmarkLocator don't influence the hinge line.
+    """
     with open(path) as f:
         data = json.load(f)
     landmarks = {}
     for feat in data["features"]:
-        name = feat["properties"]["classification"]["name"]
+        props = feat.get("properties", {})
+        if props.get("reliable") is False:
+            continue
+        name = props["classification"]["name"]
         x, y = feat["geometry"]["coordinates"]
         landmarks[name] = (x, y)
     return landmarks
@@ -292,7 +300,7 @@ def make_proximal_mask(hinge_points, dtip, width, height):
 
 def chop_hinge(image_path, landmarks_path, output_path):
     """Load image and landmarks, black out proximal region, save result."""
-    image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+    image = imread_any(image_path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise FileNotFoundError(f"Could not load image: {image_path}")
 
@@ -353,7 +361,7 @@ def landmarks_to_geojson(landmarks):
 
 def chop_hinge_from_landmarks(image_path, landmarks, output_path):
     """Black out proximal region using a landmarks dict (no GeoJSON file needed)."""
-    image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+    image = imread_any(image_path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise FileNotFoundError(f"Could not load image: {image_path}")
 
@@ -376,7 +384,7 @@ def pair_files(pics_folder, landmarks_folder):
     pics_folder = Path(pics_folder)
     landmarks_folder = Path(landmarks_folder)
 
-    image_exts = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg"}
+    image_exts = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"}
     images = {f.stem: f for f in pics_folder.iterdir() if f.suffix.lower() in image_exts}
 
     pairs = []
@@ -414,7 +422,7 @@ def main():
 
     if args.predict:
         pics_folder = Path(args.image_or_pics)
-        image_exts = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg"}
+        image_exts = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"}
         images = sorted(f for f in pics_folder.iterdir() if f.suffix.lower() in image_exts)
         if not images:
             print(f"No images found in {pics_folder}", file=sys.stderr)

@@ -14,11 +14,16 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
-
 from landmark_locator.data.dataset import _normalize_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
+)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -27,16 +32,21 @@ from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QListWidget,
     QMainWindow,
+    QMessageBox,
     QProgressDialog,
     QPushButton,
     QScrollArea,
@@ -52,20 +62,13 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
-)
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 MODEL_W, MODEL_H = 512, 352
 HEATMAP_SIGMA = 5
 HEATMAP_THUMB_W, HEATMAP_THUMB_H = 240, 165
-IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
+IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".psd", ".psb"}
 
 
 def _find_geojson_for_image(gt_dir: Path, image_name: str) -> tuple[Optional[Path], bool]:
@@ -514,11 +517,11 @@ class _StdoutCapture(io.TextIOBase):
 
 
 class TrainingThread(QThread):
-    """Background worker that trains a single fold."""
+    """Background worker that trains all K folds of cross-validation."""
 
     progress = pyqtSignal(str)
-    epoch_data = pyqtSignal(object)  # dict with epoch, mean_error, landmark_errors
-    finished_training = pyqtSignal(str)  # checkpoint path
+    epoch_data = pyqtSignal(object)  # dict with epoch, mean_error, landmark_errors, fold
+    finished_training = pyqtSignal(str)  # path to the run folder containing best_fold*.pt
     error = pyqtSignal(str)
 
     def __init__(self, model_name: str, gt_dir: Optional[Path] = None, parent=None):
@@ -527,7 +530,7 @@ class TrainingThread(QThread):
         self._gt_dir = gt_dir
 
     def run(self) -> None:
-        """Execute training fold 0."""
+        """Execute full K-fold CV training into trained_models/<model_name>/."""
         capture = _StdoutCapture(self.progress)
         old_stdout = sys.stdout
         sys.stdout = capture
@@ -543,8 +546,9 @@ class TrainingThread(QThread):
             with open(config_path) as f:
                 cfg = yaml.safe_load(f)
 
-            output_dir = _project_root / "trained_models"
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # Each run goes into its own named subfolder so folds stay grouped.
+            run_dir = _project_root / "trained_models" / self._model_name
+            run_dir.mkdir(parents=True, exist_ok=True)
 
             device = get_device()
             print(f"Using device: {device}")
@@ -553,12 +557,14 @@ class TrainingThread(QThread):
                 annotation_dir = self._gt_dir
                 cfg["data"]["annotation_dir"] = str(annotation_dir)
             else:
-                annotation_dir = _project_root / cfg["data"]["annotation_dir"]
+                annotation_dir = Path(cfg["data"]["annotation_dir"])
+                if not annotation_dir.is_absolute():
+                    annotation_dir = _project_root / annotation_dir
 
             _populate_landmark_config(cfg, annotation_dir)
             splits = create_cv_splits(annotation_dir, cfg["cv"]["n_folds"])
-            train_idx, val_idx = splits[0]
-            print(f"{self._model_name}_Fold0: {len(train_idx)} train, {len(val_idx)} val")
+
+            current_fold = {"value": 0}
 
             def _on_epoch(epoch, mean_error, landmark_errors, train_loss, val_loss):
                 self.epoch_data.emit(
@@ -568,25 +574,30 @@ class TrainingThread(QThread):
                         "landmark_errors": landmark_errors.copy(),
                         "train_loss": train_loss,
                         "val_loss": val_loss,
+                        "fold": current_fold["value"],
                     }
                 )
 
-            train_fold(
-                cfg,
-                0,
-                train_idx,
-                val_idx,
-                output_dir,
-                device,
-                epoch_callback=_on_epoch,
-                checkpoint_name=self._model_name,
-                interactive=False,
-                display_name=self._model_name,
-            )
+            for fold_idx, (train_idx, val_idx) in enumerate(splits):
+                current_fold["value"] = fold_idx
+                print()
+                print("=" * 60)
+                print(f"{self._model_name}_Fold{fold_idx}: {len(train_idx)} train, {len(val_idx)} val")
+                print("=" * 60)
+                train_fold(
+                    cfg,
+                    fold_idx,
+                    train_idx,
+                    val_idx,
+                    run_dir,
+                    device,
+                    epoch_callback=_on_epoch,
+                    checkpoint_name=None,  # use default best_fold{N}.pt naming so folds don't overwrite
+                    interactive=False,
+                    display_name=self._model_name,
+                )
 
-            name = self._model_name if self._model_name.endswith(".pt") else self._model_name + ".pt"
-            dest = output_dir / "checkpoints" / name
-            self.finished_training.emit(str(dest))
+            self.finished_training.emit(str(run_dir / "checkpoints"))
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -748,6 +759,198 @@ class TrainingDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Confidence gate editor dialog
+# ---------------------------------------------------------------------------
+_STRICT_DEFAULTS = {"peak": 0.20, "sharpness": 1.25, "second_peak_ratio": 0.65}
+_PERMISSIVE_DEFAULTS = {"peak": 0.10, "sharpness": 1.15, "second_peak_ratio": 0.80}
+
+
+class GateConfigDialog(QDialog):
+    """Per-landmark threshold tier + abort checkbox editor."""
+
+    def __init__(self, parent: "LandmarkGUI", gate_config: dict, landmark_order: list[str]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Confidence Gate Configuration")
+        self.resize(780, 480)
+        self._landmark_order = list(landmark_order)
+        # Deep-copy so Cancel discards changes
+        self._cfg = json.loads(json.dumps(gate_config))
+        # Per-row widgets keyed by landmark name
+        self._rows: dict[str, dict] = {}
+
+        root = QVBoxLayout(self)
+        hint = QLabel(
+            "Per-landmark confidence gate. 'Permissive' uses the global defaults; "
+            "'Strict' clamps tighter thresholds (crossvein presets); 'Custom' lets you "
+            "set each metric. Check 'Abort' to fail the whole image when this landmark misses."
+        )
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        # Header row
+        grid = QGridLayout()
+        headers = ["Landmark", "Tier", "peak ≥", "sharp ≥", "sp_ratio ≤", "Abort"]
+        for col, h in enumerate(headers):
+            lbl = QLabel(h)
+            lbl.setStyleSheet("font-weight: bold;")
+            grid.addWidget(lbl, 0, col)
+
+        core = set(self._cfg.get("core_landmarks", []) or [])
+        peak_pl = self._cfg.get("peak", {}).get("per_landmark", {}) or {}
+        sharp_pl = self._cfg.get("sharpness", {}).get("per_landmark", {}) or {}
+        spr_pl = self._cfg.get("second_peak_ratio", {}).get("per_landmark", {}) or {}
+        for i, name in enumerate(self._landmark_order, start=1):
+            grid.addWidget(QLabel(name), i, 0)
+
+            combo = QComboBox()
+            combo.addItems(["Permissive", "Strict", "Custom"])
+            peak_spin = QDoubleSpinBox()
+            peak_spin.setRange(0.0, 1.0)
+            peak_spin.setSingleStep(0.05)
+            peak_spin.setDecimals(3)
+            sharp_spin = QDoubleSpinBox()
+            sharp_spin.setRange(0.0, 20.0)
+            sharp_spin.setSingleStep(0.1)
+            sharp_spin.setDecimals(2)
+            spr_spin = QDoubleSpinBox()
+            spr_spin.setRange(0.0, 1.0)
+            spr_spin.setSingleStep(0.05)
+            spr_spin.setDecimals(2)
+            abort_chk = QCheckBox()
+            abort_chk.setChecked(name in core)
+
+            has_override = name in peak_pl or name in sharp_pl or name in spr_pl
+            cur_peak = peak_pl.get(name, self._cfg["peak"]["global"])
+            cur_sharp = sharp_pl.get(name, self._cfg["sharpness"]["global"])
+            cur_spr = spr_pl.get(name, self._cfg["second_peak_ratio"]["global"])
+            peak_spin.setValue(float(cur_peak))
+            sharp_spin.setValue(float(cur_sharp))
+            spr_spin.setValue(float(cur_spr))
+
+            if has_override:
+                # Detect strict tier by equality to strict defaults
+                if (
+                    peak_pl.get(name) == _STRICT_DEFAULTS["peak"]
+                    and sharp_pl.get(name) == _STRICT_DEFAULTS["sharpness"]
+                    and spr_pl.get(name) == _STRICT_DEFAULTS["second_peak_ratio"]
+                ):
+                    combo.setCurrentText("Strict")
+                else:
+                    combo.setCurrentText("Custom")
+            else:
+                combo.setCurrentText("Permissive")
+
+            combo.currentTextChanged.connect(lambda tier, n=name: self._apply_tier_to_row(n, tier))
+            grid.addWidget(combo, i, 1)
+            grid.addWidget(peak_spin, i, 2)
+            grid.addWidget(sharp_spin, i, 3)
+            grid.addWidget(spr_spin, i, 4)
+            grid.addWidget(abort_chk, i, 5)
+
+            self._rows[name] = {
+                "combo": combo,
+                "peak": peak_spin,
+                "sharpness": sharp_spin,
+                "second_peak_ratio": spr_spin,
+                "abort": abort_chk,
+            }
+            self._sync_row_editability(name)
+
+        root.addLayout(grid)
+
+        buttons_row = QHBoxLayout()
+        btn_load = QPushButton("Import YAML…")
+        btn_load.clicked.connect(self._on_import)
+        btn_save = QPushButton("Export YAML…")
+        btn_save.clicked.connect(self._on_export)
+        buttons_row.addWidget(btn_load)
+        buttons_row.addWidget(btn_save)
+        buttons_row.addStretch(1)
+        root.addLayout(buttons_row)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+
+    def _apply_tier_to_row(self, name: str, tier: str) -> None:
+        row = self._rows[name]
+        if tier == "Strict":
+            row["peak"].setValue(_STRICT_DEFAULTS["peak"])
+            row["sharpness"].setValue(_STRICT_DEFAULTS["sharpness"])
+            row["second_peak_ratio"].setValue(_STRICT_DEFAULTS["second_peak_ratio"])
+        elif tier == "Permissive":
+            row["peak"].setValue(self._cfg["peak"]["global"])
+            row["sharpness"].setValue(self._cfg["sharpness"]["global"])
+            row["second_peak_ratio"].setValue(self._cfg["second_peak_ratio"]["global"])
+        self._sync_row_editability(name)
+
+    def _sync_row_editability(self, name: str) -> None:
+        row = self._rows[name]
+        editable = row["combo"].currentText() == "Custom"
+        for key in ("peak", "sharpness", "second_peak_ratio"):
+            row[key].setEnabled(editable)
+
+    def result_override(self) -> dict:
+        """Build a confidence-override dict from the current widget state."""
+        peak_pl: dict[str, float] = {}
+        sharp_pl: dict[str, float] = {}
+        spr_pl: dict[str, float] = {}
+        core: list[str] = []
+        for name, row in self._rows.items():
+            tier = row["combo"].currentText()
+            if tier != "Permissive":
+                peak_pl[name] = float(row["peak"].value())
+                sharp_pl[name] = float(row["sharpness"].value())
+                spr_pl[name] = float(row["second_peak_ratio"].value())
+            if row["abort"].isChecked():
+                core.append(name)
+        return {
+            "peak": {"global": self._cfg["peak"]["global"], "per_landmark": peak_pl},
+            "sharpness": {"global": self._cfg["sharpness"]["global"], "per_landmark": sharp_pl},
+            "second_peak_ratio": {
+                "global": self._cfg["second_peak_ratio"]["global"],
+                "per_landmark": spr_pl,
+            },
+            "second_peak_suppression_radius_px": self._cfg.get("second_peak_suppression_radius_px", 30),
+            "core_landmarks": sorted(core),
+        }
+
+    def _on_export(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export gate YAML", "", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        doc = {"confidence": self.result_override()}
+        Path(path).write_text(yaml.safe_dump(doc, sort_keys=False))
+        QMessageBox.information(self, "Exported", f"Wrote {path}")
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import gate YAML", "", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        try:
+            data = yaml.safe_load(Path(path).read_text()) or {}
+        except Exception as e:
+            QMessageBox.warning(self, "Import failed", str(e))
+            return
+        override = data.get("confidence", data)
+        peak_pl = override.get("peak", {}).get("per_landmark", {}) or {}
+        sharp_pl = override.get("sharpness", {}).get("per_landmark", {}) or {}
+        spr_pl = override.get("second_peak_ratio", {}).get("per_landmark", {}) or {}
+        core = set(override.get("core_landmarks", []) or [])
+        for name, row in self._rows.items():
+            if name in peak_pl or name in sharp_pl or name in spr_pl:
+                row["combo"].setCurrentText("Custom")
+                row["peak"].setValue(float(peak_pl.get(name, row["peak"].value())))
+                row["sharpness"].setValue(float(sharp_pl.get(name, row["sharpness"].value())))
+                row["second_peak_ratio"].setValue(float(spr_pl.get(name, row["second_peak_ratio"].value())))
+            else:
+                row["combo"].setCurrentText("Permissive")
+            row["abort"].setChecked(name in core)
+            self._sync_row_editability(name)
+
+
+# ---------------------------------------------------------------------------
 # Main GUI
 # ---------------------------------------------------------------------------
 class LandmarkGUI(QMainWindow):
@@ -812,6 +1015,10 @@ class LandmarkGUI(QMainWindow):
         act_save = QAction("Save", self)
         act_save.triggered.connect(self._on_save_all)
         tb.addAction(act_save)
+
+        act_gate = QAction("Gate Config…", self)
+        act_gate.triggered.connect(self._on_edit_gate_config)
+        tb.addAction(act_gate)
 
         # Push Train Model button to the right
         spacer = QWidget()
@@ -930,6 +1137,42 @@ class LandmarkGUI(QMainWindow):
     def _auto_load(self) -> None:
         """No auto-load — user must select folders explicitly."""
         pass
+
+    # ---- Gate-aware prediction (for inspection) ----
+    def _predict_for_inspection(self, image: np.ndarray) -> dict:
+        """Predict with include_unreliable=True and without aborting on core failure."""
+        from landmark_locator.inference.predict import LowConfidenceLandmarkError
+
+        try:
+            return self._predictor.predict(image, include_unreliable=True)
+        except LowConfidenceLandmarkError:
+            # Temporarily drop the core set so the GUI can still render heatmaps.
+            saved_core = self._predictor.gate_config.get("core_landmarks", [])
+            self._predictor.gate_config["core_landmarks"] = []
+            try:
+                return self._predictor.predict(image, include_unreliable=True)
+            finally:
+                self._predictor.gate_config["core_landmarks"] = saved_core
+
+    # ---- Gate config ----
+    def _on_edit_gate_config(self) -> None:
+        """Open a dialog to edit per-landmark confidence-gate thresholds."""
+        if self._predictor is None:
+            self.statusBar().showMessage("Load a model before editing gate config.")
+            return
+        dlg = GateConfigDialog(self, self._predictor.gate_config, self._predictor.landmark_order)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        override = dlg.result_override()
+        # update_gate_config does a deep-merge, which would keep stale per_landmark
+        # entries the user removed. Replace the gate_config wholesale instead.
+        self._predictor.gate_config = override
+        # Invalidate cached predictions so they re-run under the new gate
+        for entry in self._entries:
+            entry.prediction = None
+        if self._current_idx >= 0:
+            self._on_image_selected(self._current_idx)
+        self.statusBar().showMessage("Gate config updated.")
 
     # ---- Actions ----
     def _on_load_model(self) -> None:
@@ -1065,7 +1308,9 @@ class LandmarkGUI(QMainWindow):
                 break
             progress.setValue(i)
 
-            image = cv2.imread(str(entry.path))
+            from landmark_locator.data.psd_loader import imread_any
+
+            image = imread_any(entry.path)
             if image is None:
                 continue
 
@@ -1075,7 +1320,7 @@ class LandmarkGUI(QMainWindow):
                 preds = entry.prediction["landmarks"]
             elif self._predictor:
                 try:
-                    entry.prediction = self._predictor.predict(image)
+                    entry.prediction = self._predict_for_inspection(image)
                     preds = entry.prediction["landmarks"]
                 except Exception:
                     pass
@@ -1180,22 +1425,27 @@ class LandmarkGUI(QMainWindow):
         self._train_dialog.append_log(f"Starting training '{model_name}' with {gt_count} annotated images...")
         self._train_dialog.exec_()
 
-    def _on_training_finished(self, ckpt_path: str) -> None:
-        """Handle successful training completion."""
-        self._train_dialog.append_log(f"\nTraining complete! Checkpoint: {ckpt_path}")
+    def _on_training_finished(self, ckpt_dir: str) -> None:
+        """Handle successful training completion. ckpt_dir contains best_fold*.pt."""
+        self._train_dialog.append_log(f"\nTraining complete! Fold checkpoints: {ckpt_dir}")
         self._train_dialog.enable_close()
-        # Save the error chart next to the checkpoint
-        chart_path = Path(ckpt_path).with_suffix(".png")
+        run_dir = Path(ckpt_dir).parent  # trained_models/<name>/
+        # Save the error chart into the run folder
+        chart_path = run_dir / "training_chart.png"
         try:
             self._train_dialog._fig.savefig(str(chart_path), dpi=150, facecolor="#1e1e1e")
             self._train_dialog.append_log(f"Error chart saved: {chart_path}")
         except Exception as e:
             self._train_dialog.append_log(f"Warning: could not save chart: {e}")
-        # Auto-load the trained model
+        # Auto-load fold 0 for quick inspection
+        fold0 = Path(ckpt_dir) / "best_fold0.pt"
+        if not fold0.exists():
+            self.statusBar().showMessage(f"Training done but no best_fold0.pt in {ckpt_dir}")
+            return
         try:
             from landmark_locator.inference.predict import LandmarkPredictor
 
-            self._predictor = LandmarkPredictor(Path(ckpt_path))
+            self._predictor = LandmarkPredictor(fold0)
             self._set_landmark_order(
                 self._predictor.landmark_order,
                 self._predictor.geojson_to_landmark,
@@ -1204,8 +1454,8 @@ class LandmarkGUI(QMainWindow):
                 entry.prediction = None
             if self._current_idx >= 0:
                 self._on_image_selected(self._current_idx)
-            self._model_label.setText(f"Model: {Path(ckpt_path).name}")
-            self.statusBar().showMessage(f"Model loaded from training: {Path(ckpt_path).name}")
+            self._model_label.setText(f"Model: {run_dir.name}/best_fold0.pt")
+            self.statusBar().showMessage(f"Loaded fold 0 from {run_dir.name}/; use predict-ensemble for all folds.")
         except Exception as e:
             self.statusBar().showMessage(f"Training done but failed to load checkpoint: {e}")
 
@@ -1310,7 +1560,9 @@ class LandmarkGUI(QMainWindow):
         QApplication.processEvents()
 
         # Load image
-        image = cv2.imread(str(entry.path))
+        from landmark_locator.data.psd_loader import imread_any
+
+        image = imread_any(entry.path)
         if image is None:
             self.statusBar().showMessage(f"Failed to load {entry.path.name}")
             self._image_widget.clear_image()
@@ -1323,10 +1575,13 @@ class LandmarkGUI(QMainWindow):
         if entry.gt and entry.gt_heatmaps is None and self._landmark_order:
             entry.gt_heatmaps = generate_gt_heatmaps(entry.gt, self._landmark_order, orig_w=orig_w, orig_h=orig_h)
 
-        # Run prediction if model available and not cached
+        # Run prediction if model available and not cached.
+        # In the inspection GUI we show every predicted landmark even if it failed
+        # the gate — so always include_unreliable, and bypass abort-on-core-fail so
+        # inspecting a failing image still shows its heatmaps.
         if self._predictor and entry.prediction is None:
             try:
-                entry.prediction = self._predictor.predict(image)
+                entry.prediction = self._predict_for_inspection(image)
             except Exception as e:
                 self.statusBar().showMessage(f"Prediction failed: {e}")
 

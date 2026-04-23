@@ -29,7 +29,7 @@ LANDMARK_TO_GEOJSON = {
     "subcostal_break": "subcostal break",
 }
 
-IMAGE_SUFFIXES = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".bmp"}
+IMAGE_SUFFIXES = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".bmp", ".psd", ".psb"}
 
 
 def select_image_dir():
@@ -117,9 +117,11 @@ def main():
     print(f"  Device: {predictor.device}\n")
 
     print("=== Step 1: Landmark detection & measurement ===")
+    from ez_psd_loader import imread_any
+
     rows = []
     for img_path in image_paths:
-        image = cv2.imread(str(img_path))
+        image = imread_any(img_path)
         if image is None:
             print(f"  WARNING: could not read {img_path}, skipping")
             continue

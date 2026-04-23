@@ -331,29 +331,41 @@ def load_model(model_dir: str, device: torch.device = None):
 # ---------------------------------------------------------------------------
 # Image I/O
 # ---------------------------------------------------------------------------
-SUPPORTED_EXTENSIONS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg"}
+SUPPORTED_EXTENSIONS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"}
 
 
 def read_image(path: str) -> np.ndarray:
     """Read an image file and return as RGB uint8 numpy array (H, W, 3).
 
-    Tries rasterio first (handles GeoTIFF + many GDAL formats), then
-    tifffile, then PIL as a universal fallback.
+    For .psd/.psb uses psd-tools (flattened composite). Otherwise tries
+    rasterio first (handles GeoTIFF + many GDAL formats), then tifffile,
+    then PIL as a universal fallback.
     """
     path = str(path)
     img = None
 
-    try:
-        with rasterio.open(path) as src:
-            bands = src.read()
-            if bands.shape[0] >= 3:
-                img = np.stack([bands[0], bands[1], bands[2]], axis=-1)
-            elif bands.shape[0] == 1:
-                img = np.stack([bands[0]] * 3, axis=-1)
-            else:
-                img = np.stack([bands[0], bands[1], bands[0]], axis=-1)
-    except Exception:
-        pass
+    if path.lower().endswith((".psd", ".psb")):
+        try:
+            from psd_tools import PSDImage
+
+            pil = PSDImage.open(path).composite()
+            if pil is not None:
+                img = np.array(pil.convert("RGB"))
+        except Exception:
+            pass
+
+    if img is None:
+        try:
+            with rasterio.open(path) as src:
+                bands = src.read()
+                if bands.shape[0] >= 3:
+                    img = np.stack([bands[0], bands[1], bands[2]], axis=-1)
+                elif bands.shape[0] == 1:
+                    img = np.stack([bands[0]] * 3, axis=-1)
+                else:
+                    img = np.stack([bands[0], bands[1], bands[0]], axis=-1)
+        except Exception:
+            pass
 
     if img is None:
         try:

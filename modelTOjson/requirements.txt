@@ -10,3 +10,4 @@ geojson
 rasterio
 scipy
 onnxruntime
+psd-tools

@@ -55,6 +55,14 @@ def parse_args(argv=None):
         action="store_true",
         help="Keep intermediate chopped images in output folder",
     )
+    parser.add_argument(
+        "--include-unreliable-landmarks",
+        action="store_true",
+        help=(
+            "Include landmarks that failed the confidence gate in the output GeoJSON "
+            "(marked reliable=false). Core-landmark failures still abort the image."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -126,6 +134,7 @@ def main(argv=None):
         device=device,
         keep_chopped=args.keep_chopped,
         progress_callback=_progress,
+        include_unreliable_landmarks=args.include_unreliable_landmarks,
     )
 
     # Summary
@@ -138,5 +147,6 @@ def main(argv=None):
         print("\nFailed images:", file=sys.stderr)
         for r in results:
             if r.error:
-                print(f"  {r.image_path.name}: {r.error.splitlines()[0]}", file=sys.stderr)
+                stage = f" [stage={r.error_stage}]" if r.error_stage else ""
+                print(f"  {r.image_path.name}{stage}: {r.error.splitlines()[0]}", file=sys.stderr)
         sys.exit(1)

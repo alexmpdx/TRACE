@@ -199,11 +199,9 @@ class LandmarkDataset(Dataset):
 
             landmarks[internal_name] = (float(x), float(y))
 
-        # Validate all expected landmarks present
-        missing = set(self.landmark_order) - set(landmarks.keys())
-        if missing:
-            raise ValueError(f"Missing landmarks in {path}: {missing}")
-
+        # Missing landmarks are allowed: the training loop masks those channels out
+        # of the loss. This supports legitimate absence (truncated crossveins) without
+        # biasing the model toward fabricating them.
         return landmarks
 
     def _generate_heatmap(self, keypoints: list[tuple[float, float]], h: int, w: int) -> np.ndarray:
@@ -241,7 +239,9 @@ class LandmarkDataset(Dataset):
         geojson_path, image_path = self.samples[idx]
 
         # Load image as BGR uint8
-        image = cv2.imread(str(image_path))
+        from landmark_locator.data.psd_loader import imread_any
+
+        image = imread_any(image_path)
         if image is None:
             raise IOError(f"Failed to load image: {image_path}")
         orig_h, orig_w = image.shape[:2]
@@ -249,11 +249,18 @@ class LandmarkDataset(Dataset):
         # Parse landmarks in original pixel coords
         landmarks_dict = self._parse_geojson(geojson_path)
 
-        # Build keypoint list in canonical order
+        # Build keypoint list in canonical order. Missing landmarks get a placeholder
+        # at (0, 0) and are masked out of the loss below.
         keypoints = []
         landmark_names = []
+        presence = []
         for name in self.landmark_order:
-            x, y = landmarks_dict[name]
+            if name in landmarks_dict:
+                x, y = landmarks_dict[name]
+                presence.append(1)
+            else:
+                x, y = 0.0, 0.0
+                presence.append(0)
             keypoints.append((x, y))
             landmark_names.append(name)
 
@@ -292,10 +299,19 @@ class LandmarkDataset(Dataset):
         # Landmark coords at model resolution
         landmark_coords = torch.tensor(ordered_kps, dtype=torch.float32)
 
+        presence_tensor = torch.tensor(presence, dtype=torch.float32)
+
+        # Zero the target heatmaps for landmarks absent from GT — we don't want the
+        # model training toward a fake (0, 0) Gaussian for those channels.
+        for i, present in enumerate(presence):
+            if not present:
+                heatmap_tensor[i].zero_()
+
         return {
             "image": img_tensor,
             "heatmaps": heatmap_tensor,
             "landmarks": landmark_coords,
+            "presence": presence_tensor,
             "image_path": str(image_path),
             "scale_x": scale_x,
             "scale_y": scale_y,

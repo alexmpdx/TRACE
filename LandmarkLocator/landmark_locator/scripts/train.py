@@ -40,7 +40,10 @@ def main() -> None:
         "--name",
         type=str,
         default=None,
-        help="Model name used in log output. Default: None (logs show Fold0, Fold1, etc.)",
+        help=(
+            "Model name. When set, all fold checkpoints go into <output-dir>/<name>/checkpoints/ "
+            "so every run is self-contained. Log labels also use this name."
+        ),
     )
     args = parser.parse_args()
 

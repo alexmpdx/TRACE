@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-IMAGE_EXTENSIONS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg"}
+IMAGE_EXTENSIONS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"}
 
 
 def discover_images(folder: Path) -> list[Path]:
@@ -33,10 +33,18 @@ def discover_images(folder: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Stage 1: Landmark detection
 # ---------------------------------------------------------------------------
-def run_landmarks(image_path: Path, checkpoint_path: Path, predictor_cache: dict) -> dict:
-    """Predict landmarks on a single image. Returns dict of name -> (x, y) with GeoJSON names.
+def run_landmarks(
+    image_path: Path,
+    checkpoint_path: Path,
+    predictor_cache: dict,
+    *,
+    include_unreliable_landmarks: bool = False,
+) -> tuple[dict, dict]:
+    """Predict landmarks. Returns (landmarks, metadata) keyed by GeoJSON names.
 
-    predictor_cache is a mutable dict used to cache the LandmarkPredictor across calls.
+    metadata[name] -> {reliable, gate_reason, confidence, sharpness, second_peak_ratio}.
+
+    Raises landmark_locator.LowConfidenceLandmarkError if a core landmark fails the gate.
     """
     from landmark_locator import LandmarkPredictor
 
@@ -46,34 +54,59 @@ def run_landmarks(image_path: Path, checkpoint_path: Path, predictor_cache: dict
         predictor_cache["checkpoint"] = cp_str
 
     predictor = predictor_cache["predictor"]
-    result = predictor.predict_from_path(image_path)
+    result = predictor.predict_from_path(image_path, include_unreliable=include_unreliable_landmarks)
 
-    # Convert internal names to GeoJSON names
     landmark_to_geojson = {v: k for k, v in predictor.geojson_to_landmark.items()}
-    landmarks = {}
-    for internal_name, coords in result["landmarks"].items():
+    landmarks: dict = {}
+    metadata: dict = {}
+    for internal_name in predictor.landmark_order:
         geojson_name = landmark_to_geojson.get(internal_name, internal_name)
-        landmarks[geojson_name] = coords
-    return landmarks
+        metadata[geojson_name] = {
+            "reliable": bool(result["reliable"].get(internal_name, True)),
+            "gate_reason": result["gate_reason"].get(internal_name, ""),
+            "confidence": float(result["confidences"].get(internal_name, 0.0)),
+            "sharpness": float(result["sharpness"].get(internal_name, 0.0)),
+            "second_peak_ratio": float(result["second_peak_ratio"].get(internal_name, 0.0)),
+        }
+        if internal_name in result["landmarks"]:
+            landmarks[geojson_name] = result["landmarks"][internal_name]
+    return landmarks, metadata
 
 
-def landmarks_to_geojson(landmarks: dict) -> dict:
-    """Convert landmarks dict to GeoJSON FeatureCollection."""
+def landmarks_to_geojson(landmarks: dict, metadata: Optional[dict] = None) -> dict:
+    """Convert landmarks dict to GeoJSON FeatureCollection.
+
+    metadata (if provided) maps name -> {reliable, gate_reason, confidence, sharpness,
+    second_peak_ratio} and is embedded into each feature's properties.
+    """
     features = []
+    metadata = metadata or {}
     for name, (x, y) in landmarks.items():
+        props: dict = {"classification": {"name": name}}
+        meta = metadata.get(name)
+        if meta is not None:
+            props.update(
+                {
+                    "reliable": meta.get("reliable", True),
+                    "gate_reason": meta.get("gate_reason", ""),
+                    "confidence": meta.get("confidence", 0.0),
+                    "sharpness": meta.get("sharpness", 0.0),
+                    "second_peak_ratio": meta.get("second_peak_ratio", 0.0),
+                }
+            )
         features.append(
             {
                 "type": "Feature",
                 "geometry": {"type": "Point", "coordinates": [x, y]},
-                "properties": {"classification": {"name": name}},
+                "properties": props,
             }
         )
     return {"type": "FeatureCollection", "features": features}
 
 
-def save_landmarks_geojson(landmarks: dict, output_path: Path) -> None:
+def save_landmarks_geojson(landmarks: dict, output_path: Path, metadata: Optional[dict] = None) -> None:
     """Save landmarks dict as GeoJSON file."""
-    fc = landmarks_to_geojson(landmarks)
+    fc = landmarks_to_geojson(landmarks, metadata)
     with open(output_path, "w") as f:
         json.dump(fc, f, indent=2)
 
@@ -133,10 +166,12 @@ def save_segmentation_geojson(geojson_fc: dict, output_path: Path) -> None:
 class PipelineResult:
     image_path: Path
     landmarks: Optional[dict] = None
+    landmark_metadata: Optional[dict] = None
     landmarks_geojson_path: Optional[Path] = None
     chopped_image_path: Optional[Path] = None
     segmentation_geojson_path: Optional[Path] = None
     error: Optional[str] = None
+    error_stage: Optional[str] = None
     stages_completed: list[str] = field(default_factory=list)
 
 
@@ -162,12 +197,15 @@ def process_single_image(
     device=None,
     keep_chopped: bool = False,
     progress_callback=None,
+    include_unreliable_landmarks: bool = False,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
     Args:
         stages: (landmarks, hinge_chop, segmentation) booleans.
         progress_callback: callable(stage_name: str, detail: str)
+        include_unreliable_landmarks: when True, landmarks that fail the LandmarkLocator
+            confidence gate are still written to the output GeoJSON (marked reliable=false).
     """
     do_landmarks, do_hinge, do_segment = stages
     result = PipelineResult(image_path=image_path)
@@ -200,16 +238,25 @@ def process_single_image(
 
     stem = image_path.stem
     ext = image_path.suffix
+    # cv2.imwrite cannot write .psd; coerce intermediate outputs to .tif when input is PSD.
+    raster_ext = ".tif" if ext.lower() in (".psd", ".psb") else ext
 
     # Stage 1: Landmarks
     landmarks = None
+    landmark_metadata: Optional[dict] = None
     if do_landmarks:
         if progress_callback:
             progress_callback("landmarks", f"Predicting landmarks for {image_path.name}")
-        landmarks = run_landmarks(image_path, landmark_checkpoint, predictor_cache)
+        landmarks, landmark_metadata = run_landmarks(
+            image_path,
+            landmark_checkpoint,
+            predictor_cache,
+            include_unreliable_landmarks=include_unreliable_landmarks,
+        )
         result.landmarks = landmarks
+        result.landmark_metadata = landmark_metadata
         lm_path = output_dir / f"{stem}_landmarks.geojson"
-        save_landmarks_geojson(landmarks, lm_path)
+        save_landmarks_geojson(landmarks, lm_path, landmark_metadata)
         result.landmarks_geojson_path = lm_path
         result.stages_completed.append("landmarks")
 
@@ -233,7 +280,7 @@ def process_single_image(
 
         if progress_callback:
             progress_callback("hinge", f"Chopping hinge for {image_path.name}")
-        chopped_path = output_dir / f"{stem}_chopped{ext}"
+        chopped_path = output_dir / f"{stem}_chopped{raster_ext}"
         run_hinge_chop(image_path, landmarks, chopped_path)
         result.chopped_image_path = chopped_path
         result.stages_completed.append("hinge")
@@ -267,6 +314,7 @@ def process_folder(
     device=None,
     keep_chopped: bool = False,
     progress_callback=None,
+    include_unreliable_landmarks: bool = False,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -305,12 +353,17 @@ def process_folder(
                     if progress_callback
                     else None
                 ),
+                include_unreliable_landmarks=include_unreliable_landmarks,
             )
             results.append(result)
             if progress_callback:
                 progress_callback(i, len(images), img_path.name, "done")
         except Exception as e:
-            result = PipelineResult(image_path=img_path, error=f"{e}\n{traceback.format_exc()}")
+            from landmark_locator import LowConfidenceLandmarkError
+
+            stage = "landmarks" if isinstance(e, LowConfidenceLandmarkError) else None
+            err_msg = str(e) if isinstance(e, LowConfidenceLandmarkError) else f"{e}\n{traceback.format_exc()}"
+            result = PipelineResult(image_path=img_path, error=err_msg, error_stage=stage)
             results.append(result)
             if progress_callback:
                 progress_callback(i, len(images), img_path.name, f"error: {e}")

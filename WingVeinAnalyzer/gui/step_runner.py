@@ -301,7 +301,9 @@ class StepRunner:
         set_scale(self._um_per_px if self._um_per_px else None)
         state = StepState()
 
-        image = cv2.imread(str(self._image_path))
+        from WingVeinAnalyzer.utils.psd_loader import imread_any
+
+        image = imread_any(self._image_path)
         if image is None:
             raise FileNotFoundError(f"Could not load image: {self._image_path}")
         state.image = image

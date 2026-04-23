@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
 from identify_features.controllers.pipeline import identify_wing
+from identify_features.utils.psd_loader import imread_any
 from identify_features.views.csv_export import export_csv, export_csv_batch
 from identify_features.views.geojson_export import export_geojson
 from identify_features.views.overlay import (
@@ -41,7 +42,7 @@ def _find_batch_specimens(
             continue
         img_path = None
         if img_dir is not None:
-            for ext in (".tif", ".bmp", ".png", ".jpg"):
+            for ext in (".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"):
                 p = img_dir / f"{stem}{ext}"
                 if p.exists():
                     img_path = p
@@ -82,7 +83,7 @@ def _process_one(args_tuple):
         )
 
         if overlay and img_path is not None:
-            base_img = cv2.imread(str(img_path))
+            base_img = imread_any(img_path)
             if base_img is not None:
                 render_overlay_to_file(
                     base_img,
@@ -225,7 +226,7 @@ def _run_single(args):
     print(f"CSV: {csv_path}")
 
     if args.overlay and args.image is not None:
-        base_img = cv2.imread(str(args.image))
+        base_img = imread_any(args.image)
         if base_img is not None:
             overlay_path = args.output_dir / f"{result.specimen_id}_overlay.png"
             render_overlay_to_file(

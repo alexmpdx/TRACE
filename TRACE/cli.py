@@ -91,6 +91,14 @@ def parse_args(argv=None):
         action="store_true",
         help="In the per-wing overlay PNG, fill buffered vein tissue polygons (default: skeleton lines only)",
     )
+    parser.add_argument(
+        "--include-unreliable-landmarks",
+        action="store_true",
+        help=(
+            "Pass low-confidence landmarks to downstream stages (marked reliable=false in GeoJSON). "
+            "Core-landmark failures still abort the image regardless of this flag."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -192,6 +200,7 @@ def main(argv=None):
         max_workers=args.workers,
         show_vein_tissue=args.show_vein_tissue,
         progress_callback=_progress,
+        include_unreliable_landmarks=args.include_unreliable_landmarks,
     )
 
     # Summary

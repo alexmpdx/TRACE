@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml",
     "tqdm",
     "scikit-learn",
+    "psd-tools>=1.9",
 ]
 
 [project.optional-dependencies]

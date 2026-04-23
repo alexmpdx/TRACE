@@ -69,7 +69,9 @@ def identify_wing(
     result.landmarks = landmarks
 
     if image_path is not None:
-        img = cv2.imread(str(image_path))
+        from identify_features.utils.psd_loader import imread_any
+
+        img = imread_any(image_path)
         if img is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
         image_shape = (img.shape[0], img.shape[1])

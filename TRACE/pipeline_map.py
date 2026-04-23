@@ -45,7 +45,7 @@ class Node:
 
 NODES: list[Node] = [
     # --- External inputs ---
-    Node("IMG", "Wing image", "input", ["*.tif / *.bmp / *.png / *.jpg"], "data"),
+    Node("IMG", "Wing image", "input", ["*.tif / *.bmp / *.png / *.jpg / *.psd"], "data"),
     Node("LMK_MODEL", "Landmark model", "input", ["ResNet18 U-Net checkpoint (.pt)"], "data"),
     Node("SEG_MODEL", "Segmentation model dir", "input", ["weights + metadata.json"], "data"),
     Node("CONFIG", "PipelineConfig", "input", ["58 fields (JSON / GUI)"], "data"),
