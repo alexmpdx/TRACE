@@ -1260,16 +1260,21 @@ def _detect_l6(
     axis's AP vector (rotation-invariant). Otherwise, falls back to the
     legacy positive-Y assumption.
     """
-    # Need Rs length as reference
-    rs_length = None
+    # Need Rs total length as reference — sum across all Rs-labeled edges,
+    # not just the first one encountered. When Rs ends up as a chain of
+    # multiple graph edges (degree-2 propagation splitting across interior
+    # nodes), the prior "first edge only" read produced a tiny rs_length
+    # and the L6 length filter ``[0.5, 1.5] × rs_length`` excluded real L6
+    # candidates.
+    rs_length = 0.0
     for key, label in edge_labels.items():
-        if label == "Rs":
-            u, v = key
-            if G.has_edge(u, v):
-                rs_length = G[u][v].get("length_px", 0)
-                break
+        if label != "Rs":
+            continue
+        u, v = key
+        if G.has_edge(u, v):
+            rs_length += G[u][v].get("length_px", 0.0)
 
-    if rs_length is None or rs_length < 10:
+    if rs_length < 10:
         return
 
     # Find L4-L5 landmark position
