@@ -22,10 +22,18 @@ Training (imported from landmark_locator.training):
 def __getattr__(name: str):
     """Lazy imports to avoid pulling in heavy deps (sklearn) on every import."""
     # Inference
-    if name in ("LandmarkPredictor", "predict_ensemble", "LowConfidenceLandmarkError"):
+    if name in (
+        "LandmarkPredictor",
+        "predict_ensemble",
+        "LowConfidenceLandmarkError",
+        "EnsemblePredictor",
+        "make_predictor",
+    ):
         from landmark_locator.inference.predict import (
+            EnsemblePredictor,
             LandmarkPredictor,
             LowConfidenceLandmarkError,
+            make_predictor,
             predict_ensemble,
         )
 
@@ -33,6 +41,8 @@ def __getattr__(name: str):
             "LandmarkPredictor": LandmarkPredictor,
             "predict_ensemble": predict_ensemble,
             "LowConfidenceLandmarkError": LowConfidenceLandmarkError,
+            "EnsemblePredictor": EnsemblePredictor,
+            "make_predictor": make_predictor,
         }[name]
 
     # Model
@@ -93,6 +103,8 @@ def __getattr__(name: str):
 
 __all__ = [
     "LandmarkPredictor",
+    "EnsemblePredictor",
+    "make_predictor",
     "predict_ensemble",
     "LowConfidenceLandmarkError",
     "LandmarkUNet",

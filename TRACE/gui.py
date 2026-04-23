@@ -12,6 +12,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from identify_features.config import PipelineConfig
+from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -35,8 +36,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
@@ -173,15 +172,24 @@ class TraceWindow(QMainWindow):
         model_group = QGroupBox("Models")
         mg = QVBoxLayout(model_group)
 
-        mg.addWidget(QLabel("Landmark model (.pt):"))
+        mg.addWidget(QLabel("Landmark model (.pt or fold folder):"))
         row = QHBoxLayout()
         self.lm_edit = QLineEdit()
         self.lm_edit.setReadOnly(True)
-        self.lm_edit.setPlaceholderText("Select landmark checkpoint...")
-        btn = QPushButton("Browse...")
-        btn.clicked.connect(self._select_landmark_model)
+        self.lm_edit.setPlaceholderText("Select .pt checkpoint or fold folder...")
+        self.lm_edit.setToolTip(
+            "Pick a single .pt checkpoint for fast single-fold inference, "
+            "or pick a folder containing best_fold*.pt for 5-fold ensemble "
+            "(~5× slower, more robust)."
+        )
+        btn_file = QPushButton("File...")
+        btn_file.clicked.connect(self._select_landmark_model)
+        btn_folder = QPushButton("Folder...")
+        btn_folder.setToolTip("Pick a folder of best_fold*.pt checkpoints (5-fold ensemble).")
+        btn_folder.clicked.connect(self._select_landmark_model_folder)
         row.addWidget(self.lm_edit, stretch=1)
-        row.addWidget(btn)
+        row.addWidget(btn_file)
+        row.addWidget(btn_folder)
         mg.addLayout(row)
 
         mg.addWidget(QLabel("Segmentation model folder:"))
@@ -334,6 +342,20 @@ class TraceWindow(QMainWindow):
         )
         if path:
             self.lm_edit.setText(path)
+
+    def _select_landmark_model_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Fold Checkpoint Folder (contains best_fold*.pt)", "")
+        if folder:
+            from pathlib import Path as _P
+
+            if not sorted(_P(folder).glob("best_fold*.pt")):
+                QMessageBox.warning(
+                    self,
+                    "No fold checkpoints",
+                    f"No best_fold*.pt files in {folder}. Pick a folder containing 5-fold CV checkpoints.",
+                )
+                return
+            self.lm_edit.setText(folder)
 
     def _select_seg_model(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Segmentation Model Folder")

@@ -29,7 +29,10 @@ def parse_args(argv=None):
         "--landmark-model",
         type=Path,
         default=None,
-        help="Path to landmark model checkpoint (.pt file)",
+        help=(
+            "Path to landmark model. Accepts either a single .pt checkpoint "
+            "or a folder containing best_fold*.pt files (runs 5-fold ensemble)."
+        ),
     )
     parser.add_argument(
         "--segmentation-model",
@@ -93,6 +96,14 @@ def _validate(args, stages: tuple[bool, bool, bool]):
     if args.landmark_model and not args.landmark_model.exists():
         print(f"Error: landmark model not found: {args.landmark_model}", file=sys.stderr)
         sys.exit(1)
+    if args.landmark_model and args.landmark_model.is_dir():
+        fold_ckpts = sorted(args.landmark_model.glob("best_fold*.pt"))
+        if not fold_ckpts:
+            print(
+                f"Error: --landmark-model points at a directory with no best_fold*.pt: {args.landmark_model}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if args.segmentation_model and not args.segmentation_model.is_dir():
         print(f"Error: segmentation model dir not found: {args.segmentation_model}", file=sys.stderr)
         sys.exit(1)

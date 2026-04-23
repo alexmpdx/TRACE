@@ -6,6 +6,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
+
 from landmark_locator.models.unet import LandmarkUNet
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -356,3 +357,96 @@ def predict_ensemble(
         gate_config=gate_config,
         include_unreliable=include_unreliable,
     )
+
+
+def _find_fold_checkpoints(folder: Path) -> list[Path]:
+    """Return `best_fold<N>.pt` checkpoints in `folder`, one per fold (lowest suffix wins)."""
+    candidates = sorted(folder.glob("best_fold*.pt"))
+    by_fold: dict[int, Path] = {}
+    for p in candidates:
+        rest = p.stem.replace("best_fold", "")
+        try:
+            fold = int(rest.split("_")[0])
+        except ValueError:
+            continue
+        if fold not in by_fold:
+            by_fold[fold] = p
+    return [by_fold[f] for f in sorted(by_fold)]
+
+
+class EnsemblePredictor:
+    """Drop-in replacement for LandmarkPredictor that averages K fold heatmaps.
+
+    Same attributes (landmark_order, geojson_to_landmark, gate_config) and same
+    predict()/predict_from_path() contract so callers don't have to branch.
+    """
+
+    def __init__(
+        self,
+        checkpoint_paths: list[Path],
+        device: Optional[str] = None,
+        confidence_override: Optional[dict] = None,
+    ) -> None:
+        if not checkpoint_paths:
+            raise ValueError("EnsemblePredictor requires at least one checkpoint")
+        self._predictors = [
+            LandmarkPredictor(p, device, confidence_override=confidence_override) for p in checkpoint_paths
+        ]
+        first = self._predictors[0]
+        self.landmark_order = first.landmark_order
+        self.geojson_to_landmark = first.geojson_to_landmark
+        self.gate_config = first.gate_config
+        self.checkpoint_paths = list(checkpoint_paths)
+        self.device = first.device
+
+    def update_gate_config(self, override: dict) -> None:
+        """Deep-merge override into every fold predictor's gate config."""
+        self.gate_config = _deep_merge(self.gate_config, override)
+        for pred in self._predictors:
+            pred.gate_config = self.gate_config
+
+    def predict(self, image: np.ndarray, *, include_unreliable: bool = False) -> dict:
+        all_heatmaps = []
+        scale_x = scale_y = None
+        for pred in self._predictors:
+            tensor, sx, sy = pred._preprocess(image)
+            tensor = tensor.to(pred.device)
+            with torch.no_grad():
+                hm = pred.model(tensor)
+            all_heatmaps.append(hm[0].cpu().numpy())
+            scale_x, scale_y = sx, sy
+        avg_heatmaps = np.mean(all_heatmaps, axis=0)
+        return _assemble_gate_result(
+            avg_heatmaps,
+            scale_x,
+            scale_y,
+            landmark_order=self.landmark_order,
+            gate_config=self.gate_config,
+            include_unreliable=include_unreliable,
+        )
+
+    def predict_from_path(self, image_path: Path, *, include_unreliable: bool = False) -> dict:
+        from landmark_locator.data.psd_loader import imread_any
+
+        image = imread_any(image_path)
+        if image is None:
+            raise IOError(f"Failed to load image: {image_path}")
+        return self.predict(image, include_unreliable=include_unreliable)
+
+
+def make_predictor(
+    path: Path,
+    device: Optional[str] = None,
+    confidence_override: Optional[dict] = None,
+):
+    """Factory: return LandmarkPredictor for a .pt file, EnsemblePredictor for a fold-folder.
+
+    A "fold folder" is any directory containing `best_fold*.pt` files.
+    """
+    path = Path(path)
+    if path.is_dir():
+        ckpts = _find_fold_checkpoints(path)
+        if not ckpts:
+            raise FileNotFoundError(f"No best_fold*.pt in {path}")
+        return EnsemblePredictor(ckpts, device=device, confidence_override=confidence_override)
+    return LandmarkPredictor(path, device=device, confidence_override=confidence_override)

@@ -9,6 +9,12 @@ import sys
 import traceback
 from pathlib import Path
 
+from preprocessing.pipeline import (
+    PipelineResult,
+    _auto_device,
+    discover_images,
+    process_folder,
+)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -29,13 +35,6 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
-)
-
-from preprocessing.pipeline import (
-    PipelineResult,
-    _auto_device,
-    discover_images,
-    process_folder,
 )
 
 
@@ -146,15 +145,23 @@ class PreprocessingWindow(QMainWindow):
         model_group = QGroupBox("Models")
         mdl_layout = QVBoxLayout(model_group)
 
-        mdl_layout.addWidget(QLabel("Landmark model (.pt):"))
+        mdl_layout.addWidget(QLabel("Landmark model (.pt or fold folder):"))
         lm_row = QHBoxLayout()
         self.lm_edit = QLineEdit()
         self.lm_edit.setReadOnly(True)
-        self.lm_edit.setPlaceholderText("Select landmark checkpoint...")
-        self.btn_lm = QPushButton("Browse...")
+        self.lm_edit.setPlaceholderText("Select .pt checkpoint or fold folder...")
+        self.lm_edit.setToolTip(
+            "Pick a single .pt checkpoint for fast single-fold inference, "
+            "or pick a folder containing best_fold*.pt for 5-fold ensemble."
+        )
+        self.btn_lm = QPushButton("File...")
         self.btn_lm.clicked.connect(self._select_landmark_model)
+        self.btn_lm_folder = QPushButton("Folder...")
+        self.btn_lm_folder.setToolTip("Pick a folder of best_fold*.pt checkpoints (5-fold ensemble).")
+        self.btn_lm_folder.clicked.connect(self._select_landmark_model_folder)
         lm_row.addWidget(self.lm_edit, stretch=1)
         lm_row.addWidget(self.btn_lm)
+        lm_row.addWidget(self.btn_lm_folder)
         mdl_layout.addLayout(lm_row)
 
         mdl_layout.addWidget(QLabel("Segmentation model folder:"))
@@ -254,6 +261,22 @@ class PreprocessingWindow(QMainWindow):
         )
         if path:
             self.lm_edit.setText(path)
+
+    def _select_landmark_model_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Fold Checkpoint Folder (contains best_fold*.pt)", "")
+        if folder:
+            from pathlib import Path as _P
+
+            if not sorted(_P(folder).glob("best_fold*.pt")):
+                from PyQt5.QtWidgets import QMessageBox as _QM
+
+                _QM.warning(
+                    self,
+                    "No fold checkpoints",
+                    f"No best_fold*.pt files in {folder}. Pick a folder containing 5-fold CV checkpoints.",
+                )
+                return
+            self.lm_edit.setText(folder)
 
     def _select_seg_model(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Segmentation Model Folder")

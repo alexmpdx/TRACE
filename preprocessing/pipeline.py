@@ -42,15 +42,18 @@ def run_landmarks(
 ) -> tuple[dict, dict]:
     """Predict landmarks. Returns (landmarks, metadata) keyed by GeoJSON names.
 
+    checkpoint_path may be a single `.pt` file (single-fold prediction) or a directory
+    containing `best_fold*.pt` (5-fold ensemble — averaged heatmaps, more robust).
+
     metadata[name] -> {reliable, gate_reason, confidence, sharpness, second_peak_ratio}.
 
     Raises landmark_locator.LowConfidenceLandmarkError if a core landmark fails the gate.
     """
-    from landmark_locator import LandmarkPredictor
+    from landmark_locator import make_predictor
 
     cp_str = str(checkpoint_path)
     if "predictor" not in predictor_cache or predictor_cache.get("checkpoint") != cp_str:
-        predictor_cache["predictor"] = LandmarkPredictor(checkpoint_path)
+        predictor_cache["predictor"] = make_predictor(checkpoint_path)
         predictor_cache["checkpoint"] = cp_str
 
     predictor = predictor_cache["predictor"]

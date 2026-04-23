@@ -14,16 +14,11 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
+
 from landmark_locator.data.dataset import _normalize_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
-)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -60,6 +55,13 @@ from PyQt5.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
+)
+
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
 )
 
 # ---------------------------------------------------------------------------
@@ -759,6 +761,103 @@ class TrainingDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Gate-result overlay
+# ---------------------------------------------------------------------------
+def _draw_gate_overlay(
+    image: np.ndarray,
+    prediction: dict,
+    landmark_order: list[str],
+) -> np.ndarray:
+    """Draw pass/fail chips with metrics next to each predicted landmark.
+
+    Expects `prediction` to contain the gate result dict (reliable, gate_reason,
+    confidences, sharpness, second_peak_ratio, landmarks).
+    """
+    vis = image.copy()
+    landmarks = prediction.get("landmarks", {})
+    reliable = prediction.get("reliable", {})
+    gate_reason = prediction.get("gate_reason", {})
+    confidences = prediction.get("confidences", {})
+    sharpness = prediction.get("sharpness", {})
+    sprs = prediction.get("second_peak_ratio", {})
+
+    # Scale font/chip size to image dimensions so chips stay readable on zoom.
+    h, w = vis.shape[:2]
+    base = min(h, w)
+    font_scale = max(0.4, base / 2200.0)
+    thick = max(1, int(round(base / 1500.0)))
+
+    # First draw a compact summary legend in the top-left corner.
+    passed = sum(1 for n in landmark_order if reliable.get(n))
+    total = len(landmark_order)
+    pad = max(8, int(base / 200))
+    legend = f"Gate: {passed}/{total} pass"
+    (tw, th), _ = cv2.getTextSize(legend, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.2, thick + 1)
+    cv2.rectangle(vis, (pad, pad), (pad + tw + 2 * pad, pad + th + 2 * pad), (20, 20, 20), -1)
+    cv2.putText(
+        vis,
+        legend,
+        (pad + pad, pad + th + pad // 2),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale * 1.2,
+        (255, 255, 255) if passed == total else (0, 255, 255),
+        thick + 1,
+        cv2.LINE_AA,
+    )
+
+    # Per-landmark chip
+    for name in landmark_order:
+        pt = landmarks.get(name)
+        if pt is None:
+            # Gate computed metrics but landmark was dropped (only under include_unreliable=False)
+            continue
+        x, y = int(pt[0]), int(pt[1])
+        ok = reliable.get(name, True)
+        color_ok = (0, 200, 0)
+        color_fail = (0, 0, 255)
+        ring = color_ok if ok else color_fail
+        cv2.circle(vis, (x, y), max(4, int(base / 400)), ring, thick + 1, cv2.LINE_AA)
+
+        label_lines = [f"{'OK' if ok else 'FAIL'} {name}"]
+        peak = confidences.get(name)
+        sharp = sharpness.get(name)
+        spr = sprs.get(name)
+        if peak is not None and sharp is not None and spr is not None:
+            label_lines.append(f"p={peak:.2f} s={sharp:.2f} r={spr:.2f}")
+        if not ok and gate_reason.get(name):
+            label_lines.append(gate_reason[name])
+
+        chip_x = x + int(base / 120)
+        chip_y = y - int(base / 200)
+        line_h = int(th * 1.6)
+        # Background rectangle
+        widths = [cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thick)[0][0] for t in label_lines]
+        rect_w = max(widths) + pad
+        rect_h = line_h * len(label_lines) + pad // 2
+        x0 = max(0, chip_x)
+        y0 = max(0, chip_y - rect_h)
+        x1 = min(w - 1, x0 + rect_w)
+        y1 = min(h - 1, y0 + rect_h)
+        overlay = vis.copy()
+        cv2.rectangle(overlay, (x0, y0), (x1, y1), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.7, vis, 0.3, 0, vis)
+        cv2.rectangle(vis, (x0, y0), (x1, y1), ring, thick, cv2.LINE_AA)
+        text_color = (255, 255, 255) if ok else (200, 200, 255)
+        for i, t in enumerate(label_lines):
+            cv2.putText(
+                vis,
+                t,
+                (x0 + pad // 2, y0 + (i + 1) * line_h - pad // 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                text_color,
+                thick,
+                cv2.LINE_AA,
+            )
+    return vis
+
+
+# ---------------------------------------------------------------------------
 # Confidence gate editor dialog
 # ---------------------------------------------------------------------------
 _STRICT_DEFAULTS = {"peak": 0.20, "sharpness": 1.25, "second_peak_ratio": 0.65}
@@ -1004,6 +1103,11 @@ class LandmarkGUI(QMainWindow):
         act_model.triggered.connect(self._on_load_model)
         tb.addAction(act_model)
 
+        act_ensemble = QAction("Load Fold Folder", self)
+        act_ensemble.setToolTip("Load a folder of best_fold*.pt checkpoints and run ensemble prediction.")
+        act_ensemble.triggered.connect(self._on_load_fold_folder)
+        tb.addAction(act_ensemble)
+
         act_images = QAction("Load Images", self)
         act_images.triggered.connect(self._on_load_folder)
         tb.addAction(act_images)
@@ -1019,6 +1123,13 @@ class LandmarkGUI(QMainWindow):
         act_gate = QAction("Gate Config…", self)
         act_gate.triggered.connect(self._on_edit_gate_config)
         tb.addAction(act_gate)
+
+        self._act_show_gate = QAction("Show Gate", self)
+        self._act_show_gate.setCheckable(True)
+        self._act_show_gate.setChecked(False)
+        self._act_show_gate.setToolTip("Overlay per-landmark gate results (pass/fail + metrics) on the image view.")
+        self._act_show_gate.toggled.connect(self._on_toggle_show_gate)
+        tb.addAction(self._act_show_gate)
 
         # Push Train Model button to the right
         spacer = QWidget()
@@ -1201,6 +1312,43 @@ class LandmarkGUI(QMainWindow):
                 self._on_image_selected(self._current_idx)
         except Exception as e:
             self.statusBar().showMessage(f"Failed to load model: {e}")
+
+    def _on_load_fold_folder(self) -> None:
+        """Load a folder of best_fold*.pt checkpoints for ensemble prediction."""
+        from landmark_locator.inference.predict import _find_fold_checkpoints, make_predictor
+
+        start = str(_project_root / "trained_models")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Fold Checkpoint Folder (contains best_fold0.pt, ...)", start
+        )
+        if not folder:
+            return
+        folder_path = Path(folder)
+        checkpoints = _find_fold_checkpoints(folder_path)
+        if not checkpoints:
+            QMessageBox.warning(self, "No checkpoints", f"No best_fold*.pt in {folder_path}")
+            return
+        try:
+            self._predictor = make_predictor(folder_path)
+            self._set_landmark_order(
+                self._predictor.landmark_order,
+                self._predictor.geojson_to_landmark,
+            )
+            self._model_label.setText(f"Ensemble: {folder_path.name}/ ({len(checkpoints)} folds)")
+            self.statusBar().showMessage(
+                f"Ensemble loaded from {folder_path.name}: {len(checkpoints)} folds — predictions will average all of them"
+            )
+            for entry in self._entries:
+                entry.prediction = None
+            if self._current_idx >= 0:
+                self._on_image_selected(self._current_idx)
+        except Exception as e:
+            self.statusBar().showMessage(f"Failed to load ensemble: {e}")
+
+    def _on_toggle_show_gate(self, checked: bool) -> None:
+        """Redraw the current image with/without the gate overlay."""
+        if self._current_idx >= 0:
+            self._on_image_selected(self._current_idx)
 
     def _on_load_folder(self) -> None:
         """Load images from a user-selected folder."""
@@ -1588,6 +1736,8 @@ class LandmarkGUI(QMainWindow):
         # Draw overlay and cache base visualization
         preds = entry.prediction["landmarks"] if entry.prediction else {}
         vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
+        if self._act_show_gate.isChecked() and entry.prediction is not None and "reliable" in entry.prediction:
+            vis = _draw_gate_overlay(vis, entry.prediction, self._landmark_order)
         self._base_vis = vis.copy()
         self._overlay_heatmaps = entry.prediction["heatmaps"] if entry.prediction else None
         self._overlay_orig_shape = (orig_h, orig_w)
