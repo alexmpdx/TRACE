@@ -10,20 +10,67 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+
 from landmark_locator.data.dataset import _normalize_name
 from landmark_locator.inference.predict import LandmarkPredictor
 
+# Hand-picked maximum-contrast BGR palette keyed by canonical internal landmark names.
+# Choices favor wide hue separation plus mixed brightness so adjacent landmarks in the
+# legend (e.g. acv_a vs acv_p) are never near-duplicates on screen.
+_LANDMARK_PALETTE: dict[str, tuple[int, int, int]] = {
+    # Core hinge/tip — primaries
+    "subcostal_break": (0, 0, 255),  # red
+    "alula_notch": (0, 255, 255),  # yellow
+    "l1_rs": (255, 0, 0),  # electric blue
+    "l2_l3": (0, 255, 0),  # green
+    "l4_l5": (255, 0, 255),  # magenta
+    "dtip": (255, 255, 0),  # cyan
+    # Crossveins — secondaries
+    "acv_a": (0, 140, 255),  # orange
+    "acv_p": (170, 50, 255),  # hot pink
+    "pcv_a": (255, 255, 255),  # white
+    "pcv_p": (50, 200, 255),  # warm gold
+    # Distal vein tips — tertiaries
+    "l2_d": (180, 60, 120),  # deep purple
+    "l4_d": (180, 230, 0),  # bright teal/cyan-green
+    "l5_d": (70, 30, 160),  # maroon
+}
+
+# Distinct fallback palette for any landmark name not in the curated map above.
+# Picked to interleave bright and darker shades to avoid adjacent look-alikes.
+_FALLBACK_PALETTE: list[tuple[int, int, int]] = [
+    (0, 200, 100),  # forest green
+    (100, 100, 255),  # salmon
+    (255, 150, 50),  # sky blue
+    (50, 50, 200),  # brick
+    (200, 200, 50),  # turquoise-ish
+    (150, 0, 255),  # rose
+    (100, 255, 255),  # lemon
+    (255, 100, 200),  # orchid
+]
+
 
 def generate_landmark_colors(names: list[str]) -> dict[str, tuple[int, int, int]]:
-    """Generate distinct BGR colors for an arbitrary list of landmark names."""
-    # Hand-picked hues that maximise perceptual distance; avoids adjacent greens
-    _BASE_HUES = [0.0, 0.08, 0.17, 0.35, 0.55, 0.72, 0.85]
-    colors = {}
-    n = max(len(names), 1)
-    for i, name in enumerate(names):
-        hue = _BASE_HUES[i] if i < len(_BASE_HUES) else (i / n)
-        r, g, b = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
-        colors[name] = (int(b * 255), int(g * 255), int(r * 255))  # BGR
+    """Return a high-contrast BGR color per landmark name.
+
+    Uses the curated palette for known landmark names; falls through to a rotating
+    distinct-secondary palette for unknown names.
+    """
+    colors: dict[str, tuple[int, int, int]] = {}
+    used = set()
+    fallback_idx = 0
+    for name in names:
+        if name in _LANDMARK_PALETTE:
+            bgr = _LANDMARK_PALETTE[name]
+        else:
+            bgr = _FALLBACK_PALETTE[fallback_idx % len(_FALLBACK_PALETTE)]
+            fallback_idx += 1
+        # If a collision somehow slips in (same BGR already used) nudge fallback forward.
+        while bgr in used and fallback_idx < 100:
+            bgr = _FALLBACK_PALETTE[fallback_idx % len(_FALLBACK_PALETTE)]
+            fallback_idx += 1
+        used.add(bgr)
+        colors[name] = bgr
     return colors
 
 
@@ -59,12 +106,12 @@ LANDMARK_COLORS: dict[str, tuple[int, int, int]] = {}
 
 
 def _ensure_colors(names: list[str]) -> dict[str, tuple[int, int, int]]:
-    """Ensure LANDMARK_COLORS has entries for all names."""
+    """Refresh LANDMARK_COLORS for the requested names using the curated palette.
+
+    Always regenerates to avoid stale entries cached from an older palette.
+    """
     global LANDMARK_COLORS
-    missing = [n for n in names if n not in LANDMARK_COLORS]
-    if missing:
-        new_colors = generate_landmark_colors(names)
-        LANDMARK_COLORS.update(new_colors)
+    LANDMARK_COLORS.update(generate_landmark_colors(names))
     return LANDMARK_COLORS
 
 
@@ -72,11 +119,19 @@ def draw_landmarks_on_image(
     image: np.ndarray,
     predictions: dict[str, tuple[float, float]],
     ground_truth: dict[str, tuple[float, float]] | None = None,
-    radius: int = 15,
+    radius: int | None = None,
     landmark_order: list[str] | None = None,
 ) -> np.ndarray:
-    """Draw predicted landmarks (circles) and ground truth (crosses) on image."""
+    """Draw predicted landmarks (circles) and ground truth (crosses) on image.
+
+    When `radius` is None it scales with image size (small — ~0.2% of the min dim).
+    """
     vis = image.copy()
+
+    h, w = vis.shape[:2]
+    if radius is None:
+        radius = max(4, int(min(h, w) / 500))
+    ring_thick = max(1, radius // 4)
 
     # Determine which landmarks to draw
     if landmark_order is None:
@@ -92,20 +147,20 @@ def draw_landmarks_on_image(
         # Ground truth: cross
         if ground_truth and name in ground_truth:
             gx, gy = int(ground_truth[name][0]), int(ground_truth[name][1])
-            arm = radius + 5
-            cv2.line(vis, (gx - arm, gy), (gx + arm, gy), color, 3)
-            cv2.line(vis, (gx, gy - arm), (gx, gy + arm), color, 3)
+            arm = radius + max(2, radius // 2)
+            cv2.line(vis, (gx - arm, gy), (gx + arm, gy), color, ring_thick)
+            cv2.line(vis, (gx, gy - arm), (gx, gy + arm), color, ring_thick)
 
-        # Prediction: filled circle
+        # Prediction: filled circle with thin white ring for pop on dark tissue
         if name in predictions:
             px, py = int(predictions[name][0]), int(predictions[name][1])
-            cv2.circle(vis, (px, py), radius, color, -1)
-            cv2.circle(vis, (px, py), radius, (255, 255, 255), 2)
+            cv2.circle(vis, (px, py), radius, color, -1, cv2.LINE_AA)
+            cv2.circle(vis, (px, py), radius, (255, 255, 255), ring_thick, cv2.LINE_AA)
 
             # Error vector
             if ground_truth and name in ground_truth:
                 gx, gy = int(ground_truth[name][0]), int(ground_truth[name][1])
-                cv2.arrowedLine(vis, (px, py), (gx, gy), (0, 0, 255), 2, tipLength=0.3)
+                cv2.arrowedLine(vis, (px, py), (gx, gy), (0, 0, 255), ring_thick, tipLength=0.3)
 
     return vis
 

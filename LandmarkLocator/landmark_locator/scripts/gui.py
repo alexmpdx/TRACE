@@ -768,92 +768,33 @@ def _draw_gate_overlay(
     prediction: dict,
     landmark_order: list[str],
 ) -> np.ndarray:
-    """Draw pass/fail chips with metrics next to each predicted landmark.
+    """Ring each predicted landmark in green (pass) or red (fail).
 
-    Expects `prediction` to contain the gate result dict (reliable, gate_reason,
-    confidences, sharpness, second_peak_ratio, landmarks).
+    The numeric gate details live in the info table — the overlay just gives an
+    at-a-glance pass/fail for each landmark on the image.
     """
     vis = image.copy()
     landmarks = prediction.get("landmarks", {})
     reliable = prediction.get("reliable", {})
-    gate_reason = prediction.get("gate_reason", {})
-    confidences = prediction.get("confidences", {})
-    sharpness = prediction.get("sharpness", {})
-    sprs = prediction.get("second_peak_ratio", {})
 
-    # Scale font/chip size to image dimensions so chips stay readable on zoom.
     h, w = vis.shape[:2]
     base = min(h, w)
-    font_scale = max(0.4, base / 2200.0)
-    thick = max(1, int(round(base / 1500.0)))
+    # Ring sits just outside the landmark dot drawn by draw_landmarks_on_image
+    # (radius ~= base/500 there). Add a small gap, then outline.
+    dot_radius = max(4, int(base / 500))
+    ring_radius = dot_radius + max(2, int(base / 800))
+    thick = max(2, int(round(base / 1200.0)))
 
-    # First draw a compact summary legend in the top-left corner.
-    passed = sum(1 for n in landmark_order if reliable.get(n))
-    total = len(landmark_order)
-    pad = max(8, int(base / 200))
-    legend = f"Gate: {passed}/{total} pass"
-    (tw, th), _ = cv2.getTextSize(legend, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.2, thick + 1)
-    cv2.rectangle(vis, (pad, pad), (pad + tw + 2 * pad, pad + th + 2 * pad), (20, 20, 20), -1)
-    cv2.putText(
-        vis,
-        legend,
-        (pad + pad, pad + th + pad // 2),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        font_scale * 1.2,
-        (255, 255, 255) if passed == total else (0, 255, 255),
-        thick + 1,
-        cv2.LINE_AA,
-    )
+    color_ok = (0, 220, 0)
+    color_fail = (0, 0, 255)
 
-    # Per-landmark chip
     for name in landmark_order:
         pt = landmarks.get(name)
         if pt is None:
-            # Gate computed metrics but landmark was dropped (only under include_unreliable=False)
             continue
         x, y = int(pt[0]), int(pt[1])
         ok = reliable.get(name, True)
-        color_ok = (0, 200, 0)
-        color_fail = (0, 0, 255)
-        ring = color_ok if ok else color_fail
-        cv2.circle(vis, (x, y), max(4, int(base / 400)), ring, thick + 1, cv2.LINE_AA)
-
-        label_lines = [f"{'OK' if ok else 'FAIL'} {name}"]
-        peak = confidences.get(name)
-        sharp = sharpness.get(name)
-        spr = sprs.get(name)
-        if peak is not None and sharp is not None and spr is not None:
-            label_lines.append(f"p={peak:.2f} s={sharp:.2f} r={spr:.2f}")
-        if not ok and gate_reason.get(name):
-            label_lines.append(gate_reason[name])
-
-        chip_x = x + int(base / 120)
-        chip_y = y - int(base / 200)
-        line_h = int(th * 1.6)
-        # Background rectangle
-        widths = [cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thick)[0][0] for t in label_lines]
-        rect_w = max(widths) + pad
-        rect_h = line_h * len(label_lines) + pad // 2
-        x0 = max(0, chip_x)
-        y0 = max(0, chip_y - rect_h)
-        x1 = min(w - 1, x0 + rect_w)
-        y1 = min(h - 1, y0 + rect_h)
-        overlay = vis.copy()
-        cv2.rectangle(overlay, (x0, y0), (x1, y1), (20, 20, 20), -1)
-        cv2.addWeighted(overlay, 0.7, vis, 0.3, 0, vis)
-        cv2.rectangle(vis, (x0, y0), (x1, y1), ring, thick, cv2.LINE_AA)
-        text_color = (255, 255, 255) if ok else (200, 200, 255)
-        for i, t in enumerate(label_lines):
-            cv2.putText(
-                vis,
-                t,
-                (x0 + pad // 2, y0 + (i + 1) * line_h - pad // 4),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                text_color,
-                thick,
-                cv2.LINE_AA,
-            )
+        cv2.circle(vis, (x, y), ring_radius, color_ok if ok else color_fail, thick, cv2.LINE_AA)
     return vis
 
 
@@ -1124,13 +1065,6 @@ class LandmarkGUI(QMainWindow):
         act_gate.triggered.connect(self._on_edit_gate_config)
         tb.addAction(act_gate)
 
-        self._act_show_gate = QAction("Show Gate", self)
-        self._act_show_gate.setCheckable(True)
-        self._act_show_gate.setChecked(False)
-        self._act_show_gate.setToolTip("Overlay per-landmark gate results (pass/fail + metrics) on the image view.")
-        self._act_show_gate.toggled.connect(self._on_toggle_show_gate)
-        tb.addAction(self._act_show_gate)
-
         # Push Train Model button to the right
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1185,6 +1119,15 @@ class LandmarkGUI(QMainWindow):
         self._image_widget = ImageWidget()
         center_layout.addWidget(self._image_widget, stretch=3)
 
+        # Overall wing pass/fail status line (under the image).
+        self._wing_status_label = QLabel("")
+        self._wing_status_label.setAlignment(Qt.AlignCenter)
+        self._wing_status_label.setStyleSheet(
+            "padding: 6px; font-weight: bold; font-size: 14px;" "background: #252526; color: #aaa; border-radius: 4px;"
+        )
+        self._wing_status_label.setFixedHeight(32)
+        center_layout.addWidget(self._wing_status_label)
+
         # Heatmap overlay opacity slider
         slider_row = QHBoxLayout()
         slider_label = QLabel("Heatmap opacity:")
@@ -1206,11 +1149,25 @@ class LandmarkGUI(QMainWindow):
         self._model_label.setStyleSheet("color: #aaa; font-size: 10px; padding: 2px;")
         center_layout.addWidget(self._model_label)
 
-        self._info_table = QTableWidget(0, 6)
-        self._info_table.setHorizontalHeaderLabels(["Landmark", "Pred X", "Pred Y", "GT X", "GT Y", "Error (px)"])
-        self._info_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._show_gate_chk = QCheckBox("Show gate ring on each landmark")
+        self._show_gate_chk.setChecked(False)
+        self._show_gate_chk.setToolTip(
+            "Ring each predicted landmark in green (pass) or red (fail). "
+            "Per-landmark metrics are in the table below."
+        )
+        self._show_gate_chk.toggled.connect(self._on_toggle_show_gate)
+        center_layout.addWidget(self._show_gate_chk)
+
+        self._info_table = QTableWidget(0, 7)
+        self._info_table.setHorizontalHeaderLabels(
+            ["Landmark", "Gate", "Peak", "Sharpness", "SP ratio", "Core?", "Reason"]
+        )
+        hdr = self._info_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)  # landmark name column expands
+        hdr.setSectionResizeMode(6, QHeaderView.Stretch)  # reason column expands
         self._info_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._info_table.setMaximumHeight(180)
+        self._info_table.setMaximumHeight(220)
         center_layout.addWidget(self._info_table, stretch=0)
         splitter.addWidget(center)
 
@@ -1410,18 +1367,30 @@ class LandmarkGUI(QMainWindow):
 
     def _on_save_all(self) -> None:
         """Save outputs for all entries with user-selected options."""
+        try:
+            self._do_save_all()
+        except Exception as exc:
+            import traceback
+
+            self.statusBar().showMessage(f"Save failed: {exc}")
+            print("Save failed:\n" + traceback.format_exc(), file=sys.stderr)
+
+    def _do_save_all(self) -> None:
         if not self._entries:
             self.statusBar().showMessage("No images loaded")
             return
 
-        # Build a folder dialog with save-option checkboxes
+        # Build a folder dialog with save-option checkboxes. Force Qt's own dialog
+        # (not macOS native) so we can add our checkboxes to its layout safely.
         dialog = QFileDialog(self, "Select Output Directory")
         dialog.setFileMode(QFileDialog.Directory)
         dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
         start = str(self._output_dir) if self._output_dir else str(_project_root)
         dialog.setDirectory(start)
 
-        # Add checkboxes to the dialog layout
+        # Add checkboxes to the dialog layout (guard: layout may not be a QGridLayout
+        # on some Qt versions, in which case we fall back to separate checkbox dialogs).
         cb_geojson = QCheckBox("Save GeoJSONs")
         cb_geojson.setChecked(True)
         cb_images = QCheckBox("Save Labeled Images")
@@ -1429,7 +1398,25 @@ class LandmarkGUI(QMainWindow):
         opts_layout = QHBoxLayout()
         opts_layout.addWidget(cb_geojson)
         opts_layout.addWidget(cb_images)
-        dialog.layout().addLayout(opts_layout, dialog.layout().rowCount(), 0, 1, -1)
+        try:
+            dlg_layout = dialog.layout()
+            if dlg_layout is not None and hasattr(dlg_layout, "rowCount"):
+                dlg_layout.addLayout(opts_layout, dlg_layout.rowCount(), 0, 1, -1)
+            else:
+                raise RuntimeError("dialog layout not a QGridLayout")
+        except Exception:
+            # Couldn't inject into the dialog — show an ad hoc options dialog first.
+            picker = QDialog(self)
+            picker.setWindowTitle("Save Options")
+            pl = QVBoxLayout(picker)
+            pl.addWidget(cb_geojson)
+            pl.addWidget(cb_images)
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.accepted.connect(picker.accept)
+            btns.rejected.connect(picker.reject)
+            pl.addWidget(btns)
+            if picker.exec_() != QDialog.Accepted:
+                return
 
         if not dialog.exec_():
             return
@@ -1736,7 +1723,7 @@ class LandmarkGUI(QMainWindow):
         # Draw overlay and cache base visualization
         preds = entry.prediction["landmarks"] if entry.prediction else {}
         vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
-        if self._act_show_gate.isChecked() and entry.prediction is not None and "reliable" in entry.prediction:
+        if self._show_gate_chk.isChecked() and entry.prediction is not None and "reliable" in entry.prediction:
             vis = _draw_gate_overlay(vis, entry.prediction, self._landmark_order)
         self._base_vis = vis.copy()
         self._overlay_heatmaps = entry.prediction["heatmaps"] if entry.prediction else None
@@ -1750,6 +1737,7 @@ class LandmarkGUI(QMainWindow):
 
         # Update info table
         self._update_info_table(entry)
+        self._update_wing_status(entry)
 
         # Update heatmap panel — pass GT coords scaled to model resolution
         pred_hm = entry.prediction["heatmaps"] if entry.prediction else None
@@ -1766,43 +1754,129 @@ class LandmarkGUI(QMainWindow):
 
     # ---- Info table ----
     def _update_info_table(self, entry: ImageEntry) -> None:
-        """Populate the per-landmark info table."""
+        """Populate the per-landmark gate table.
+
+        Columns: Landmark, Gate (PASS/FAIL), Peak, Sharpness, SP ratio, Core?, Reason.
+        Peak/Sharpness/SP-ratio cells are colored against their active threshold so
+        the user can see at a glance which metric is near the edge.
+        """
+        pred = entry.prediction
+        gate_cfg = self._predictor.gate_config if self._predictor else None
+        core = set((gate_cfg or {}).get("core_landmarks", []))
+
+        pass_fg = QColor(80, 255, 80)
+        fail_fg = QColor(255, 80, 80)
+        warn_fg = QColor(255, 200, 80)
+        dim_fg = QColor(160, 160, 160)
+
+        def _threshold_cell(value: float | None, threshold: float | None, higher_is_better: bool) -> QTableWidgetItem:
+            if value is None:
+                item = QTableWidgetItem("N/A")
+                item.setForeground(dim_fg)
+                return item
+            text = f"{value:.3f}" if value < 10 else f"{value:.1f}"
+            item = QTableWidgetItem(text)
+            if threshold is None:
+                return item
+            passes = value >= threshold if higher_is_better else value <= threshold
+            # Flag cells within 15% of the threshold on the passing side as "close"
+            if not passes:
+                item.setForeground(fail_fg)
+            elif higher_is_better and threshold > 0 and value < threshold * 1.15:
+                item.setForeground(warn_fg)
+            elif not higher_is_better and threshold > 0 and value > threshold * 0.85:
+                item.setForeground(warn_fg)
+            else:
+                item.setForeground(pass_fg)
+            return item
+
         for i, name in enumerate(self._landmark_order):
-            # Pred coords
-            if entry.prediction and name in entry.prediction["landmarks"]:
-                px, py = entry.prediction["landmarks"][name]
-                conf = entry.prediction["confidences"][name]
-                self._info_table.setItem(i, 1, QTableWidgetItem(f"{px:.1f}"))
-                self._info_table.setItem(i, 2, QTableWidgetItem(f"{py:.1f}"))
-            else:
-                self._info_table.setItem(i, 1, QTableWidgetItem("N/A"))
-                self._info_table.setItem(i, 2, QTableWidgetItem("N/A"))
-                conf = None
+            if pred is None:
+                for col in range(1, 7):
+                    cell = QTableWidgetItem("—")
+                    cell.setForeground(dim_fg)
+                    self._info_table.setItem(i, col, cell)
+                continue
 
-            # GT coords
-            if entry.gt and name in entry.gt:
-                gx, gy = entry.gt[name]
-                self._info_table.setItem(i, 3, QTableWidgetItem(f"{gx:.1f}"))
-                self._info_table.setItem(i, 4, QTableWidgetItem(f"{gy:.1f}"))
-            else:
-                self._info_table.setItem(i, 3, QTableWidgetItem("N/A"))
-                self._info_table.setItem(i, 4, QTableWidgetItem("N/A"))
+            reliable = pred.get("reliable", {}).get(name)
+            peak = pred.get("confidences", {}).get(name)
+            sharp = pred.get("sharpness", {}).get(name)
+            spr = pred.get("second_peak_ratio", {}).get(name)
+            reason = pred.get("gate_reason", {}).get(name, "")
 
-            # Error
-            if entry.prediction and name in entry.prediction["landmarks"] and entry.gt and name in entry.gt:
-                px, py = entry.prediction["landmarks"][name]
-                gx, gy = entry.gt[name]
-                err = np.sqrt((px - gx) ** 2 + (py - gy) ** 2)
-                item = QTableWidgetItem(f"{err:.1f}")
-                if err > 100:
-                    item.setForeground(QColor(255, 80, 80))
-                elif err > 50:
-                    item.setForeground(QColor(255, 200, 80))
-                else:
-                    item.setForeground(QColor(80, 255, 80))
-                self._info_table.setItem(i, 5, item)
+            peak_thr = None
+            sharp_thr = None
+            spr_thr = None
+            if gate_cfg is not None:
+                peak_thr = gate_cfg["peak"]["per_landmark"].get(name, gate_cfg["peak"]["global"])
+                sharp_thr = gate_cfg["sharpness"]["per_landmark"].get(name, gate_cfg["sharpness"]["global"])
+                spr_thr = gate_cfg["second_peak_ratio"]["per_landmark"].get(
+                    name, gate_cfg["second_peak_ratio"]["global"]
+                )
+
+            gate_item = QTableWidgetItem("PASS" if reliable else "FAIL")
+            gate_item.setForeground(pass_fg if reliable else fail_fg)
+            self._info_table.setItem(i, 1, gate_item)
+
+            self._info_table.setItem(i, 2, _threshold_cell(peak, peak_thr, higher_is_better=True))
+            self._info_table.setItem(i, 3, _threshold_cell(sharp, sharp_thr, higher_is_better=True))
+            self._info_table.setItem(i, 4, _threshold_cell(spr, spr_thr, higher_is_better=False))
+
+            core_item = QTableWidgetItem("core" if name in core else "")
+            if name in core:
+                core_item.setForeground(warn_fg)
+            self._info_table.setItem(i, 5, core_item)
+
+            reason_item = QTableWidgetItem(reason or ("" if reliable else "(no reason)"))
+            if not reliable:
+                reason_item.setForeground(fail_fg)
             else:
-                self._info_table.setItem(i, 5, QTableWidgetItem("N/A"))
+                reason_item.setForeground(dim_fg)
+            self._info_table.setItem(i, 6, reason_item)
+
+    # ---- Wing-level pass/fail ----
+    def _update_wing_status(self, entry: ImageEntry) -> None:
+        """Summarize the whole wing as pass / fail below the image view.
+
+        Pass = every core landmark reliable. Non-core failures list as a warning but
+        don't flip the overall status (matches the gate's abort semantics).
+        """
+        pred = entry.prediction
+        if pred is None or not pred.get("reliable"):
+            self._wing_status_label.setText("No prediction")
+            self._wing_status_label.setStyleSheet(
+                "padding: 6px; font-weight: bold; font-size: 14px;"
+                "background: #252526; color: #888; border-radius: 4px;"
+            )
+            return
+
+        gate_cfg = self._predictor.gate_config if self._predictor else {}
+        core = set(gate_cfg.get("core_landmarks", []) or [])
+        reliable = pred["reliable"]
+
+        core_fail = sorted(n for n in core if n in reliable and not reliable[n])
+        non_core_fail = sorted(n for n, ok in reliable.items() if n not in core and not ok)
+
+        if core_fail:
+            self._wing_status_label.setText(f"WING FAIL — core landmarks failed: {', '.join(core_fail)}")
+            self._wing_status_label.setStyleSheet(
+                "padding: 6px; font-weight: bold; font-size: 14px;"
+                "background: #4a0e0e; color: #ffb0b0; border-radius: 4px;"
+            )
+        elif non_core_fail:
+            self._wing_status_label.setText(
+                f"WING PASS — but {len(non_core_fail)} non-core landmark(s) unreliable: " f"{', '.join(non_core_fail)}"
+            )
+            self._wing_status_label.setStyleSheet(
+                "padding: 6px; font-weight: bold; font-size: 14px;"
+                "background: #4a3c0e; color: #ffe08a; border-radius: 4px;"
+            )
+        else:
+            self._wing_status_label.setText("WING PASS — all landmarks reliable")
+            self._wing_status_label.setStyleSheet(
+                "padding: 6px; font-weight: bold; font-size: 14px;"
+                "background: #0e4a1a; color: #a0ffb0; border-radius: 4px;"
+            )
 
 
 # ---------------------------------------------------------------------------
