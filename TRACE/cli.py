@@ -95,11 +95,32 @@ def parse_args(argv=None):
         help="In the per-wing overlay PNG, fill buffered vein tissue polygons (default: skeleton lines only)",
     )
     parser.add_argument(
+        "--calibrate-workers",
+        type=Path,
+        metavar="PATH",
+        default=None,
+        help=(
+            "Calibrate Stage 2 memory against PATH (folder of wing images or a "
+            "single image), print a recommended --workers value, then exit. Runs "
+            "Stage 1 once on the chosen image to produce inputs for Stage 2 "
+            "calibration. Requires --landmark-model and --segmentation-model."
+        ),
+    )
+    parser.add_argument(
         "--include-unreliable-landmarks",
         action="store_true",
         help=(
             "Pass low-confidence landmarks to downstream stages (marked reliable=false in GeoJSON). "
             "Core-landmark failures still abort the image regardless of this flag."
+        ),
+    )
+    parser.add_argument(
+        "--landmark-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Batch size for the landmark forward pass. 0 (default) tracks --workers. "
+            "1 disables batching, larger values trade memory for throughput."
         ),
     )
     return parser.parse_args(argv)
@@ -150,8 +171,51 @@ def _progress(image_index, total, image_name, stage, detail):
     print(f"[{image_index + 1}/{total}] {image_name}: {stage} - {detail}")
 
 
+def _run_calibration(args) -> int:
+    """Handle --calibrate-workers PATH and exit. Returns process exit code."""
+    if not args.landmark_model.exists():
+        print(f"Error: landmark model not found: {args.landmark_model}", file=sys.stderr)
+        return 1
+    if not args.segmentation_model.is_dir():
+        print(f"Error: segmentation model dir not found: {args.segmentation_model}", file=sys.stderr)
+        return 1
+
+    logging.basicConfig(level=logging.WARNING)
+
+    device = None
+    if args.device:
+        import torch
+
+        device = torch.device(args.device)
+
+    from TRACE.calibrate_workers import calibrate_for_trace, format_report
+
+    def _cb(stage, detail):
+        print(f"[{stage}] {detail}")
+
+    try:
+        result = calibrate_for_trace(
+            image_or_folder=args.calibrate_workers,
+            landmark_checkpoint=args.landmark_model,
+            segmentation_model_dir=args.segmentation_model,
+            device=device,
+            progress_callback=_cb,
+        )
+    except Exception as e:
+        print(f"Calibration failed: {e}", file=sys.stderr)
+        return 1
+
+    print()
+    print(format_report(result))
+    return 0
+
+
 def main(argv=None):
     args = parse_args(argv)
+
+    if args.calibrate_workers is not None:
+        sys.exit(_run_calibration(args))
+
     _validate(args)
 
     logging.basicConfig(
@@ -177,6 +241,7 @@ def main(argv=None):
 
     # Build PipelineConfig: load from file if given, then apply --scale override.
     from identify_features.config import PipelineConfig
+
     from TRACE.config_io import load_config
 
     if args.config is not None:
@@ -211,6 +276,7 @@ def main(argv=None):
         show_vein_tissue=args.show_vein_tissue,
         progress_callback=_progress,
         include_unreliable_landmarks=args.include_unreliable_landmarks,
+        landmark_batch_size=(args.landmark_batch_size or None),
     )
 
     # Summary

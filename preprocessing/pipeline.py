@@ -33,6 +33,97 @@ def discover_images(folder: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Stage 1: Landmark detection
 # ---------------------------------------------------------------------------
+def _predictor_from_cache(checkpoint_path: Path, predictor_cache: dict):
+    """Lazily build/cache a predictor for the given checkpoint or fold folder."""
+    from landmark_locator import make_predictor
+
+    cp_str = str(checkpoint_path)
+    if "predictor" not in predictor_cache or predictor_cache.get("checkpoint") != cp_str:
+        predictor_cache["predictor"] = make_predictor(checkpoint_path)
+        predictor_cache["checkpoint"] = cp_str
+    return predictor_cache["predictor"]
+
+
+def _shape_predict_result(predictor, result: dict) -> tuple[dict, dict]:
+    """Convert a raw predictor result dict into (landmarks, metadata) keyed by GeoJSON names."""
+    landmark_to_geojson = {v: k for k, v in predictor.geojson_to_landmark.items()}
+    landmarks: dict = {}
+    metadata: dict = {}
+    for internal_name in predictor.landmark_order:
+        geojson_name = landmark_to_geojson.get(internal_name, internal_name)
+        metadata[geojson_name] = {
+            "reliable": bool(result["reliable"].get(internal_name, True)),
+            "gate_reason": result["gate_reason"].get(internal_name, ""),
+            "confidence": float(result["confidences"].get(internal_name, 0.0)),
+            "sharpness": float(result["sharpness"].get(internal_name, 0.0)),
+            "second_peak_ratio": float(result["second_peak_ratio"].get(internal_name, 0.0)),
+        }
+        if internal_name in result["landmarks"]:
+            landmarks[geojson_name] = result["landmarks"][internal_name]
+    return landmarks, metadata
+
+
+def predict_landmarks_for_paths(
+    paths: list[Path],
+    checkpoint_path: Path,
+    predictor_cache: Optional[dict] = None,
+    *,
+    include_unreliable_landmarks: bool = False,
+    batch_size: Optional[int] = None,
+) -> dict:
+    """Predict landmarks for many images in batches.
+
+    Returns {path: {"landmarks", "metadata", "error"}} where `error` is None on success
+    or a `LowConfidenceLandmarkError` instance when a core landmark failed the gate.
+    Caller decides whether to abort the image based on `error`.
+
+    `batch_size`:
+      - None → auto-pick via `landmark_locator.auto_batch_size`.
+      - 1    → process one image at a time (matches single-fold predict() semantics).
+      - >1   → batch model forward passes.
+    """
+    from landmark_locator import LowConfidenceLandmarkError, auto_batch_size
+    from landmark_locator.data.psd_loader import imread_any
+
+    if predictor_cache is None:
+        predictor_cache = {}
+    predictor = _predictor_from_cache(checkpoint_path, predictor_cache)
+
+    out: dict = {}
+    if not paths:
+        return out
+
+    bs = batch_size if batch_size and batch_size > 0 else auto_batch_size(len(paths))
+    for chunk_start in range(0, len(paths), bs):
+        chunk_paths = paths[chunk_start : chunk_start + bs]
+        chunk_images = []
+        valid_paths = []
+        for p in chunk_paths:
+            img = imread_any(p)
+            if img is None:
+                out[p] = {"landmarks": {}, "metadata": {}, "error": IOError(f"Failed to load image: {p}")}
+                continue
+            chunk_images.append(img)
+            valid_paths.append(p)
+        if not chunk_images:
+            continue
+        results = predictor.predict_batch(
+            chunk_images,
+            include_unreliable=include_unreliable_landmarks,
+            raise_on_core_fail=False,
+        )
+        for p, r in zip(valid_paths, results):
+            if r.get("error") is not None:
+                out[p] = {"landmarks": {}, "metadata": {}, "error": r["error"]}
+                continue
+            try:
+                landmarks, metadata = _shape_predict_result(predictor, r)
+                out[p] = {"landmarks": landmarks, "metadata": metadata, "error": None}
+            except LowConfidenceLandmarkError as exc:
+                out[p] = {"landmarks": {}, "metadata": {}, "error": exc}
+    return out
+
+
 def run_landmarks(
     image_path: Path,
     checkpoint_path: Path,
@@ -49,31 +140,9 @@ def run_landmarks(
 
     Raises landmark_locator.LowConfidenceLandmarkError if a core landmark fails the gate.
     """
-    from landmark_locator import make_predictor
-
-    cp_str = str(checkpoint_path)
-    if "predictor" not in predictor_cache or predictor_cache.get("checkpoint") != cp_str:
-        predictor_cache["predictor"] = make_predictor(checkpoint_path)
-        predictor_cache["checkpoint"] = cp_str
-
-    predictor = predictor_cache["predictor"]
+    predictor = _predictor_from_cache(checkpoint_path, predictor_cache)
     result = predictor.predict_from_path(image_path, include_unreliable=include_unreliable_landmarks)
-
-    landmark_to_geojson = {v: k for k, v in predictor.geojson_to_landmark.items()}
-    landmarks: dict = {}
-    metadata: dict = {}
-    for internal_name in predictor.landmark_order:
-        geojson_name = landmark_to_geojson.get(internal_name, internal_name)
-        metadata[geojson_name] = {
-            "reliable": bool(result["reliable"].get(internal_name, True)),
-            "gate_reason": result["gate_reason"].get(internal_name, ""),
-            "confidence": float(result["confidences"].get(internal_name, 0.0)),
-            "sharpness": float(result["sharpness"].get(internal_name, 0.0)),
-            "second_peak_ratio": float(result["second_peak_ratio"].get(internal_name, 0.0)),
-        }
-        if internal_name in result["landmarks"]:
-            landmarks[geojson_name] = result["landmarks"][internal_name]
-    return landmarks, metadata
+    return _shape_predict_result(predictor, result)
 
 
 def landmarks_to_geojson(landmarks: dict, metadata: Optional[dict] = None) -> dict:
@@ -201,6 +270,7 @@ def process_single_image(
     keep_chopped: bool = False,
     progress_callback=None,
     include_unreliable_landmarks: bool = False,
+    prefetched_landmarks: Optional[dict] = None,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
@@ -209,6 +279,11 @@ def process_single_image(
         progress_callback: callable(stage_name: str, detail: str)
         include_unreliable_landmarks: when True, landmarks that fail the LandmarkLocator
             confidence gate are still written to the output GeoJSON (marked reliable=false).
+        prefetched_landmarks: optional dict of `{path: {"landmarks", "metadata", "error"}}`
+            populated upstream by `predict_landmarks_for_paths`. When supplied and the
+            current image_path has an entry, the landmark forward pass is skipped and the
+            cached result is used directly. A non-None `error` re-raises so the caller
+            handles it the same way it would handle a synchronous failure.
     """
     do_landmarks, do_hinge, do_segment = stages
     result = PipelineResult(image_path=image_path)
@@ -250,12 +325,25 @@ def process_single_image(
     if do_landmarks:
         if progress_callback:
             progress_callback("landmarks", f"Predicting landmarks for {image_path.name}")
-        landmarks, landmark_metadata = run_landmarks(
-            image_path,
-            landmark_checkpoint,
-            predictor_cache,
-            include_unreliable_landmarks=include_unreliable_landmarks,
-        )
+        cached = None
+        if prefetched_landmarks is not None:
+            # Try the original input path first, then the (post-JPEG-conversion) path.
+            cached = prefetched_landmarks.get(image_path)
+            if cached is None:
+                # Caller may have keyed by the original input before JPEG/PSD conversion.
+                cached = prefetched_landmarks.get(Path(str(image_path).replace(raster_ext, ext)))
+        if cached is not None:
+            if cached.get("error") is not None:
+                raise cached["error"]
+            landmarks = cached["landmarks"]
+            landmark_metadata = cached["metadata"]
+        else:
+            landmarks, landmark_metadata = run_landmarks(
+                image_path,
+                landmark_checkpoint,
+                predictor_cache,
+                include_unreliable_landmarks=include_unreliable_landmarks,
+            )
         result.landmarks = landmarks
         result.landmark_metadata = landmark_metadata
         lm_path = output_dir / f"{stem}_landmarks.geojson"
@@ -318,11 +406,16 @@ def process_folder(
     keep_chopped: bool = False,
     progress_callback=None,
     include_unreliable_landmarks: bool = False,
+    landmark_batch_size: Optional[int] = None,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
     Args:
         progress_callback: callable(image_index: int, total: int, image_name: str, status: str)
+        landmark_batch_size:
+          - None  → auto-pick via landmark_locator.auto_batch_size (single-image fallback).
+          - 1     → run landmarks per-image (original behavior).
+          - >1    → batch the landmark forward pass across this many images.
     """
     if device is None:
         device = _auto_device()
@@ -333,9 +426,30 @@ def process_folder(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    predictor_cache = {}
-    model_cache = {}
-    results = []
+    predictor_cache: dict = {}
+    model_cache: dict = {}
+    results: list[PipelineResult] = []
+
+    # If the landmark stage is enabled and we have a checkpoint, run landmarks in
+    # batches up front so the model amortizes its forward-pass overhead across many
+    # images. The per-image loop below picks results up via prefetched_landmarks.
+    prefetched: Optional[dict] = None
+    if stages[0] and landmark_checkpoint is not None:
+        if progress_callback:
+            progress_callback(0, len(images), "(batch)", "landmarks: predicting in batches")
+        try:
+            prefetched = predict_landmarks_for_paths(
+                images,
+                landmark_checkpoint,
+                predictor_cache,
+                include_unreliable_landmarks=include_unreliable_landmarks,
+                batch_size=landmark_batch_size,
+            )
+        except Exception as e:
+            # Fail soft — fall back to per-image predict in process_single_image.
+            if progress_callback:
+                progress_callback(0, len(images), "(batch)", f"batch landmarks failed, falling back per-image: {e}")
+            prefetched = None
 
     for i, img_path in enumerate(images):
         if progress_callback:
@@ -357,6 +471,7 @@ def process_folder(
                     else None
                 ),
                 include_unreliable_landmarks=include_unreliable_landmarks,
+                prefetched_landmarks=prefetched,
             )
             results.append(result)
             if progress_callback:

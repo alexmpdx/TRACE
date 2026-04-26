@@ -66,6 +66,16 @@ def parse_args(argv=None):
             "(marked reliable=false). Core-landmark failures still abort the image."
         ),
     )
+    parser.add_argument(
+        "--landmark-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Batch size for the landmark forward pass. 0 (default) auto-picks based on "
+            "available memory and image count. 1 disables batching. Larger values trade "
+            "memory for throughput."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -146,6 +156,7 @@ def main(argv=None):
         keep_chopped=args.keep_chopped,
         progress_callback=_progress,
         include_unreliable_landmarks=args.include_unreliable_landmarks,
+        landmark_batch_size=(args.landmark_batch_size or None),
     )
 
     # Summary

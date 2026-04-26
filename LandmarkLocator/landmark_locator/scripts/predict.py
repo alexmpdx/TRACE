@@ -141,6 +141,15 @@ def main() -> None:
         action="store_true",
         help="Print per-landmark gate result table to stdout for each image.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Batch size for the model forward pass. 0 (default) auto-picks based on "
+            "available memory and image count. 1 disables batching."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.checkpoint and not args.checkpoint_dir:
@@ -156,41 +165,49 @@ def main() -> None:
 
     results: dict = {}
 
+    from landmark_locator.data.psd_loader import imread_any
+    from landmark_locator.inference.predict import EnsemblePredictor, auto_batch_size
+
+    # Build the right predictor.
     if args.checkpoint_dir:
         checkpoint_paths = sorted(args.checkpoint_dir.glob("best_fold*.pt"))
         if not checkpoint_paths:
             parser.error(f"No checkpoints found in {args.checkpoint_dir}")
-
-        from landmark_locator.data.psd_loader import imread_any
-
-        for img_path in args.images:
-            image = imread_any(img_path)
-            if image is None:
-                print(f"Warning: could not load {img_path}, skipping")
-                continue
-            try:
-                result = predict_ensemble(
-                    image,
-                    checkpoint_paths,
-                    args.device,
-                    confidence_override=override,
-                    include_unreliable=args.include_unreliable,
-                )
-            except LowConfidenceLandmarkError as e:
-                print(f"ABORT {img_path}: {e}")
-                results[str(img_path)] = {"error": "low_confidence_core", "failures": e.failures}
-                continue
-            results[str(img_path)] = _shape_result(result)
-            if args.print_gate:
-                _print_gate(img_path, result, override if override else base_gate)
+        predictor = EnsemblePredictor(checkpoint_paths, device=args.device, confidence_override=override)
     else:
         predictor = LandmarkPredictor(args.checkpoint, args.device, confidence_override=override)
-        for img_path in args.images:
-            try:
-                result = predictor.predict_from_path(img_path, include_unreliable=args.include_unreliable)
-            except LowConfidenceLandmarkError as e:
-                print(f"ABORT {img_path}: {e}")
-                results[str(img_path)] = {"error": "low_confidence_core", "failures": e.failures}
+
+    # Load all images first, dropping any that fail to read.
+    loaded: list[tuple[Path, "np.ndarray"]] = []
+    for img_path in args.images:
+        image = imread_any(img_path)
+        if image is None:
+            print(f"Warning: could not load {img_path}, skipping")
+            continue
+        loaded.append((img_path, image))
+
+    if not loaded:
+        return
+
+    # Pick batch size and run in chunks.
+    batch_size = args.batch_size if args.batch_size > 0 else auto_batch_size(len(loaded))
+    if args.batch_size == 0:
+        print(f"Auto-selected batch size: {batch_size} (for {len(loaded)} image(s))")
+
+    for chunk_start in range(0, len(loaded), batch_size):
+        chunk = loaded[chunk_start : chunk_start + batch_size]
+        chunk_paths = [p for p, _ in chunk]
+        chunk_imgs = [im for _, im in chunk]
+        batch_results = predictor.predict_batch(
+            chunk_imgs,
+            include_unreliable=args.include_unreliable,
+            raise_on_core_fail=False,
+        )
+        for img_path, result in zip(chunk_paths, batch_results):
+            err = result.get("error")
+            if isinstance(err, LowConfidenceLandmarkError):
+                print(f"ABORT {img_path}: {err}")
+                results[str(img_path)] = {"error": "low_confidence_core", "failures": err.failures}
                 continue
             results[str(img_path)] = _shape_result(result)
             if args.print_gate:

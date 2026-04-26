@@ -240,6 +240,7 @@ def trace_folder(
     show_vein_tissue: bool = False,
     progress_callback=None,
     include_unreliable_landmarks: bool = False,
+    landmark_batch_size: Optional[int] = None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -263,6 +264,10 @@ def trace_folder(
         include_unreliable_landmarks: If True, landmarks that fail the LandmarkLocator
             confidence gate are still written to downstream stages (marked reliable=false).
             Core-landmark failures always abort the image regardless of this flag.
+        landmark_batch_size: Batch size for the landmark forward pass. None defaults to
+            `max_workers` so the GUI's Workers spinbox controls both Stage 2 parallelism
+            and Stage 1 batching. 1 disables batching, larger values trade memory for
+            throughput.
 
     Returns:
         List of TraceResult, one per input image.
@@ -287,6 +292,10 @@ def trace_folder(
         temp_dir_obj = tempfile.TemporaryDirectory(prefix="trace_preproc_")
         preproc_dir = Path(temp_dir_obj.name)
 
+    # Default landmark batch size to max_workers if the caller didn't specify.
+    effective_workers = max(1, int(max_workers))
+    effective_batch = landmark_batch_size if (landmark_batch_size and landmark_batch_size > 0) else effective_workers
+
     try:
         return _run(
             input_dir=input_dir,
@@ -297,10 +306,11 @@ def trace_folder(
             config=config,
             device=device,
             outputs=outputs,
-            max_workers=max(1, int(max_workers)),
+            max_workers=effective_workers,
             show_vein_tissue=show_vein_tissue,
             progress_callback=progress_callback,
             include_unreliable_landmarks=include_unreliable_landmarks,
+            landmark_batch_size=effective_batch,
         )
     finally:
         if temp_dir_obj is not None:
@@ -320,6 +330,7 @@ def _run(
     show_vein_tissue: bool,
     progress_callback,
     include_unreliable_landmarks: bool = False,
+    landmark_batch_size: Optional[int] = None,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -349,6 +360,7 @@ def _run(
         keep_chopped=("chopped_image" in outputs),
         progress_callback=_preproc_progress,
         include_unreliable_landmarks=include_unreliable_landmarks,
+        landmark_batch_size=landmark_batch_size,
     )
 
     results: list[TraceResult] = []

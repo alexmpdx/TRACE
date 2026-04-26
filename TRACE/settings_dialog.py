@@ -15,6 +15,7 @@ individual field types.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
@@ -33,6 +34,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -62,11 +64,17 @@ class PipelineConfigDialog(QDialog):
         show_vein_tissue: bool = False,
         include_unreliable_landmarks: bool = False,
         workers: int = DEFAULT_MAX_WORKERS,
+        input_path: str = "",
+        landmark_model_path: str = "",
+        segmentation_model_path: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
         self.resize(720, 640)
         self._original_config = config
+        self._calib_input_path = input_path
+        self._calib_lm_path = landmark_model_path
+        self._calib_seg_path = segmentation_model_path
         # (kind, widget, extra) tuples indexed by PipelineConfig field name.
         self._widgets: dict[str, tuple[str, Any, Any]] = {}
         self._build_ui()
@@ -170,7 +178,16 @@ class PipelineConfigDialog(QDialog):
         layout.addWidget(gb)
 
         gb = QGroupBox("Parallel processing")
-        form = QFormLayout(gb)
+        gb_layout = QVBoxLayout(gb)
+
+        from TRACE.calibrate_widget import CalibrateWidget
+
+        self._calibrate_widget = CalibrateWidget(self)
+        self._calibrate_widget.set_paths(self._calib_input_path, self._calib_lm_path, self._calib_seg_path)
+        self._calibrate_widget.applied.connect(lambda v: self._workers_spin.setValue(int(v)))
+        gb_layout.addWidget(self._calibrate_widget)
+
+        form = QFormLayout()
         self._workers_spin = QSpinBox()
         self._workers_spin.setRange(1, 32)
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
@@ -179,6 +196,8 @@ class PipelineConfigDialog(QDialog):
             "Stage 1 (GPU preprocessing) always runs sequentially."
         )
         form.addRow("Workers", self._workers_spin)
+        gb_layout.addLayout(form)
+
         layout.addWidget(gb)
 
         layout.addStretch()

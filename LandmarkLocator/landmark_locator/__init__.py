@@ -28,11 +28,13 @@ def __getattr__(name: str):
         "LowConfidenceLandmarkError",
         "EnsemblePredictor",
         "make_predictor",
+        "auto_batch_size",
     ):
         from landmark_locator.inference.predict import (
             EnsemblePredictor,
             LandmarkPredictor,
             LowConfidenceLandmarkError,
+            auto_batch_size,
             make_predictor,
             predict_ensemble,
         )
@@ -43,6 +45,7 @@ def __getattr__(name: str):
             "LowConfidenceLandmarkError": LowConfidenceLandmarkError,
             "EnsemblePredictor": EnsemblePredictor,
             "make_predictor": make_predictor,
+            "auto_batch_size": auto_batch_size,
         }[name]
 
     # Model
@@ -106,6 +109,7 @@ __all__ = [
     "EnsemblePredictor",
     "make_predictor",
     "predict_ensemble",
+    "auto_batch_size",
     "LowConfidenceLandmarkError",
     "LandmarkUNet",
     "LandmarkDataset",

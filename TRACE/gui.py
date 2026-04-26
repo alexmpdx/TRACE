@@ -284,8 +284,8 @@ class TraceWindow(QMainWindow):
         self.workers_spin.setRange(1, 32)
         self.workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self.workers_spin.setToolTip(
-            "Number of wings to analyze in parallel during Stage 2.\n"
-            "Stage 1 (GPU preprocessing) always runs sequentially."
+            "Number of wings to analyze in parallel during Stage 2 AND batch size for "
+            "the Stage 1 landmark forward pass. Higher = more memory + more throughput."
         )
         self.workers_spin.valueChanged.connect(self._on_workers_changed)
         workers_row.addWidget(self.workers_spin, stretch=1)
@@ -399,16 +399,29 @@ class TraceWindow(QMainWindow):
         QMessageBox.warning(self, "Parallel workers", self._PARALLEL_WORKERS_WARNING_TEXT)
 
     def _show_workers_warning_info(self):
-        """On-demand display of the parallel-workers details, triggered by the ? button.
+        """Open the parallel-workers help dialog: details text + Calibrate panel."""
+        from TRACE.calibrate_widget import CalibrateWidget
 
-        Plain message — no warning icon, no leading "you are enabling…" line.
-        """
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.NoIcon)
-        box.setWindowTitle("Parallel workers")
-        box.setText(self._PARALLEL_WORKERS_DETAILS_TEXT)
-        box.setStandardButtons(QMessageBox.Ok)
-        box.exec_()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Parallel workers")
+        layout = QVBoxLayout(dlg)
+        msg = QLabel(self._PARALLEL_WORKERS_DETAILS_TEXT)
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        calib = CalibrateWidget(dlg)
+        calib.set_paths(self.input_edit.text(), self.lm_edit.text(), self.seg_edit.text())
+        calib.applied.connect(lambda v: self.workers_spin.setValue(int(v)))
+        layout.addWidget(calib)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        close_row.addWidget(close_btn)
+        layout.addLayout(close_row)
+
+        dlg.exec_()
 
     def _confirm_parallel_workers(self) -> bool:
         """Show the parallel-workers warning before a multi-worker run.
@@ -444,6 +457,9 @@ class TraceWindow(QMainWindow):
             show_vein_tissue=self._show_vein_tissue,
             include_unreliable_landmarks=self._include_unreliable_landmarks,
             workers=self.workers_spin.value(),
+            input_path=self.input_edit.text(),
+            landmark_model_path=self.lm_edit.text(),
+            segmentation_model_path=self.seg_edit.text(),
         )
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
@@ -621,6 +637,9 @@ class TraceWindow(QMainWindow):
                 max_workers=self.workers_spin.value(),
                 show_vein_tissue=self._show_vein_tissue,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
+                # Tie landmark batch size to the Workers spinbox so a single setting
+                # controls Stage 1 batching and Stage 2 parallelism together.
+                landmark_batch_size=self.workers_spin.value(),
             )
         )
         self.worker.progress.connect(self._on_progress)

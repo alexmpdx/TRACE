@@ -6,7 +6,6 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-
 from landmark_locator.models.unet import LandmarkUNet
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -253,6 +252,40 @@ class LandmarkPredictor:
             raise IOError(f"Failed to load image: {image_path}")
         return self.predict(image, include_unreliable=include_unreliable)
 
+    def predict_batch(
+        self,
+        images: list[np.ndarray],
+        *,
+        include_unreliable: bool = False,
+        raise_on_core_fail: bool = False,
+    ) -> list[dict]:
+        """Run a single forward pass over a batch of images.
+
+        Returns a list of result dicts with the same keys as `predict()`, plus an
+        additional `error` field that is None on success or a LowConfidenceLandmarkError
+        when the per-image gate would have aborted. Set `raise_on_core_fail=True` to
+        get the same raising behavior as `predict()` (first failure aborts the batch).
+        """
+        if not images:
+            return []
+        tensors: list[torch.Tensor] = []
+        scales: list[tuple[float, float]] = []
+        for img in images:
+            t, sx, sy = self._preprocess(img)
+            tensors.append(t)
+            scales.append((sx, sy))
+        batch = torch.cat(tensors, dim=0).to(self.device)
+        with torch.no_grad():
+            out = self.model(batch).cpu().numpy()  # (B, C, H, W)
+        return _assemble_batch_results(
+            out,
+            scales,
+            landmark_order=self.landmark_order,
+            gate_config=self.gate_config,
+            include_unreliable=include_unreliable,
+            raise_on_core_fail=raise_on_core_fail,
+        )
+
     def _assemble_result(
         self,
         heatmaps: np.ndarray,
@@ -432,6 +465,108 @@ class EnsemblePredictor:
         if image is None:
             raise IOError(f"Failed to load image: {image_path}")
         return self.predict(image, include_unreliable=include_unreliable)
+
+    def predict_batch(
+        self,
+        images: list[np.ndarray],
+        *,
+        include_unreliable: bool = False,
+        raise_on_core_fail: bool = False,
+    ) -> list[dict]:
+        """Batched ensemble prediction: K folds × B images in K forward passes."""
+        if not images:
+            return []
+        first = self._predictors[0]
+        tensors: list[torch.Tensor] = []
+        scales: list[tuple[float, float]] = []
+        for img in images:
+            t, sx, sy = first._preprocess(img)
+            tensors.append(t)
+            scales.append((sx, sy))
+        batch_cpu = torch.cat(tensors, dim=0)
+
+        summed: Optional[np.ndarray] = None
+        for pred in self._predictors:
+            batch = batch_cpu.to(pred.device)
+            with torch.no_grad():
+                out = pred.model(batch).cpu().numpy()
+            summed = out if summed is None else summed + out
+        avg = summed / float(len(self._predictors))
+
+        return _assemble_batch_results(
+            avg,
+            scales,
+            landmark_order=self.landmark_order,
+            gate_config=self.gate_config,
+            include_unreliable=include_unreliable,
+            raise_on_core_fail=raise_on_core_fail,
+        )
+
+
+def _assemble_batch_results(
+    heatmap_batch: np.ndarray,
+    scales: list[tuple[float, float]],
+    *,
+    landmark_order: list[str],
+    gate_config: dict,
+    include_unreliable: bool,
+    raise_on_core_fail: bool,
+) -> list[dict]:
+    """Assemble per-image gate results from a (B, C, H, W) heatmap batch.
+
+    Each result has the same shape as `LandmarkPredictor.predict()` plus an `error`
+    field that is None on success or a `LowConfidenceLandmarkError` instance when
+    `raise_on_core_fail` is False and a core landmark would have aborted the image.
+    """
+    results: list[dict] = []
+    for i, (sx, sy) in enumerate(scales):
+        try:
+            r = _assemble_gate_result(
+                heatmap_batch[i],
+                sx,
+                sy,
+                landmark_order=landmark_order,
+                gate_config=gate_config,
+                include_unreliable=include_unreliable,
+            )
+            r["error"] = None
+            results.append(r)
+        except LowConfidenceLandmarkError as exc:
+            if raise_on_core_fail:
+                raise
+            results.append(
+                {
+                    "landmarks": {},
+                    "confidences": {},
+                    "sharpness": {},
+                    "second_peak_ratio": {},
+                    "reliable": {},
+                    "gate_reason": {},
+                    "heatmaps": heatmap_batch[i],
+                    "error": exc,
+                }
+            )
+    return results
+
+
+def auto_batch_size(num_images: int, *, max_cap: int = 16) -> int:
+    """Heuristic batch size based on available memory and image count.
+
+    Estimates ~12 MB of working memory per image at the model's input resolution
+    (input tensor + heatmap output) and uses up to 25% of available RAM. Falls back
+    to a fixed cap when psutil isn't installed.
+    """
+    if num_images <= 1:
+        return 1
+    bytes_per_image = 12_000_000
+    try:
+        import psutil
+
+        available = psutil.virtual_memory().available
+        max_by_mem = max(1, int(available * 0.25 / bytes_per_image))
+    except ImportError:
+        max_by_mem = max_cap
+    return max(1, min(num_images, max_by_mem, max_cap))
 
 
 def make_predictor(
