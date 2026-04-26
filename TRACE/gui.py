@@ -399,14 +399,28 @@ class TraceWindow(QMainWindow):
         QMessageBox.warning(self, "Parallel workers", self._PARALLEL_WORKERS_WARNING_TEXT)
 
     def _show_workers_warning_info(self):
-        """Open the parallel-workers help dialog: details text + Calibrate panel."""
+        """Open the parallel-workers help dialog: details text + Calibrate panel.
+
+        Styled to match the QMessageBox warning that fires before a multi-worker
+        run — bold message text, constrained width, right-aligned button row.
+        """
+        from PyQt5.QtGui import QFont
+
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Parallel workers")
+        dlg.setMinimumWidth(520)
+        dlg.setMaximumWidth(560)
         layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+
         msg = QLabel(self._PARALLEL_WORKERS_DETAILS_TEXT)
         msg.setWordWrap(True)
+        msg_font = QFont(msg.font())
+        msg_font.setBold(True)
+        msg.setFont(msg_font)
         layout.addWidget(msg)
 
         calib = CalibrateWidget(dlg)
@@ -417,6 +431,7 @@ class TraceWindow(QMainWindow):
         close_row = QHBoxLayout()
         close_row.addStretch()
         close_btn = QPushButton("Close")
+        close_btn.setDefault(True)
         close_btn.clicked.connect(dlg.accept)
         close_row.addWidget(close_btn)
         layout.addLayout(close_row)
@@ -718,6 +733,11 @@ def _apply_dark_palette(app: QApplication):
     p.setColor(QPalette.Disabled, QPalette.Text, QColor(128, 128, 128))
     p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(128, 128, 128))
     app.setPalette(p)
+    # Force tooltips to match the dark dialog look — without this, on macOS
+    # they fall back to the unstyled native popup and ignore the palette.
+    app.setStyleSheet(
+        "QToolTip { background-color: #2d2d2d; color: #d0d0d0; " "border: 1px solid #555555; padding: 4px; }"
+    )
 
 
 def main():
