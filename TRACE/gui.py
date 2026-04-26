@@ -12,6 +12,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from identify_features.config import PipelineConfig
+from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -36,8 +37,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
@@ -138,6 +137,7 @@ class TraceWindow(QMainWindow):
         self.config = PipelineConfig()
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
+        self._gate_override: dict | None = None
         self._workers_warning_shown = False
         self._build_ui()
         self._restore_settings()
@@ -284,8 +284,11 @@ class TraceWindow(QMainWindow):
         self.workers_spin.setRange(1, 32)
         self.workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self.workers_spin.setToolTip(
-            "Number of wings to analyze in parallel during Stage 2 AND batch size for "
-            "the Stage 1 landmark forward pass. Higher = more memory + more throughput."
+            "Number of wings to process in parallel through every stage of the pipeline:\n"
+            "  • Stage 1 — hinge chop and segmentation (per image)\n"
+            "  • Stage 2 — identifyFeatures analysis (per image)\n"
+            "Also sets the GPU batch size for the upfront landmark forward pass.\n"
+            "Higher = more memory + more throughput."
         )
         self.workers_spin.valueChanged.connect(self._on_workers_changed)
         workers_row.addWidget(self.workers_spin, stretch=1)
@@ -405,7 +408,6 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
-
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)
@@ -475,11 +477,13 @@ class TraceWindow(QMainWindow):
             input_path=self.input_edit.text(),
             landmark_model_path=self.lm_edit.text(),
             segmentation_model_path=self.seg_edit.text(),
+            gate_override=self._gate_override,
         )
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
             self._show_vein_tissue = dlg.get_show_vein_tissue()
             self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
+            self._gate_override = dlg.get_gate_override()
             # Keep main-window scale spinner in sync.
             val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
             self.scale_spin.blockSignals(True)
@@ -535,6 +539,12 @@ class TraceWindow(QMainWindow):
         s.setValue("max_workers", self.workers_spin.value())
         s.setValue("show_vein_tissue", self._show_vein_tissue)
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
+        import json as _json
+
+        s.setValue(
+            "gate_override_json",
+            _json.dumps(self._gate_override) if self._gate_override else "",
+        )
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
 
@@ -578,6 +588,14 @@ class TraceWindow(QMainWindow):
         saved_iul = s.value("include_unreliable_landmarks", None)
         if saved_iul is not None:
             self._include_unreliable_landmarks = saved_iul == "true" or saved_iul is True
+        saved_gate = s.value("gate_override_json", "")
+        if saved_gate:
+            try:
+                import json as _json
+
+                self._gate_override = _json.loads(saved_gate)
+            except Exception:
+                self._gate_override = None
         workers_val = s.value("max_workers", None)
         if workers_val is not None:
             try:
@@ -652,6 +670,7 @@ class TraceWindow(QMainWindow):
                 max_workers=self.workers_spin.value(),
                 show_vein_tissue=self._show_vein_tissue,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
+                gate_override=self._gate_override,
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
                 landmark_batch_size=self.workers_spin.value(),

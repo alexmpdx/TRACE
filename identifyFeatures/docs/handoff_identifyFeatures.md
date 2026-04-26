@@ -34,13 +34,12 @@ Stages 1–3 already exist as the `preprocessing` module. Stage 4 is `identifyFe
 | `HingeChopper/` | Blacks out hinge region using landmark coords | CLI only |
 | `modelTOjson/` | Segmentation inference with GeoJSON export | PyQt5 |
 | `preprocessing/` | Orchestrates stages 1–3 | PyQt5 + CLI |
-| `TRACE/` | Master pipeline (currently preprocessing only, analysis TODO) | PyQt5 + CLI |
-| `WingVeinAnalyzer/` | Older vein analysis (spatial-prior based) — being replaced by identifyFeatures | PyQt5 + CLI |
-| `identifyFeatures/` | Landmark-anchored vein identification (the module you're integrating) | **CLI only — no GUI yet** |
+| `TRACE/` | Master pipeline (preprocessing + identifyFeatures) | PyQt5 + CLI |
+| `identifyFeatures/` | Landmark-anchored vein identification (the analysis stage in TRACE) | CLI |
 
 ### What needs to happen
 
-1. Wire `identifyFeatures` as Stage 5 into the TRACE pipeline (replacing or alongside WingVeinAnalyzer)
+1. Continue refining identifyFeatures as TRACE's analysis stage
 2. Build or extend a GUI that covers the full pipeline end-to-end
 3. Make it accessible to bench scientists (biology researchers, not programmers)
 
@@ -52,7 +51,7 @@ Given a pixel-classifier segmentation (vein/intervein GeoJSON polygons) and deep
 
 ### Key design principle
 
-**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, DTip). This inverts the old WingVeinAnalyzer approach of spatial-prior guessing.
+**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, DTip), rather than relying on spatial priors.
 
 ### Performance on current test data
 
@@ -404,15 +403,13 @@ identifyFeatures/
 
 1. **Filenames can start with `-`** (e.g., `-CTRL_PknRNAi_108870_0007`) and one has a spurious space. Handle these in any file-matching logic.
 
-2. **WingVeinAnalyzer is the old approach** — identifyFeatures replaces it. Don't adapt code from WingVeinAnalyzer; use identifyFeatures' API directly.
+2. **Unreliable landmarks (ACV.a, ACV.p, PCV.a, PCV.p)** should never be used as hard constraints — they're fallback only. The reliable landmarks are the 5 junctions.
 
-3. **Unreliable landmarks (ACV.a, ACV.p, PCV.a, PCV.p)** should never be used as hard constraints — they're fallback only. The reliable landmarks are the 5 junctions.
+3. **The AP compartment split** uses L4's bounding box with a distal-end pivot shift of 0.5× median vein width toward the anterior.
 
-4. **The AP compartment split** uses L4's bounding box with a distal-end pivot shift of 0.5× median vein width toward the anterior.
+4. **Pre-commit hooks will reformat your code** — isort and black run automatically. Don't fight them.
 
-5. **Pre-commit hooks will reformat your code** — isort and black run automatically. Don't fight them.
-
-6. **The pre-push hook** blocks pushes if docs are stale. Touch `docs/pipeline_reference.md` and `docs/project_plan.md` (or update them) after modifying `.py` files.
+5. **The pre-push hook** blocks pushes if docs are stale. Touch `docs/pipeline_reference.md` and `docs/project_plan.md` (or update them) after modifying `.py` files.
 
 7. **ProcessPoolExecutor** is used for batch parallelism. WingResult must remain picklable.
 

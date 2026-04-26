@@ -20,7 +20,7 @@ Last updated: 2026-04-20 (Tier 2c graph-reach + chirality-aware AP axis)
 
 ## Context
 
-Landmark-anchored replacement for WingVeinAnalyzer. Vein identity flows outward from 6 reliable anatomical junction landmarks. Handles missing, partial, and ectopic veins in Drosophila melanogaster wings.
+Landmark-anchored vein identification. Vein identity flows outward from 6 reliable anatomical junction landmarks. Handles missing, partial, and ectopic veins in Drosophila melanogaster wings.
 
 **Key design decisions established during implementation:**
 - Voronoi partition of intervein polygons fails for vein centerlines — vein mask must be skeletonized directly
@@ -226,7 +226,6 @@ For each intervein polygon from the detection GeoJSON (after the splitter has pr
 - Split merged polygons along extended vein trajectories using `shapely.ops.split`
 - Extend partial longitudinals to wing outline for proper region bounding
 
-**Note:** The previous WingVeinAnalyzer had `partition_by_vein_extension()` and `_clip_regions_by_extension()` that implemented vein-extension-based region splitting. This logic can be adapted.
 
 ### Step 8: Flag Ectopic Veins — DONE
 

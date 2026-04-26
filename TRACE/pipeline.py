@@ -241,6 +241,7 @@ def trace_folder(
     progress_callback=None,
     include_unreliable_landmarks: bool = False,
     landmark_batch_size: Optional[int] = None,
+    gate_override: Optional[dict] = None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -255,9 +256,11 @@ def trace_folder(
         keep_intermediates: If True, keep preprocessing files in output/intermediates/.
         outputs: Which Stage 2 outputs to produce. Keys from OUTPUT_TYPES.
             None means all outputs. Empty set skips Stage 2 entirely.
-        max_workers: Number of Stage 2 wings to analyze in parallel. Stage 1
-            (GPU preprocessing) always runs sequentially regardless of this
-            setting. Values <=1 run Stage 2 sequentially.
+        max_workers: Number of wings to process in parallel. Applies to BOTH
+            Stage 1 (preprocessing — hinge chop and segmentation per image)
+            and Stage 2 (identifyFeatures analysis). The landmark forward pass
+            is still GPU-batched in one call upfront via landmark_batch_size.
+            Values <=1 run everything sequentially.
         show_vein_tissue: If True, the per-wing overlay PNG fills buffered vein
             tissue polygons. Default False draws skeleton centerlines only.
         progress_callback: callable(image_index, total, image_name, stage, detail).
@@ -268,6 +271,9 @@ def trace_folder(
             `max_workers` so the GUI's Workers spinbox controls both Stage 2 parallelism
             and Stage 1 batching. 1 disables batching, larger values trade memory for
             throughput.
+        gate_override: Optional confidence-gate override applied at predictor construction
+            time. Same shape as the `confidence:` block in `configs/default.yaml` —
+            populated by the GUI's Landmarks tab or by `--gate-override-yaml` on the CLI.
 
     Returns:
         List of TraceResult, one per input image.
@@ -311,6 +317,7 @@ def trace_folder(
             progress_callback=progress_callback,
             include_unreliable_landmarks=include_unreliable_landmarks,
             landmark_batch_size=effective_batch,
+            gate_override=gate_override,
         )
     finally:
         if temp_dir_obj is not None:
@@ -331,6 +338,7 @@ def _run(
     progress_callback,
     include_unreliable_landmarks: bool = False,
     landmark_batch_size: Optional[int] = None,
+    gate_override: Optional[dict] = None,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -361,6 +369,8 @@ def _run(
         progress_callback=_preproc_progress,
         include_unreliable_landmarks=include_unreliable_landmarks,
         landmark_batch_size=landmark_batch_size,
+        gate_override=gate_override,
+        max_workers=max_workers,
     )
 
     results: list[TraceResult] = []

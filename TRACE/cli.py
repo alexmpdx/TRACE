@@ -123,6 +123,16 @@ def parse_args(argv=None):
             "1 disables batching, larger values trade memory for throughput."
         ),
     )
+    parser.add_argument(
+        "--gate-override-yaml",
+        type=Path,
+        default=None,
+        help=(
+            "YAML file with the same shape as the `confidence:` block in "
+            "configs/default.yaml. Applied as a confidence-gate override at predictor "
+            "construction time. Produced by the GUI's Landmarks tab Export button."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -241,7 +251,6 @@ def main(argv=None):
 
     # Build PipelineConfig: load from file if given, then apply --scale override.
     from identify_features.config import PipelineConfig
-
     from TRACE.config_io import load_config
 
     if args.config is not None:
@@ -263,6 +272,20 @@ def main(argv=None):
         print(f"Error: --workers must be >= 1, got {args.workers}", file=sys.stderr)
         sys.exit(1)
 
+    gate_override = None
+    if args.gate_override_yaml is not None:
+        if not args.gate_override_yaml.exists():
+            print(f"Error: --gate-override-yaml not found: {args.gate_override_yaml}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            import yaml as _yaml
+
+            gate_doc = _yaml.safe_load(args.gate_override_yaml.read_text()) or {}
+        except Exception as e:
+            print(f"Error: failed to parse {args.gate_override_yaml}: {e}", file=sys.stderr)
+            sys.exit(1)
+        gate_override = gate_doc.get("confidence", gate_doc)
+
     results = trace_folder(
         input_dir=args.input,
         output_dir=args.output,
@@ -277,6 +300,7 @@ def main(argv=None):
         progress_callback=_progress,
         include_unreliable_landmarks=args.include_unreliable_landmarks,
         landmark_batch_size=(args.landmark_batch_size or None),
+        gate_override=gate_override,
     )
 
     # Summary

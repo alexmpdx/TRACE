@@ -2,9 +2,11 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import yaml
+
 from landmark_locator.inference.predict import (
     DEFAULT_GATE_CONFIG,
     LandmarkPredictor,
@@ -12,6 +14,47 @@ from landmark_locator.inference.predict import (
     _deep_merge,
     predict_ensemble,
 )
+
+_IMAGE_EXTS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"}
+
+
+def _discover_images(folder: Path) -> list[Path]:
+    """List supported images in a folder, skipping hidden / resource-fork files."""
+    out = []
+    for f in sorted(folder.iterdir()):
+        if f.name.startswith(".") or f.name.startswith("._"):
+            continue
+        if f.suffix.lower() in _IMAGE_EXTS:
+            out.append(f)
+    return out
+
+
+def _result_to_geojson(result: dict, internal_to_geojson: dict[str, str]) -> dict:
+    """Build a GeoJSON FeatureCollection from a predictor result.
+
+    Matches the schema produced by preprocessing.pipeline.landmarks_to_geojson:
+    each Point feature carries its classification name plus gate metadata.
+    """
+    features = []
+    landmarks = result.get("landmarks", {}) or {}
+    for internal_name, (x, y) in landmarks.items():
+        gj_name = internal_to_geojson.get(internal_name, internal_name)
+        props = {
+            "classification": {"name": gj_name},
+            "reliable": bool(result.get("reliable", {}).get(internal_name, True)),
+            "gate_reason": result.get("gate_reason", {}).get(internal_name, ""),
+            "confidence": float(result.get("confidences", {}).get(internal_name, 0.0)),
+            "sharpness": float(result.get("sharpness", {}).get(internal_name, 0.0)),
+            "second_peak_ratio": float(result.get("second_peak_ratio", {}).get(internal_name, 0.0)),
+        }
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [float(x), float(y)]},
+                "properties": props,
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
 
 
 def _parse_tier(tier_args: list[str] | None) -> dict:
@@ -104,7 +147,22 @@ def main() -> None:
         help="Directory with fold checkpoints for ensemble prediction",
     )
     parser.add_argument("--device", type=str, default=None, help="Device: mps, cuda, cpu")
-    parser.add_argument("--output", type=Path, default=None, help="Output JSON path")
+    parser.add_argument("--output", type=Path, default=None, help="Output JSON path (single-output mode only)")
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help=(
+            "Folder-batch mode. The single positional `images` argument must be a directory; "
+            "every supported image in it is processed and a per-image *_landmarks.geojson is "
+            "written to --output-dir. Supersedes --output."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Output directory for per-image GeoJSONs in --batch mode (created if missing).",
+    )
     parser.add_argument(
         "--include-unreliable",
         action="store_true",
@@ -155,6 +213,19 @@ def main() -> None:
     if not args.checkpoint and not args.checkpoint_dir:
         parser.error("Provide --checkpoint or --checkpoint-dir")
 
+    # Resolve image inputs: in --batch mode, expand the folder into a list.
+    if args.batch:
+        if len(args.images) != 1 or not args.images[0].is_dir():
+            parser.error("--batch requires exactly one positional argument that is a directory")
+        if args.output_dir is None:
+            parser.error("--batch requires --output-dir")
+        image_paths = _discover_images(args.images[0])
+        if not image_paths:
+            parser.error(f"No supported images found in {args.images[0]}")
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        image_paths = list(args.images)
+
     # Load a peek of the checkpoint's existing gate config so we can apply core-set edits on top.
     import torch
 
@@ -179,7 +250,7 @@ def main() -> None:
 
     # Load all images first, dropping any that fail to read.
     loaded: list[tuple[Path, "np.ndarray"]] = []
-    for img_path in args.images:
+    for img_path in image_paths:
         image = imread_any(img_path)
         if image is None:
             print(f"Warning: could not load {img_path}, skipping")
@@ -194,7 +265,13 @@ def main() -> None:
     if args.batch_size == 0:
         print(f"Auto-selected batch size: {batch_size} (for {len(loaded)} image(s))")
 
-    for chunk_start in range(0, len(loaded), batch_size):
+    total = len(loaded)
+    internal_to_geojson = {v: k for k, v in (predictor.geojson_to_landmark or {}).items()}
+    succeeded = 0
+    failed = 0
+    done = 0
+
+    for chunk_start in range(0, total, batch_size):
         chunk = loaded[chunk_start : chunk_start + batch_size]
         chunk_paths = [p for p, _ in chunk]
         chunk_imgs = [im for _, im in chunk]
@@ -204,14 +281,27 @@ def main() -> None:
             raise_on_core_fail=False,
         )
         for img_path, result in zip(chunk_paths, batch_results):
+            done += 1
             err = result.get("error")
             if isinstance(err, LowConfidenceLandmarkError):
-                print(f"ABORT {img_path}: {err}")
+                print(f"[{done}/{total}] {img_path.name}: ABORT (low-confidence core landmark) — {err}")
                 results[str(img_path)] = {"error": "low_confidence_core", "failures": err.failures}
+                failed += 1
                 continue
             results[str(img_path)] = _shape_result(result)
             if args.print_gate:
                 _print_gate(img_path, result, predictor.gate_config)
+            if args.batch:
+                gj = _result_to_geojson(result, internal_to_geojson)
+                out_path = args.output_dir / f"{img_path.stem}_landmarks.geojson"
+                out_path.write_text(json.dumps(gj))
+                print(f"[{done}/{total}] {img_path.name}: ok → {out_path.name}")
+            succeeded += 1
+
+    if args.batch:
+        print(f"\nDone: {succeeded} succeeded, {failed} failed out of {total}.")
+        # In batch mode, --output (single JSON dump) is intentionally ignored.
+        return
 
     output_json = json.dumps(results, indent=2)
     if args.output:

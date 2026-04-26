@@ -1,8 +1,0 @@
-output/
-input pics/
-trained_model/
-landmarkPoints/
-__pycache__/
-build/
-dist/
-*.spec.bak

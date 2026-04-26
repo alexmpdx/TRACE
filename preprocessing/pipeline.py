@@ -11,7 +11,9 @@ Each stage can be run independently or as part of the full pipeline.
 
 import json
 import shutil
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -33,14 +35,29 @@ def discover_images(folder: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Stage 1: Landmark detection
 # ---------------------------------------------------------------------------
-def _predictor_from_cache(checkpoint_path: Path, predictor_cache: dict):
-    """Lazily build/cache a predictor for the given checkpoint or fold folder."""
+def _predictor_from_cache(
+    checkpoint_path: Path,
+    predictor_cache: dict,
+    confidence_override: Optional[dict] = None,
+):
+    """Lazily build/cache a predictor for the given checkpoint or fold folder.
+
+    Cache key is `(checkpoint_path, override_signature)` so swapping the override
+    rebuilds the predictor — necessary because confidence_override is applied at
+    construction time and stored on the predictor's gate_config.
+    """
     from landmark_locator import make_predictor
 
     cp_str = str(checkpoint_path)
-    if "predictor" not in predictor_cache or predictor_cache.get("checkpoint") != cp_str:
-        predictor_cache["predictor"] = make_predictor(checkpoint_path)
-        predictor_cache["checkpoint"] = cp_str
+    override_sig = json.dumps(confidence_override or {}, sort_keys=True)
+    cache_key = (cp_str, override_sig)
+    if predictor_cache.get("key") != cache_key:
+        lock = predictor_cache.setdefault("_lock", threading.Lock())
+        with lock:
+            if predictor_cache.get("key") != cache_key:
+                predictor_cache["predictor"] = make_predictor(checkpoint_path, confidence_override=confidence_override)
+                predictor_cache["key"] = cache_key
+                predictor_cache["checkpoint"] = cp_str  # back-compat for callers that read this
     return predictor_cache["predictor"]
 
 
@@ -70,6 +87,7 @@ def predict_landmarks_for_paths(
     *,
     include_unreliable_landmarks: bool = False,
     batch_size: Optional[int] = None,
+    confidence_override: Optional[dict] = None,
 ) -> dict:
     """Predict landmarks for many images in batches.
 
@@ -87,7 +105,7 @@ def predict_landmarks_for_paths(
 
     if predictor_cache is None:
         predictor_cache = {}
-    predictor = _predictor_from_cache(checkpoint_path, predictor_cache)
+    predictor = _predictor_from_cache(checkpoint_path, predictor_cache, confidence_override=confidence_override)
 
     out: dict = {}
     if not paths:
@@ -206,10 +224,14 @@ def run_segmentation(image_path: Path, model_dir: Path, device, model_cache: dic
 
     md_str = str(model_dir)
     if "model" not in model_cache or model_cache.get("model_dir") != md_str:
-        model, metadata = load_model(md_str, device)
-        model_cache["model"] = model
-        model_cache["metadata"] = metadata
-        model_cache["model_dir"] = md_str
+        # dict.setdefault is atomic under the GIL — safe for lazy lock creation.
+        lock = model_cache.setdefault("_lock", threading.Lock())
+        with lock:
+            if "model" not in model_cache or model_cache.get("model_dir") != md_str:
+                model, metadata = load_model(md_str, device)
+                model_cache["model"] = model
+                model_cache["metadata"] = metadata
+                model_cache["model_dir"] = md_str
 
     model = model_cache["model"]
     metadata = model_cache["metadata"]
@@ -407,6 +429,8 @@ def process_folder(
     progress_callback=None,
     include_unreliable_landmarks: bool = False,
     landmark_batch_size: Optional[int] = None,
+    gate_override: Optional[dict] = None,
+    max_workers: int = 1,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -416,6 +440,10 @@ def process_folder(
           - None  → auto-pick via landmark_locator.auto_batch_size (single-image fallback).
           - 1     → run landmarks per-image (original behavior).
           - >1    → batch the landmark forward pass across this many images.
+        max_workers: per-image parallelism for hinge / segmentation. The landmark
+            stage stays batched (one forward pass) regardless. Each worker holds
+            an image and a partial GeoJSON in memory; pick a value compatible
+            with system RAM. Values <= 1 keep the original sequential loop.
     """
     if device is None:
         device = _auto_device()
@@ -444,6 +472,7 @@ def process_folder(
                 predictor_cache,
                 include_unreliable_landmarks=include_unreliable_landmarks,
                 batch_size=landmark_batch_size,
+                confidence_override=gate_override,
             )
         except Exception as e:
             # Fail soft — fall back to per-image predict in process_single_image.
@@ -451,9 +480,31 @@ def process_folder(
                 progress_callback(0, len(images), "(batch)", f"batch landmarks failed, falling back per-image: {e}")
             prefetched = None
 
-    for i, img_path in enumerate(images):
-        if progress_callback:
-            progress_callback(i, len(images), img_path.name, "starting")
+    # Pre-warm the segmentation model cache so parallel workers don't race on first init
+    # (the lock inside run_segmentation handles correctness; pre-warming avoids one
+    # worker doing the slow load while the others stall waiting on the lock).
+    if stages[2] and segmentation_model_dir is not None:
+        from modeltojson import load_model as _load_seg_model
+
+        try:
+            _model, _meta = _load_seg_model(str(segmentation_model_dir), device)
+            model_cache["model"] = _model
+            model_cache["metadata"] = _meta
+            model_cache["model_dir"] = str(segmentation_model_dir)
+        except Exception:
+            # Non-fatal — workers will lazy-load and just take longer on the first call.
+            pass
+
+    progress_lock = threading.Lock()
+
+    def _emit(idx: int, name: str, msg: str):
+        if not progress_callback:
+            return
+        with progress_lock:
+            progress_callback(idx, len(images), name, msg)
+
+    def _process_one(i: int, img_path: Path) -> PipelineResult:
+        _emit(i, img_path.name, "starting")
         try:
             result = process_single_image(
                 image_path=img_path,
@@ -465,25 +516,31 @@ def process_folder(
                 model_cache=model_cache,
                 device=device,
                 keep_chopped=keep_chopped,
-                progress_callback=lambda stage, detail: (
-                    progress_callback(i, len(images), img_path.name, f"{stage}: {detail}")
-                    if progress_callback
-                    else None
-                ),
+                progress_callback=lambda stage, detail: _emit(i, img_path.name, f"{stage}: {detail}"),
                 include_unreliable_landmarks=include_unreliable_landmarks,
                 prefetched_landmarks=prefetched,
             )
-            results.append(result)
-            if progress_callback:
-                progress_callback(i, len(images), img_path.name, "done")
+            _emit(i, img_path.name, "done")
+            return result
         except Exception as e:
             from landmark_locator import LowConfidenceLandmarkError
 
             stage = "landmarks" if isinstance(e, LowConfidenceLandmarkError) else None
             err_msg = str(e) if isinstance(e, LowConfidenceLandmarkError) else f"{e}\n{traceback.format_exc()}"
-            result = PipelineResult(image_path=img_path, error=err_msg, error_stage=stage)
-            results.append(result)
-            if progress_callback:
-                progress_callback(i, len(images), img_path.name, f"error: {e}")
+            _emit(i, img_path.name, f"error: {e}")
+            return PipelineResult(image_path=img_path, error=err_msg, error_stage=stage)
+
+    workers = max(1, int(max_workers))
+    if workers <= 1:
+        for i, img_path in enumerate(images):
+            results.append(_process_one(i, img_path))
+    else:
+        # Pre-allocate so we can fill by original index → preserves input order.
+        results = [None] * len(images)  # type: ignore[list-item]
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="preproc") as executor:
+            futures = {executor.submit(_process_one, i, p): i for i, p in enumerate(images)}
+            for fut in as_completed(futures):
+                i = futures[fut]
+                results[i] = fut.result()
 
     return results

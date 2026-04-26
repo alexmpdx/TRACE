@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-HingeChopper is a standalone CLI tool that blacks out the hinge (proximal) region of Drosophila wing images. It uses landmark points from GeoJSON files to construct a hinge line, then masks the proximal side to black. Part of the broader mapThemVeins project but has no dependency on WingVeinAnalyzer.
+HingeChopper is a standalone CLI tool that blacks out the hinge (proximal) region of Drosophila wing images. It uses landmark points from GeoJSON files to construct a hinge line, then masks the proximal side to black. Part of the broader mapThemVeins project; consumed by `preprocessing` as Stage 2.
 
 ## Running
 

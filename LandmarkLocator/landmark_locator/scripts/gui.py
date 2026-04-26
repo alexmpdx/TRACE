@@ -14,16 +14,11 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
+
 from landmark_locator.data.dataset import _normalize_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
-)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -63,6 +58,13 @@ from PyQt5.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
+)
+
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
 )
 
 # ---------------------------------------------------------------------------
@@ -224,7 +226,7 @@ def heatmap_to_pixmap(
 
 
 # ---------------------------------------------------------------------------
-# ImageWidget (inline copy from WingVeinAnalyzer/gui/image_widget.py)
+# ImageWidget
 # ---------------------------------------------------------------------------
 class ImageWidget(QGraphicsView):
     """A QGraphicsView that displays a BGR numpy array with zoom and pan."""
@@ -876,30 +878,37 @@ _STRICT_DEFAULTS = {"peak": 0.20, "sharpness": 1.25, "second_peak_ratio": 0.65}
 _PERMISSIVE_DEFAULTS = {"peak": 0.10, "sharpness": 1.15, "second_peak_ratio": 0.80}
 
 
-class GateConfigDialog(QDialog):
-    """Per-landmark threshold tier + abort checkbox editor."""
+class GateConfigPanel(QWidget):
+    """Reusable panel with per-landmark tier + threshold editor and YAML import/export.
 
-    def __init__(self, parent: "LandmarkGUI", gate_config: dict, landmark_order: list[str]) -> None:
+    Embeddable in any QDialog or QTabWidget; emits no signals on its own — read state
+    via `result_override()` when the host dialog/window accepts.
+    """
+
+    def __init__(self, gate_config: dict, landmark_order: list[str], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Confidence Gate Configuration")
-        self.resize(780, 480)
         self._landmark_order = list(landmark_order)
-        # Deep-copy so Cancel discards changes
+        # Deep-copy so the host can revert by discarding the panel.
         self._cfg = json.loads(json.dumps(gate_config))
-        # Per-row widgets keyed by landmark name
         self._rows: dict[str, dict] = {}
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
         hint = QLabel(
             "Per-landmark confidence gate. 'Permissive' uses the global defaults; "
             "'Strict' clamps tighter thresholds (crossvein presets); 'Custom' lets you "
             "set each metric. Check 'Abort' to fail the whole image when this landmark misses."
         )
         hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aaa; padding: 0; margin: 0;")
+        hint.setSizePolicy(hint.sizePolicy().horizontalPolicy(), hint.sizePolicy().Maximum)
         root.addWidget(hint)
 
-        # Header row
         grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setVerticalSpacing(2)
+        grid.setHorizontalSpacing(8)
         headers = ["Landmark", "Tier", "peak ≥", "sharp ≥", "sp_ratio ≤", "Abort"]
         for col, h in enumerate(headers):
             lbl = QLabel(h)
@@ -939,7 +948,6 @@ class GateConfigDialog(QDialog):
             spr_spin.setValue(float(cur_spr))
 
             if has_override:
-                # Detect strict tier by equality to strict defaults
                 if (
                     peak_pl.get(name) == _STRICT_DEFAULTS["peak"]
                     and sharp_pl.get(name) == _STRICT_DEFAULTS["sharpness"]
@@ -978,11 +986,6 @@ class GateConfigDialog(QDialog):
         buttons_row.addWidget(btn_save)
         buttons_row.addStretch(1)
         root.addLayout(buttons_row)
-
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        root.addWidget(bb)
 
     def _apply_tier_to_row(self, name: str, tier: str) -> None:
         row = self._rows[name]
@@ -1059,6 +1062,51 @@ class GateConfigDialog(QDialog):
                 row["combo"].setCurrentText("Permissive")
             row["abort"].setChecked(name in core)
             self._sync_row_editability(name)
+
+
+def read_gate_config_from_checkpoint(path: Path) -> tuple[dict, list[str]]:
+    """Inspect a checkpoint file (or fold folder) and return (gate_config, landmark_order).
+
+    Used by callers that want to populate a `GateConfigPanel` without instantiating a
+    full predictor — e.g. the TRACE settings dialog.
+    """
+    import torch
+
+    from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge, _find_fold_checkpoints
+
+    p = Path(path)
+    target = p
+    if p.is_dir():
+        ckpts = _find_fold_checkpoints(p)
+        if not ckpts:
+            raise FileNotFoundError(f"No best_fold*.pt in {p}")
+        target = ckpts[0]
+    ckpt = torch.load(target, map_location="cpu", weights_only=False)
+    cfg = ckpt.get("config", {}) or {}
+    gate_config = _deep_merge(DEFAULT_GATE_CONFIG, cfg.get("confidence", {}) or {})
+    landmark_order = list(cfg.get("heatmap", {}).get("landmark_order", []) or [])
+    return gate_config, landmark_order
+
+
+class GateConfigDialog(QDialog):
+    """Modal wrapper around `GateConfigPanel` for the LandmarkLocator inspection GUI."""
+
+    def __init__(self, parent: "LandmarkGUI", gate_config: dict, landmark_order: list[str]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Confidence Gate Configuration")
+        self.resize(780, 480)
+
+        root = QVBoxLayout(self)
+        self._panel = GateConfigPanel(gate_config, landmark_order, self)
+        root.addWidget(self._panel)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+
+    def result_override(self) -> dict:
+        return self._panel.result_override()
 
 
 # ---------------------------------------------------------------------------

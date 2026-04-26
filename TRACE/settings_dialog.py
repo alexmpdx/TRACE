@@ -41,8 +41,24 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from TRACE.pipeline import DEFAULT_MAX_WORKERS
+
+
+def _merge_gate_override(base: dict, override: dict) -> dict:
+    """Shallow-merge for the gate-config dict shape used by GateConfigPanel."""
+    import copy
+
+    out = copy.deepcopy(base)
+    for section in ("peak", "sharpness", "second_peak_ratio"):
+        if section in override and "per_landmark" in override[section]:
+            out.setdefault(section, {}).setdefault("per_landmark", {}).update(override[section]["per_landmark"])
+        if section in override and "global" in override[section]:
+            out.setdefault(section, {})["global"] = override[section]["global"]
+    if "core_landmarks" in override:
+        out["core_landmarks"] = list(override["core_landmarks"])
+    if "second_peak_suppression_radius_px" in override:
+        out["second_peak_suppression_radius_px"] = override["second_peak_suppression_radius_px"]
+    return out
 
 
 class PipelineConfigDialog(QDialog):
@@ -67,6 +83,7 @@ class PipelineConfigDialog(QDialog):
         input_path: str = "",
         landmark_model_path: str = "",
         segmentation_model_path: str = "",
+        gate_override: dict | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -75,6 +92,8 @@ class PipelineConfigDialog(QDialog):
         self._calib_input_path = input_path
         self._calib_lm_path = landmark_model_path
         self._calib_seg_path = segmentation_model_path
+        self._gate_panel = None  # populated by _build_landmarks_tab when a model is loaded
+        self._initial_gate_override = gate_override
         # (kind, widget, extra) tuples indexed by PipelineConfig field name.
         self._widgets: dict[str, tuple[str, Any, Any]] = {}
         self._build_ui()
@@ -140,6 +159,7 @@ class PipelineConfigDialog(QDialog):
         layout.addWidget(tabs, stretch=1)
 
         tabs.addTab(self._build_general_tab(), "General")
+        tabs.addTab(self._build_landmarks_tab(), "Landmarks")
         tabs.addTab(self._build_skel_pruning_tab(), "Skeletonization && Pruning")
         tabs.addTab(self._build_bridging_tab(), "Bridging")
         tabs.addTab(self._build_tracing_tab(), "Tracing")
@@ -192,8 +212,9 @@ class PipelineConfigDialog(QDialog):
         self._workers_spin.setRange(1, 32)
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._workers_spin.setToolTip(
-            "Number of wings to analyze in parallel during Stage 2.\n"
-            "Stage 1 (GPU preprocessing) always runs sequentially."
+            "Number of wings to process in parallel.\n"
+            "Applies to both Stage 1 (hinge chop, segmentation) and Stage 2 (analysis).\n"
+            "The landmark forward pass is GPU-batched once upfront."
         )
         form.addRow("Workers", self._workers_spin)
         gb_layout.addLayout(form)
@@ -214,6 +235,51 @@ class PipelineConfigDialog(QDialog):
 
     def get_include_unreliable_landmarks(self) -> bool:
         return self._include_unreliable_landmarks_chk.isChecked()
+
+    def get_gate_override(self) -> dict | None:
+        """Confidence-gate override built from the Landmarks tab, or None if untouched."""
+        if self._gate_panel is None:
+            return self._initial_gate_override
+        return self._gate_panel.result_override()
+
+    def _build_landmarks_tab(self) -> QWidget:
+        """Confidence-gate editor tab. Requires a landmark model path; otherwise placeholder."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        if not self._calib_lm_path:
+            msg = QLabel(
+                "Select a landmark model (.pt or fold folder) on the main window first, "
+                "then reopen this dialog to edit per-landmark gate thresholds."
+            )
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color: #aaa; padding: 12px;")
+            layout.addWidget(msg)
+            layout.addStretch()
+            return w
+
+        try:
+            from landmark_locator.scripts.gui import GateConfigPanel, read_gate_config_from_checkpoint
+
+            gate_config, landmark_order = read_gate_config_from_checkpoint(Path(self._calib_lm_path))
+        except Exception as exc:
+            err = QLabel(f"Could not read gate config from {self._calib_lm_path}: {exc}")
+            err.setWordWrap(True)
+            err.setStyleSheet("color: #f88; padding: 12px;")
+            layout.addWidget(err)
+            layout.addStretch()
+            return w
+
+        # Merge any persisted GUI override on top so the panel shows the user's last edits.
+        if self._initial_gate_override:
+            gate_config = _merge_gate_override(gate_config, self._initial_gate_override)
+
+        self._gate_panel = GateConfigPanel(gate_config, landmark_order, w)
+        layout.addWidget(self._gate_panel)
+        layout.addStretch(1)
+        return w
 
     def _build_skel_pruning_tab(self) -> QWidget:
         w = QWidget()

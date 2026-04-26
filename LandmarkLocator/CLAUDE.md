@@ -1,10 +1,10 @@
 # LandmarkLocator — Claude Code Project Instructions
 
 ## Project Purpose
-A deep learning sub-project within the mapThemVeins suite. Trains a heatmap-based landmark detection model to locate anatomical keypoints in *Drosophila* wing brightfield images — hinge landmarks (subcostal break, alula notch, L1/Rs junction, L4/L5 junction) and wing tip (L3 at distal edge). These landmarks define the hinge line and wing length, replacing fragile geometry-based heuristics in WingVeinAnalyzer.
+A deep learning sub-project within the mapThemVeins suite. Trains a heatmap-based landmark detection model to locate anatomical keypoints in *Drosophila* wing brightfield images — hinge landmarks (subcostal break, alula notch, L1/Rs junction, L4/L5 junction) and wing tip (L3 at distal edge). These landmarks define the hinge line and wing length, and anchor downstream vein identification in `identifyFeatures`.
 
-## Relationship to WingVeinAnalyzer
-This project is a sibling to `../WingVeinAnalyzer/`. It shares the same test images and integrates back into `wing_geometry.py` by providing a model-based replacement for `detect_hinge_landmarks()`. The two projects share no code at runtime — LandmarkLocator produces a trained model that WingVeinAnalyzer loads for inference.
+## Relationship to other modules
+LandmarkLocator produces a trained model that `preprocessing` loads as Stage 1, then passes the resulting landmarks GeoJSON to `HingeChopper` (Stage 2) and `identifyFeatures` (the analysis stage in TRACE). LandmarkLocator imports nothing from sibling modules at runtime.
 
 ## Architecture
 Single-stage pipeline: full-wing heatmap regression (no canonicalization or cropping). ResNet18-encoder U-Net predicts one Gaussian heatmap per landmark directly on the resized input image.
