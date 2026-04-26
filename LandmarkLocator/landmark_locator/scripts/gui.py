@@ -14,11 +14,16 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
-
 from landmark_locator.data.dataset import _normalize_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
+)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -39,29 +44,25 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QProxyStyle,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
     QSplitter,
     QStatusBar,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
     QWidget,
-)
-
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
 )
 
 # ---------------------------------------------------------------------------
@@ -111,6 +112,29 @@ def _make_qcolors(names: list[str]) -> dict[str, QColor]:
     """Generate QColor map for a list of landmark names."""
     bgr_colors = generate_landmark_colors(names)
     return {name: QColor(bgr[2], bgr[1], bgr[0]) for name, bgr in bgr_colors.items()}
+
+
+class _OutlinedCheckBoxStyle(QProxyStyle):
+    """Proxy style that paints a light outline around every checkbox indicator.
+
+    Overlays the outline after Qt's native indicator is drawn, so the native
+    checkmark is preserved. Applied globally via QMainWindow.setStyle().
+    """
+
+    _OUTLINE = QColor("#888888")
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        super().drawPrimitive(element, option, painter, widget)
+        if element in (QStyle.PE_IndicatorCheckBox, QStyle.PE_IndicatorItemViewItemCheck):
+            painter.save()
+            pen = painter.pen()
+            pen.setColor(self._OUTLINE)
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            rect = option.rect.adjusted(0, 0, -1, -1)
+            painter.drawRect(rect)
+            painter.restore()
 
 
 # ---------------------------------------------------------------------------
@@ -265,17 +289,45 @@ class ImageWidget(QGraphicsView):
 class LegendWidget(QWidget):
     """Color legend for landmark types."""
 
+    labels_toggled = pyqtSignal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._landmark_order: list[str] = []
         self._qcolors: dict[str, QColor] = {}
         self.setFixedHeight(50)
+        # Overlay-labels toggle sits next to the painter-drawn "Legend" title.
+        # Indicator styling comes from the main window's global QCheckBox stylesheet
+        # so this checkbox matches every other one in the app.
+        self._labels_chk = QCheckBox(self)
+        self._labels_chk.setToolTip("Draw landmark name labels next to each point on the overlay.")
+        self._labels_chk.toggled.connect(self.labels_toggled.emit)
+        self._labels_chk.adjustSize()
+        self._labels_chk.raise_()
+        self._labels_chk.show()
+        self._position_labels_chk()
+
+    def labels_enabled(self) -> bool:
+        return self._labels_chk.isChecked()
+
+    def resizeEvent(self, event) -> None:
+        self._position_labels_chk()
+        super().resizeEvent(event)
+
+    def _position_labels_chk(self) -> None:
+        # Anchor top-right, level with the "Legend" title drawn at y~5.
+        hint = self._labels_chk.sizeHint()
+        w = hint.width() if hint.width() > 0 else 18
+        h = hint.height() if hint.height() > 0 else 18
+        self._labels_chk.setGeometry(max(0, self.width() - w - 8), 4, w, h)
+        self._labels_chk.raise_()
 
     def set_landmarks(self, landmark_order: list[str]) -> None:
         """Update the legend with a new set of landmarks."""
         self._landmark_order = landmark_order
         self._qcolors = _make_qcolors(landmark_order)
         self.setFixedHeight(len(landmark_order) * 22 + 50)
+        self._position_labels_chk()
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -393,6 +445,23 @@ class HeatmapPanel(QScrollArea):
     def set_gt_dir_label(self, text: str) -> None:
         """Update the GT directory label."""
         self._gt_dir_label.setText(text)
+
+    def mount_opacity_controls(self, slider: QSlider, value_label: QLabel) -> None:
+        """Insert an Opacity slider row directly below the color gradient bar.
+
+        Layout order at call time is: [gt_dir_label, show_gt, gradient_bar, stretch].
+        We insert at index 3 so the row sits below the gradient and above the
+        per-landmark thumbnails that get appended later by set_landmarks().
+        """
+        row = QHBoxLayout()
+        opacity_lbl = QLabel("Opacity:")
+        opacity_lbl.setStyleSheet("color: #aaa; font-size: 10px;")
+        row.addWidget(opacity_lbl)
+        slider.setParent(self._container)
+        row.addWidget(slider)
+        value_label.setParent(self._container)
+        row.addWidget(value_label)
+        self._layout.insertLayout(3, row)
 
     def set_landmarks(self, landmark_order: list[str]) -> None:
         """Rebuild heatmap thumbnail slots for a new set of landmarks."""
@@ -767,11 +836,12 @@ def _draw_gate_overlay(
     image: np.ndarray,
     prediction: dict,
     landmark_order: list[str],
+    size_scale: float = 1.0,
 ) -> np.ndarray:
     """Ring each predicted landmark in green (pass) or red (fail).
 
-    The numeric gate details live in the info table — the overlay just gives an
-    at-a-glance pass/fail for each landmark on the image.
+    `size_scale` mirrors the one passed to draw_landmarks_on_image so the ring stays
+    consistent with the dot size at any user-chosen overlay size.
     """
     vis = image.copy()
     landmarks = prediction.get("landmarks", {})
@@ -779,11 +849,12 @@ def _draw_gate_overlay(
 
     h, w = vis.shape[:2]
     base = min(h, w)
-    # Ring sits just outside the landmark dot drawn by draw_landmarks_on_image
-    # (radius ~= base/500 there). Add a small gap, then outline.
-    dot_radius = max(4, int(base / 500))
-    ring_radius = dot_radius + max(2, int(base / 800))
-    thick = max(2, int(round(base / 1200.0)))
+    # Quadratic response matches draw_landmarks_on_image so the ring grows and
+    # shrinks in lockstep with the dot it's framing.
+    dot_scale = size_scale * size_scale
+    dot_radius = max(2, int(base / 500 * dot_scale))
+    ring_radius = dot_radius + max(2, int(base / 800 * dot_scale))
+    thick = max(2, int(round(base / 1200.0 * dot_scale)))
 
     color_ok = (0, 220, 0)
     color_fail = (0, 0, 255)
@@ -1000,6 +1071,11 @@ class LandmarkGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("LandmarkLocator — Verification GUI")
         self.resize(1400, 900)
+        # Overlay a light outline on every checkbox indicator without suppressing
+        # the native checkmark. The proxy style wraps the current app style and adds
+        # a drawPrimitive overlay — safer than stylesheet-based image: url() rules
+        # which break native rendering across Qt versions.
+        self.setStyle(_OutlinedCheckBoxStyle(self.style()))
         self.setStyleSheet(
             "QMainWindow { background: #1e1e1e; color: #ddd; }"
             "QListWidget { background: #252526; color: #ddd; border: none; }"
@@ -1102,11 +1178,26 @@ class LandmarkGUI(QMainWindow):
         self._img_dir_label.setWordWrap(False)
         left_layout.addWidget(self._img_dir_label)
 
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search images…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setToolTip(
+            "Filter images by substring (case-insensitive). Press Enter to jump to the first match."
+        )
+        self._search_edit.textChanged.connect(self._apply_search_filter)
+        self._search_edit.returnPressed.connect(self._jump_to_first_match)
+        left_layout.addWidget(self._search_edit)
+
+        self._search_count_label = QLabel("")
+        self._search_count_label.setStyleSheet("color: #888; font-size: 10px; padding: 0 2px;")
+        left_layout.addWidget(self._search_count_label)
+
         self._image_list = QListWidget()
         self._image_list.currentRowChanged.connect(self._on_image_selected)
         left_layout.addWidget(self._image_list)
 
         self._legend = LegendWidget()
+        self._legend.labels_toggled.connect(self._on_labels_toggled)
         left_layout.addWidget(self._legend)
         left.setFixedWidth(220)
         splitter.addWidget(left)
@@ -1119,6 +1210,23 @@ class LandmarkGUI(QMainWindow):
         self._image_widget = ImageWidget()
         center_layout.addWidget(self._image_widget, stretch=3)
 
+        # Overlay size (points/rings/labels) slider — lives directly below the image view.
+        overlay_row = QHBoxLayout()
+        overlay_lbl = QLabel("Overlay size:")
+        overlay_lbl.setStyleSheet("color: #aaa; font-size: 10px;")
+        overlay_row.addWidget(overlay_lbl)
+        self._overlay_size_slider = QSlider(Qt.Horizontal)
+        self._overlay_size_slider.setRange(25, 300)  # percent of auto-computed size
+        self._overlay_size_slider.setValue(100)
+        self._overlay_size_slider.setFixedHeight(20)
+        self._overlay_size_slider.valueChanged.connect(self._on_overlay_size_changed)
+        overlay_row.addWidget(self._overlay_size_slider)
+        self._overlay_size_label = QLabel("100%")
+        self._overlay_size_label.setStyleSheet("color: #aaa; font-size: 10px;")
+        self._overlay_size_label.setFixedWidth(40)
+        overlay_row.addWidget(self._overlay_size_label)
+        center_layout.addLayout(overlay_row)
+
         # Overall wing pass/fail status line (under the image).
         self._wing_status_label = QLabel("")
         self._wing_status_label.setAlignment(Qt.AlignCenter)
@@ -1128,22 +1236,16 @@ class LandmarkGUI(QMainWindow):
         self._wing_status_label.setFixedHeight(32)
         center_layout.addWidget(self._wing_status_label)
 
-        # Heatmap overlay opacity slider
-        slider_row = QHBoxLayout()
-        slider_label = QLabel("Heatmap opacity:")
-        slider_label.setStyleSheet("color: #aaa; font-size: 10px;")
-        slider_row.addWidget(slider_label)
+        # Heatmap overlay opacity controls — built here so the slot can be wired, but
+        # mounted below the color gradient inside HeatmapPanel (see _heatmap_panel.mount_opacity_controls).
         self._opacity_slider = QSlider(Qt.Horizontal)
         self._opacity_slider.setRange(0, 100)
         self._opacity_slider.setValue(50)
         self._opacity_slider.setFixedHeight(20)
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
-        slider_row.addWidget(self._opacity_slider)
         self._opacity_label = QLabel("50%")
         self._opacity_label.setStyleSheet("color: #aaa; font-size: 10px;")
         self._opacity_label.setFixedWidth(32)
-        slider_row.addWidget(self._opacity_label)
-        center_layout.addLayout(slider_row)
 
         self._model_label = QLabel("Model: (none)")
         self._model_label.setStyleSheet("color: #aaa; font-size: 10px; padding: 2px;")
@@ -1174,6 +1276,7 @@ class LandmarkGUI(QMainWindow):
         # -- Right panel: heatmaps --
         self._heatmap_panel = HeatmapPanel()
         self._heatmap_panel.heatmap_clicked.connect(self._on_heatmap_clicked)
+        self._heatmap_panel.mount_opacity_controls(self._opacity_slider, self._opacity_label)
         splitter.addWidget(self._heatmap_panel)
 
         splitter.setSizes([220, 800, 300])
@@ -1304,6 +1407,17 @@ class LandmarkGUI(QMainWindow):
 
     def _on_toggle_show_gate(self, checked: bool) -> None:
         """Redraw the current image with/without the gate overlay."""
+        if self._current_idx >= 0:
+            self._on_image_selected(self._current_idx)
+
+    def _on_labels_toggled(self, checked: bool) -> None:
+        """Redraw the current image with/without overlay landmark labels."""
+        if self._current_idx >= 0:
+            self._on_image_selected(self._current_idx)
+
+    def _on_overlay_size_changed(self, value: int) -> None:
+        """Rescale and redraw overlay markers/labels/rings at the new size."""
+        self._overlay_size_label.setText(f"{value}%")
         if self._current_idx >= 0:
             self._on_image_selected(self._current_idx)
 
@@ -1461,7 +1575,14 @@ class LandmarkGUI(QMainWindow):
                     pass
 
             if save_images:
-                vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
+                vis = draw_landmarks_on_image(
+                    image,
+                    preds,
+                    entry.gt,
+                    landmark_order=self._landmark_order,
+                    show_labels=self._legend.labels_enabled(),
+                    size_scale=self._overlay_size_slider.value() / 100.0,
+                )
                 out_path = self._output_dir / f"{entry.path.stem}_landmarks.jpg"
                 cv2.imwrite(str(out_path), vis)
 
@@ -1662,8 +1783,12 @@ class LandmarkGUI(QMainWindow):
         if fuzzy_matches:
             self._confirm_fuzzy_matches(fuzzy_matches)
 
+        # Re-apply any active search filter against the new list before selecting.
+        self._apply_search_filter(self._search_edit.text())
+
         if self._entries:
-            self._image_list.setCurrentRow(0)
+            # Select the first visible row (respects the search filter).
+            self._image_list.setCurrentRow(self._first_visible_row(default=0))
 
     def _confirm_fuzzy_matches(self, fuzzy_matches: list[tuple[int, str, str]]) -> None:
         """Show a dialog asking the user to accept or reject fuzzy GT matches."""
@@ -1722,9 +1847,17 @@ class LandmarkGUI(QMainWindow):
 
         # Draw overlay and cache base visualization
         preds = entry.prediction["landmarks"] if entry.prediction else {}
-        vis = draw_landmarks_on_image(image, preds, entry.gt, landmark_order=self._landmark_order)
+        size_scale = self._overlay_size_slider.value() / 100.0
+        vis = draw_landmarks_on_image(
+            image,
+            preds,
+            entry.gt,
+            landmark_order=self._landmark_order,
+            show_labels=self._legend.labels_enabled(),
+            size_scale=size_scale,
+        )
         if self._show_gate_chk.isChecked() and entry.prediction is not None and "reliable" in entry.prediction:
-            vis = _draw_gate_overlay(vis, entry.prediction, self._landmark_order)
+            vis = _draw_gate_overlay(vis, entry.prediction, self._landmark_order, size_scale=size_scale)
         self._base_vis = vis.copy()
         self._overlay_heatmaps = entry.prediction["heatmaps"] if entry.prediction else None
         self._overlay_orig_shape = (orig_h, orig_w)
@@ -1835,6 +1968,50 @@ class LandmarkGUI(QMainWindow):
             self._info_table.setItem(i, 6, reason_item)
 
     # ---- Wing-level pass/fail ----
+    # ---- Image-list search ----
+    def _apply_search_filter(self, text: str | None = None) -> None:
+        """Hide image-list rows whose filename does not contain the search substring."""
+        if text is None:
+            text = self._search_edit.text() if hasattr(self, "_search_edit") else ""
+        query = (text or "").strip().lower()
+        total = self._image_list.count()
+        visible = 0
+        for row in range(total):
+            item = self._image_list.item(row)
+            if item is None:
+                continue
+            matches = (not query) or (query in item.text().lower())
+            item.setHidden(not matches)
+            if matches:
+                visible += 1
+        if not query:
+            self._search_count_label.setText("")
+        else:
+            self._search_count_label.setText(f"{visible} / {total} match")
+        # If the currently selected row is hidden by the filter, jump to the first visible row.
+        cur = self._image_list.currentRow()
+        if cur >= 0 and cur < total:
+            cur_item = self._image_list.item(cur)
+            if cur_item is not None and cur_item.isHidden():
+                first = self._first_visible_row(default=-1)
+                if first >= 0:
+                    self._image_list.setCurrentRow(first)
+
+    def _jump_to_first_match(self) -> None:
+        """Pressing Enter in the search box selects the first visible match."""
+        first = self._first_visible_row(default=-1)
+        if first >= 0:
+            self._image_list.setCurrentRow(first)
+            self._image_list.setFocus()
+
+    def _first_visible_row(self, default: int = -1) -> int:
+        """Return the row index of the first non-hidden image, or `default`."""
+        for row in range(self._image_list.count()):
+            item = self._image_list.item(row)
+            if item is not None and not item.isHidden():
+                return row
+        return default
+
     def _update_wing_status(self, entry: ImageEntry) -> None:
         """Summarize the whole wing as pass / fail below the image view.
 

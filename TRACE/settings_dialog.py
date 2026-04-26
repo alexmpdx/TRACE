@@ -1,8 +1,9 @@
 """Modal dialog for editing an identifyFeatures PipelineConfig.
 
-All PipelineConfig fields are grouped into 5 tabs (Scale & Skeleton,
-Pruning, Bridging, Tracing, Intervein). The dialog takes a config as
-input, works on a copy, and returns the updated config on accept.
+All PipelineConfig fields are grouped into 5 tabs (General,
+Skeletonization & Pruning, Bridging, Tracing, Intervein). The dialog
+takes a config as input, works on a copy, and returns the updated
+config on accept.
 
 The dialog is dispatch-based: each field is registered via a small helper
 (`_add_float`, `_add_opt_float`, `_add_int`, `_add_opt_int`,
@@ -39,6 +40,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from TRACE.pipeline import DEFAULT_MAX_WORKERS
+
 
 class PipelineConfigDialog(QDialog):
     """Edit a PipelineConfig via a tabbed form."""
@@ -52,7 +55,14 @@ class PipelineConfigDialog(QDialog):
     _KIND_FLOAT_LIST = "float_list"
     _KIND_BOOL = "bool"
 
-    def __init__(self, config: PipelineConfig, parent=None):
+    def __init__(
+        self,
+        config: PipelineConfig,
+        parent=None,
+        show_vein_tissue: bool = False,
+        include_unreliable_landmarks: bool = False,
+        workers: int = DEFAULT_MAX_WORKERS,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
         self.resize(720, 640)
@@ -61,6 +71,9 @@ class PipelineConfigDialog(QDialog):
         self._widgets: dict[str, tuple[str, Any, Any]] = {}
         self._build_ui()
         self._load_from_config(config)
+        self._show_vein_tissue_chk.setChecked(show_vein_tissue)
+        self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
+        self._workers_spin.setValue(int(workers))
 
     # -----------------------------------------------------------------------
     # Public API
@@ -118,8 +131,8 @@ class PipelineConfigDialog(QDialog):
         tabs = QTabWidget()
         layout.addWidget(tabs, stretch=1)
 
-        tabs.addTab(self._build_scale_skel_tab(), "Scale && Skeleton")
-        tabs.addTab(self._build_pruning_tab(), "Pruning")
+        tabs.addTab(self._build_general_tab(), "General")
+        tabs.addTab(self._build_skel_pruning_tab(), "Skeletonization && Pruning")
         tabs.addTab(self._build_bridging_tab(), "Bridging")
         tabs.addTab(self._build_tracing_tab(), "Tracing")
         tabs.addTab(self._build_intervein_tab(), "Intervein")
@@ -130,7 +143,7 @@ class PipelineConfigDialog(QDialog):
         btns.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._reset_defaults)
         layout.addWidget(btns)
 
-    def _build_scale_skel_tab(self) -> QWidget:
+    def _build_general_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -139,18 +152,59 @@ class PipelineConfigDialog(QDialog):
         self._add_opt_float(form, "um_per_px", "Microns per pixel", 0.0, 100.0, 4, 0.001, "use pixels")
         layout.addWidget(gb)
 
-        gb = QGroupBox("Skeletonization")
+        gb = QGroupBox("Output options")
         form = QFormLayout(gb)
-        self._add_enum_list(form, "skeleton_methods", "Methods", SkeletonMethod, allowed_values={"ridge"})
-        self._add_float(form, "smooth_sigma", "Smoothing sigma", 0.0, 100.0, 2, 0.1)
+        self._show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
+        self._show_vein_tissue_chk.setToolTip(
+            "When off (default), the per-wing overlay only shows vein skeleton "
+            "centerlines. When on, it also fills the buffered vein tissue polygons."
+        )
+        form.addRow("", self._show_vein_tissue_chk)
+        self._include_unreliable_landmarks_chk = QCheckBox("Include low-confidence landmarks")
+        self._include_unreliable_landmarks_chk.setToolTip(
+            "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
+            "dropped from the output. When on, they are still emitted (marked reliable=false). "
+            "Core-landmark failures abort the image regardless of this setting."
+        )
+        form.addRow("", self._include_unreliable_landmarks_chk)
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Parallel processing")
+        form = QFormLayout(gb)
+        self._workers_spin = QSpinBox()
+        self._workers_spin.setRange(1, 32)
+        self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
+        self._workers_spin.setToolTip(
+            "Number of wings to analyze in parallel during Stage 2.\n"
+            "Stage 1 (GPU preprocessing) always runs sequentially."
+        )
+        form.addRow("Workers", self._workers_spin)
         layout.addWidget(gb)
 
         layout.addStretch()
         return w
 
-    def _build_pruning_tab(self) -> QWidget:
+    def get_workers(self) -> int:
+        return int(self._workers_spin.value())
+
+    # -----------------------------------------------------------------------
+    # GUI-only flag accessors (not part of PipelineConfig)
+    # -----------------------------------------------------------------------
+    def get_show_vein_tissue(self) -> bool:
+        return self._show_vein_tissue_chk.isChecked()
+
+    def get_include_unreliable_landmarks(self) -> bool:
+        return self._include_unreliable_landmarks_chk.isChecked()
+
+    def _build_skel_pruning_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
+
+        gb = QGroupBox("Skeletonization")
+        form = QFormLayout(gb)
+        self._add_enum_list(form, "skeleton_methods", "Methods", SkeletonMethod, allowed_values={"ridge"})
+        self._add_float(form, "smooth_sigma", "Smoothing sigma", 0.0, 100.0, 2, 0.1)
+        layout.addWidget(gb)
 
         gb = QGroupBox("Pruning")
         form = QFormLayout(gb)
@@ -419,6 +473,12 @@ class PipelineConfigDialog(QDialog):
 
     def _reset_defaults(self):
         self._load_from_config(PipelineConfig())
+        self._show_vein_tissue_chk.setChecked(False)
+        self._include_unreliable_landmarks_chk.setChecked(False)
+        self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "reset_workers_warning"):
+            parent.reset_workers_warning()
 
     def _apply_selected_preset(self):
         name = self._preset_combo.currentText()

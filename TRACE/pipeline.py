@@ -57,6 +57,38 @@ class TraceResult:
 
 DEFAULT_MAX_WORKERS = 1
 
+# Per-output preprocessing requirements: (needs_landmarks, needs_hinge, needs_segmentation).
+# Used by _required_stages() to skip upstream work the requested outputs don't depend on.
+_OUTPUT_STAGE_REQUIREMENTS = {
+    "chopped_image": (True, True, False),
+    "landmarks_overlay": (True, False, False),
+    "segmentation_overlay": (True, True, True),
+    "geojson": (True, True, True),
+    "overlay": (True, True, True),
+    "ap_overlay": (True, True, True),
+    "cv_ratio_overlay": (True, True, True),
+    "csv": (True, True, True),
+}
+
+# Outputs that require running Stage 2 (identifyFeatures analysis), as opposed to
+# just copying / rendering preprocessing artifacts.
+_STAGE2_ANALYSIS_OUTPUTS = {"geojson", "overlay", "ap_overlay", "cv_ratio_overlay", "csv"}
+
+
+def _required_stages(outputs: set[str]) -> tuple[bool, bool, bool]:
+    """Compute the minimal set of preprocessing stages needed to produce `outputs`.
+
+    Returns (needs_landmarks, needs_hinge, needs_segmentation).
+    """
+    needs_lm = needs_hinge = needs_seg = False
+    for key in outputs:
+        lm, hinge, seg = _OUTPUT_STAGE_REQUIREMENTS.get(key, (True, True, True))
+        needs_lm = needs_lm or lm
+        needs_hinge = needs_hinge or hinge
+        needs_seg = needs_seg or seg
+    return (needs_lm, needs_hinge, needs_seg)
+
+
 # BGR fallback colors for segmentation classes if the GeoJSON feature has no color.
 _SEG_FALLBACK_COLORS = {
     "vein": (0, 0, 200),
@@ -290,21 +322,29 @@ def _run(
     include_unreliable_landmarks: bool = False,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
-    from preprocessing.pipeline import process_folder
+    from preprocessing.pipeline import PipelineResult as _PreprocResult
+    from preprocessing.pipeline import discover_images, process_folder
+
+    stages = _required_stages(outputs)
+    needs_lm, needs_hinge, needs_seg = stages
 
     # --- Stage 1: Preprocessing ---
-    logger.info("=== Stage 1: Preprocessing ===")
+    logger.info("=== Stage 1: Preprocessing (stages=%s) ===", stages)
 
     def _preproc_progress(idx, total, name, status):
         if progress_callback:
             progress_callback(idx, total, name, "preprocessing", status)
+
+    if not any(stages):
+        # Nothing to preprocess and nothing to analyze — emit empty TraceResults per image.
+        return [TraceResult(image_path=img) for img in discover_images(input_dir)]
 
     preproc_results = process_folder(
         input_dir=input_dir,
         output_dir=preproc_dir,
         landmark_checkpoint=landmark_checkpoint,
         segmentation_model_dir=segmentation_model_dir,
-        stages=(True, True, True),
+        stages=stages,
         device=device,
         keep_chopped=("chopped_image" in outputs),
         progress_callback=_preproc_progress,
@@ -312,9 +352,10 @@ def _run(
     )
 
     results: list[TraceResult] = []
-    successful_preproc = []
+    successful_preproc: list[_PreprocResult] = []
     for r in preproc_results:
-        if r.error is not None or not r.segmentation_geojson_path:
+        missing_seg = needs_seg and not r.segmentation_geojson_path
+        if r.error is not None or missing_seg:
             err_stage = r.error_stage or "preprocessing"
             results.append(
                 TraceResult(
@@ -354,7 +395,6 @@ def _run(
         render_overlay_to_file,
     )
 
-    _STAGE2_ANALYSIS_OUTPUTS = {"geojson", "overlay", "ap_overlay", "cv_ratio_overlay", "csv"}
     needs_analysis = bool(_STAGE2_ANALYSIS_OUTPUTS & outputs)
 
     scale = config.um_per_px

@@ -10,7 +10,6 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-
 from landmark_locator.data.dataset import _normalize_name
 from landmark_locator.inference.predict import LandmarkPredictor
 
@@ -121,17 +120,29 @@ def draw_landmarks_on_image(
     ground_truth: dict[str, tuple[float, float]] | None = None,
     radius: int | None = None,
     landmark_order: list[str] | None = None,
+    show_labels: bool = False,
+    size_scale: float = 1.0,
 ) -> np.ndarray:
     """Draw predicted landmarks (circles) and ground truth (crosses) on image.
 
     When `radius` is None it scales with image size (small — ~0.2% of the min dim).
+    `size_scale` (default 1.0) multiplies the auto-radius and font size so callers can
+    offer a live slider to grow or shrink every overlay element.
+    When `show_labels` is True, each predicted point gets its name painted next to it
+    in the landmark's color, with a dark halo for legibility.
     """
     vis = image.copy()
 
     h, w = vis.shape[:2]
+    # Dot size uses a quadratic response on size_scale so the slider produces
+    # visible changes at display zoom — a linear scale on this small base reads
+    # as almost no change when the image is fit to the viewport.
+    dot_scale = size_scale * size_scale
     if radius is None:
-        radius = max(4, int(min(h, w) / 500))
+        radius = max(2, int(min(h, w) / 500 * dot_scale))
     ring_thick = max(1, radius // 4)
+    font_scale = max(0.25, (min(h, w) / 2200.0) * size_scale)
+    font_thick = max(1, int(round((min(h, w) / 1800.0) * size_scale)))
 
     # Determine which landmarks to draw
     if landmark_order is None:
@@ -156,6 +167,33 @@ def draw_landmarks_on_image(
             px, py = int(predictions[name][0]), int(predictions[name][1])
             cv2.circle(vis, (px, py), radius, color, -1, cv2.LINE_AA)
             cv2.circle(vis, (px, py), radius, (255, 255, 255), ring_thick, cv2.LINE_AA)
+
+            # Optional: landmark name as a labeled chip next to the point.
+            if show_labels:
+                label = name.replace("_", " ")
+                tx = px + radius + max(3, radius)
+                ty = py + max(3, radius // 2)
+                # Black halo first, then colored text on top — readable on any tissue color.
+                cv2.putText(
+                    vis,
+                    label,
+                    (tx, ty),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    (0, 0, 0),
+                    font_thick + 2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    vis,
+                    label,
+                    (tx, ty),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    color,
+                    font_thick,
+                    cv2.LINE_AA,
+                )
 
             # Error vector
             if ground_truth and name in ground_truth:

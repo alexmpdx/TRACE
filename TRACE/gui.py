@@ -12,7 +12,6 @@ from collections import OrderedDict
 from pathlib import Path
 
 from identify_features.config import PipelineConfig
-from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -33,9 +32,12 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
@@ -114,6 +116,18 @@ class TraceWorker(QThread):
 
 
 class TraceWindow(QMainWindow):
+    _PARALLEL_WORKERS_DETAILS_TEXT = (
+        "Each worker runs the full identifyFeatures pipeline on one wing "
+        "and uses significant CPU and RAM. Setting this value too high can:\n\n"
+        "  • Exhaust system RAM and cause the process to be killed\n"
+        "  • Saturate all CPU cores and freeze other applications\n"
+        "  • Trigger thermal throttling on laptops\n"
+        "  • Produce no speedup past the number of physical cores\n\n"
+        "A safe starting point is 2–4. Do not exceed your machine's "
+        "physical core count unless you know what you're doing."
+    )
+    _PARALLEL_WORKERS_WARNING_TEXT = "You are enabling parallel Stage 2 analysis.\n\n" + _PARALLEL_WORKERS_DETAILS_TEXT
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TRACE — Wing Analysis Pipeline")
@@ -122,6 +136,8 @@ class TraceWindow(QMainWindow):
         self.worker = None
         self._image_paths = []
         self.config = PipelineConfig()
+        self._show_vein_tissue = False
+        self._include_unreliable_landmarks = False
         self._workers_warning_shown = False
         self._build_ui()
         self._restore_settings()
@@ -244,29 +260,26 @@ class TraceWindow(QMainWindow):
             chk.setChecked(True)
             self.output_checks[key] = chk
             ol.addWidget(chk)
-        self.show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
-        self.show_vein_tissue_chk.setChecked(False)
-        self.show_vein_tissue_chk.setToolTip(
-            "When off (default), the per-wing overlay only shows vein skeleton "
-            "centerlines. When on, it also fills the buffered vein tissue polygons."
-        )
-        ol.addWidget(self.show_vein_tissue_chk)
-
-        self.include_unreliable_landmarks_chk = QCheckBox("Include low-confidence landmarks")
-        self.include_unreliable_landmarks_chk.setChecked(False)
-        self.include_unreliable_landmarks_chk.setToolTip(
-            "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
-            "dropped from the output. When on, they are still emitted (marked reliable=false). "
-            "Core-landmark failures abort the image regardless of this setting."
-        )
-        ol.addWidget(self.include_unreliable_landmarks_chk)
 
         left_layout.addWidget(out_group)
 
         # -- Parallel workers --
-        workers_group = QGroupBox("Parallel processing")
-        wg = QHBoxLayout(workers_group)
-        wg.addWidget(QLabel("Workers:"))
+        # Custom header so the "?" help button sits directly next to the section title.
+        workers_header = QHBoxLayout()
+        workers_title = QLabel("Parallel processing")
+        workers_title.setStyleSheet("font-weight: bold;")
+        workers_header.addWidget(workers_title)
+        self.workers_help_btn = QToolButton()
+        self.workers_help_btn.setText("?")
+        self.workers_help_btn.setToolTip("Show parallel-workers warning")
+        self.workers_help_btn.setAutoRaise(True)
+        self.workers_help_btn.clicked.connect(self._show_workers_warning_info)
+        workers_header.addWidget(self.workers_help_btn)
+        workers_header.addStretch()
+        left_layout.addLayout(workers_header)
+
+        workers_row = QHBoxLayout()
+        workers_row.addWidget(QLabel("Workers:"))
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(1, 32)
         self.workers_spin.setValue(DEFAULT_MAX_WORKERS)
@@ -275,8 +288,8 @@ class TraceWindow(QMainWindow):
             "Stage 1 (GPU preprocessing) always runs sequentially."
         )
         self.workers_spin.valueChanged.connect(self._on_workers_changed)
-        wg.addWidget(self.workers_spin, stretch=1)
-        left_layout.addWidget(workers_group)
+        workers_row.addWidget(self.workers_spin, stretch=1)
+        left_layout.addLayout(workers_row)
 
         # -- Run / Cancel --
         btn_layout = QHBoxLayout()
@@ -368,35 +381,84 @@ class TraceWindow(QMainWindow):
     def _on_scale_changed(self, val: float):
         self.config.um_per_px = val if val > 0 else None
 
+    def reset_workers_warning(self):
+        """Re-arm the spinner-change parallel-workers warning so it fires again on the next bump above 1.
+
+        Skipped if the user has permanently suppressed the warning via the run-time dialog.
+        """
+        if self.settings.value("workers_warning_suppressed", False, type=bool):
+            return
+        self._workers_warning_shown = False
+
     def _on_workers_changed(self, val: int):
         if val <= DEFAULT_MAX_WORKERS or self._workers_warning_shown:
             return
+        if self.settings.value("workers_warning_suppressed", False, type=bool):
+            return
         self._workers_warning_shown = True
-        QMessageBox.warning(
-            self,
-            "Parallel workers",
-            (
-                "You are enabling parallel Stage 2 analysis.\n\n"
-                "Each worker runs the full identifyFeatures pipeline on one wing "
-                "and uses significant CPU and RAM. Setting this value too high can:\n\n"
-                "  • Exhaust system RAM and cause the process to be killed\n"
-                "  • Saturate all CPU cores and freeze other applications\n"
-                "  • Trigger thermal throttling on laptops\n"
-                "  • Produce no speedup past the number of physical cores\n\n"
-                "A safe starting point is 2–4. Do not exceed your machine's "
-                "physical core count unless you know what you're doing."
-            ),
-        )
+        QMessageBox.warning(self, "Parallel workers", self._PARALLEL_WORKERS_WARNING_TEXT)
+
+    def _show_workers_warning_info(self):
+        """On-demand display of the parallel-workers details, triggered by the ? button.
+
+        Plain message — no warning icon, no leading "you are enabling…" line.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.NoIcon)
+        box.setWindowTitle("Parallel workers")
+        box.setText(self._PARALLEL_WORKERS_DETAILS_TEXT)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+
+    def _confirm_parallel_workers(self) -> bool:
+        """Show the parallel-workers warning before a multi-worker run.
+
+        Fires every time the pipeline is started with workers > 1, unless the
+        user has previously checked "do not warn me again". Returns True if the
+        run should proceed, False if the user cancelled.
+        """
+        if self.workers_spin.value() <= DEFAULT_MAX_WORKERS:
+            return True
+        if self.settings.value("workers_warning_suppressed", False, type=bool):
+            return True
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Parallel workers")
+        box.setText(self._PARALLEL_WORKERS_WARNING_TEXT)
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Ok)
+        suppress_chk = QCheckBox("Do not warn me again")
+        box.setCheckBox(suppress_chk)
+        result = box.exec_()
+        if result != QMessageBox.Ok:
+            return False
+        if suppress_chk.isChecked():
+            self.settings.setValue("workers_warning_suppressed", True)
+        return True
 
     def _open_settings_dialog(self):
-        dlg = PipelineConfigDialog(self.config, self)
+        dlg = PipelineConfigDialog(
+            self.config,
+            self,
+            show_vein_tissue=self._show_vein_tissue,
+            include_unreliable_landmarks=self._include_unreliable_landmarks,
+            workers=self.workers_spin.value(),
+        )
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
+            self._show_vein_tissue = dlg.get_show_vein_tissue()
+            self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
             # Keep main-window scale spinner in sync.
             val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
             self.scale_spin.blockSignals(True)
             self.scale_spin.setValue(val)
             self.scale_spin.blockSignals(False)
+            # Keep main-window workers spinner in sync (block signals to avoid
+            # re-firing the spinner-change warning).
+            self.workers_spin.blockSignals(True)
+            self.workers_spin.setValue(dlg.get_workers())
+            self.workers_spin.blockSignals(False)
 
     def _import_config(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import Pipeline Config", "", "JSON (*.json);;All Files (*)")
@@ -440,8 +502,8 @@ class TraceWindow(QMainWindow):
         s.setValue("segmentation_model", self.seg_edit.text())
         s.setValue("pipeline_config_json", config_to_json(self.config))
         s.setValue("max_workers", self.workers_spin.value())
-        s.setValue("show_vein_tissue", self.show_vein_tissue_chk.isChecked())
-        s.setValue("include_unreliable_landmarks", self.include_unreliable_landmarks_chk.isChecked())
+        s.setValue("show_vein_tissue", self._show_vein_tissue)
+        s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
 
@@ -481,10 +543,10 @@ class TraceWindow(QMainWindow):
                 chk.setChecked(saved == "true" or saved is True)
         saved_svt = s.value("show_vein_tissue", None)
         if saved_svt is not None:
-            self.show_vein_tissue_chk.setChecked(saved_svt == "true" or saved_svt is True)
+            self._show_vein_tissue = saved_svt == "true" or saved_svt is True
         saved_iul = s.value("include_unreliable_landmarks", None)
         if saved_iul is not None:
-            self.include_unreliable_landmarks_chk.setChecked(saved_iul == "true" or saved_iul is True)
+            self._include_unreliable_landmarks = saved_iul == "true" or saved_iul is True
         workers_val = s.value("max_workers", None)
         if workers_val is not None:
             try:
@@ -533,6 +595,9 @@ class TraceWindow(QMainWindow):
             if box.exec_() == QMessageBox.Abort:
                 return
 
+        if not self._confirm_parallel_workers():
+            return
+
         # UI state
         self.btn_run.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -554,8 +619,8 @@ class TraceWindow(QMainWindow):
                 keep_intermediates=False,
                 outputs=self._selected_outputs(),
                 max_workers=self.workers_spin.value(),
-                show_vein_tissue=self.show_vein_tissue_chk.isChecked(),
-                include_unreliable_landmarks=self.include_unreliable_landmarks_chk.isChecked(),
+                show_vein_tissue=self._show_vein_tissue,
+                include_unreliable_landmarks=self._include_unreliable_landmarks,
             )
         )
         self.worker.progress.connect(self._on_progress)

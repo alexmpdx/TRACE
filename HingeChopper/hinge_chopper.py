@@ -321,12 +321,16 @@ def chop_hinge(image_path, landmarks_path, output_path):
 
 
 def predict_landmarks(image_path, checkpoint_path):
-    """Run LandmarkLocator on an image and return landmarks dict with GeoJSON names."""
-    from landmark_locator import LandmarkPredictor
+    """Run LandmarkLocator on an image and return landmarks dict with GeoJSON names.
+
+    `checkpoint_path` may be a single .pt file or a fold folder (containing
+    best_fold*.pt files), in which case an ensemble is used.
+    """
+    from landmark_locator import make_predictor
 
     predictor = predict_landmarks._predictor
     if predictor is None or predict_landmarks._checkpoint != checkpoint_path:
-        predictor = LandmarkPredictor(Path(checkpoint_path))
+        predictor = make_predictor(Path(checkpoint_path))
         predict_landmarks._predictor = predictor
         predict_landmarks._checkpoint = checkpoint_path
 
