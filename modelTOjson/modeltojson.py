@@ -311,6 +311,11 @@ def load_model(model_dir: str, device: torch.device = None):
                 _replace_bn_with_batchrenorm(model)
             model.load_state_dict(loaded, strict=False)
         else:
+            onnx_files = list(model_dir.glob("*.onnx"))
+            if onnx_files:
+                onnx_path = model_dir / "model.onnx" if (model_dir / "model.onnx").exists() else onnx_files[0]
+                wrapper = OnnxModelWrapper(str(onnx_path), device)
+                return wrapper, metadata
             raise ValueError(
                 f"Architecture '{arch_type}' is not a known SMP type and "
                 f"the model file contains a state dict (not a full model). "
@@ -337,20 +342,57 @@ SUPPORTED_EXTENSIONS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd"
 def read_image(path: str) -> np.ndarray:
     """Read an image file and return as RGB uint8 numpy array (H, W, 3).
 
-    For .psd/.psb uses psd-tools (flattened composite). Otherwise tries
-    rasterio first (handles GeoTIFF + many GDAL formats), then tifffile,
-    then PIL as a universal fallback.
+    Format-specific decoders (in order):
+      - .psd/.psb        → psd-tools (flattened composite)
+      - .heic/.heif      → pillow-heif
+      - .svg             → cairosvg + system Cairo
+      - camera RAW       → rawpy.postprocess (auto WB, sRGB)
+    For everything else, falls back through rasterio → tifffile → PIL.
     """
     path = str(path)
     img = None
+    ext = os.path.splitext(path)[1].lower()
 
-    if path.lower().endswith((".psd", ".psb")):
+    if ext in (".psd", ".psb"):
         try:
             from psd_tools import PSDImage
 
             pil = PSDImage.open(path).composite()
             if pil is not None:
                 img = np.array(pil.convert("RGB"))
+        except Exception:
+            pass
+
+    if img is None and ext in (".heic", ".heif"):
+        try:
+            import pillow_heif
+            from PIL import Image
+
+            pillow_heif.register_heif_opener()
+            pil = Image.open(path).convert("RGB")
+            img = np.array(pil)
+        except Exception:
+            pass
+
+    if img is None and ext == ".svg":
+        try:
+            from io import BytesIO
+
+            import cairosvg
+            from PIL import Image
+
+            png_bytes = cairosvg.svg2png(url=path, dpi=300)
+            pil = Image.open(BytesIO(png_bytes)).convert("RGB")
+            img = np.array(pil)
+        except Exception:
+            pass
+
+    if img is None and ext in (".raw", ".dng", ".nef", ".cr2", ".cr3", ".arw", ".raf", ".orf", ".pef", ".rw2", ".srw"):
+        try:
+            import rawpy
+
+            with rawpy.imread(path) as raw:
+                img = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
         except Exception:
             pass
 

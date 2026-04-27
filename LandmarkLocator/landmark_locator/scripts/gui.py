@@ -73,7 +73,30 @@ from landmark_locator.scripts.visualize import (
 MODEL_W, MODEL_H = 512, 352
 HEATMAP_SIGMA = 5
 HEATMAP_THUMB_W, HEATMAP_THUMB_H = 240, 165
-IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".psd", ".psb"}
+IMAGE_EXTENSIONS = {
+    ".tif",
+    ".tiff",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".psd",
+    ".psb",
+    ".heic",
+    ".heif",
+    ".svg",
+    ".raw",
+    ".dng",
+    ".nef",
+    ".cr2",
+    ".cr3",
+    ".arw",
+    ".raf",
+    ".orf",
+    ".pef",
+    ".rw2",
+    ".srw",
+}
 
 
 def _find_geojson_for_image(gt_dir: Path, image_name: str) -> tuple[Optional[Path], bool]:

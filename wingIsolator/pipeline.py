@@ -66,6 +66,20 @@ SUPPORTED_IMAGE_EXTS = {
     ".jpeg",
     ".psd",
     ".psb",
+    ".heic",
+    ".heif",
+    ".svg",
+    ".raw",
+    ".dng",
+    ".nef",
+    ".cr2",
+    ".cr3",
+    ".arw",
+    ".raf",
+    ".orf",
+    ".pef",
+    ".rw2",
+    ".srw",
 }
 
 

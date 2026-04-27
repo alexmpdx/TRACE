@@ -41,7 +41,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from TRACE.pipeline import DEFAULT_MAX_WORKERS
+from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
 
 
 def _merge_gate_override(base: dict, override: dict) -> dict:
@@ -84,6 +84,10 @@ class PipelineConfigDialog(QDialog):
         landmark_model_path: str = "",
         segmentation_model_path: str = "",
         gate_override: dict | None = None,
+        wing_expand_fraction: float = 0.05,
+        wing_isolation_enabled: bool = False,
+        wing_isolation_model_path: str = "",
+        intermediate_outputs: dict[str, bool] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -101,6 +105,16 @@ class PipelineConfigDialog(QDialog):
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
         self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
         self._workers_spin.setValue(int(workers))
+        self._wing_expand_spin.setValue(float(wing_expand_fraction))
+        self._wing_enable_chk.setChecked(bool(wing_isolation_enabled))
+        if wing_isolation_model_path:
+            self._wing_model_edit.setText(wing_isolation_model_path)
+        # Sync enabled state of model-picker widgets to the checkbox.
+        self._on_wing_isolation_toggled(bool(wing_isolation_enabled))
+        # Apply current intermediate-output state to the checkboxes.
+        if intermediate_outputs:
+            for key, chk in self._intermediate_output_chks.items():
+                chk.setChecked(bool(intermediate_outputs.get(key, True)))
 
     # -----------------------------------------------------------------------
     # Public API
@@ -180,6 +194,46 @@ class PipelineConfigDialog(QDialog):
         self._add_opt_float(form, "um_per_px", "Microns per pixel", 0.0, 100.0, 4, 0.001, "use pixels")
         layout.addWidget(gb)
 
+        gb = QGroupBox("Wing isolation (optional)")
+        wig_layout = QVBoxLayout(gb)
+        self._wing_enable_chk = QCheckBox("Enable wing isolation (Stage 0)")
+        self._wing_enable_chk.setToolTip(
+            "When enabled, every input image is masked through wingIsolator before "
+            "LandmarkLocator sees it. Useful when images contain multiple wings."
+        )
+        self._wing_enable_chk.toggled.connect(self._on_wing_isolation_toggled)
+        wig_layout.addWidget(self._wing_enable_chk)
+
+        wig_layout.addWidget(QLabel("Wing identification model folder:"))
+        wing_row = QHBoxLayout()
+        self._wing_model_edit = QLineEdit()
+        self._wing_model_edit.setReadOnly(True)
+        self._wing_model_edit.setPlaceholderText("Select wing-identification model folder...")
+        self._wing_model_edit.setToolTip(
+            "modelTOjson model directory for wing/background segmentation. The model's "
+            "metadata.json must declare a 'wing' class."
+        )
+        self._wing_model_browse = QPushButton("Browse...")
+        self._wing_model_browse.clicked.connect(self._select_wing_model_folder)
+        wing_row.addWidget(self._wing_model_edit, stretch=1)
+        wing_row.addWidget(self._wing_model_browse)
+        wig_layout.addLayout(wing_row)
+
+        wing_form = QFormLayout()
+        self._wing_expand_spin = QDoubleSpinBox()
+        self._wing_expand_spin.setRange(0.0, 1.0)
+        self._wing_expand_spin.setDecimals(3)
+        self._wing_expand_spin.setSingleStep(0.01)
+        self._wing_expand_spin.setValue(0.05)
+        self._wing_expand_spin.setToolTip(
+            "Stage 0 mask buffer, as a fraction of sqrt(wing area). "
+            "0 = exact polygon (no buffer); 0.05 = ~5% expansion. "
+            "Used only when wing isolation is enabled."
+        )
+        wing_form.addRow("Buffer (× √area)", self._wing_expand_spin)
+        wig_layout.addLayout(wing_form)
+        layout.addWidget(gb)
+
         gb = QGroupBox("Output options")
         form = QFormLayout(gb)
         self._show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
@@ -188,13 +242,22 @@ class PipelineConfigDialog(QDialog):
             "centerlines. When on, it also fills the buffered vein tissue polygons."
         )
         form.addRow("", self._show_vein_tissue_chk)
-        self._include_unreliable_landmarks_chk = QCheckBox("Include low-confidence landmarks")
-        self._include_unreliable_landmarks_chk.setToolTip(
-            "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
-            "dropped from the output. When on, they are still emitted (marked reliable=false). "
-            "Core-landmark failures abort the image regardless of this setting."
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Intermediate outputs")
+        gb.setToolTip(
+            "Upstream/intermediate artifacts written before final overlays + CSV. "
+            "Toggle which ones to keep alongside the final outputs."
         )
-        form.addRow("", self._include_unreliable_landmarks_chk)
+        im_layout = QVBoxLayout(gb)
+        self._intermediate_output_chks: dict[str, QCheckBox] = {}
+        for key, label in OUTPUT_TYPES.items():
+            if key not in INTERMEDIATE_OUTPUTS:
+                continue
+            chk = QCheckBox(label)
+            chk.setChecked(True)
+            self._intermediate_output_chks[key] = chk
+            im_layout.addWidget(chk)
         layout.addWidget(gb)
 
         gb = QGroupBox("Parallel processing")
@@ -227,6 +290,30 @@ class PipelineConfigDialog(QDialog):
     def get_workers(self) -> int:
         return int(self._workers_spin.value())
 
+    def get_wing_expand_fraction(self) -> float:
+        return float(self._wing_expand_spin.value())
+
+    def get_wing_isolation_enabled(self) -> bool:
+        return bool(self._wing_enable_chk.isChecked())
+
+    def get_wing_isolation_model_path(self) -> str:
+        return self._wing_model_edit.text().strip()
+
+    def get_intermediate_outputs(self) -> dict[str, bool]:
+        return {key: chk.isChecked() for key, chk in self._intermediate_output_chks.items()}
+
+    def _on_wing_isolation_toggled(self, checked: bool):
+        self._wing_model_edit.setEnabled(checked)
+        self._wing_model_browse.setEnabled(checked)
+        self._wing_expand_spin.setEnabled(checked)
+
+    def _select_wing_model_folder(self):
+        from PyQt5.QtWidgets import QFileDialog
+
+        folder = QFileDialog.getExistingDirectory(self, "Select Wing-Identification Model Folder")
+        if folder:
+            self._wing_model_edit.setText(folder)
+
     # -----------------------------------------------------------------------
     # GUI-only flag accessors (not part of PipelineConfig)
     # -----------------------------------------------------------------------
@@ -248,6 +335,18 @@ class PipelineConfigDialog(QDialog):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+
+        # Output flag (always visible — independent of whether a gate-panel model is loaded).
+        gb = QGroupBox("Output options")
+        form = QFormLayout(gb)
+        self._include_unreliable_landmarks_chk = QCheckBox("Include low-confidence landmarks")
+        self._include_unreliable_landmarks_chk.setToolTip(
+            "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
+            "dropped from the output. When on, they are still emitted (marked reliable=false). "
+            "Core-landmark failures abort the image regardless of this setting."
+        )
+        form.addRow("", self._include_unreliable_landmarks_chk)
+        layout.addWidget(gb)
 
         if not self._calib_lm_path:
             msg = QLabel(
@@ -561,6 +660,12 @@ class PipelineConfigDialog(QDialog):
         self._show_vein_tissue_chk.setChecked(False)
         self._include_unreliable_landmarks_chk.setChecked(False)
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
+        self._wing_expand_spin.setValue(0.05)
+        self._wing_enable_chk.setChecked(False)
+        self._wing_model_edit.clear()
+        self._on_wing_isolation_toggled(False)
+        for chk in self._intermediate_output_chks.values():
+            chk.setChecked(True)
         parent = self.parent()
         if parent is not None and hasattr(parent, "reset_workers_warning"):
             parent.reset_workers_warning()

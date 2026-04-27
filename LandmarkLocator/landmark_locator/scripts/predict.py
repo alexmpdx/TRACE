@@ -15,7 +15,30 @@ from landmark_locator.inference.predict import (
     predict_ensemble,
 )
 
-_IMAGE_EXTS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"}
+_IMAGE_EXTS = {
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".psd",
+    ".psb",
+    ".heic",
+    ".heif",
+    ".svg",
+    ".raw",
+    ".dng",
+    ".nef",
+    ".cr2",
+    ".cr3",
+    ".arw",
+    ".raf",
+    ".orf",
+    ".pef",
+    ".rw2",
+    ".srw",
+}
 
 
 def _discover_images(folder: Path) -> list[Path]:

@@ -11,3 +11,8 @@ rasterio
 scipy
 onnxruntime
 psd-tools
+pillow-heif
+rawpy
+# cairosvg requires the system Cairo library (e.g. `brew install cairo` on macOS).
+# Pipeline gracefully reports a clear ImportError if SVG inputs are used without it.
+cairosvg

@@ -38,7 +38,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
-from TRACE.pipeline import DEFAULT_MAX_WORKERS, OUTPUT_TYPES, trace_folder
+from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
 
 # ---------------------------------------------------------------------------
@@ -138,6 +138,12 @@ class TraceWindow(QMainWindow):
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
         self._gate_override: dict | None = None
+        self._wing_expand_fraction = 0.05
+        self._wing_isolation_enabled = False
+        self._wing_isolation_model_path = ""
+        # Intermediate outputs (toggled in Settings → General → Intermediate outputs).
+        # Default-on to match historical behavior of every output starting checked.
+        self._intermediate_outputs: dict[str, bool] = {key: True for key in INTERMEDIATE_OUTPUTS}
         self._workers_warning_shown = False
         self._build_ui()
         self._restore_settings()
@@ -251,11 +257,13 @@ class TraceWindow(QMainWindow):
         stg.addLayout(io_row)
         left_layout.addWidget(settings_group)
 
-        # -- Output selection --
+        # -- Output selection (final outputs only; intermediates live in Settings → General) --
         out_group = QGroupBox("Outputs")
         ol = QVBoxLayout(out_group)
         self.output_checks: OrderedDict[str, QCheckBox] = OrderedDict()
         for key, label in OUTPUT_TYPES.items():
+            if key in INTERMEDIATE_OUTPUTS:
+                continue
             chk = QCheckBox(label)
             chk.setChecked(True)
             self.output_checks[key] = chk
@@ -478,12 +486,20 @@ class TraceWindow(QMainWindow):
             landmark_model_path=self.lm_edit.text(),
             segmentation_model_path=self.seg_edit.text(),
             gate_override=self._gate_override,
+            wing_expand_fraction=self._wing_expand_fraction,
+            wing_isolation_enabled=self._wing_isolation_enabled,
+            wing_isolation_model_path=self._wing_isolation_model_path,
+            intermediate_outputs=dict(self._intermediate_outputs),
         )
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
             self._show_vein_tissue = dlg.get_show_vein_tissue()
             self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
             self._gate_override = dlg.get_gate_override()
+            self._wing_expand_fraction = dlg.get_wing_expand_fraction()
+            self._wing_isolation_enabled = dlg.get_wing_isolation_enabled()
+            self._wing_isolation_model_path = dlg.get_wing_isolation_model_path()
+            self._intermediate_outputs = dlg.get_intermediate_outputs()
             # Keep main-window scale spinner in sync.
             val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
             self.scale_spin.blockSignals(True)
@@ -527,7 +543,9 @@ class TraceWindow(QMainWindow):
     # Settings persistence
     # -----------------------------------------------------------------------
     def _selected_outputs(self) -> set[str]:
-        return {key for key, chk in self.output_checks.items() if chk.isChecked()}
+        finals = {key for key, chk in self.output_checks.items() if chk.isChecked()}
+        intermediates = {key for key, on in self._intermediate_outputs.items() if on}
+        return finals | intermediates
 
     def _save_settings(self):
         s = self.settings
@@ -535,6 +553,9 @@ class TraceWindow(QMainWindow):
         s.setValue("output_folder", self.output_edit.text())
         s.setValue("landmark_model", self.lm_edit.text())
         s.setValue("segmentation_model", self.seg_edit.text())
+        s.setValue("wing_isolation_enabled", self._wing_isolation_enabled)
+        s.setValue("wing_isolation_model", self._wing_isolation_model_path)
+        s.setValue("wing_expand_fraction", self._wing_expand_fraction)
         s.setValue("pipeline_config_json", config_to_json(self.config))
         s.setValue("max_workers", self.workers_spin.value())
         s.setValue("show_vein_tissue", self._show_vein_tissue)
@@ -547,6 +568,8 @@ class TraceWindow(QMainWindow):
         )
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
+        for key, on in self._intermediate_outputs.items():
+            s.setValue(f"output/{key}", on)
 
     def _restore_settings(self):
         s = self.settings
@@ -568,6 +591,18 @@ class TraceWindow(QMainWindow):
         val = s.value("segmentation_model", "")
         if val:
             self.seg_edit.setText(val)
+        val = s.value("wing_isolation_model", "")
+        if val:
+            self._wing_isolation_model_path = val
+        saved_wing = s.value("wing_isolation_enabled", None)
+        if saved_wing is not None:
+            self._wing_isolation_enabled = saved_wing == "true" or saved_wing is True
+        saved_wef = s.value("wing_expand_fraction", None)
+        if saved_wef is not None:
+            try:
+                self._wing_expand_fraction = float(saved_wef)
+            except (TypeError, ValueError):
+                pass
         cfg_json = s.value("pipeline_config_json", None)
         if cfg_json:
             try:
@@ -582,6 +617,10 @@ class TraceWindow(QMainWindow):
             saved = s.value(f"output/{key}", None)
             if saved is not None:
                 chk.setChecked(saved == "true" or saved is True)
+        for key in self._intermediate_outputs:
+            saved = s.value(f"output/{key}", None)
+            if saved is not None:
+                self._intermediate_outputs[key] = saved == "true" or saved is True
         saved_svt = s.value("show_vein_tissue", None)
         if saved_svt is not None:
             self._show_vein_tissue = saved_svt == "true" or saved_svt is True
@@ -658,6 +697,10 @@ class TraceWindow(QMainWindow):
         for i in range(self.image_list.count()):
             self.image_list.item(i).setForeground(QColor(208, 208, 208))
 
+        wing_model_dir = None
+        if self._wing_isolation_enabled and self._wing_isolation_model_path.strip():
+            wing_model_dir = Path(self._wing_isolation_model_path)
+
         self.worker = TraceWorker(
             kwargs=dict(
                 input_dir=Path(self.input_edit.text()),
@@ -671,6 +714,8 @@ class TraceWindow(QMainWindow):
                 show_vein_tissue=self._show_vein_tissue,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
                 gate_override=self._gate_override,
+                wing_isolation_model_dir=wing_model_dir,
+                wing_expand_fraction=self._wing_expand_fraction,
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
                 landmark_batch_size=self.workers_spin.value(),

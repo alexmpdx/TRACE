@@ -41,6 +41,30 @@ def parse_args(argv=None):
         help="Path to segmentation model directory (contains metadata.json + weights)",
     )
     parser.add_argument(
+        "--wing-isolation-model",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Stage 0 — modelTOjson model directory for wing/background "
+            "segmentation. When set, every image is masked through wingIsolator before "
+            "LandmarkLocator sees it. Omit to disable Stage 0."
+        ),
+    )
+    parser.add_argument(
+        "--wing-expand-fraction",
+        type=float,
+        default=0.05,
+        help="Stage 0 mask buffer (fraction of sqrt(wing area)). Default 0.05.",
+    )
+    parser.add_argument(
+        "--keep-intermediates",
+        action="store_true",
+        help=(
+            "Keep intermediate Stage 0 outputs in the output folder "
+            "(currently the wing GeoJSON written alongside the masked image)."
+        ),
+    )
+    parser.add_argument(
         "--stages",
         nargs="+",
         default=["all"],
@@ -117,6 +141,12 @@ def _validate(args, stages: tuple[bool, bool, bool]):
     if args.segmentation_model and not args.segmentation_model.is_dir():
         print(f"Error: segmentation model dir not found: {args.segmentation_model}", file=sys.stderr)
         sys.exit(1)
+    if args.wing_isolation_model is not None and not args.wing_isolation_model.is_dir():
+        print(
+            f"Error: --wing-isolation-model dir not found: {args.wing_isolation_model}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _progress(image_index, total, image_name, status):
@@ -157,6 +187,9 @@ def main(argv=None):
         progress_callback=_progress,
         include_unreliable_landmarks=args.include_unreliable_landmarks,
         landmark_batch_size=(args.landmark_batch_size or None),
+        wing_model_dir=args.wing_isolation_model,
+        wing_expand_fraction=args.wing_expand_fraction,
+        keep_intermediates=args.keep_intermediates,
     )
 
     # Summary

@@ -18,7 +18,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-IMAGE_EXTENSIONS = {".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb"}
+IMAGE_EXTENSIONS = {
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".psd",
+    ".psb",
+    ".heic",
+    ".heif",
+    ".svg",
+    ".raw",
+    ".dng",
+    ".nef",
+    ".cr2",
+    ".cr3",
+    ".arw",
+    ".raf",
+    ".orf",
+    ".pef",
+    ".rw2",
+    ".srw",
+}
 
 
 def discover_images(folder: Path) -> list[Path]:
@@ -436,13 +459,35 @@ def process_single_image(
     if not dest_image.exists() or dest_image != image_path:
         shutil.copy2(image_path, dest_image)
 
-    # Convert JPEG inputs to lossless TIF and use that for the rest of the pipeline.
-    if image_path.suffix.lower() in (".jpg", ".jpeg"):
+    # Coerce non-cv2-native and lossy formats to a lossless TIF up front so every
+    # downstream stage (LandmarkLocator, hinge_chopper, modelTOjson) sees a path
+    # cv2.imread can handle. HEIC/HEIF, RAW, and SVG are treated the same way as
+    # JPEG: decoded once via psd_loader.imread_any, re-saved as TIF.
+    _COERCE_TO_TIF_EXTS = {
+        ".jpg",
+        ".jpeg",
+        ".heic",
+        ".heif",
+        ".svg",
+        ".raw",
+        ".dng",
+        ".nef",
+        ".cr2",
+        ".cr3",
+        ".arw",
+        ".raf",
+        ".orf",
+        ".pef",
+        ".rw2",
+        ".srw",
+    }
+    if image_path.suffix.lower() in _COERCE_TO_TIF_EXTS:
         import cv2
+        from preprocessing.psd_loader import imread_any
 
-        img = cv2.imread(str(dest_image), cv2.IMREAD_UNCHANGED)
+        img = imread_any(str(dest_image), cv2.IMREAD_UNCHANGED)
         if img is None:
-            raise ValueError(f"Failed to read JPEG image: {dest_image}")
+            raise ValueError(f"Failed to read image: {dest_image}")
         tif_path = output_dir / f"{image_path.stem}.tif"
         if not cv2.imwrite(str(tif_path), img):
             raise IOError(f"Failed to write converted TIFF: {tif_path}")

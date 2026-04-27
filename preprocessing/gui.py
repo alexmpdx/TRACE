@@ -50,7 +50,17 @@ class PipelineWorker(QThread):
     error = pyqtSignal(str)  # fatal error
 
     def __init__(
-        self, input_dir, output_dir, landmark_checkpoint, segmentation_model_dir, stages, device, keep_chopped
+        self,
+        input_dir,
+        output_dir,
+        landmark_checkpoint,
+        segmentation_model_dir,
+        stages,
+        device,
+        keep_chopped,
+        wing_model_dir=None,
+        wing_expand_fraction=0.05,
+        keep_intermediates=False,
     ):
         super().__init__()
         self.input_dir = input_dir
@@ -60,6 +70,9 @@ class PipelineWorker(QThread):
         self.stages = stages
         self.device = device
         self.keep_chopped = keep_chopped
+        self.wing_model_dir = wing_model_dir
+        self.wing_expand_fraction = wing_expand_fraction
+        self.keep_intermediates = keep_intermediates
         self._cancel = False
 
     def cancel(self):
@@ -76,6 +89,9 @@ class PipelineWorker(QThread):
                 device=self.device,
                 keep_chopped=self.keep_chopped,
                 progress_callback=self._on_progress,
+                wing_model_dir=self.wing_model_dir,
+                wing_expand_fraction=self.wing_expand_fraction,
+                keep_intermediates=self.keep_intermediates,
             )
             self.all_done.emit(results)
         except Exception as e:
@@ -175,6 +191,30 @@ class PreprocessingWindow(QMainWindow):
         seg_row.addWidget(self.btn_seg)
         mdl_layout.addLayout(seg_row)
         left_layout.addWidget(model_group)
+
+        # Wing isolation (optional Stage 0)
+        wing_group = QGroupBox("Wing isolation (optional)")
+        wig_layout = QVBoxLayout(wing_group)
+        self.chk_wing = QCheckBox("Enable wing isolation (Stage 0)")
+        self.chk_wing.setToolTip(
+            "When enabled, every input image is masked through wingIsolator before "
+            "LandmarkLocator sees it. Useful when images contain multiple wings."
+        )
+        self.chk_wing.toggled.connect(self._on_wing_toggled)
+        wig_layout.addWidget(self.chk_wing)
+        wig_layout.addWidget(QLabel("Wing identification model folder:"))
+        wing_row = QHBoxLayout()
+        self.wing_edit = QLineEdit()
+        self.wing_edit.setReadOnly(True)
+        self.wing_edit.setPlaceholderText("Select wing-identification model folder...")
+        self.wing_edit.setEnabled(False)
+        self.btn_wing = QPushButton("Browse...")
+        self.btn_wing.setEnabled(False)
+        self.btn_wing.clicked.connect(self._select_wing_model)
+        wing_row.addWidget(self.wing_edit, stretch=1)
+        wing_row.addWidget(self.btn_wing)
+        wig_layout.addLayout(wing_row)
+        left_layout.addWidget(wing_group)
 
         # Stages
         stage_group = QGroupBox("Stages")
@@ -283,6 +323,15 @@ class PreprocessingWindow(QMainWindow):
         if folder:
             self.seg_edit.setText(folder)
 
+    def _select_wing_model(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Wing-Identification Model Folder")
+        if folder:
+            self.wing_edit.setText(folder)
+
+    def _on_wing_toggled(self, checked: bool):
+        self.wing_edit.setEnabled(checked)
+        self.btn_wing.setEnabled(checked)
+
     # --- Stage toggling ---
     def _on_stage_toggled(self):
         needs_lm = self.chk_landmarks.isChecked() or self.chk_hinge.isChecked()
@@ -340,6 +389,10 @@ class PreprocessingWindow(QMainWindow):
 
         device = _auto_device()
 
+        wing_model_dir = None
+        if self.chk_wing.isChecked() and self.wing_edit.text().strip():
+            wing_model_dir = Path(self.wing_edit.text())
+
         self.worker = PipelineWorker(
             input_dir=Path(self.input_edit.text()),
             output_dir=Path(self.output_edit.text()),
@@ -348,6 +401,9 @@ class PreprocessingWindow(QMainWindow):
             stages=stages,
             device=device,
             keep_chopped=False,
+            wing_model_dir=wing_model_dir,
+            wing_expand_fraction=0.05,
+            keep_intermediates=False,
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.image_done.connect(self._on_image_done)

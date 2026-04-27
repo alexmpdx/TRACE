@@ -27,16 +27,29 @@ logger = logging.getLogger("TRACE")
 # User-selectable Stage 2 outputs. Keys are internal IDs; values are GUI labels.
 OUTPUT_TYPES = OrderedDict(
     [
-        ("wing_isolated_image", "Per-wing isolated single-wing image (Stage 0; requires wing-isolation model)"),
-        ("chopped_image", "Per-wing chopped (hinge-removed) image"),
-        ("landmarks_overlay", "Per-wing landmark points overlay PNG"),
-        ("segmentation_overlay", "Per-wing vein/intervein inference overlay PNG"),
-        ("geojson", "Per-wing GeoJSON (named veins & regions)"),
-        ("overlay", "Per-wing overlay PNG"),
-        ("ap_overlay", "Per-wing AP compartment overlay PNG"),
-        ("cv_ratio_overlay", "Per-wing CV ratio overlay PNG"),
+        ("wing_isolated_image", "Isolated single-wing image (Stage 0; requires wing-isolation model)"),
+        ("chopped_image", "Chopped (hinge-removed) image"),
+        ("landmarks_overlay", "Landmark points overlay PNG"),
+        ("segmentation_overlay", "Vein/intervein inference overlay PNG"),
+        ("geojson", "GeoJSON (named veins & regions)"),
+        ("overlay", "Overlay PNG"),
+        ("ap_overlay", "AP compartment overlay PNG"),
+        ("cv_ratio_overlay", "CV ratio overlay PNG"),
         ("csv", "Batch measurements CSV"),
     ]
+)
+
+# Outputs that are upstream/intermediate artifacts (preprocessing or raw analysis files).
+# In the GUI these live in the Settings dialog → General tab. The remaining keys are
+# "final" outputs (overlays + CSV) shown in the main-window Outputs group.
+INTERMEDIATE_OUTPUTS = frozenset(
+    {
+        "wing_isolated_image",
+        "chopped_image",
+        "landmarks_overlay",
+        "segmentation_overlay",
+        "geojson",
+    }
 )
 
 
