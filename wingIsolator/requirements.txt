@@ -1,0 +1,8 @@
+numpy
+Pillow
+shapely
+geojson
+rasterio
+scipy
+scikit-image
+tifffile
