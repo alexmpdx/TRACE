@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import yaml
-
 from landmark_locator.inference.predict import (
     DEFAULT_GATE_CONFIG,
     LandmarkPredictor,
@@ -38,6 +37,10 @@ _IMAGE_EXTS = {
     ".pef",
     ".rw2",
     ".srw",
+    ".czi",
+    ".nd2",
+    ".lif",
+    ".lsm",
 }
 
 

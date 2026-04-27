@@ -18,6 +18,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+
+def _clean_stem(image_path: Path) -> str:
+    """Strip an .ome.tif / .ome.tiff compound suffix to get a clean stem.
+
+    Path.stem returns "<name>.ome" for "<name>.ome.tif"; this collapses both the
+    ``.ome`` and the trailing extension so intermediate filenames stay readable
+    (e.g. ``<name>_chopped.tif`` instead of ``<name>.ome_chopped.tif``).
+    """
+    name = image_path.name
+    low = name.lower()
+    if low.endswith(".ome.tif"):
+        return name[: -len(".ome.tif")]
+    if low.endswith(".ome.tiff"):
+        return name[: -len(".ome.tiff")]
+    return image_path.stem
+
+
 IMAGE_EXTENSIONS = {
     ".tif",
     ".tiff",
@@ -41,6 +58,11 @@ IMAGE_EXTENSIONS = {
     ".pef",
     ".rw2",
     ".srw",
+    # Microscopy formats — converted to OME-TIFF in process_single_image.
+    ".czi",
+    ".nd2",
+    ".lif",
+    ".lsm",
 }
 
 
@@ -267,10 +289,13 @@ def run_wing_isolation(
         (isolated_image_path, wing_geojson_path_or_None) — GeoJSON path is
         returned only when `keep_intermediate_geojson` is True; otherwise None.
     """
+    import cv2
     from modeltojson import mask_to_geojson, read_image, run_inference, save_geojson
     from shapely.geometry import MultiPolygon as _MultiPolygon
     from shapely.geometry import Polygon as _Polygon
     from shapely.geometry import shape as _shape
+
+    from preprocessing.psd_loader import imwrite_ome_tiff
     from wingIsolator import isolate_in_memory
     from wingIsolator.pipeline import apply_mask_to_image, write_masked_image
 
@@ -304,11 +329,17 @@ def run_wing_isolation(
         raise RuntimeError(f"wing isolation: {out['status']}")
 
     masked = apply_mask_to_image(image, out["mask"], bg_value=0)
-    stem = image_path.stem
+    stem = _clean_stem(image_path)
     ext = image_path.suffix
-    # cv2/Pillow can't write PSD; let write_masked_image fall back to PNG.
-    raster_ext = ".tif" if ext.lower() in (".psd", ".psb") else ext
-    out_image_path = Path(write_masked_image(masked, output_dir / f"{stem}_isolated{raster_ext}"))
+    # cv2/Pillow can't write PSD; coerce TIF outputs to OME-TIFF so we keep
+    # multi-channel/metadata semantics; everything else falls back to write_masked_image.
+    is_tiff = ext.lower() in (".tif", ".tiff", ".psd", ".psb") or ext.lower().endswith(".ome.tif")
+    if is_tiff:
+        # imwrite_ome_tiff expects cv2 BGR convention; modeltojson.read_image returns RGB.
+        bgr = cv2.cvtColor(masked, cv2.COLOR_RGB2BGR) if masked.ndim == 3 else masked
+        out_image_path = imwrite_ome_tiff(output_dir / f"{stem}_isolated", bgr)
+    else:
+        out_image_path = Path(write_masked_image(masked, output_dir / f"{stem}_isolated{ext}"))
 
     geojson_out_path = None
     if keep_intermediate_geojson:
@@ -462,7 +493,8 @@ def process_single_image(
     # Coerce non-cv2-native and lossy formats to a lossless TIF up front so every
     # downstream stage (LandmarkLocator, hinge_chopper, modelTOjson) sees a path
     # cv2.imread can handle. HEIC/HEIF, RAW, and SVG are treated the same way as
-    # JPEG: decoded once via psd_loader.imread_any, re-saved as TIF.
+    # JPEG: decoded once via psd_loader.imread_any, re-saved as TIF. Microscopy
+    # formats (CZI/ND2/LIF/LSM) get a richer round-trip via OME-TIFF.
     _COERCE_TO_TIF_EXTS = {
         ".jpg",
         ".jpeg",
@@ -481,17 +513,20 @@ def process_single_image(
         ".rw2",
         ".srw",
     }
-    if image_path.suffix.lower() in _COERCE_TO_TIF_EXTS:
+    _MICROSCOPY_EXTS = {".czi", ".nd2", ".lif", ".lsm"}
+    if image_path.suffix.lower() in _MICROSCOPY_EXTS:
+        from preprocessing.psd_loader import convert_microscopy_to_ome_tiff
+
+        image_path = convert_microscopy_to_ome_tiff(dest_image, output_dir)
+    elif image_path.suffix.lower() in _COERCE_TO_TIF_EXTS:
         import cv2
-        from preprocessing.psd_loader import imread_any
+
+        from preprocessing.psd_loader import imread_any, imwrite_ome_tiff
 
         img = imread_any(str(dest_image), cv2.IMREAD_UNCHANGED)
         if img is None:
             raise ValueError(f"Failed to read image: {dest_image}")
-        tif_path = output_dir / f"{image_path.stem}.tif"
-        if not cv2.imwrite(str(tif_path), img):
-            raise IOError(f"Failed to write converted TIFF: {tif_path}")
-        image_path = tif_path
+        image_path = imwrite_ome_tiff(output_dir / _clean_stem(image_path), img)
 
     # Stage 0: Wing isolation (optional). When wing_model_dir is set, mask out
     # non-main-wing pixels and rebind image_path so all downstream stages see
@@ -514,10 +549,11 @@ def process_single_image(
         result.stages_completed.append("wing_isolation")
         image_path = isolated_path
 
-    stem = image_path.stem
+    stem = _clean_stem(image_path)
     ext = image_path.suffix
-    # cv2.imwrite cannot write .psd; coerce intermediate outputs to .tif when input is PSD.
-    raster_ext = ".tif" if ext.lower() in (".psd", ".psb") else ext
+    # cv2.imwrite cannot write .psd; coerce intermediate outputs to OME-TIFF when
+    # input is PSD so we still keep multi-channel/metadata semantics on the way out.
+    raster_ext = ".ome.tif" if ext.lower() in (".psd", ".psb") else ext
 
     # Stage 1: Landmarks
     landmarks = None

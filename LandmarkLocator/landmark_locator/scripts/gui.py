@@ -14,11 +14,16 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
-
 from landmark_locator.data.dataset import _normalize_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
+)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -60,13 +65,6 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
-)
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -96,6 +94,10 @@ IMAGE_EXTENSIONS = {
     ".pef",
     ".rw2",
     ".srw",
+    ".czi",
+    ".nd2",
+    ".lif",
+    ".lsm",
 }
 
 
@@ -1095,7 +1097,6 @@ def read_gate_config_from_checkpoint(path: Path) -> tuple[dict, list[str]]:
     full predictor — e.g. the TRACE settings dialog.
     """
     import torch
-
     from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge, _find_fold_checkpoints
 
     p = Path(path)

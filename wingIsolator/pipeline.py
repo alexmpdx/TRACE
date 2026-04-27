@@ -80,6 +80,10 @@ SUPPORTED_IMAGE_EXTS = {
     ".pef",
     ".rw2",
     ".srw",
+    ".czi",
+    ".nd2",
+    ".lif",
+    ".lsm",
 }
 
 
@@ -352,7 +356,16 @@ def write_masked_image(image, output_path) -> str:
         try:
             import tifffile
 
-            tifffile.imwrite(output_path, image)
+            # Write OME-TIFF so downstream tooling sees photometric / channel metadata.
+            # `image` from upstream is RGB (modeltojson.read_image / load_image return RGB).
+            if image.ndim == 3 and image.shape[-1] == 3:
+                tifffile.imwrite(output_path, image, ome=True, photometric="rgb")
+            elif image.ndim == 3 and image.shape[-1] == 4:
+                tifffile.imwrite(output_path, image, ome=True, photometric="rgb")
+            elif image.ndim == 2:
+                tifffile.imwrite(output_path, image, ome=True, photometric="minisblack")
+            else:
+                tifffile.imwrite(output_path, image, ome=True)
             return output_path
         except Exception:
             pass

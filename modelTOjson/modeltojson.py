@@ -396,6 +396,20 @@ def read_image(path: str) -> np.ndarray:
         except Exception:
             pass
 
+    if img is None and ext in (".czi", ".nd2", ".lif", ".lsm"):
+        try:
+            # Reuse the loader's microscopy reduction so this stays consistent
+            # with imread_any. Returns RGB-like (Y, X, 3) or (Y, X) ndarray.
+            import cv2 as _cv2
+
+            from preprocessing.psd_loader import _imread_microscopy
+
+            bgr = _imread_microscopy(path, _cv2.IMREAD_COLOR)
+            if bgr is not None:
+                img = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB) if bgr.ndim == 3 else np.stack([bgr] * 3, axis=-1)
+        except Exception:
+            pass
+
     if img is None:
         try:
             with rasterio.open(path) as src:

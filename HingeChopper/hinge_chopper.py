@@ -11,6 +11,36 @@ import numpy as np
 from hinge_psd_loader import imread_any
 
 
+def _write_chopped_image(path: Path, image: np.ndarray) -> None:
+    """Write a chopped image; coerce TIFF outputs to OME-TIFF to preserve metadata.
+
+    Falls back to cv2.imwrite for non-TIFF formats and for any failure inside
+    tifffile (e.g. if the optional dep isn't installed).
+    """
+    name_low = path.name.lower()
+    is_tiff = path.suffix.lower() in (".tif", ".tiff") or name_low.endswith((".ome.tif", ".ome.tiff"))
+    if is_tiff:
+        try:
+            import tifffile
+
+            if image.ndim == 3 and image.shape[-1] == 3:
+                rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                tifffile.imwrite(str(path), rgb, ome=True, photometric="rgb")
+                return
+            if image.ndim == 3 and image.shape[-1] == 4:
+                rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+                tifffile.imwrite(str(path), rgba, ome=True, photometric="rgb")
+                return
+            if image.ndim == 2:
+                tifffile.imwrite(str(path), image, ome=True, photometric="minisblack")
+                return
+            tifffile.imwrite(str(path), image, ome=True)
+            return
+        except Exception:
+            pass
+    cv2.imwrite(str(path), image)
+
+
 def load_landmarks(path):
     """Parse GeoJSON landmarks, return dict of name → (x, y).
 
@@ -316,7 +346,7 @@ def chop_hinge(image_path, landmarks_path, output_path):
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(output_path), image)
+    _write_chopped_image(output_path, image)
     print(f"Saved: {output_path}")
 
 
@@ -379,7 +409,7 @@ def chop_hinge_from_landmarks(image_path, landmarks, output_path):
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(output_path), image)
+    _write_chopped_image(output_path, image)
     print(f"Saved: {output_path}")
 
 

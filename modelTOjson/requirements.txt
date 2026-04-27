@@ -16,3 +16,7 @@ rawpy
 # cairosvg requires the system Cairo library (e.g. `brew install cairo` on macOS).
 # Pipeline gracefully reports a clear ImportError if SVG inputs are used without it.
 cairosvg
+# Microscopy formats: pipeline auto-converts CZI/ND2/LIF/LSM inputs to OME-TIFF.
+czifile
+nd2
+readlif
