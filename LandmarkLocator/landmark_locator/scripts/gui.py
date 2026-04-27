@@ -852,11 +852,12 @@ def _draw_gate_overlay(
     h, w = vis.shape[:2]
     base = min(h, w)
     # Quadratic response matches draw_landmarks_on_image so the ring grows and
-    # shrinks in lockstep with the dot it's framing.
+    # shrinks in lockstep with the dot it's framing. Base divisor tuned to keep
+    # 100% clearly visible at fit-to-window display zoom.
     dot_scale = size_scale * size_scale
-    dot_radius = max(2, int(base / 500 * dot_scale))
-    ring_radius = dot_radius + max(2, int(base / 800 * dot_scale))
-    thick = max(2, int(round(base / 1200.0 * dot_scale)))
+    dot_radius = max(3, int(base / 250 * dot_scale))
+    ring_radius = dot_radius + max(2, int(base / 500 * dot_scale))
+    thick = max(2, int(round(base / 800.0 * dot_scale)))
 
     color_ok = (0, 220, 0)
     color_fail = (0, 0, 255)
@@ -1119,11 +1120,9 @@ class LandmarkGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("LandmarkLocator — Verification GUI")
         self.resize(1400, 900)
-        # Overlay a light outline on every checkbox indicator without suppressing
-        # the native checkmark. The proxy style wraps the current app style and adds
-        # a drawPrimitive overlay — safer than stylesheet-based image: url() rules
-        # which break native rendering across Qt versions.
-        self.setStyle(_OutlinedCheckBoxStyle(self.style()))
+        # Outlined-checkbox proxy is applied at the QApplication level in main()
+        # so it outlives any window. Setting it here too caused a use-after-free
+        # in QToolBar's destructor when closing the window.
         self.setStyleSheet(
             "QMainWindow { background: #1e1e1e; color: #ddd; }"
             "QListWidget { background: #252526; color: #ddd; border: none; }"
@@ -2111,6 +2110,12 @@ def main() -> None:
     """Launch the GUI."""
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    # Apply the outlined-checkbox proxy at the application level so it outlives
+    # any window. Stash a Python reference on the app instance so the wrapper
+    # isn't garbage-collected before Qt is done with the C++ object — a missing
+    # reference causes a use-after-free during QToolBar destruction on close.
+    app._outlined_checkbox_style = _OutlinedCheckBoxStyle(app.style())
+    app.setStyle(app._outlined_checkbox_style)
     # Dark palette
     from PyQt5.QtGui import QPalette
 

@@ -213,6 +213,118 @@ def run_hinge_chop(image_path: Path, landmarks: dict, output_path: Path) -> Path
 
 
 # ---------------------------------------------------------------------------
+# Stage 0: Wing isolation (optional)
+# ---------------------------------------------------------------------------
+def run_wing_isolation(
+    image_path: Path,
+    model_dir: Path,
+    output_dir: Path,
+    device,
+    model_cache: dict,
+    *,
+    expand_fraction: float = 0.05,
+    keep_intermediate_geojson: bool = False,
+) -> tuple[Path, Path]:
+    """Mask out non-main-wing pixels in `image_path` using a modelTOjson wing-id model.
+
+    1. Run inference with the wing-identification model to get a vein/wing/background
+       segmentation; convert to GeoJSON; filter for `properties.class == "wing"`.
+    2. Hand the resulting shapely polygons to `wingIsolator.isolate_in_memory`,
+       which picks the image-centered (or largest) wing, optionally splits merged
+       wings via watershed, and dilates by `expand_fraction * sqrt(area)`.
+    3. Apply the binary mask to the source image and write `<stem>_isolated<ext>`
+       to `output_dir` (PSD inputs fall back to PNG via wingIsolator's writer).
+
+    Raises:
+        RuntimeError: when the wing model finds no "wing" features, or when
+            wingIsolator cannot produce a valid polygon. Surfaced as
+            `error_stage="wing_isolation"` by `process_folder`'s error handler.
+
+    Returns:
+        (isolated_image_path, wing_geojson_path_or_None) — GeoJSON path is
+        returned only when `keep_intermediate_geojson` is True; otherwise None.
+    """
+    from modeltojson import mask_to_geojson, read_image, run_inference, save_geojson
+    from shapely.geometry import MultiPolygon as _MultiPolygon
+    from shapely.geometry import Polygon as _Polygon
+    from shapely.geometry import shape as _shape
+    from wingIsolator import isolate_in_memory
+    from wingIsolator.pipeline import apply_mask_to_image, write_masked_image
+
+    model, metadata = _load_or_cache_modeltojson(model_dir, device, model_cache)
+
+    image = read_image(str(image_path))
+    seg_mask = run_inference(model, image, metadata, device)
+    fc = mask_to_geojson(seg_mask, metadata["classes"], str(image_path))
+
+    # Collect wing polygons. Filter by class name (exact "wing" or substring match).
+    polygons: list = []
+    for feat in fc.get("features", []):
+        props = feat.get("properties") or {}
+        cls = props.get("class") or (props.get("classification") or {}).get("name")
+        if cls is None or "wing" not in str(cls).lower():
+            continue
+        try:
+            shp = _shape(feat["geometry"])
+        except Exception:
+            continue
+        if isinstance(shp, _Polygon) and not shp.is_empty:
+            polygons.append(shp)
+        elif isinstance(shp, _MultiPolygon):
+            polygons.extend(p for p in shp.geoms if not p.is_empty)
+
+    if not polygons:
+        raise RuntimeError("wing isolation: no 'wing' features detected in image")
+
+    out = isolate_in_memory(image, polygons, expand_fraction=expand_fraction)
+    if out["status"] != "ok":
+        raise RuntimeError(f"wing isolation: {out['status']}")
+
+    masked = apply_mask_to_image(image, out["mask"], bg_value=0)
+    stem = image_path.stem
+    ext = image_path.suffix
+    # cv2/Pillow can't write PSD; let write_masked_image fall back to PNG.
+    raster_ext = ".tif" if ext.lower() in (".psd", ".psb") else ext
+    out_image_path = Path(write_masked_image(masked, output_dir / f"{stem}_isolated{raster_ext}"))
+
+    geojson_out_path = None
+    if keep_intermediate_geojson:
+        geojson_out_path = output_dir / f"{stem}_wing.geojson"
+        save_geojson(fc, str(geojson_out_path))
+
+    return out_image_path, geojson_out_path
+
+
+# ---------------------------------------------------------------------------
+# Shared modelTOjson cache helper (multi-slot, dir-keyed)
+# ---------------------------------------------------------------------------
+def _load_or_cache_modeltojson(model_dir: Path, device, model_cache: dict) -> tuple:
+    """Lazily load a modelTOjson model into a multi-slot, dir-keyed cache.
+
+    model_cache layout::
+
+        {"_lock": Lock(), "<model_dir_str>": {"model": ..., "metadata": ...}, ...}
+
+    Multiple model directories can coexist without thrashing — used so the
+    vein/intervein segmentation model and the wing-identification model
+    share one cache without invalidating each other.
+    """
+    from modeltojson import load_model
+
+    md_str = str(model_dir)
+    entry = model_cache.get(md_str)
+    if entry is None:
+        lock = model_cache.setdefault("_lock", threading.Lock())
+        with lock:
+            entry = model_cache.get(md_str)
+            if entry is None:
+                model, metadata = load_model(md_str, device)
+                entry = {"model": model, "metadata": metadata}
+                model_cache[md_str] = entry
+    return entry["model"], entry["metadata"]
+
+
+# ---------------------------------------------------------------------------
 # Stage 3: Segmentation
 # ---------------------------------------------------------------------------
 def run_segmentation(image_path: Path, model_dir: Path, device, model_cache: dict) -> dict:
@@ -220,21 +332,9 @@ def run_segmentation(image_path: Path, model_dir: Path, device, model_cache: dic
 
     model_cache is a mutable dict used to cache the loaded model across calls.
     """
-    from modeltojson import load_model, mask_to_geojson, read_image, run_inference
+    from modeltojson import mask_to_geojson, read_image, run_inference
 
-    md_str = str(model_dir)
-    if "model" not in model_cache or model_cache.get("model_dir") != md_str:
-        # dict.setdefault is atomic under the GIL — safe for lazy lock creation.
-        lock = model_cache.setdefault("_lock", threading.Lock())
-        with lock:
-            if "model" not in model_cache or model_cache.get("model_dir") != md_str:
-                model, metadata = load_model(md_str, device)
-                model_cache["model"] = model
-                model_cache["metadata"] = metadata
-                model_cache["model_dir"] = md_str
-
-    model = model_cache["model"]
-    metadata = model_cache["metadata"]
+    model, metadata = _load_or_cache_modeltojson(model_dir, device, model_cache)
 
     image = read_image(str(image_path))
     mask = run_inference(model, image, metadata, device)
@@ -262,6 +362,8 @@ class PipelineResult:
     landmarks: Optional[dict] = None
     landmark_metadata: Optional[dict] = None
     landmarks_geojson_path: Optional[Path] = None
+    wing_isolated_image_path: Optional[Path] = None
+    wing_geojson_path: Optional[Path] = None
     chopped_image_path: Optional[Path] = None
     segmentation_geojson_path: Optional[Path] = None
     error: Optional[str] = None
@@ -293,6 +395,9 @@ def process_single_image(
     progress_callback=None,
     include_unreliable_landmarks: bool = False,
     prefetched_landmarks: Optional[dict] = None,
+    wing_model_dir: Optional[Path] = None,
+    wing_expand_fraction: float = 0.05,
+    keep_intermediates: bool = False,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
@@ -306,6 +411,13 @@ def process_single_image(
             current image_path has an entry, the landmark forward pass is skipped and the
             cached result is used directly. A non-None `error` re-raises so the caller
             handles it the same way it would handle a synchronous failure.
+        wing_model_dir: optional Stage 0. When provided, run modelTOjson with this wing
+            -identification model, feed the result into wingIsolator, and rebind
+            image_path to the masked image so all downstream stages see a single wing.
+            None disables the stage entirely.
+        wing_expand_fraction: Stage 0 buffer (fraction of sqrt(polygon area)).
+        keep_intermediates: when True, the wing GeoJSON intermediate is also written
+            alongside the masked image as <stem>_wing.geojson.
     """
     do_landmarks, do_hinge, do_segment = stages
     result = PipelineResult(image_path=image_path)
@@ -335,6 +447,27 @@ def process_single_image(
         if not cv2.imwrite(str(tif_path), img):
             raise IOError(f"Failed to write converted TIFF: {tif_path}")
         image_path = tif_path
+
+    # Stage 0: Wing isolation (optional). When wing_model_dir is set, mask out
+    # non-main-wing pixels and rebind image_path so all downstream stages see
+    # the single-wing image. result.image_path remains the original input.
+    if wing_model_dir is not None:
+        if progress_callback:
+            progress_callback("wing_isolation", f"Isolating main wing for {image_path.name}")
+        isolated_path, wing_geojson_path = run_wing_isolation(
+            image_path,
+            wing_model_dir,
+            output_dir,
+            device,
+            model_cache,
+            expand_fraction=wing_expand_fraction,
+            keep_intermediate_geojson=keep_intermediates,
+        )
+        result.wing_isolated_image_path = isolated_path
+        if wing_geojson_path is not None:
+            result.wing_geojson_path = wing_geojson_path
+        result.stages_completed.append("wing_isolation")
+        image_path = isolated_path
 
     stem = image_path.stem
     ext = image_path.suffix
@@ -431,6 +564,9 @@ def process_folder(
     landmark_batch_size: Optional[int] = None,
     gate_override: Optional[dict] = None,
     max_workers: int = 1,
+    wing_model_dir: Optional[Path] = None,
+    wing_expand_fraction: float = 0.05,
+    keep_intermediates: bool = False,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -444,6 +580,13 @@ def process_folder(
             stage stays batched (one forward pass) regardless. Each worker holds
             an image and a partial GeoJSON in memory; pick a value compatible
             with system RAM. Values <= 1 keep the original sequential loop.
+        wing_model_dir: optional Stage 0 — when set, every image is masked through
+            wingIsolator before landmarks/hinge/segmentation. Disables landmark
+            batching (the prefetch is keyed by original paths and would be wrong
+            for the masked images).
+        wing_expand_fraction: Stage 0 buffer (fraction of sqrt(polygon area)).
+        keep_intermediates: when True, the wing GeoJSON intermediate is also
+            written alongside the masked image as <stem>_wing.geojson.
     """
     if device is None:
         device = _auto_device()
@@ -461,8 +604,10 @@ def process_folder(
     # If the landmark stage is enabled and we have a checkpoint, run landmarks in
     # batches up front so the model amortizes its forward-pass overhead across many
     # images. The per-image loop below picks results up via prefetched_landmarks.
+    # Skipped when wing isolation is on — the prefetch is keyed by original paths
+    # and would not match the rebound (masked) image_path inside process_single_image.
     prefetched: Optional[dict] = None
-    if stages[0] and landmark_checkpoint is not None:
+    if stages[0] and landmark_checkpoint is not None and wing_model_dir is None:
         if progress_callback:
             progress_callback(0, len(images), "(batch)", "landmarks: predicting in batches")
         try:
@@ -480,19 +625,19 @@ def process_folder(
                 progress_callback(0, len(images), "(batch)", f"batch landmarks failed, falling back per-image: {e}")
             prefetched = None
 
-    # Pre-warm the segmentation model cache so parallel workers don't race on first init
-    # (the lock inside run_segmentation handles correctness; pre-warming avoids one
-    # worker doing the slow load while the others stall waiting on the lock).
+    # Pre-warm the modelTOjson model cache so parallel workers don't race on first init
+    # (the lock inside _load_or_cache_modeltojson handles correctness; pre-warming
+    # avoids one worker doing the slow load while the others stall waiting on the lock).
     if stages[2] and segmentation_model_dir is not None:
-        from modeltojson import load_model as _load_seg_model
-
         try:
-            _model, _meta = _load_seg_model(str(segmentation_model_dir), device)
-            model_cache["model"] = _model
-            model_cache["metadata"] = _meta
-            model_cache["model_dir"] = str(segmentation_model_dir)
+            _load_or_cache_modeltojson(segmentation_model_dir, device, model_cache)
         except Exception:
             # Non-fatal — workers will lazy-load and just take longer on the first call.
+            pass
+    if wing_model_dir is not None:
+        try:
+            _load_or_cache_modeltojson(wing_model_dir, device, model_cache)
+        except Exception:
             pass
 
     progress_lock = threading.Lock()
@@ -519,14 +664,24 @@ def process_folder(
                 progress_callback=lambda stage, detail: _emit(i, img_path.name, f"{stage}: {detail}"),
                 include_unreliable_landmarks=include_unreliable_landmarks,
                 prefetched_landmarks=prefetched,
+                wing_model_dir=wing_model_dir,
+                wing_expand_fraction=wing_expand_fraction,
+                keep_intermediates=keep_intermediates,
             )
             _emit(i, img_path.name, "done")
             return result
         except Exception as e:
             from landmark_locator import LowConfidenceLandmarkError
 
-            stage = "landmarks" if isinstance(e, LowConfidenceLandmarkError) else None
-            err_msg = str(e) if isinstance(e, LowConfidenceLandmarkError) else f"{e}\n{traceback.format_exc()}"
+            if isinstance(e, LowConfidenceLandmarkError):
+                stage = "landmarks"
+                err_msg = str(e)
+            elif isinstance(e, RuntimeError) and str(e).startswith("wing isolation:"):
+                stage = "wing_isolation"
+                err_msg = str(e)
+            else:
+                stage = None
+                err_msg = f"{e}\n{traceback.format_exc()}"
             _emit(i, img_path.name, f"error: {e}")
             return PipelineResult(image_path=img_path, error=err_msg, error_stage=stage)
 

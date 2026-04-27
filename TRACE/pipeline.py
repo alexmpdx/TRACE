@@ -27,6 +27,7 @@ logger = logging.getLogger("TRACE")
 # User-selectable Stage 2 outputs. Keys are internal IDs; values are GUI labels.
 OUTPUT_TYPES = OrderedDict(
     [
+        ("wing_isolated_image", "Per-wing isolated single-wing image (Stage 0; requires wing-isolation model)"),
         ("chopped_image", "Per-wing chopped (hinge-removed) image"),
         ("landmarks_overlay", "Per-wing landmark points overlay PNG"),
         ("segmentation_overlay", "Per-wing vein/intervein inference overlay PNG"),
@@ -49,17 +50,22 @@ class TraceResult:
     ap_overlay_path: Optional[Path] = None
     cv_ratio_overlay_path: Optional[Path] = None
     chopped_image_path: Optional[Path] = None
+    wing_isolated_image_path: Optional[Path] = None
     landmarks_overlay_path: Optional[Path] = None
     segmentation_overlay_path: Optional[Path] = None
     error: Optional[str] = None
-    error_stage: Optional[str] = None  # "preprocessing" or "analysis"
+    error_stage: Optional[str] = None  # "preprocessing", "analysis", or "wing_isolation"
 
 
 DEFAULT_MAX_WORKERS = 1
 
 # Per-output preprocessing requirements: (needs_landmarks, needs_hinge, needs_segmentation).
 # Used by _required_stages() to skip upstream work the requested outputs don't depend on.
+# Note: Stage 0 (wing isolation) is gated by the presence of a wing-isolation model dir,
+# not by this table. The "wing_isolated_image" output is produced as a side effect of
+# Stage 0 having run; selecting it without a wing-isolation model just yields nothing.
 _OUTPUT_STAGE_REQUIREMENTS = {
+    "wing_isolated_image": (False, False, False),
     "chopped_image": (True, True, False),
     "landmarks_overlay": (True, False, False),
     "segmentation_overlay": (True, True, True),
@@ -242,6 +248,8 @@ def trace_folder(
     include_unreliable_landmarks: bool = False,
     landmark_batch_size: Optional[int] = None,
     gate_override: Optional[dict] = None,
+    wing_isolation_model_dir: Optional[Path] = None,
+    wing_expand_fraction: float = 0.05,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -274,6 +282,11 @@ def trace_folder(
         gate_override: Optional confidence-gate override applied at predictor construction
             time. Same shape as the `confidence:` block in `configs/default.yaml` —
             populated by the GUI's Landmarks tab or by `--gate-override-yaml` on the CLI.
+        wing_isolation_model_dir: Optional Stage 0 — when set, a modelTOjson wing-id
+            model produces a wing/background segmentation, wingIsolator masks all but
+            the main wing, and the masked image becomes the input to LandmarkLocator
+            and downstream stages. None disables Stage 0 entirely.
+        wing_expand_fraction: Stage 0 buffer (fraction of sqrt(wing area)). Default 0.05.
 
     Returns:
         List of TraceResult, one per input image.
@@ -318,6 +331,9 @@ def trace_folder(
             include_unreliable_landmarks=include_unreliable_landmarks,
             landmark_batch_size=effective_batch,
             gate_override=gate_override,
+            wing_isolation_model_dir=wing_isolation_model_dir.resolve() if wing_isolation_model_dir else None,
+            wing_expand_fraction=wing_expand_fraction,
+            keep_intermediates=keep_intermediates,
         )
     finally:
         if temp_dir_obj is not None:
@@ -339,6 +355,9 @@ def _run(
     include_unreliable_landmarks: bool = False,
     landmark_batch_size: Optional[int] = None,
     gate_override: Optional[dict] = None,
+    wing_isolation_model_dir: Optional[Path] = None,
+    wing_expand_fraction: float = 0.05,
+    keep_intermediates: bool = False,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -371,6 +390,9 @@ def _run(
         landmark_batch_size=landmark_batch_size,
         gate_override=gate_override,
         max_workers=max_workers,
+        wing_model_dir=wing_isolation_model_dir,
+        wing_expand_fraction=wing_expand_fraction,
+        keep_intermediates=keep_intermediates,
     )
 
     results: list[TraceResult] = []
@@ -524,6 +546,19 @@ def _run(
                         logger.warning("%s: failed to copy chopped image: %s", stem, exc)
                 else:
                     logger.warning("%s: chopped_image requested but no chopped file found", stem)
+
+            if "wing_isolated_image" in outputs:
+                wi_src = getattr(preproc_result, "wing_isolated_image_path", None)
+                if wi_src and Path(wi_src).exists():
+                    wi_dst = output_dir / Path(wi_src).name
+                    try:
+                        shutil.copy2(wi_src, wi_dst)
+                        trace_result.wing_isolated_image_path = wi_dst
+                    except OSError as exc:
+                        logger.warning("%s: failed to copy wing-isolated image: %s", stem, exc)
+                else:
+                    # Quietly skip — Stage 0 simply wasn't enabled for this run.
+                    pass
 
             stage2_slots[i] = trace_result
             if "csv" in outputs and wing_result is not None:

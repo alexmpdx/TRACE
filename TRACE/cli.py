@@ -42,6 +42,25 @@ def parse_args(argv=None):
         help="Path to segmentation model directory",
     )
     parser.add_argument(
+        "--wing-isolation-model",
+        type=Path,
+        default=None,
+        help=(
+            "Optional Stage 0 model directory. When set, every image is masked through "
+            "wingIsolator (using a wing/background segmentation from this model) before "
+            "LandmarkLocator sees it. Omit to disable Stage 0."
+        ),
+    )
+    parser.add_argument(
+        "--wing-expand-fraction",
+        type=float,
+        default=0.05,
+        help=(
+            "Stage 0 mask buffer, as a fraction of sqrt(wing area). Default 0.05. "
+            "Ignored when --wing-isolation-model is not set."
+        ),
+    )
+    parser.add_argument(
         "-s",
         "--scale",
         type=float,
@@ -175,6 +194,12 @@ def _validate(args):
     if not args.segmentation_model.is_dir():
         print(f"Error: segmentation model dir not found: {args.segmentation_model}", file=sys.stderr)
         sys.exit(1)
+    if args.wing_isolation_model is not None and not args.wing_isolation_model.is_dir():
+        print(
+            f"Error: --wing-isolation-model dir not found: {args.wing_isolation_model}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _progress(image_index, total, image_name, stage, detail):
@@ -301,6 +326,8 @@ def main(argv=None):
         include_unreliable_landmarks=args.include_unreliable_landmarks,
         landmark_batch_size=(args.landmark_batch_size or None),
         gate_override=gate_override,
+        wing_isolation_model_dir=args.wing_isolation_model,
+        wing_expand_fraction=args.wing_expand_fraction,
     )
 
     # Summary

@@ -10,6 +10,7 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+
 from landmark_locator.data.dataset import _normalize_name
 from landmark_locator.inference.predict import LandmarkPredictor
 
@@ -136,10 +137,11 @@ def draw_landmarks_on_image(
     h, w = vis.shape[:2]
     # Dot size uses a quadratic response on size_scale so the slider produces
     # visible changes at display zoom — a linear scale on this small base reads
-    # as almost no change when the image is fit to the viewport.
+    # as almost no change when the image is fit to the viewport. Base divisor
+    # tuned so 100% is clearly visible on typical wing images.
     dot_scale = size_scale * size_scale
     if radius is None:
-        radius = max(2, int(min(h, w) / 500 * dot_scale))
+        radius = max(3, int(min(h, w) / 250 * dot_scale))
     ring_thick = max(1, radius // 4)
     font_scale = max(0.25, (min(h, w) / 2200.0) * size_scale)
     font_thick = max(1, int(round((min(h, w) / 1800.0) * size_scale)))
