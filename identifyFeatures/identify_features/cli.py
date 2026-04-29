@@ -35,10 +35,16 @@ def _find_batch_specimens(
     specimens = []
     for det in sorted(det_dir.glob("*_detections.geojson")):
         stem = det.name.replace("_detections.geojson", "")
-        lm_path = lm_dir / f"{stem}_landmarks.geojson"
-        if not lm_path.exists():
-            lm_path = lm_dir / f"{stem} _landmarks.geojson"
-        if not lm_path.exists():
+        # Try canonical, space-padded, and wing-isolation suffix variants.
+        for cand in (
+            lm_dir / f"{stem}_landmarks.geojson",
+            lm_dir / f"{stem} _landmarks.geojson",
+            lm_dir / f"{stem}_main_wing_landmarks.geojson",
+        ):
+            if cand.exists():
+                lm_path = cand
+                break
+        else:
             continue
         img_path = None
         if img_dir is not None:

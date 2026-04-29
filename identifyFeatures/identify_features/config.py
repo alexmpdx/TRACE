@@ -33,6 +33,13 @@ class PipelineConfig:
         2.0  # Tight junction merge: merge deg-2/3 nodes within this × vein width (0 = disabled)
     )
     enable_small_fragment_removal: bool = True  # Steps 11/14 small-fragment prune; disable to keep isolated components
+    # Final-pass orphan-component cull: at the end of skeleton building (step 17),
+    # discard any connected component whose total edge length is below this
+    # fraction of the graph's combined edge length. Set to 0 to keep every
+    # component; default 0.05 (= 5%) is permissive enough that disconnected
+    # but legitimate vein chains (e.g. an L4/L5 island when the bridge passes
+    # leave a gap) are preserved while pure noise fragments are still removed.
+    min_component_edge_fraction: float = 0.05
     prune_radius_ratio_threshold: float = 0.3  # For distance-map: r_endpoint/r_junction below this = noise
     prune_scale_sigmas: list[float] = field(
         default_factory=lambda: [2.0, 4.0, 8.0, 16.0]  # For multi-scale persistence
@@ -179,6 +186,7 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
         # Pruning
         "enable_basic_prune": True,
         "enable_small_fragment_removal": True,
+        "min_component_edge_fraction": 0.05,
         "synthesize_missing_crossveins": True,
         "prune_methods": [],
         "prune_min_length_um": None,
@@ -224,6 +232,7 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
         # Pruning
         "enable_basic_prune": False,
         "enable_small_fragment_removal": False,
+        "min_component_edge_fraction": 0.05,
         "synthesize_missing_crossveins": True,
         "prune_methods": [PruneMethod.DISTANCE_MAP],
         "prune_min_length_um": None,

@@ -41,6 +41,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
 
 
@@ -179,6 +180,13 @@ class PipelineConfigDialog(QDialog):
         tabs.addTab(self._build_tracing_tab(), "Tracing")
         tabs.addTab(self._build_intervein_tab(), "Intervein")
 
+        # Keep the General-tab mirror of "synthesize missing crossveins" in sync
+        # with the canonical checkbox on the Tracing tab.
+        canonical = self._widgets["synthesize_missing_crossveins"][1]
+        mirror = self._synthesize_missing_crossveins_mirror
+        canonical.toggled.connect(lambda v: mirror.setChecked(v) if mirror.isChecked() != v else None)
+        mirror.toggled.connect(lambda v: canonical.setChecked(v) if canonical.isChecked() != v else None)
+
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -232,6 +240,15 @@ class PipelineConfigDialog(QDialog):
         )
         wing_form.addRow("Buffer (× √area)", self._wing_expand_spin)
         wig_layout.addLayout(wing_form)
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Vein detection")
+        form = QFormLayout(gb)
+        self._synthesize_missing_crossveins_mirror = QCheckBox("Synthesize ACV/PCV from landmarks when not detected")
+        self._synthesize_missing_crossveins_mirror.setToolTip(
+            "Mirror of the same option on the Tracing tab. Toggling here updates both."
+        )
+        form.addRow("", self._synthesize_missing_crossveins_mirror)
         layout.addWidget(gb)
 
         gb = QGroupBox("Output options")
@@ -394,6 +411,15 @@ class PipelineConfigDialog(QDialog):
         form = QFormLayout(gb)
         self._add_bool(form, "enable_basic_prune", "Basic length-based prune (step 4)")
         self._add_bool(form, "enable_small_fragment_removal", "Small-fragment removal (steps 11 / 14)")
+        self._add_float(
+            form,
+            "min_component_edge_fraction",
+            "Orphan component cull (min fraction of total length)",
+            0.0,
+            1.0,
+            3,
+            0.01,
+        )
         self._add_enum_list(
             form, "prune_methods", "Methods (empty = length-based only)", PruneMethod, allowed_values={"distance-map"}
         )

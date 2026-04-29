@@ -241,7 +241,7 @@ def trace_veins_from_landmarks(
         dbg.dump(G, edge_labels, "phase3_l6")
 
     # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5)
-    _detect_crossveins(G, edge_labels)
+    _detect_crossveins(G, edge_labels, config=config, median_vein_width_px=skel_graph.median_vein_width_px)
     if dbg:
         dbg.dump(G, edge_labels, "phase4_crossveins")
 
@@ -1348,6 +1348,8 @@ def _detect_l6(
 def _detect_crossveins(
     G: nx.Graph,
     edge_labels: dict[tuple, str],
+    config: Optional["PipelineConfig"] = None,
+    median_vein_width_px: float = 0.0,
 ) -> None:
     """Detect ACV and PCV crossveins.
 
@@ -1356,18 +1358,35 @@ def _detect_crossveins(
     veins.  ACV connects L3↔L4, PCV connects L4↔L5.
 
     Detection: group unlabeled edges into chains by contracting
-    degree-2 pass-through nodes, then for each crossvein find the chain
-    whose two outer endpoints best match vein_a and vein_b.  This
-    handles multi-edge crossveins that pass through interior kinks
-    (e.g. the ACV on 20241205_en-PknRNAi_108870_0019 where a short chain
-    of 2 edges bridges L3 and L4 through a degree-2 kink node).  Chains
-    of length 1 degrade gracefully to the previous single-edge match.
+    degree-2 pass-through nodes (and degree-3 nodes whose third neighbor
+    is a short dead-end stub — same stub guard as `merge_through_junctions`
+    in junction_resolver.py), then for each crossvein find the chain
+    whose two outer endpoints best match vein_a and vein_b AND whose
+    bounding box lies inside the (vein_a, vein_b) corridor — i.e. ACV
+    must sit between L3 and L4 longitudinally (in AP order), PCV between
+    L4 and L5. The corridor gate prevents the detector from grabbing a
+    distant unlabeled chain whose endpoints happen to score well purely
+    by coincidence.
+
     "Near" means the node is an endpoint of a labeled edge (shared
     graph node) or its coordinates lie on/close to a labeled vein
     LineString (typical after junction merging contracts the junction
     node into the longitudinal's line).
     """
     from identify_features.models.topology import CROSSVEIN_CONNECTIONS
+
+    # Stub-length cap: same anatomical floor as junction_resolver.merge_through_junctions
+    # so this detector and the junction merger agree on what counts as a stub.
+    if config is not None and config.um_per_px is not None and config.um_per_px > 0:
+        stub_len_floor_px = config.to_px(60.0)
+    elif median_vein_width_px > 0:
+        stub_len_floor_px = 2.5 * median_vein_width_px
+    else:
+        stub_len_floor_px = 0.0
+    stub_len_cap = max(5.0 * median_vein_width_px, stub_len_floor_px)
+
+    def _is_short_stub(neighbor: int, edge_length: float) -> bool:
+        return G.degree(neighbor) == 1 and edge_length < stub_len_cap
 
     # Build lookup: labeled vein LineStrings and endpoint node sets
     vein_lines: dict[str, list[LineString]] = defaultdict(list)
@@ -1397,11 +1416,28 @@ def _detect_crossveins(
         for start, direction in [(u, v), (v, u)]:
             cur = start
             prev = direction
-            while G.degree(cur) == 2:
-                nxt = [n for n in G.neighbors(cur) if n != prev]
-                if not nxt:
+            while True:
+                deg = G.degree(cur)
+                if deg == 2:
+                    candidates = [n for n in G.neighbors(cur) if n != prev]
+                elif deg == 3:
+                    # Bridge across a degree-3 node when exactly one of the two
+                    # forward neighbors is a short dead-end stub. Mirrors the
+                    # stub guard in junction_resolver.merge_through_junctions
+                    # (commit b5a8253) so chain contraction here doesn't break
+                    # apart over the same kind of ectopic-stub junctions.
+                    forward = [n for n in G.neighbors(cur) if n != prev]
+                    if len(forward) != 2:
+                        break
+                    non_stub = [n for n in forward if not _is_short_stub(n, G[cur][n].get("length_px", 0))]
+                    if len(non_stub) != 1:
+                        break
+                    candidates = non_stub
+                else:
                     break
-                nxt = nxt[0]
+                if not candidates:
+                    break
+                nxt = candidates[0]
                 nkey = _edge_key(cur, nxt)
                 if nkey in visited or nkey in edge_labels:
                     break
@@ -1432,17 +1468,57 @@ def _detect_crossveins(
             }
         )
 
+    # Margin for the corridor gate — a chain whose bounding box pokes a few
+    # vein widths outside the [vein_a, vein_b] AP corridor is still plausibly
+    # a real crossvein (anchor noise, label-line jitter), but a chain that
+    # sits entirely on the wrong side of one of the boundary veins is not.
+    corridor_margin = max(2.0 * median_vein_width_px, 30.0)
+
     for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
         if vein_a not in vein_lines or vein_b not in vein_lines:
             logger.info("Cannot detect %s: %s or %s not labeled", cv_name, vein_a, vein_b)
             continue
 
+        # Build the AP-axis corridor from the two longitudinal veins. We use
+        # mean Y on each vein since L3/L4/L5 are roughly horizontal in the
+        # canonical wing pose; the corridor gate keeps the chain's bbox-Y
+        # within the [min, max] of the two veins (± margin).
+        a_pts = [pt for ln in vein_lines[vein_a] for pt in ln.coords]
+        b_pts = [pt for ln in vein_lines[vein_b] for pt in ln.coords]
+        if not a_pts or not b_pts:
+            logger.info("Cannot detect %s: missing geometry for %s/%s", cv_name, vein_a, vein_b)
+            continue
+        a_y_mean = sum(p[1] for p in a_pts) / len(a_pts)
+        b_y_mean = sum(p[1] for p in b_pts) / len(b_pts)
+        corridor_y_lo = min(a_y_mean, b_y_mean) - corridor_margin
+        corridor_y_hi = max(a_y_mean, b_y_mean) + corridor_margin
+
         best_chain = None
         best_score = float("inf")
+        rejected_corridor = 0
 
         for chain in chains:
             if chain["claimed"]:
                 continue
+
+            # Corridor gate: the chain's centroid Y must lie within the
+            # AP corridor between vein_a and vein_b. This blocks distant
+            # unlabeled chains (e.g. a hinge-area stub or a chain on the
+            # opposite side of a longitudinal vein) from winning the
+            # endpoint-distance tournament when their endpoints happen to
+            # sit close to (vein_a, vein_b) by coincidence.
+            chain_pts = []
+            for a, b in chain["edges"]:
+                line = G[a][b].get("line") if G.has_edge(a, b) else None
+                if line is not None:
+                    chain_pts.extend(line.coords)
+            if not chain_pts:
+                continue
+            chain_y_mean = sum(p[1] for p in chain_pts) / len(chain_pts)
+            if not (corridor_y_lo <= chain_y_mean <= corridor_y_hi):
+                rejected_corridor += 1
+                continue
+
             end_a, end_b = chain["endpoints"]
             # Try both orientations
             for ea, eb in [(end_a, end_b), (end_b, end_a)]:
@@ -1460,14 +1536,19 @@ def _detect_crossveins(
                 edge_labels[key] = cv_name
             best_chain["claimed"] = True
             logger.info(
-                "Detected %s: %d-edge chain, %.0fpx total (score=%.1f)",
+                "Detected %s: %d-edge chain, %.0fpx total (score=%.1f, %d chain(s) rejected by corridor)",
                 cv_name,
                 len(best_chain["edges"]),
                 best_chain["length"],
                 best_score,
+                rejected_corridor,
             )
         else:
-            logger.info("No candidate found for %s", cv_name)
+            logger.info(
+                "No candidate found for %s (%d chain(s) rejected by corridor)",
+                cv_name,
+                rejected_corridor,
+            )
 
 
 def _detect_crossveins_via_junctions(

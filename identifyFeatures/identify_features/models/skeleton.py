@@ -361,16 +361,46 @@ def build_skeleton_graph(
         dbg.dump_graph(graph, "final_stubs")
 
     # Step 17: Snap edge LineString endpoints to node positions.
-    # Keep only the largest connected component — any smaller component is an
-    # orphan fragment unreachable from landmark anchors. This runs regardless
-    # of enable_small_fragment_removal (which governs only intermediate pruning).
+    # Cull orphan components by combined edge length: discard any component
+    # whose summed `length_px` is below `min_component_edge_fraction` × the
+    # graph's total edge length. The previous "keep only the largest" rule
+    # discarded legitimate disconnected-but-real components on wings where
+    # the bridge passes happened to leave a mid-wing gap (e.g. 0005's L4/L5
+    # island disconnected from the L1/L3/Rs trunk). Always preserve at least
+    # the largest component to guarantee a non-empty graph if the threshold
+    # is high enough to drop everything.
     _snap_edge_endpoints(graph)
     components = list(nx.connected_components(graph))
     if len(components) > 1:
-        largest = max(components, key=len)
+        comp_lengths = []
         for comp in components:
-            if comp is not largest:
+            sub = graph.subgraph(comp)
+            total = sum(d.get("length_px", 0.0) for _, _, d in sub.edges(data=True))
+            comp_lengths.append((comp, total))
+        grand_total = sum(t for _, t in comp_lengths) or 1.0
+        threshold = config.min_component_edge_fraction * grand_total
+        # Keep components meeting the fraction cutoff; if none do, fall back
+        # to keeping just the longest one so the graph is never emptied.
+        survivors = [comp for comp, t in comp_lengths if t >= threshold]
+        if not survivors:
+            survivors = [max(comp_lengths, key=lambda ct: ct[1])[0]]
+        survivors_set: set[int] = set()
+        for comp in survivors:
+            survivors_set.update(comp)
+        dropped = 0
+        for comp, t in comp_lengths:
+            if comp not in survivors:
                 graph.remove_nodes_from(comp)
+                dropped += 1
+        if dropped:
+            logger.info(
+                "Component cull: kept %d component(s) (≥ %.0f px = %.0f%% of %.0f px), dropped %d",
+                len(survivors),
+                threshold,
+                config.min_component_edge_fraction * 100,
+                grand_total,
+                dropped,
+            )
     if dbg:
         dbg.dump_graph(graph, "final")
 

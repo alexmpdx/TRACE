@@ -49,6 +49,16 @@ def _build_region_adjacency() -> tuple[
 _REGION_ADJACENCY, _REGION_EDGE_SEPARATOR = _build_region_adjacency()
 
 
+def _claimed_single_names(results: list[InterveinRegion]) -> frozenset[str]:
+    """Names already assigned as canonical single-region polygons.
+
+    Used to suppress merge candidates that would absorb a region whose own
+    polygon has already been observed and named — such a merger would
+    double-count that polygon.
+    """
+    return frozenset(r.name for r in results if " + " not in r.name and r.status == "identified")
+
+
 def name_intervein_regions(
     intervein_polys: list[Polygon | MultiPolygon],
     veins: list[VeinIdentification],
@@ -158,8 +168,17 @@ def name_intervein_regions(
                 continue
 
         if name is None:
-            # Try merged region detection
-            name, status = _check_merged(detected, vein_map, effective_expected, config.max_merge_size)
+            # Try merged region detection. Exclude regions already assigned
+            # as canonical singles in earlier loop iterations — merging into
+            # them would double-count those polygons.
+            claimed_singles = _claimed_single_names(results)
+            name, status = _check_merged(
+                detected,
+                vein_map,
+                effective_expected,
+                config.max_merge_size,
+                claimed_names=claimed_singles,
+            )
 
         if name is None:
             # Coverage fallback: what fraction of expected veins are present?
@@ -190,9 +209,19 @@ def name_intervein_regions(
 
     # Anything the PD resolver couldn't handle (no axis, no matching PD pair,
     # or a lone polygon spanning both regions) falls through to the old
-    # merge/coverage fallback path.
+    # merge/coverage fallback path. The polygon's tied initial-match set
+    # constrains valid merge candidates: the merge must include every region
+    # that matched best in single-region scoring.
+    claimed_singles = _claimed_single_names(results)
     for _, poly, detected, _tied in unresolved_ties:
-        name, status = _check_merged(detected, vein_map, effective_expected, config.max_merge_size)
+        name, status = _check_merged(
+            detected,
+            vein_map,
+            effective_expected,
+            config.max_merge_size,
+            claimed_names=claimed_singles,
+            required_names=_tied,
+        )
         if name is None:
             name, status = _coverage_fallback(detected, effective_expected)
         if name is None:
@@ -589,6 +618,8 @@ def _enumerate_merge_candidates(
     detected: frozenset[str],
     effective_expected: dict[str, set[str]],
     max_merge_size: Optional[int] = None,
+    claimed_names: frozenset[str] = frozenset(),
+    required_names: frozenset[str] = frozenset(),
 ) -> Optional[tuple[tuple[str, ...], frozenset[str], set[str]]]:
     """Find the best connected subset of regions matching a detected vein set.
 
@@ -605,10 +636,17 @@ def _enumerate_merge_candidates(
            smallest merge (avoid absorbing extra regions we don't need).
         3. AP-ordered region tuple — deterministic final tie-break.
 
+    ``claimed_names`` excludes regions already assigned as canonical
+    single-name polygons elsewhere in ``results`` — a merger that absorbs
+    them would double-count those polygons. ``required_names`` constrains
+    candidates to those that *contain* the polygon's best initial single-
+    region matches (the tied set that fell through to merge resolution);
+    the merge interpretation must explain why every tied region matched.
+
     Returns ``(ap_ordered_regions, merged_expected, internal_separators)`` or
     ``None`` if no connected subset matches.
     """
-    all_regions = [r for r in REGION_AP_ORDER if r in effective_expected]
+    all_regions = [r for r in REGION_AP_ORDER if r in effective_expected and r not in claimed_names]
     if not all_regions:
         return None
     upper = max_merge_size if max_merge_size is not None else len(all_regions)
@@ -622,6 +660,8 @@ def _enumerate_merge_candidates(
     for size in range(2, upper + 1):
         for combo in combinations(all_regions, size):
             subset = set(combo)
+            if required_names and not required_names <= subset:
+                continue
             if not _is_connected(subset, _REGION_ADJACENCY):
                 continue
             # Internal separators = veins bounding pairs both inside the subset
@@ -650,6 +690,8 @@ def _check_merged(
     vein_map: dict[str, VeinIdentification],
     effective_expected: dict[str, set[str]],
     max_merge_size: Optional[int] = None,
+    claimed_names: frozenset[str] = frozenset(),
+    required_names: frozenset[str] = frozenset(),
 ) -> tuple[Optional[str], str]:
     """Detect an N-way merged region matching the given vein set.
 
@@ -658,8 +700,18 @@ def _check_merged(
     veins along the chain are absent or partial. Any connected subset of
     the region adjacency graph is a valid candidate; the largest/highest-
     specificity match wins.
+
+    ``claimed_names`` and ``required_names`` are forwarded to the enumerator
+    to exclude regions already assigned elsewhere and to constrain
+    candidates to those containing the tied initial-match regions.
     """
-    result = _enumerate_merge_candidates(detected, effective_expected, max_merge_size=max_merge_size)
+    result = _enumerate_merge_candidates(
+        detected,
+        effective_expected,
+        max_merge_size=max_merge_size,
+        claimed_names=claimed_names,
+        required_names=required_names,
+    )
     if result is None:
         return None, ""
 
