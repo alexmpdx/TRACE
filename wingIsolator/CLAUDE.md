@@ -44,7 +44,7 @@ python run_cli.py --batch <image_dir> <geojson_dir> -o <out_dir>
 python make_overlays.py
 ```
 
-The CLI's `--batch` mode pairs each image with `<stem>_detections.geojson` (or `<stem>.geojson`) in the geojson dir. It writes `<stem>_main_wing.{ext,geojson}` and a `wing_isolator_summary.json` per run.
+The CLI's `--batch` mode pairs each image with `<stem>_detections.geojson` (or `<stem>.geojson`) in the geojson dir. Outputs are split into `<output>/images/<stem>_main_wing.<ext>` and `<output>/geojsons/<stem>_main_wing.geojson`, with `wing_isolator_summary.json` at the top level.
 
 To regenerate detection GeoJSONs from images, call `modeltojson.process_folder(model_dir, image_dir, geojson_dir)` from `../modelTOjson` with a wing-vs-background segmentation model (e.g. `../workingModels/alextinynet_4x_*`).
 
@@ -56,7 +56,7 @@ To regenerate detection GeoJSONs from images, call `modeltojson.process_folder(m
 2. **Pick main polygon** — first polygon containing the image-center point; falls back to largest by area.
 3. **Watershed split** — rasterize → `scipy.ndimage.distance_transform_edt` → smooth → `skimage.feature.peak_local_max` → `skimage.segmentation.watershed`. Seed `min_distance` defaults to ~max DT value, which admits one peak per touching wing while rejecting sub-peaks inside a single wing. Most inputs produce a single seed and skip the split.
 4. **Pick main label** — watershed label at the center pixel; fallback to nearest centroid.
-5. **Vectorize + dilate** — `rasterio.features.shapes` → simplify → uniform Minkowski dilation via `polygon.buffer(expand_fraction * sqrt(area))`, then clipped to image bounds. Default `expand_fraction=0.05`. The dilated polygon is re-rasterized so the masked image and GeoJSON output stay in sync.
+5. **Vectorize + dilate** — `rasterio.features.shapes` → simplify → uniform Minkowski dilation via `polygon.buffer(expand_fraction * sqrt(area))`, then clipped to image bounds. Default `expand_fraction=0.05`. The dilated polygon is re-rasterized, and any pixels that were originally part of a *non-main* wing (other watershed sub-labels or other input polygons) are subtracted so the dilation can grow into background but never into a neighboring wing's tissue. The result is re-vectorized so the masked image and GeoJSON output stay in sync.
 6. **Write** — single-feature GeoJSON + masked image (`bg_value` outside the dilated mask).
 
 Tunables exposed on the CLI: `--threshold-rel` (lower catches small sliver wings), `--min-seed-distance` (raise to prevent over-splitting one wing), `--smoothing-sigma`, `--simplify`, `--bg-value`, `--class-name` (repeatable), `--expand` (dilation fraction; 0 disables).

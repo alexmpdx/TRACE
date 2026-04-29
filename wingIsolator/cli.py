@@ -50,6 +50,14 @@ def main():
         "--threshold-rel", type=float, default=0.2, help="Relative peak threshold for seed detection (default: 0.2)."
     )
     parser.add_argument(
+        "--max-saddle-ratio",
+        type=float,
+        default=0.35,
+        help="Reject the watershed split when (saddle DT) / (peak DT) exceeds this. "
+        "Real merges have shallow saddles (~0.1-0.2); torn/notched single wings "
+        "have deep saddles (~0.5-0.7). Default: 0.35; 0 disables the check.",
+    )
+    parser.add_argument(
         "--expand",
         type=float,
         default=0.05,
@@ -69,6 +77,7 @@ def main():
         smoothing_sigma=args.smoothing_sigma,
         min_seed_distance=args.min_seed_distance,
         threshold_rel=args.threshold_rel,
+        max_saddle_ratio=args.max_saddle_ratio,
         expand_fraction=args.expand_fraction,
         debug=args.debug,
     )

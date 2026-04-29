@@ -238,9 +238,17 @@ def split_merged_wing(
     smoothing_sigma=2.0,
     min_seed_distance=None,
     threshold_rel=0.2,
+    max_saddle_ratio=0.35,
     debug=False,
 ):
     """Watershed-split a polygon if it contains multiple wing peaks.
+
+    Includes a saddle-depth sanity check: the watershed cut between two real
+    merged wings runs through a thin neck, so the maximum DT value along the
+    cut (the "saddle") is small relative to the polygon's peak DT. A torn or
+    notched single wing produces a deep saddle (cut runs through wing tissue,
+    not a constriction). If saddle/peak exceeds `max_saddle_ratio` the split
+    is rejected and the polygon is returned as a single label.
 
     Returns (labels, mask) where labels is (H, W) int32 with 0 = background
     and 1..N for separated wings; mask is the (H, W) uint8 binary input mask.
@@ -287,6 +295,19 @@ def split_merged_wing(
         return mask.astype(np.int32), mask
 
     labels = watershed(-distance, markers, mask=mask.astype(bool))
+
+    if max_saddle_ratio is not None and max_saddle_ratio > 0:
+        boundary = np.zeros_like(labels, dtype=bool)
+        boundary[1:, :] |= (labels[1:, :] != labels[:-1, :]) & (labels[1:, :] > 0) & (labels[:-1, :] > 0)
+        boundary[:, 1:] |= (labels[:, 1:] != labels[:, :-1]) & (labels[:, 1:] > 0) & (labels[:, :-1] > 0)
+        if boundary.any():
+            saddle = float(distance[boundary].max())
+            ratio = saddle / peak if peak > 0 else 0.0
+            if debug:
+                print(f"  saddle/peak={ratio:.3f} (max allowed={max_saddle_ratio})")
+            if ratio > max_saddle_ratio:
+                return mask.astype(np.int32), mask
+
     return labels.astype(np.int32), mask
 
 
@@ -403,6 +424,7 @@ def isolate_in_memory(
     smoothing_sigma: float = 2.0,
     min_seed_distance: Optional[int] = None,
     threshold_rel: float = 0.2,
+    max_saddle_ratio: float = 0.35,
     expand_fraction: float = 0.05,
     debug: bool = False,
 ):
@@ -444,6 +466,7 @@ def isolate_in_memory(
         smoothing_sigma=smoothing_sigma,
         min_seed_distance=min_seed_distance,
         threshold_rel=threshold_rel,
+        max_saddle_ratio=max_saddle_ratio,
         debug=debug,
     )
     main_label = select_main_label(labels, center)
@@ -470,6 +493,27 @@ def isolate_in_memory(
     main_polygon = dilate_polygon_to_image(main_polygon, image.shape, expand_fraction)
     keep_mask = rasterize_polygon(main_polygon, image.shape)
 
+    # Subtract any wing tissue that wasn't part of the chosen main label.
+    # This removes neighboring-wing pixels that the dilation may have grown
+    # into (other watershed sub-labels within the merged polygon, or other
+    # input wing polygons entirely).
+    main_undilated = labels == main_label
+    other_wings_mask = np.zeros(image.shape[:2], dtype=bool)
+    for p in polygons:
+        other_wings_mask |= rasterize_polygon(p, image.shape).astype(bool)
+    other_wings_mask &= ~main_undilated
+    if other_wings_mask.any():
+        keep_mask = (keep_mask.astype(bool) & ~other_wings_mask).astype(np.uint8)
+        main_polygon = vectorize_mask(keep_mask, simplify_tolerance=simplify_tolerance)
+        if main_polygon is None:
+            return {
+                "polygon": None,
+                "mask": keep_mask,
+                "num_input_polygons": len(polygons),
+                "num_subwings": int(labels.max()),
+                "status": "vectorize_failed",
+            }
+
     return {
         "polygon": main_polygon,
         "mask": keep_mask,
@@ -494,6 +538,7 @@ def isolate_main_wing(
     smoothing_sigma=2.0,
     min_seed_distance=None,
     threshold_rel=0.2,
+    max_saddle_ratio=0.35,
     expand_fraction=0.05,
     debug=False,
 ) -> IsolationResult:
@@ -514,6 +559,7 @@ def isolate_main_wing(
             smoothing_sigma=smoothing_sigma,
             min_seed_distance=min_seed_distance,
             threshold_rel=threshold_rel,
+            max_saddle_ratio=max_saddle_ratio,
             expand_fraction=expand_fraction,
             debug=debug,
         )
@@ -531,8 +577,12 @@ def isolate_main_wing(
 
         stem = Path(image_path).stem
         img_ext = Path(image_path).suffix.lower() or ".png"
-        masked_image_path = os.path.join(output_dir, f"{stem}{output_suffix}{img_ext}")
-        main_geojson_path = os.path.join(output_dir, f"{stem}{output_suffix}.geojson")
+        images_dir = os.path.join(output_dir, "images")
+        geojsons_dir = os.path.join(output_dir, "geojsons")
+        os.makedirs(images_dir, exist_ok=True)
+        os.makedirs(geojsons_dir, exist_ok=True)
+        masked_image_path = os.path.join(images_dir, f"{stem}{output_suffix}{img_ext}")
+        main_geojson_path = os.path.join(geojsons_dir, f"{stem}{output_suffix}.geojson")
 
         actual_image_path = write_masked_image(masked_image, masked_image_path)
         fc = build_geojson(outcome["polygon"], image_path)
