@@ -11,7 +11,7 @@ from typing import Optional
 
 import cv2
 from identify_features.config import PipelineConfig
-from identify_features.models.datatypes import WingResult
+from identify_features.models.datatypes import VeinIdentification, WingResult
 from identify_features.models.geojson_io import (
     _compute_wing_outline,
     load_detection_geojson,
@@ -26,8 +26,96 @@ from identify_features.models.landmark_anchor import anchor_landmarks
 from identify_features.models.skeleton import build_skeleton_graph
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
+from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
+
+
+def _fill_interior_ectopic_veins(
+    intervein_polys: list[Polygon | MultiPolygon],
+    veins: list[VeinIdentification],
+    wing_outline: Optional[Polygon],
+    median_vein_width_px: float,
+) -> list[Polygon | MultiPolygon]:
+    """Union purely-interior EV* centerlines back into the intervein mask.
+
+    An ectopic sprout that lives entirely inside a single intervein region
+    can split that region into two polygons in the segmentation output (the
+    pixel classifier draws a vein-pixel band where the sprout is). The
+    intervein splitter then names the two halves as different regions
+    (e.g. half of marginal becomes submarginal on 0009).
+
+    Filter out EVs that look like fragments of a real-but-undetected vein:
+    if an EV endpoint is close to a labeled longitudinal/crossvein endpoint
+    OR close to the wing margin, the EV probably anchors a real boundary
+    and should not be filled in. Only EVs with both endpoints in the
+    interior get unioned into adjacent intervein polygons.
+    """
+    if not veins or not intervein_polys:
+        return intervein_polys
+
+    buffer_px = max(median_vein_width_px * 1.5, 5.0)
+    margin_buffer = max(median_vein_width_px * 2.0, 5.0)
+
+    real_endpoints: list[Point] = []
+    for v in veins:
+        if v.centerline is None or v.vein_id.startswith("EV"):
+            continue
+        coords = list(v.centerline.coords)
+        real_endpoints.append(Point(*coords[0]))
+        real_endpoints.append(Point(*coords[-1]))
+
+    wing_boundary = wing_outline.boundary if wing_outline is not None else None
+
+    fills: list[Polygon] = []
+    for v in veins:
+        if v.centerline is None or not v.vein_id.startswith("EV"):
+            continue
+        coords = list(v.centerline.coords)
+        if len(coords) < 2:
+            continue
+        ev_p1 = Point(*coords[0])
+        ev_p2 = Point(*coords[-1])
+
+        anchored_to_real_vein = any(ep.distance(rp) < buffer_px for ep in (ev_p1, ev_p2) for rp in real_endpoints)
+        if anchored_to_real_vein:
+            logger.info("EV fill: skipping %s (endpoint near real-vein anchor)", v.vein_id)
+            continue
+        if wing_boundary is not None:
+            min_margin = min(ev_p1.distance(wing_boundary), ev_p2.distance(wing_boundary))
+            if min_margin < margin_buffer:
+                logger.info(
+                    "EV fill: skipping %s (endpoint within %.0fpx of wing margin)",
+                    v.vein_id,
+                    margin_buffer,
+                )
+                continue
+        fills.append(v.centerline.buffer(buffer_px))
+        logger.info("EV fill: %s flagged for intervein mask union", v.vein_id)
+
+    if not fills:
+        return intervein_polys
+
+    remaining = list(intervein_polys)
+    for fill in fills:
+        touched: list[Polygon | MultiPolygon] = []
+        others: list[Polygon | MultiPolygon] = []
+        for p in remaining:
+            if p.intersects(fill) or p.distance(fill) < 1.0:
+                touched.append(p)
+            else:
+                others.append(p)
+        if not touched:
+            remaining = others
+            continue
+        merged = unary_union(touched + [fill])
+        if isinstance(merged, MultiPolygon):
+            others.extend(list(merged.geoms))
+        else:
+            others.append(merged)
+        remaining = others
+    return remaining
 
 
 def identify_wing(
@@ -100,6 +188,9 @@ def identify_wing(
 
     # Step 5.5a: Assign vein tissue polygons
     assign_vein_tissue_polygons(veins, skel.median_vein_width_px, config, wing_outline)
+
+    # Step 5.5a': Re-merge regions split by purely-interior ectopic veins
+    intervein_polys = _fill_interior_ectopic_veins(intervein_polys, veins, wing_outline, skel.median_vein_width_px)
 
     # Step 5.5b: Split merged intervein polygons
     logger.info("Step 5.5: Splitting merged intervein polygons")
