@@ -255,6 +255,15 @@ def trace_veins_from_landmarks(
     if dbg:
         dbg.dump(G, edge_labels, "phase4b_crossveins_fallback")
 
+    # Phase 4b': Extend each labeled crossvein by absorbing adjacent unlabeled
+    # edges that share a graph node with it and lie inside its AP corridor.
+    # Catches cases where the chain detector / fallback labels only a piece
+    # of a crossvein (e.g. fallback labels just the edge touching PCV.a) and
+    # the rest stays unlabeled, eventually getting promoted to EV*.
+    _extend_crossveins_along_corridor(G, edge_labels, skel_graph.median_vein_width_px, config=config)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4b_crossveins_extend")
+
     # Phase 4c: Re-propagate labels through degree-2 nodes after crossvein labeling
     _propagate_through_degree2(
         G,
@@ -270,8 +279,13 @@ def trace_veins_from_landmarks(
     if dbg:
         dbg.dump(G, edge_labels, "phase4d_ectopic")
 
-    # Phase 5: Build VeinIdentification objects
-    merge_gap = config.to_px(config.merge_max_gap_um) if config.um_per_px else 100.0
+    # Phase 5: Build VeinIdentification objects.
+    # Primary: convert µm gap. Fallback: 4× median vein width (last-resort
+    # is 0 if both are unavailable, i.e. only collinear edges merge).
+    if config.um_per_px:
+        merge_gap = config.to_px(config.merge_max_gap_um)
+    else:
+        merge_gap = 4.0 * skel_graph.median_vein_width_px
     veins = _build_vein_identifications(G, edge_labels, max_merge_gap_px=merge_gap)
 
     # Phase 5b: Synthesize crossveins from landmarks when graph detection failed.
@@ -1472,7 +1486,23 @@ def _detect_crossveins(
     # vein widths outside the [vein_a, vein_b] AP corridor is still plausibly
     # a real crossvein (anchor noise, label-line jitter), but a chain that
     # sits entirely on the wrong side of one of the boundary veins is not.
-    corridor_margin = max(2.0 * median_vein_width_px, 30.0)
+    # Primary: 2× median vein width. Fallback when vein width is unknown:
+    # 60 µm anatomical floor (matches the stub-length floor used elsewhere).
+    corridor_margin = max(
+        2.0 * median_vein_width_px,
+        config.to_px(60.0) if (config and config.um_per_px) else 0.0,
+    )
+    # "Near a labeled vein" radius for chain endpoint scoring. Primary:
+    # 2× median vein width. Fallback: 60 µm. The fallback to a hard 50 px
+    # default in `_node_vein_distance` is only hit when this scope itself
+    # has neither vein width nor µm scale.
+    node_vein_max_dist = (
+        max(
+            2.0 * median_vein_width_px,
+            config.to_px(60.0) if (config and config.um_per_px) else 0.0,
+        )
+        or 50.0
+    )
 
     for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
         if vein_a not in vein_lines or vein_b not in vein_lines:
@@ -1522,8 +1552,8 @@ def _detect_crossveins(
             end_a, end_b = chain["endpoints"]
             # Try both orientations
             for ea, eb in [(end_a, end_b), (end_b, end_a)]:
-                dist_a = _node_vein_distance(G, ea, vein_a, vein_lines, vein_nodes)
-                dist_b = _node_vein_distance(G, eb, vein_b, vein_lines, vein_nodes)
+                dist_a = _node_vein_distance(G, ea, vein_a, vein_lines, vein_nodes, max_dist=node_vein_max_dist)
+                dist_b = _node_vein_distance(G, eb, vein_b, vein_lines, vein_nodes, max_dist=node_vein_max_dist)
                 if dist_a is not None and dist_b is not None:
                     score = dist_a + dist_b
                     if score < best_score:
@@ -1549,6 +1579,217 @@ def _detect_crossveins(
                 cv_name,
                 rejected_corridor,
             )
+
+
+def _extend_crossveins_along_corridor(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    median_vein_width_px: float = 0.0,
+    config: Optional["PipelineConfig"] = None,
+) -> None:
+    """Greedily absorb unlabeled edges into a labeled crossvein when the
+    edge shares a graph node with the crossvein, sits within a small
+    distance of the labeled crossvein's existing centerline, AND points
+    in a direction that continues the labeled crossvein (rather than
+    branching off it).
+
+    Repeats until no more absorptions qualify. Catches cases where the
+    chain detector / fallback labels only a fragment of the real crossvein
+    (e.g. the fallback labels just the segment touching PCV.a) and the
+    rest of the crossvein stays unlabeled, eventually getting promoted to
+    EV*. Common when a degree-3 kink in the skeleton broke the original
+    crossvein chain into pieces that don't all anchor to vein_a / vein_b
+    by themselves.
+
+    Three guards keep absorption conservative:
+      1. Shared graph node — the candidate must share an endpoint with an
+         already-labeled crossvein edge.
+      2. Distance to labeled centerline — the candidate's centroid must
+         be within ~max(4× median vein width, 200 µm) of the existing
+         labeled crossvein geometry. Without this, an edge that shares a
+         junction node with PCV but extends far from PCV's actual
+         centerline gets erroneously pulled in.
+      3. Departure-angle gate — the candidate edge's direction at the
+         shared node must be roughly opposite to the labeled crossvein's
+         direction at that node (i.e., the candidate continues the
+         crossvein across the junction). An ectopic branch off PCV
+         points in a different direction (T- or Y-junction) and gets
+         rejected even when it would otherwise pass the centerline-
+         distance gate.
+
+    The AP corridor band that gates `_detect_crossveins` is intentionally
+    NOT applied here: when L4/L5 sweep diagonally, the band's mean-Y
+    representation collapses to a tight slice (sometimes <30 px) and
+    rejects PCV continuation pieces whose Y is outside that slice but
+    correctly between L4 and L5 locally.
+    """
+    from identify_features.models.topology import CROSSVEIN_CONNECTIONS
+    from identify_features.utils.geometry_utils import angle_between_vectors
+    from identify_features.utils.graph_utils import edge_departure_direction
+    from shapely.geometry import MultiLineString
+    from shapely.geometry import Point as _Pt
+
+    # Distance from candidate edge centroid to labeled crossvein centerline.
+    # Primary: 4× median vein width. Fallback: 200 µm (anatomical scale —
+    # roughly twice a typical median vein width on standard wing imagery).
+    centerline_distance_cap = max(
+        4.0 * median_vein_width_px,
+        config.to_px(200.0) if (config and config.um_per_px) else 0.0,
+    )
+    # Direction sample window for departure-direction computation.
+    direction_window = (
+        config.departure_sample_px(median_vein_width_px)
+        if config is not None
+        else max(median_vein_width_px * 4.0, 50.0)
+    )
+    # Continuation-angle threshold (degrees). Both edges leave the shared
+    # node going outward; a candidate is "collinear with the already-
+    # labeled crossvein" only if the two outward directions point in
+    # roughly opposite directions (close to 180°). Reuses the project's
+    # standard collinear threshold (`config.collinear_min_angle`,
+    # default 150°), so absorption requires the candidate to be within
+    # 30° of a perfectly straight continuation. Rejects every form of
+    # branch (T-, Y-, kink) that doesn't actually continue the crossvein.
+    min_continuation_angle = config.collinear_min_angle if config is not None else 150.0
+
+    # Reuse the same lookups as _detect_crossveins.
+    vein_lines: dict[str, list[LineString]] = defaultdict(list)
+    vein_nodes: dict[str, set[int]] = defaultdict(set)
+    for (u, v), label in edge_labels.items():
+        if G.has_edge(u, v):
+            line = G[u][v].get("line")
+            if line:
+                vein_lines[label].append(line)
+            vein_nodes[label].add(u)
+            vein_nodes[label].add(v)
+
+    for cv_name, vein_pair in CROSSVEIN_CONNECTIONS.items():
+        if cv_name not in vein_lines or not vein_lines[cv_name]:
+            continue
+        vein_a, vein_b = vein_pair
+
+        # Track a growing geometry of the labeled crossvein for the
+        # centerline-distance gate. MultiLineString is fine even if there's
+        # only one line.
+        cv_geom = vein_lines[cv_name][0] if len(vein_lines[cv_name]) == 1 else MultiLineString(vein_lines[cv_name])
+
+        cv_nodes = set(vein_nodes[cv_name])  # mutable copy
+        cv_lines_list = list(vein_lines[cv_name])
+
+        def _opposite_anchor_nodes() -> set[int]:
+            """Return graph nodes labeled as the anchor vein this crossvein
+            does NOT yet touch, or empty set if both/neither are touched.
+            Re-evaluated on each absorption attempt because cv_nodes grows."""
+            touched_a = bool(cv_nodes & vein_nodes.get(vein_a, set()))
+            touched_b = bool(cv_nodes & vein_nodes.get(vein_b, set()))
+            if touched_a and not touched_b:
+                return vein_nodes.get(vein_b, set())
+            if touched_b and not touched_a:
+                return vein_nodes.get(vein_a, set())
+            return set()
+
+        def _branch_reaches(start: int, target_nodes: set[int]) -> bool:
+            """BFS from start through unlabeled non-cv edges. True iff any
+            reachable node is in target_nodes."""
+            if not target_nodes:
+                return False
+            if start in target_nodes:
+                return True
+            visited: set[int] = {start}
+            frontier: list[int] = [start]
+            while frontier:
+                next_frontier: list[int] = []
+                for node in frontier:
+                    for nbr in G.neighbors(node):
+                        if nbr in visited:
+                            continue
+                        nkey = _edge_key(node, nbr)
+                        if nkey in edge_labels:
+                            # Don't traverse already-labeled edges; they
+                            # may belong to other veins.
+                            continue
+                        if nbr in target_nodes:
+                            return True
+                        visited.add(nbr)
+                        next_frontier.append(nbr)
+                frontier = next_frontier
+            return False
+
+        absorbed = 0
+        changed = True
+        while changed:
+            changed = False
+            opposite_nodes = _opposite_anchor_nodes()
+            for u, v in list(G.edges()):
+                key = _edge_key(u, v)
+                if key in edge_labels:
+                    continue
+                line = G[u][v].get("line")
+                if line is None:
+                    continue
+                if u not in cv_nodes and v not in cv_nodes:
+                    continue
+                pts = list(line.coords)
+                cx = sum(p[0] for p in pts) / len(pts)
+                cy = sum(p[1] for p in pts) / len(pts)
+                centroid = _Pt(cx, cy)
+                # Centerline-distance gate: candidate must hug the existing
+                # labeled crossvein.
+                if centroid.distance(cv_geom) > centerline_distance_cap:
+                    continue
+
+                shared_node = u if u in cv_nodes else v
+                other_node = v if shared_node == u else u
+
+                # Reach-opposite-vein gate: if walking from this branch
+                # through unlabeled edges eventually arrives at a node on
+                # the opposite anchor vein, the branch is the genuine
+                # crossvein continuation regardless of departure angle.
+                # This rescues cases where an ectopic stub at a Y-junction
+                # is more collinear than the real branch (e.g. PCV on
+                # std30 0001.bmp where the ectopic is near-perfectly
+                # collinear and the L5-reaching branch bends away).
+                if _branch_reaches(other_node, opposite_nodes):
+                    edge_labels[key] = cv_name
+                    cv_nodes.add(u)
+                    cv_nodes.add(v)
+                    cv_lines_list.append(line)
+                    cv_geom = MultiLineString(cv_lines_list) if len(cv_lines_list) > 1 else cv_lines_list[0]
+                    absorbed += 1
+                    changed = True
+                    continue
+
+                # Collinearity gate (fallback when the branch doesn't reach
+                # the opposite anchor): identify the shared node's labeled-
+                # crossvein neighbor and require the candidate's outward
+                # direction to be roughly opposite (collinear) to the
+                # labeled crossvein's outward direction.
+                cv_neighbor = None
+                for nbr in G.neighbors(shared_node):
+                    if nbr == other_node:
+                        continue
+                    if edge_labels.get(_edge_key(shared_node, nbr)) == cv_name:
+                        cv_neighbor = nbr
+                        break
+                if cv_neighbor is None:
+                    continue
+                cand_dep = edge_departure_direction(G, shared_node, other_node, direction_window)
+                cv_dep = edge_departure_direction(G, shared_node, cv_neighbor, direction_window)
+                if cand_dep is None or cv_dep is None:
+                    continue
+                angle = angle_between_vectors(cand_dep, cv_dep)
+                if angle < min_continuation_angle:
+                    continue
+
+                edge_labels[key] = cv_name
+                cv_nodes.add(u)
+                cv_nodes.add(v)
+                cv_lines_list.append(line)
+                cv_geom = MultiLineString(cv_lines_list) if len(cv_lines_list) > 1 else cv_lines_list[0]
+                absorbed += 1
+                changed = True
+        if absorbed:
+            logger.info("Extended %s: absorbed %d additional edge(s)", cv_name, absorbed)
 
 
 def _detect_crossveins_via_junctions(

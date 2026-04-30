@@ -68,6 +68,7 @@ def _process_one(args_tuple):
         um_per_px,
         verbose,
         overlay,
+        all_overlays,
         preset,
         show_vein_tissue,
         synthesize_missing_crossveins,
@@ -98,10 +99,11 @@ def _process_one(args_tuple):
                     output_dir / f"{stem}_overlay.png",
                     show_vein_tissue=show_vein_tissue,
                 )
-                render_ap_overlay_to_file(base_img, result, output_dir / f"{stem}_ap_overlay.png")
-                render_cv_ratio_overlay_to_file(
-                    base_img, result, output_dir / f"{stem}_cv_ratio_overlay.png", um_per_px=config.um_per_px
-                )
+                if all_overlays:
+                    render_ap_overlay_to_file(base_img, result, output_dir / f"{stem}_ap_overlay.png")
+                    render_cv_ratio_overlay_to_file(
+                        base_img, result, output_dir / f"{stem}_cv_ratio_overlay.png", um_per_px=config.um_per_px
+                    )
 
         n_veins = sum(1 for v in result.veins if v.centerline is not None)
         n_regions = len(result.intervein_regions)
@@ -159,7 +161,12 @@ def main():
     parser.add_argument(
         "--overlay",
         action="store_true",
-        help="Generate overlay PNG images (requires image input)",
+        help="Generate the vein/intervein overlay PNG (requires image input)",
+    )
+    parser.add_argument(
+        "--all-overlays",
+        action="store_true",
+        help="Also render the AP-compartment and CV-ratio overlays (slow; off by default)",
     )
     parser.add_argument(
         "--show-vein-tissue",
@@ -244,13 +251,14 @@ def _run_single(args):
             )
             print(f"Overlay: {overlay_path}")
 
-            ap_path = args.output_dir / f"{result.specimen_id}_ap_overlay.png"
-            if render_ap_overlay_to_file(base_img, result, ap_path):
-                print(f"AP overlay: {ap_path}")
+            if args.all_overlays:
+                ap_path = args.output_dir / f"{result.specimen_id}_ap_overlay.png"
+                if render_ap_overlay_to_file(base_img, result, ap_path):
+                    print(f"AP overlay: {ap_path}")
 
-            cv_path = args.output_dir / f"{result.specimen_id}_cv_ratio_overlay.png"
-            if render_cv_ratio_overlay_to_file(base_img, result, cv_path, um_per_px=config.um_per_px):
-                print(f"CV ratio overlay: {cv_path}")
+                cv_path = args.output_dir / f"{result.specimen_id}_cv_ratio_overlay.png"
+                if render_cv_ratio_overlay_to_file(base_img, result, cv_path, um_per_px=config.um_per_px):
+                    print(f"CV ratio overlay: {cv_path}")
 
     n_veins = sum(1 for v in result.veins if v.centerline is not None)
     print(f"{result.specimen_id}: {n_veins} veins, {len(result.intervein_regions)}/7 regions")
@@ -283,6 +291,7 @@ def _run_batch(args):
             args.um_per_px,
             args.verbose,
             args.overlay,
+            args.all_overlays,
             args.preset,
             args.show_vein_tissue,
             args.synthesize_missing_crossveins,
