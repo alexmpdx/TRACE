@@ -8,31 +8,10 @@ live here. No other module should hardcode these relationships.
 # Landmarks
 # ---------------------------------------------------------------------------
 
-RELIABLE_LANDMARKS: set[str] = {
-    "subcostal break",
-    "alula notch",
-    "L1-Rs",
-    "L2-L3",
-    "L4-L5",
-}
-
-# Soft landmarks: helpful when they agree with the skeleton, but never
-# required. Use as hints, not hard constraints. If the skeleton doesn't
-# reach the landmark, the vein is partial — don't force extension.
-# These may be unreliable in mutants with premature vein termination.
-SOFT_LANDMARKS: set[str] = {
-    "DTip",
-    "L2.d",
-    "L4.d",
-    "L5.d",
-}
-
-UNRELIABLE_LANDMARKS: set[str] = {
-    "ACV.a",
-    "ACV.p",
-    "PCV.a",
-    "PCV.p",
-}
+# Reliability is no longer a hard-coded set; it now comes from the per-landmark
+# `reliable` flag in each landmark geojson (LandmarkLocator's confidence-gate
+# verdict). The previous RELIABLE_LANDMARKS / UNRELIABLE_LANDMARKS / SOFT_LANDMARKS
+# sets have been retired — see geojson_io.load_landmarks_geojson.
 
 # ---------------------------------------------------------------------------
 # Vein definitions
@@ -42,6 +21,18 @@ UNRELIABLE_LANDMARKS: set[str] = {
 LONGITUDINAL_VEINS: list[str] = ["costa", "L1", "L2", "L3", "L4", "L5", "L6"]
 
 CROSSVEINS: list[str] = ["ACV", "PCV"]
+
+# Reliable landmark endpoint pair for each longitudinal that can be traced
+# by shortest-path between its anchor landmarks. costa is detected
+# separately (margin band); L6 has no clean landmark endpoint pair.
+LONGITUDINAL_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "L1": ("subcostal break", "L1-Rs"),
+    "Rs": ("L1-Rs", "L2-L3"),
+    "L2": ("L2-L3", "L2.d"),
+    "L3": ("L2-L3", "DTip"),
+    "L4": ("L4-L5", "L4.d"),
+    "L5": ("L4-L5", "L5.d"),
+}
 
 # Radial sector is the short proximal stem connecting L1-Rs to L2-L3
 OTHER_VEINS: list[str] = ["Rs"]

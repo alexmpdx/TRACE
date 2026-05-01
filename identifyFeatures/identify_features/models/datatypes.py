@@ -65,9 +65,14 @@ class Landmark:
     name: str
     point: Point
     reliable: bool
-    soft: bool = False  # Helpful hint, but don't force — may be wrong in mutants
     snapped_node: Optional[int] = None
     snap_distance: float = 0.0
+    # Per-landmark reliability signals from LandmarkLocator (optional; older
+    # geojsons may not have them, in which case all four are None).
+    gate_reason: Optional[str] = None  # "" when reliable; otherwise "peak<thr" / "sharpness<thr" / "spr>thr"
+    confidence: Optional[float] = None  # peak heatmap value, ~0–1
+    sharpness: Optional[float] = None  # peak / mean of top-k neighborhood (>1 sharper than flat)
+    second_peak_ratio: Optional[float] = None  # 2nd peak / 1st peak, 0–1 (lower = more unimodal)
 
     @property
     def x(self) -> float:

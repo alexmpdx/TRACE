@@ -9,7 +9,6 @@ from typing import Optional
 import networkx as nx
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import Landmark, SkeletonGraph
-from identify_features.models.topology import RELIABLE_LANDMARKS
 from identify_features.utils.graph_utils import nearest_node
 
 logger = logging.getLogger(__name__)
@@ -42,6 +41,14 @@ def anchor_landmarks(
 
     snap_radius = config.snap_radius_px(skel_graph.median_vein_width_px)
     prefer_junction_radius = snap_radius * 2
+    # Edge-insertion fallback cap (used when no graph node is within
+    # snap_radius). Anatomy-anchored at 4× median vein width so the cap
+    # scales with image resolution rather than the (much larger)
+    # snap radius — otherwise we'd silently insert nodes hundreds of
+    # pixels from the predicted landmark on wings where the skeleton
+    # is missing a real junction (e.g. 20241211_…_0004 L4-L5 snapped
+    # 294 px away into L1-Rs territory).
+    edge_insert_cap = 4.0 * skel_graph.median_vein_width_px
     if config.um_per_px is not None and config.um_per_px > 0:
         logger.info("Snap radius: %.0fpx (%.0f µm)", snap_radius, config.snap_radius_um)
     else:
@@ -84,23 +91,6 @@ def anchor_landmarks(
                 prefer_degree=1,
                 prefer_degree_radius=snap_radius,
             )
-            # A leaf node near the landmark may belong to a different vein
-            # than the one the landmark represents (e.g., costa leaf near a
-            # wrapping L3/L4 anastomosis at DTip). When snapped to a degree-1
-            # leaf, if another edge passes substantially closer, prefer edge
-            # insertion so the landmark sits on the correct chain.
-            if node is not None and G.degree(node) == 1:
-                node_dist = math.hypot(G.nodes[node]["x"] - lm.x, G.nodes[node]["y"] - lm.y)
-                nearest_edge_dist = _nearest_edge_distance(G, lm.x, lm.y)
-                if nearest_edge_dist * 2 < node_dist:
-                    logger.info(
-                        "Landmark %r: leaf node %s at %.1fpx, but edge passes at %.1fpx — inserting on edge",
-                        name,
-                        node,
-                        node_dist,
-                        nearest_edge_dist,
-                    )
-                    node = None
         elif name == "alula notch":
             # Alula notch is a wing margin reference point — don't modify the graph
             logger.debug("Landmark %r: margin reference, skipping graph modification", name)
@@ -108,6 +98,39 @@ def anchor_landmarks(
         else:
             # Other landmarks — snap to nearest node, no degree preference
             node = nearest_node(G, lm.x, lm.y, max_dist=snap_radius)
+
+        # Unified "closer-edge wins" override (applies to all landmark types
+        # except `alula notch`, which `continue`d above).
+        #
+        # If a graph edge passes substantially closer to the predicted
+        # landmark than the chosen node, fall through to edge insertion. The
+        # override fires when EITHER:
+        #   (a) the chosen node is far (> 2× median vein width) AND there's
+        #       a much-closer edge — catches blatant misanchors like L4.d
+        #       on PknCG736-lacZ_engal4_BL12322_0002 (147 px snap, 17 px edge)
+        #       and L1-Rs on en-PknRNAi_57804_0008 (129 px / 3 px), even when
+        #       the closer edge is incident to the chosen node; OR
+        #   (b) the closer edge is NOT incident to the chosen node (so it
+        #       belongs to a different vein) — catches the "leaf snapped to
+        #       a wrapping anastomosis" case for endpoint landmarks.
+        # The 2× mvw threshold prevents the L2-L3 stub problem
+        # (en-PknRNAi_57804_0008 — node 35 px off, incident edge 3 px off:
+        # bisecting would create a tiny stub that L2 and L3 fight over).
+        if node is not None:
+            node_dist = math.hypot(G.nodes[node]["x"] - lm.x, G.nodes[node]["y"] - lm.y)
+            edge_dist, edge_uv = _nearest_edge_info(G, lm.x, lm.y)
+            edge_is_incident = edge_uv is not None and node in edge_uv
+            far_threshold = 2.0 * skel_graph.median_vein_width_px
+            if edge_dist * 2 < node_dist and (node_dist > far_threshold or not edge_is_incident):
+                logger.info(
+                    "Landmark %r: chosen node %s at %.1fpx, edge passes at %.1fpx (%s) — inserting on edge",
+                    name,
+                    node,
+                    node_dist,
+                    edge_dist,
+                    "non-incident" if not edge_is_incident else f"incident, far ≥ {far_threshold:.0f}px",
+                )
+                node = None
 
         if node is not None:
             node_data = G.nodes[node]
@@ -127,7 +150,7 @@ def anchor_landmarks(
                 G,
                 lm.x,
                 lm.y,
-                max_dist=prefer_junction_radius * 2,
+                max_dist=edge_insert_cap,
             )
             if inserted is not None:
                 lm.snapped_node = inserted
@@ -150,18 +173,28 @@ def anchor_landmarks(
 
 def _nearest_edge_distance(G: nx.Graph, x: float, y: float) -> float:
     """Return the minimum distance from (x, y) to any edge's ``line`` geometry."""
+    dist, _ = _nearest_edge_info(G, x, y)
+    return dist
+
+
+def _nearest_edge_info(G: nx.Graph, x: float, y: float) -> tuple[float, Optional[tuple[int, int]]]:
+    """Like _nearest_edge_distance, but also returns the (u, v) of the
+    closest edge so callers can tell whether that edge is incident to a
+    given graph node."""
     from shapely.geometry import Point
 
     target = Point(x, y)
     best = float("inf")
-    for _u, _v, data in G.edges(data=True):
+    best_uv: Optional[tuple[int, int]] = None
+    for u, v, data in G.edges(data=True):
         line = data.get("line")
         if line is None:
             continue
         d = line.distance(target)
         if d < best:
             best = d
-    return best
+            best_uv = (u, v)
+    return best, best_uv
 
 
 def _insert_node_on_nearest_edge(

@@ -152,22 +152,24 @@ def trace_veins_from_landmarks(
     if dbg:
         dbg.dump(G, edge_labels, "initial")
 
-    # Phase 0: Merge longitudinals through crossvein junctions (graph-level)
-    # Done BEFORE labeling so merged edges get a single label.
-    # Landmark nodes are protected from being contracted.
-    from identify_features.models.junction_resolver import merge_through_junctions
-
-    protected = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
-    skel_graph.graph = merge_through_junctions(
-        G,
-        edge_labels,
-        config,
-        protected_nodes=protected,
-        median_vein_width_px=skel_graph.median_vein_width_px,
-    )
-    G = skel_graph.graph
+    # Phase 0: DISABLED — merge_through_junctions was welding Y-fork branches
+    # into single edges, which destroyed real PCV/ACV Y-junction topology
+    # (e.g. 0001 PCV) and contributed to longitudinal mislabeling at junctions
+    # (e.g. 0010 L3). The function is preserved in junction_resolver.py for
+    # easy revert; uncomment the block below to re-enable.
+    #
+    # from identify_features.models.junction_resolver import merge_through_junctions
+    # protected = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
+    # skel_graph.graph = merge_through_junctions(
+    #     G,
+    #     edge_labels,
+    #     config,
+    #     protected_nodes=protected,
+    #     median_vein_width_px=skel_graph.median_vein_width_px,
+    # )
+    # G = skel_graph.graph
     if dbg:
-        dbg.dump(G, edge_labels, "phase0_merge_junctions")
+        dbg.dump(G, edge_labels, "phase0_merge_junctions_DISABLED")
 
     # Phase 1: Detect costa edges using margin band (on the merged graph)
     costa_band = None
@@ -185,6 +187,15 @@ def trace_veins_from_landmarks(
     # Landmark nodes are chain boundaries even when degree-2.
     landmark_nodes = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
     chain_lines = _assign_chain_ids(G, edge_labels, boundary_nodes=landmark_nodes)
+
+    # Phase 1c: Primary longitudinal labeling — pixel-length shortest path
+    # between each longitudinal's reliable, snapped landmark endpoints with
+    # collinearity-based conflict resolution and an iterative endpoint-
+    # connectivity gate. Veins not labeled here (no path / dropped by gate /
+    # unreliable landmarks) fall through to the production phases below.
+    _label_longitudinals_via_shortest_path(G, landmarks, edge_labels, config, skel_graph.median_vein_width_px)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase1c_shortest_path")
 
     # Phase 2: Label edges at landmark positions (on the merged graph)
     _label_landmark_edges(
@@ -300,6 +311,174 @@ def trace_veins_from_landmarks(
         _synthesize_crossveins_from_landmarks(G, edge_labels, landmarks, veins)
 
     return veins
+
+
+def _label_longitudinals_via_shortest_path(
+    G: nx.Graph,
+    landmarks: dict[str, Landmark],
+    edge_labels: dict[tuple, str],
+    config: PipelineConfig,
+    median_vein_width_px: float,
+) -> None:
+    """Primary longitudinal labeling. For each longitudinal in
+    ``LONGITUDINAL_ENDPOINTS`` whose two endpoint landmarks are reliable
+    and snapped, find the pixel-length shortest path between the snapped
+    nodes and label every edge on it as that vein.
+
+    When two veins claim the same edge, the per-edge collinearity contest
+    decides ownership using a 3-tier rule:
+      1. higher local collinearity (path-bend angle at the disputed edge);
+      2. tie-break (within 5°) by lower cumulative path twist;
+      3. final tie-break by the subset rule — a vein whose path is a strict
+         subset of another claimer's wins (otherwise it has no exclusive
+         tissue).
+
+    After conflict resolution, an endpoint-connectivity gate iteratively
+    drops the worst-twisting vein whose surviving edges no longer connect
+    its two snapped landmark endpoints, then re-resolves so collateral
+    failures recover.
+
+    Edges already in ``edge_labels`` (e.g. costa from phase 1) are never
+    overwritten. Veins that fail the gate or have no path are silently
+    skipped — the production landmark-edge / propagate / extend / connect
+    phases that follow this function act as a fallback for anything still
+    unlabeled.
+    """
+    from identify_features.models.topology import LONGITUDINAL_ENDPOINTS
+    from identify_features.utils.geometry_utils import angle_between_vectors
+    from identify_features.utils.graph_utils import edge_departure_direction
+
+    window_px = config.departure_sample_px(median_vein_width_px)
+
+    # Pass 1: shortest paths.
+    paths_per_vein: dict[str, list[int]] = {}
+    for vein_name, (lm_a_name, lm_b_name) in LONGITUDINAL_ENDPOINTS.items():
+        a = landmarks.get(lm_a_name)
+        b = landmarks.get(lm_b_name)
+        if a is None or b is None or not a.reliable or not b.reliable:
+            continue
+        if a.snapped_node is None or b.snapped_node is None:
+            continue
+        if not (G.has_node(a.snapped_node) and G.has_node(b.snapped_node)):
+            continue
+        try:
+            paths_per_vein[vein_name] = nx.shortest_path(G, a.snapped_node, b.snapped_node, weight="length_px")
+        except nx.NetworkXNoPath:
+            continue
+
+    if not paths_per_vein:
+        return
+
+    edge_claims: dict[tuple, list[tuple[str, int]]] = defaultdict(list)
+    for vein_name, path in paths_per_vein.items():
+        for i in range(len(path) - 1):
+            edge_claims[_edge_key(path[i], path[i + 1])].append((vein_name, i))
+
+    edges_per_vein = {v: {_edge_key(p[i], p[i + 1]) for i in range(len(p) - 1)} for v, p in paths_per_vein.items()}
+
+    def _local_collinearity(path: list[int], i: int) -> float:
+        u, v = path[i], path[i + 1]
+        has_prev = i > 0
+        has_next = i + 2 < len(path)
+        if not has_prev and not has_next:
+            return 180.0
+        scores: list[float] = []
+        if has_prev:
+            prev = path[i - 1]
+            dep_uv = edge_departure_direction(G, u, v, window_px)
+            dep_up = edge_departure_direction(G, u, prev, window_px)
+            if dep_uv is not None and dep_up is not None:
+                scores.append(angle_between_vectors(dep_uv, dep_up))
+        if has_next:
+            nxt = path[i + 2]
+            dep_vu = edge_departure_direction(G, v, u, window_px)
+            dep_vn = edge_departure_direction(G, v, nxt, window_px)
+            if dep_vu is not None and dep_vn is not None:
+                scores.append(angle_between_vectors(dep_vu, dep_vn))
+        return sum(scores) / len(scores) if scores else 180.0
+
+    def _cumulative_twist(path: list[int]) -> float:
+        if len(path) < 3:
+            return 0.0
+        total = 0.0
+        for i in range(1, len(path) - 1):
+            prev, mid, nxt = path[i - 1], path[i], path[i + 1]
+            dep_to_prev = edge_departure_direction(G, mid, prev, window_px)
+            dep_to_next = edge_departure_direction(G, mid, nxt, window_px)
+            if dep_to_prev is not None and dep_to_next is not None:
+                total += 180.0 - angle_between_vectors(dep_to_prev, dep_to_next)
+        return total
+
+    twist_per_vein = {v: _cumulative_twist(p) for v, p in paths_per_vein.items()}
+
+    TIE_TOL = 5.0
+
+    def _resolve_round(active: set[str]) -> dict[tuple, str]:
+        winners: dict[tuple, str] = {}
+        for key, claimers in edge_claims.items():
+            active_claimers = [c for c in claimers if c[0] in active]
+            if not active_claimers:
+                continue
+            if len(active_claimers) == 1:
+                winners[key] = active_claimers[0][0]
+                continue
+            names = [c[0] for c in active_claimers]
+            local_scores = {c[0]: _local_collinearity(paths_per_vein[c[0]], c[1]) for c in active_claimers}
+            subset_of = {v: any(v != w and edges_per_vein[v] < edges_per_vein[w] for w in names) for v in names}
+            ranked = sorted(
+                names,
+                key=lambda n: (-local_scores[n], twist_per_vein[n], not subset_of[n], n),
+            )
+            top_local = local_scores[ranked[0]]
+            within_tol = [n for n in ranked if top_local - local_scores[n] <= TIE_TOL]
+            if len(within_tol) > 1:
+                within_tol.sort(key=lambda n: (twist_per_vein[n], not subset_of[n], n))
+                winners[key] = within_tol[0]
+            else:
+                winners[key] = ranked[0]
+        return winners
+
+    def _reaches_both_endpoints(vein_name: str, winners: dict[tuple, str]) -> bool:
+        a_name, b_name = LONGITUDINAL_ENDPOINTS[vein_name]
+        snap_a = landmarks[a_name].snapped_node
+        snap_b = landmarks[b_name].snapped_node
+        if snap_a is None or snap_b is None:
+            return False
+        own = [k for k, v in winners.items() if v == vein_name]
+        if not own:
+            return False
+        sub = nx.Graph()
+        for u, v in own:
+            sub.add_edge(u, v)
+        if snap_a not in sub or snap_b not in sub:
+            return False
+        return nx.has_path(sub, snap_a, snap_b)
+
+    active = set(paths_per_vein.keys())
+    edge_winner: dict[tuple, str] = {}
+    for _ in range(len(active) + 1):
+        edge_winner = _resolve_round(active)
+        failing = [v for v in active if not _reaches_both_endpoints(v, edge_winner)]
+        if not failing:
+            break
+        worst = max(failing, key=lambda v: (twist_per_vein[v], v))
+        logger.info(
+            "shortest-path: dropping %s (twist=%.0f°) — owned edges don't connect both endpoints",
+            worst,
+            twist_per_vein[worst],
+        )
+        active.discard(worst)
+
+    n_labeled = 0
+    for key, vein_name in edge_winner.items():
+        if key not in edge_labels:
+            edge_labels[key] = vein_name
+            n_labeled += 1
+    logger.info(
+        "shortest-path: labeled %d edge(s) across %d vein(s)",
+        n_labeled,
+        len({v for v in edge_winner.values()}),
+    )
 
 
 def _label_landmark_edges(

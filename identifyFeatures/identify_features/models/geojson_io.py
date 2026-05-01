@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from identify_features.models.datatypes import Landmark, ParsedInput
-from identify_features.models.topology import RELIABLE_LANDMARKS, SOFT_LANDMARKS
 from shapely.geometry import MultiPolygon, Point, Polygon, shape
 
 logger = logging.getLogger(__name__)
@@ -69,16 +68,19 @@ def load_landmarks_geojson(path: Path) -> dict[str, Landmark]:
             logger.warning("Landmark %r has invalid coordinates — skipping", name)
             continue
 
-        is_soft = name in SOFT_LANDMARKS
-        topology_reliable = name in RELIABLE_LANDMARKS or is_soft
-        # LandmarkLocator may tag a feature with properties.reliable=False when it
-        # fails the confidence gate. Respect that override (can only downgrade).
-        gate_reliable = props.get("reliable", True)
+        # Reliability comes from LandmarkLocator's per-landmark confidence gate
+        # (properties.reliable). The previous static topology-based RELIABLE_LANDMARKS,
+        # SOFT_LANDMARKS, and UNRELIABLE_LANDMARKS sets have been retired in favor
+        # of this signal. If the field is missing (older geojsons), default to
+        # True so legacy data still loads.
         landmarks[name] = Landmark(
             name=name,
             point=Point(coords[0], coords[1]),
-            reliable=topology_reliable and bool(gate_reliable),
-            soft=is_soft,
+            reliable=bool(props.get("reliable", True)),
+            gate_reason=props.get("gate_reason"),
+            confidence=props.get("confidence"),
+            sharpness=props.get("sharpness"),
+            second_peak_ratio=props.get("second_peak_ratio"),
         )
 
     reliable_found = [n for n, lm in landmarks.items() if lm.reliable]
