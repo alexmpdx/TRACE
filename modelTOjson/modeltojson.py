@@ -478,6 +478,80 @@ def list_images(folder: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Region-of-interest from GeoJSON
+# ---------------------------------------------------------------------------
+ROI_EXTENSIONS = (".geojson", ".json")
+
+
+def find_roi_for_image(image_path: str, roi_folder: str):
+    """Find a GeoJSON ROI file matching the image by filename stem.
+
+    Tries `<stem>.geojson` and `<stem>.json` first, then any file that starts
+    with `<stem>` and has a recognized extension. Returns None if nothing
+    matches.
+    """
+    if not roi_folder:
+        return None
+    folder = Path(roi_folder)
+    if not folder.is_dir():
+        return None
+    stem = Path(image_path).stem
+    for ext in ROI_EXTENSIONS:
+        candidate = folder / f"{stem}{ext}"
+        if candidate.exists():
+            return str(candidate)
+    for entry in sorted(os.listdir(folder)):
+        if entry.startswith("._") or entry.startswith("."):
+            continue
+        ep = Path(entry)
+        if ep.suffix.lower() in ROI_EXTENSIONS and ep.stem.startswith(stem):
+            return str(folder / entry)
+    return None
+
+
+def roi_mask_from_geojson(geojson_path: str, image_shape) -> np.ndarray:
+    """Rasterize a GeoJSON file's polygons into a boolean ROI mask.
+
+    Pixels inside any Polygon / MultiPolygon feature are True. Non-polygon
+    geometries are ignored. The output shape is (H, W) regardless of how
+    many channels `image_shape` carries.
+    """
+    import rasterio.features
+
+    with open(geojson_path) as f:
+        data = json.load(f)
+
+    if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+        features = data.get("features", [])
+    elif isinstance(data, list):
+        features = data
+    else:
+        features = [data]
+
+    geoms = []
+    for feat in features:
+        if not isinstance(feat, dict):
+            continue
+        geom = feat.get("geometry", feat)
+        if not isinstance(geom, dict):
+            continue
+        if geom.get("type") in ("Polygon", "MultiPolygon"):
+            geoms.append(geom)
+
+    h, w = image_shape[:2]
+    if not geoms:
+        return np.zeros((h, w), dtype=bool)
+
+    mask = rasterio.features.rasterize(
+        [(g, 1) for g in geoms],
+        out_shape=(h, w),
+        fill=0,
+        dtype=np.uint8,
+    )
+    return mask.astype(bool)
+
+
+# ---------------------------------------------------------------------------
 # Preprocessing & inference
 # ---------------------------------------------------------------------------
 def preprocess_tile(tile: np.ndarray, norm_stats: list) -> torch.Tensor:
@@ -504,6 +578,9 @@ def _compute_effective_padding(tile_size: int) -> int:
     return max(64, min(min_pad, max_pad))
 
 
+ROI_OUTSIDE_VALUE = 255  # sentinel value written to pixels outside the ROI
+
+
 def run_inference(
     model,
     image: np.ndarray,
@@ -511,6 +588,7 @@ def run_inference(
     device: torch.device = None,
     progress_callback=None,
     smoothing_sigma: float = 2.0,
+    roi_mask: np.ndarray = None,
 ) -> np.ndarray:
     """Run tiled inference using expanded reads + center-crop stitching.
 
@@ -525,6 +603,11 @@ def run_inference(
         device: Torch device. Defaults to CUDA if available, else CPU.
         progress_callback: Optional callable(current_tile, total_tiles).
         smoothing_sigma: Gaussian sigma for probability smoothing (0 to disable).
+        roi_mask: Optional boolean array of shape (H, W) at the ORIGINAL
+            image resolution. When provided, tiles fully outside the ROI are
+            skipped, and out-of-ROI pixels are set to ROI_OUTSIDE_VALUE (255)
+            in the returned mask so they're excluded from overlays / GeoJSON
+            export.
 
     Returns:
         Predicted class indices as (H, W) uint8 numpy array at original resolution.
@@ -549,6 +632,17 @@ def run_inference(
     else:
         h_ds, w_ds = h_orig, w_orig
         img_ds = image
+
+    roi_mask_ds = None
+    if roi_mask is not None:
+        if roi_mask.shape[:2] != (h_orig, w_orig):
+            raise ValueError(f"roi_mask shape {roi_mask.shape[:2]} does not match image shape {(h_orig, w_orig)}")
+        if downsample > 1:
+            roi_mask_ds = (
+                np.array(Image.fromarray(roi_mask.astype(np.uint8) * 255).resize((w_ds, h_ds), Image.NEAREST)) > 0
+            )
+        else:
+            roi_mask_ds = roi_mask.astype(bool)
 
     # Normalization stats: prefer saved per-channel training stats, fall
     # back to estimating per-channel percentiles from the image
@@ -584,6 +678,12 @@ def run_inference(
                 out_x1 = min(out_x0 + stride, w_ds)
                 out_h = out_y1 - out_y0
                 out_w = out_x1 - out_x0
+
+                if roi_mask_ds is not None and not roi_mask_ds[out_y0:out_y1, out_x0:out_x1].any():
+                    tile_idx += 1
+                    if progress_callback:
+                        progress_callback(tile_idx, total_tiles)
+                    continue
 
                 in_y0 = out_y0 - input_padding
                 in_x0 = out_x0 - input_padding
@@ -672,6 +772,9 @@ def run_inference(
     if downsample > 1:
         pred_classes = np.array(Image.fromarray(pred_classes).resize((w_orig, h_orig), Image.NEAREST))
 
+    if roi_mask is not None:
+        pred_classes[~roi_mask] = ROI_OUTSIDE_VALUE
+
     return pred_classes
 
 
@@ -752,6 +855,7 @@ def process_folder(
     device: torch.device = None,
     smoothing_sigma: float = 2.0,
     progress_callback=None,
+    roi_folder: str = None,
 ):
     """Run inference on all images in a folder and save GeoJSON detections.
 
@@ -762,6 +866,8 @@ def process_folder(
         device: Torch device. Defaults to CUDA if available, else CPU.
         smoothing_sigma: Gaussian sigma for probability smoothing.
         progress_callback: Optional callable(image_index, total_images, image_path).
+        roi_folder: Optional folder of GeoJSON ROIs. Files are matched to images
+            by filename stem; inference is restricted to polygon interiors.
 
     Returns:
         List of (image_path, geojson_path) tuples for successfully processed images.
@@ -779,7 +885,12 @@ def process_folder(
             progress_callback(i, len(image_paths), img_path)
 
         image = read_image(img_path)
-        mask = run_inference(model, image, metadata, device, smoothing_sigma=smoothing_sigma)
+        roi_mask = None
+        if roi_folder:
+            roi_path = find_roi_for_image(img_path, roi_folder)
+            if roi_path:
+                roi_mask = roi_mask_from_geojson(roi_path, image.shape)
+        mask = run_inference(model, image, metadata, device, smoothing_sigma=smoothing_sigma, roi_mask=roi_mask)
         fc = mask_to_geojson(mask, metadata["classes"], img_path)
 
         stem = Path(img_path).stem

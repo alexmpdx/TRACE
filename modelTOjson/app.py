@@ -6,6 +6,7 @@ PyQt5 application that wraps the modeltojson library for interactive use.
 
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -14,12 +15,14 @@ import numpy as np
 import torch
 from modeltojson import (
     SUPPORTED_EXTENSIONS,
+    find_roi_for_image,
     load_model,
     mask_to_geojson,
     read_image,
+    roi_mask_from_geojson,
     run_inference,
 )
-from PyQt5.QtCore import QRectF, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -76,39 +79,66 @@ def numpy_to_qimage(img: np.ndarray) -> QImage:
 # ---------------------------------------------------------------------------
 # Worker thread
 # ---------------------------------------------------------------------------
+class _InferenceCancelled(Exception):
+    """Raised inside the tile-progress callback to abort run_inference."""
+
+
 class InferenceWorker(QThread):
     progress = pyqtSignal(int, int)  # current, total
+    image_started = pyqtSignal(str, int, int)  # path, idx, total_images
+    stage = pyqtSignal(str)  # human-readable stage label
     image_done = pyqtSignal(str, np.ndarray, np.ndarray)  # path, image, mask
     finished_all = pyqtSignal()
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
-    def __init__(self, model, metadata, image_paths, device):
+    def __init__(self, model, metadata, image_paths, device, roi_folder=None):
         super().__init__()
         self.model = model
         self.metadata = metadata
         self.image_paths = image_paths
         self.device = device
+        self.roi_folder = roi_folder
         self._cancel = False
 
     def cancel(self):
         self._cancel = True
 
+    def _tile_progress(self, cur, tot):
+        if self._cancel:
+            raise _InferenceCancelled()
+        self.progress.emit(cur, tot)
+
     def run(self):
         try:
-            for path in self.image_paths:
+            total = len(self.image_paths)
+            for i, path in enumerate(self.image_paths):
                 if self._cancel:
                     break
+                self.image_started.emit(path, i, total)
+                self.stage.emit("Preprocessing")
                 img = read_image(path)
+                roi_mask = None
+                if self.roi_folder:
+                    roi_path = find_roi_for_image(path, self.roi_folder)
+                    if roi_path:
+                        roi_mask = roi_mask_from_geojson(roi_path, img.shape)
+                self.stage.emit("Analysis")
                 mask = run_inference(
                     self.model,
                     img,
                     self.metadata,
                     self.device,
-                    progress_callback=lambda cur, tot: self.progress.emit(cur, tot),
+                    progress_callback=self._tile_progress,
+                    roi_mask=roi_mask,
                 )
                 self.image_done.emit(path, img, mask)
+        except _InferenceCancelled:
+            pass
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
+        if self._cancel:
+            self.cancelled.emit()
         self.finished_all.emit()
 
 
@@ -159,6 +189,21 @@ class MainWindow(QMainWindow):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.results = {}  # path -> (image, mask)
         self.worker = None
+        self.roi_folder = None
+
+        # Progress / ETA tracking
+        self._run_start_time = None
+        self._image_index = 0
+        self._image_total = 0
+        self._image_name = ""
+        self._current_stage = ""
+        self._tile_cur = 0
+        self._tile_tot = 0
+        self._image_start_time = None
+        self._image_durations = []  # finished-image elapsed seconds
+        self._eta_timer = QTimer(self)
+        self._eta_timer.setInterval(500)
+        self._eta_timer.timeout.connect(self._refresh_eta_label)
 
         self._build_ui()
 
@@ -194,12 +239,31 @@ class MainWindow(QMainWindow):
         ig_layout.addWidget(self.image_list)
         left_layout.addWidget(img_group)
 
+        # ROI selection
+        roi_group = QGroupBox("ROI (optional)")
+        rg2_layout = QVBoxLayout(roi_group)
+        self.roi_label = QLabel("No ROI folder")
+        self.roi_label.setWordWrap(True)
+        roi_btn_row = QHBoxLayout()
+        btn_roi = QPushButton("Select ROI Folder...")
+        btn_roi.clicked.connect(self._select_roi_folder)
+        btn_roi_clear = QPushButton("Clear")
+        btn_roi_clear.clicked.connect(self._clear_roi_folder)
+        roi_btn_row.addWidget(btn_roi)
+        roi_btn_row.addWidget(btn_roi_clear)
+        rg2_layout.addWidget(self.roi_label)
+        rg2_layout.addLayout(roi_btn_row)
+        left_layout.addWidget(roi_group)
+
         # Run / Export
         run_group = QGroupBox("Actions")
         rg_layout = QVBoxLayout(run_group)
         self.btn_run = QPushButton("Run Inference")
         self.btn_run.clicked.connect(self._run_inference)
         self.btn_run.setEnabled(False)
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.clicked.connect(self._stop_inference)
+        self.btn_stop.setEnabled(False)
         self.btn_export = QPushButton("Export All as GeoJSON...")
         self.btn_export.clicked.connect(self._export_geojson)
         self.btn_export.setEnabled(False)
@@ -207,10 +271,16 @@ class MainWindow(QMainWindow):
         self.btn_export_current.clicked.connect(self._export_current_geojson)
         self.btn_export_current.setEnabled(False)
         self.progress = QProgressBar()
+        self.stage_label = QLabel("Idle")
+        self.stage_label.setWordWrap(True)
+        self.eta_label = QLabel("")
         rg_layout.addWidget(self.btn_run)
+        rg_layout.addWidget(self.btn_stop)
         rg_layout.addWidget(self.btn_export)
         rg_layout.addWidget(self.btn_export_current)
+        rg_layout.addWidget(self.stage_label)
         rg_layout.addWidget(self.progress)
+        rg_layout.addWidget(self.eta_label)
         left_layout.addWidget(run_group)
 
         left.setMaximumWidth(320)
@@ -313,7 +383,32 @@ class MainWindow(QMainWindow):
                 self._image_paths.append(full)
                 self.image_list.addItem(f)
         self._check_ready()
+        self._refresh_roi_summary()
         self.statusBar().showMessage(f"Found {len(self._image_paths)} images.")
+
+    def _select_roi_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select ROI GeoJSON Folder", "", QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog
+        )
+        if not folder:
+            return
+        self.roi_folder = folder
+        self._refresh_roi_summary()
+
+    def _clear_roi_folder(self):
+        self.roi_folder = None
+        self._refresh_roi_summary()
+
+    def _refresh_roi_summary(self):
+        if not self.roi_folder:
+            self.roi_label.setText("No ROI folder")
+            return
+        paths = getattr(self, "_image_paths", []) or []
+        if not paths:
+            self.roi_label.setText(f"{Path(self.roi_folder).name} (select images to check matches)")
+            return
+        matched = sum(1 for p in paths if find_roi_for_image(p, self.roi_folder))
+        self.roi_label.setText(f"{Path(self.roi_folder).name}\n{matched}/{len(paths)} images matched")
 
     def _check_ready(self):
         ready = self.model is not None and hasattr(self, "_image_paths") and len(self._image_paths) > 0
@@ -322,37 +417,154 @@ class MainWindow(QMainWindow):
     # --- Inference ---
     def _run_inference(self):
         self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
         self.btn_export.setEnabled(False)
         self.btn_export_current.setEnabled(False)
         self.progress.setValue(0)
         self.results.clear()
 
-        self.worker = InferenceWorker(self.model, self.metadata, self._image_paths, self.device)
+        self._run_start_time = time.monotonic()
+        self._image_index = 0
+        self._image_total = len(self._image_paths)
+        self._image_name = ""
+        self._current_stage = "Starting"
+        self._tile_cur = 0
+        self._tile_tot = 0
+        self._image_start_time = None
+        self._image_durations = []
+        self.stage_label.setText("Starting…")
+        self.eta_label.setText("Elapsed 0:00 — ETA …")
+
+        self.worker = InferenceWorker(
+            self.model, self.metadata, self._image_paths, self.device, roi_folder=self.roi_folder
+        )
         self.worker.progress.connect(self._on_tile_progress)
+        self.worker.image_started.connect(self._on_image_started)
+        self.worker.stage.connect(self._on_stage)
         self.worker.image_done.connect(self._on_image_done)
         self.worker.finished_all.connect(self._on_all_done)
         self.worker.error.connect(self._on_error)
+        self.worker.cancelled.connect(self._on_cancelled)
         self.worker.start()
+        self._eta_timer.start()
+
+    def _stop_inference(self):
+        if self.worker is not None and self.worker.isRunning():
+            self.btn_stop.setEnabled(False)
+            self.worker.cancel()
+            self.statusBar().showMessage("Stopping — finishing current tile...")
 
     def _on_tile_progress(self, current, total):
         self.progress.setMaximum(total)
         self.progress.setValue(current)
+        self._tile_cur = current
+        self._tile_tot = total
+
+    def _on_image_started(self, path, idx, total):
+        self._image_index = idx
+        self._image_total = total
+        self._image_name = os.path.basename(path)
+        self._image_start_time = time.monotonic()
+        self._tile_cur = 0
+        self._tile_tot = 0
+        self._refresh_stage_label()
+
+    def _on_stage(self, name):
+        self._current_stage = name
+        self._refresh_stage_label()
+
+    def _refresh_stage_label(self):
+        idx_part = f"Image {self._image_index + 1}/{self._image_total}" if self._image_total else ""
+        stage_part = self._current_stage or ""
+        name_part = self._image_name
+        bits = [b for b in (idx_part, stage_part) if b]
+        header = " — ".join(bits)
+        if name_part:
+            header = f"{header}\n{name_part}" if header else name_part
+        self.stage_label.setText(header)
+
+    def _refresh_eta_label(self):
+        if self._run_start_time is None:
+            return
+        elapsed = time.monotonic() - self._run_start_time
+        eta_text = self._estimate_eta()
+        self.eta_label.setText(f"Elapsed {self._fmt_duration(elapsed)} — ETA {eta_text}")
+
+    def _estimate_eta(self) -> str:
+        # Rate from finished images
+        completed = len(self._image_durations)
+        avg_image = (sum(self._image_durations) / completed) if completed else None
+
+        # Current image: project completion from tile rate
+        remaining_current = 0.0
+        if self._image_start_time is not None and self._tile_tot > 0:
+            current_elapsed = time.monotonic() - self._image_start_time
+            if self._tile_cur > 0:
+                per_tile = current_elapsed / self._tile_cur
+                remaining_current = per_tile * (self._tile_tot - self._tile_cur)
+            elif avg_image is not None:
+                remaining_current = max(0.0, avg_image - current_elapsed)
+            else:
+                return "…"
+        elif self._image_start_time is not None and avg_image is not None:
+            remaining_current = max(0.0, avg_image - (time.monotonic() - self._image_start_time))
+        elif avg_image is None:
+            return "…"
+
+        # Remaining images after current
+        remaining_images = max(0, self._image_total - (self._image_index + 1))
+        if avg_image is None and self._tile_tot > 0 and self._tile_cur > 0 and self._image_start_time is not None:
+            # fall back to extrapolating current image's per-tile rate
+            current_elapsed = time.monotonic() - self._image_start_time
+            projected_image = current_elapsed * (self._tile_tot / max(1, self._tile_cur))
+            avg_image = projected_image
+        per_remaining_image = avg_image if avg_image is not None else 0.0
+        eta_seconds = remaining_current + remaining_images * per_remaining_image
+        return self._fmt_duration(eta_seconds)
+
+    @staticmethod
+    def _fmt_duration(seconds: float) -> str:
+        if seconds is None or seconds < 0:
+            return "…"
+        seconds = int(round(seconds))
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
 
     def _on_image_done(self, path, image, mask):
         self.results[path] = (image, mask)
+        if self._image_start_time is not None:
+            self._image_durations.append(time.monotonic() - self._image_start_time)
         idx = self._image_paths.index(path)
         self.image_list.setCurrentRow(idx)
         self.statusBar().showMessage(f"Done: {os.path.basename(path)}")
 
     def _on_all_done(self):
+        self._eta_timer.stop()
         self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
         self.btn_export.setEnabled(len(self.results) > 0)
         self.btn_export_current.setEnabled(len(self.results) > 0)
-        self.statusBar().showMessage(f"Inference complete — {len(self.results)} images processed.")
+        if self.worker is not None and self.worker._cancel:
+            self.stage_label.setText("Stopped")
+            self.statusBar().showMessage(f"Inference stopped — {len(self.results)} images processed.")
+        else:
+            self.stage_label.setText("Complete")
+            self.statusBar().showMessage(f"Inference complete — {len(self.results)} images processed.")
+        if self._run_start_time is not None:
+            total = time.monotonic() - self._run_start_time
+            self.eta_label.setText(f"Total time: {self._fmt_duration(total)}")
+
+    def _on_cancelled(self):
+        pass
 
     def _on_error(self, msg):
+        self._eta_timer.stop()
         QMessageBox.critical(self, "Inference Error", msg)
         self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
 
     # --- Display ---
     def _on_image_selected(self, row):
