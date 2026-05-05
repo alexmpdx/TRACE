@@ -302,7 +302,22 @@ def trace_veins_from_landmarks(
     if dbg:
         dbg.dump(G, edge_labels, "phase3_l6")
 
-    # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5)
+    # Phase 4-pre0: Primary crossvein labeler — pixel-length shortest path
+    # between reliable + snapped crossvein-anchor landmarks.
+    _label_crossveins_via_landmark_path(G, edge_labels, landmarks)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4pre0_landmark_path")
+
+    # Phase 4-pre1: Secondary crossvein labeler — per-position corridor +
+    # H-shape / partial-CV pair-merge. Labels any crossvein the shortest-
+    # path step missed when the chain topology gives a clean answer.
+    _label_crossveins_via_chain_topology(G, edge_labels, landmarks, config, skel_graph.median_vein_width_px)
+    if dbg:
+        dbg.dump(G, edge_labels, "phase4pre1_chain_topology")
+
+    # Phase 4: Detect crossveins (ACV between L3↔L4, PCV between L4↔L5).
+    # Now skips any cv_name already labeled by Phase 4-pre0/4-pre1 — acts as
+    # a fallback for crossveins those couldn't trace.
     _detect_crossveins(G, edge_labels, config=config, median_vein_width_px=skel_graph.median_vein_width_px)
     if dbg:
         dbg.dump(G, edge_labels, "phase4_crossveins")
@@ -1589,6 +1604,358 @@ def _detect_l6(
         logger.info("Detected L6: edge %d↔%d, %.0fpx", u, v, length)
 
 
+_CROSSVEIN_LANDMARKS = {"ACV": ("ACV.a", "ACV.p"), "PCV": ("PCV.a", "PCV.p")}
+
+
+def _label_crossveins_via_landmark_path(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    landmarks: dict[str, Landmark],
+) -> None:
+    """Phase 4-pre0: pixel-length shortest path between reliable + snapped
+    crossvein-anchor landmarks.
+
+    For each crossvein (ACV/PCV), if both anchor landmarks are reliable AND
+    snapped to graph nodes, walk the pixel-length shortest path between
+    those snap nodes and label every edge on the path as the crossvein —
+    PROVIDED every edge on the path is currently unlabeled. If the path
+    crosses a longitudinal-labeled edge the anchor is probably mis-snapped
+    or the wing's anatomy is too unusual for a direct trace; we leave it
+    for the chain-topology / production fallback to handle.
+
+    Mirrors the longitudinal `_label_longitudinals_via_shortest_path`
+    primary-labeler. Inserted before the existing `_detect_crossveins`
+    chain detector, which now skips cv_names that this step already
+    labeled.
+    """
+    for cv_name, (a_name, b_name) in _CROSSVEIN_LANDMARKS.items():
+        a = landmarks.get(a_name)
+        b = landmarks.get(b_name)
+        if a is None or b is None or not a.reliable or not b.reliable:
+            continue
+        if a.snapped_node is None or b.snapped_node is None:
+            continue
+        if not (G.has_node(a.snapped_node) and G.has_node(b.snapped_node)):
+            continue
+        try:
+            path = nx.shortest_path(G, a.snapped_node, b.snapped_node, weight="length_px")
+        except nx.NetworkXNoPath:
+            continue
+        path_edges = [_edge_key(path[i], path[i + 1]) for i in range(len(path) - 1)]
+        # Don't carve through a labeled longitudinal — sanity gate.
+        if any(k in edge_labels for k in path_edges):
+            continue
+        for k in path_edges:
+            edge_labels[k] = cv_name
+        total_len = sum(G[u][v].get("length_px", 0) for u, v in path_edges if G.has_edge(u, v))
+        logger.info(
+            "Phase 4-pre0: %s labeled via landmark shortest-path (%d edge(s), %.0fpx)",
+            cv_name,
+            len(path_edges),
+            total_len,
+        )
+
+
+def _label_crossveins_via_chain_topology(
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    landmarks: dict[str, Landmark],
+    config: "PipelineConfig",
+    median_vein_width_px: float,
+) -> None:
+    """Phase 4-pre1: per-position corridor + H-shape / partial-CV detection.
+
+    For any crossvein not already labeled by Phase 4-pre0 (landmark
+    shortest-path), build chains of unlabeled edges, filter to those whose
+    centroid lies in the per-position AP corridor between the two bounding
+    longitudinals (margin=0), then pick the winning chain via:
+
+      - Round 1 (H-shape): a chain whose two endpoint nodes each anchor on
+        a different bounding vein (within 1× median vein width) is the
+        crossvein by construction.
+      - Round 2 (partial-CV pair-merge): when no chain in the pool passes
+        H-shape, look for chains where exactly one endpoint anchors on a
+        bounding vein. Merge two partials touching opposite veins (via
+        shared node, or via shortest unlabeled bridge through other pool
+        chains, with strict per-node corridor confinement). Orphan
+        partials are kept as candidates.
+      - Final picker: minimum (dist_a + dist_b) sum-distance among all
+        candidates from Rounds 1 + 2.
+
+    Mirrors the sandbox's `_evaluate_chain` + `_select_crossvein` (see
+    crossvein_sandbox.py).
+    """
+    from identify_features.models.topology import CROSSVEIN_CONNECTIONS
+    from shapely.geometry import MultiLineString
+    from shapely.geometry import Point as _Pt
+    from shapely.ops import nearest_points
+
+    # Stub-length cap for chain contraction (matches `_detect_crossveins`).
+    if config.um_per_px is not None and config.um_per_px > 0:
+        stub_len_floor_px = config.to_px(60.0)
+    elif median_vein_width_px > 0:
+        stub_len_floor_px = 2.5 * median_vein_width_px
+    else:
+        stub_len_floor_px = 0.0
+    stub_len_cap = max(5.0 * median_vein_width_px, stub_len_floor_px)
+
+    def _is_short_stub(neighbor: int, edge_length: float) -> bool:
+        return G.degree(neighbor) == 1 and edge_length < stub_len_cap
+
+    # Build labeled-vein lookups (same as `_detect_crossveins`).
+    vein_lines: dict[str, list[LineString]] = defaultdict(list)
+    vein_nodes: dict[str, set[int]] = defaultdict(set)
+    for (u, v), label in edge_labels.items():
+        if G.has_edge(u, v):
+            line = G[u][v].get("line")
+            if line:
+                vein_lines[label].append(line)
+            vein_nodes[label].add(u)
+            vein_nodes[label].add(v)
+
+    # Group unlabeled edges into chains.
+    chains: list[dict] = []
+    visited: set[tuple] = set()
+    for u, v, data in G.edges(data=True):
+        key = _edge_key(u, v)
+        if key in visited or key in edge_labels:
+            continue
+        if data.get("line") is None:
+            continue
+        chain_edges = [key]
+        visited.add(key)
+        for start, direction in [(u, v), (v, u)]:
+            cur = start
+            prev = direction
+            while True:
+                deg = G.degree(cur)
+                if deg == 2:
+                    candidates = [n for n in G.neighbors(cur) if n != prev]
+                elif deg == 3:
+                    forward = [n for n in G.neighbors(cur) if n != prev]
+                    if len(forward) != 2:
+                        break
+                    non_stub = [n for n in forward if not _is_short_stub(n, G[cur][n].get("length_px", 0))]
+                    if len(non_stub) != 1:
+                        break
+                    candidates = non_stub
+                else:
+                    break
+                if not candidates:
+                    break
+                nxt = candidates[0]
+                nkey = _edge_key(cur, nxt)
+                if nkey in visited or nkey in edge_labels:
+                    break
+                if G[cur][nxt].get("line") is None:
+                    break
+                chain_edges.append(nkey)
+                visited.add(nkey)
+                prev = cur
+                cur = nxt
+        touch: dict[int, int] = defaultdict(int)
+        for eu, ev in chain_edges:
+            touch[eu] += 1
+            touch[ev] += 1
+        eps = [n for n, c in touch.items() if c == 1]
+        if len(eps) != 2:
+            continue
+        total_len = sum(G[a][b].get("length_px", 0) for a, b in chain_edges if G.has_edge(a, b))
+        chains.append(
+            {
+                "edges": chain_edges,
+                "endpoints": (eps[0], eps[1]),
+                "length": total_len,
+            }
+        )
+
+    if not chains:
+        return
+
+    # Per-position corridor margin = 0 (strict band between vein_a and vein_b).
+    corridor_margin = 0.0
+    node_vein_max_dist = (
+        max(2.0 * median_vein_width_px, config.to_px(60.0) if (config and config.um_per_px) else 0.0) or 50.0
+    )
+    h_max_dist = median_vein_width_px or 1.0
+
+    def _node_in_corridor(node: int, vein_a_geom, vein_b_geom, margin: float) -> bool:
+        x, y = G.nodes[node]["x"], G.nodes[node]["y"]
+        try:
+            _, near_a = nearest_points(_Pt(x, y), vein_a_geom)
+            _, near_b = nearest_points(_Pt(x, y), vein_b_geom)
+        except Exception:
+            return False
+        y_lo = min(near_a.y, near_b.y) - margin
+        y_hi = max(near_a.y, near_b.y) + margin
+        return y_lo <= y <= y_hi
+
+    def _all_nodes_in_corridor(edges: list[tuple], vein_a_geom, vein_b_geom, margin: float) -> bool:
+        seen: set[int] = set()
+        for u, v in edges:
+            seen.add(u)
+            seen.add(v)
+        return all(_node_in_corridor(n, vein_a_geom, vein_b_geom, margin) for n in seen)
+
+    for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
+        # Skip if Phase 4-pre0 already labeled this crossvein.
+        if any(label == cv_name for label in edge_labels.values()):
+            continue
+        if vein_a not in vein_lines or vein_b not in vein_lines:
+            continue
+        vein_a_geom = vein_lines[vein_a][0] if len(vein_lines[vein_a]) == 1 else MultiLineString(vein_lines[vein_a])
+        vein_b_geom = vein_lines[vein_b][0] if len(vein_lines[vein_b]) == 1 else MultiLineString(vein_lines[vein_b])
+
+        # Step 1: per-position corridor pool.
+        pool: list[dict] = []
+        for ch in chains:
+            pts = []
+            for u, v in ch["edges"]:
+                line = G[u][v].get("line") if G.has_edge(u, v) else None
+                if line is not None:
+                    pts.extend(line.coords)
+            if not pts:
+                continue
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            try:
+                _, na = nearest_points(_Pt(cx, cy), vein_a_geom)
+                _, nb = nearest_points(_Pt(cx, cy), vein_b_geom)
+            except Exception:
+                continue
+            y_lo = min(na.y, nb.y) - corridor_margin
+            y_hi = max(na.y, nb.y) + corridor_margin
+            if y_lo <= cy <= y_hi:
+                pool.append(ch)
+        if not pool:
+            continue
+
+        # Round 1 — H-shape (1× mvw tolerance). Round 2 — partial CVs.
+        h_candidates: list[dict] = []
+        partials_a: list[dict] = []
+        partials_b: list[dict] = []
+        for ch in pool:
+            ea, eb = ch["endpoints"]
+            da_a = _node_vein_distance(G, ea, vein_a, vein_lines, vein_nodes, max_dist=h_max_dist)
+            db_a = _node_vein_distance(G, eb, vein_a, vein_lines, vein_nodes, max_dist=h_max_dist)
+            da_b = _node_vein_distance(G, ea, vein_b, vein_lines, vein_nodes, max_dist=h_max_dist)
+            db_b = _node_vein_distance(G, eb, vein_b, vein_lines, vein_nodes, max_dist=h_max_dist)
+            h_orient_1 = da_a is not None and db_b is not None
+            h_orient_2 = db_a is not None and da_b is not None
+            if h_orient_1 or h_orient_2:
+                h_candidates.append({"edges": ch["edges"], "endpoints": ch["endpoints"], "length": ch["length"]})
+                continue
+            on_a_count = int(da_a is not None) + int(db_a is not None)
+            on_b_count = int(da_b is not None) + int(db_b is not None)
+            if on_a_count == 1 and on_b_count == 0:
+                anchor = ea if da_a is not None else eb
+                free = eb if da_a is not None else ea
+                partials_a.append(
+                    {
+                        "edges": ch["edges"],
+                        "endpoints": ch["endpoints"],
+                        "length": ch["length"],
+                        "anchor": anchor,
+                        "free": free,
+                    }
+                )
+            elif on_b_count == 1 and on_a_count == 0:
+                anchor = ea if da_b is not None else eb
+                free = eb if da_b is not None else ea
+                partials_b.append(
+                    {
+                        "edges": ch["edges"],
+                        "endpoints": ch["endpoints"],
+                        "length": ch["length"],
+                        "anchor": anchor,
+                        "free": free,
+                    }
+                )
+
+        candidates: list[dict] = list(h_candidates)
+        if not h_candidates:
+            # Round 2 pair-merge through corridor-pool unlabeled bridges.
+            pool_edges_set: set[tuple] = set()
+            for ev in pool:
+                for u, v in ev["edges"]:
+                    pool_edges_set.add(_edge_key(u, v))
+            pool_sub = nx.Graph()
+            for u, v, data in G.edges(data=True):
+                if _edge_key(u, v) in pool_edges_set:
+                    pool_sub.add_edge(u, v, **data)
+            used_partial_keys: set[tuple] = set()
+            for pa in partials_a:
+                for pb in partials_b:
+                    shared = set(pa["endpoints"]) & set(pb["endpoints"])
+                    bridge_edges: list[tuple] = []
+                    if shared:
+                        pass  # adjacent — empty bridge
+                    else:
+                        bridge_g = pool_sub.copy()
+                        for u, v in pa["edges"]:
+                            if bridge_g.has_edge(u, v):
+                                bridge_g.remove_edge(u, v)
+                        for u, v in pb["edges"]:
+                            if bridge_g.has_edge(u, v):
+                                bridge_g.remove_edge(u, v)
+                        if not (bridge_g.has_node(pa["free"]) and bridge_g.has_node(pb["free"])):
+                            continue
+                        try:
+                            path = nx.shortest_path(bridge_g, pa["free"], pb["free"], weight="length_px")
+                        except nx.NetworkXNoPath:
+                            continue
+                        bridge_edges = [_edge_key(path[i], path[i + 1]) for i in range(len(path) - 1)]
+                    merged = list(pa["edges"]) + bridge_edges + list(pb["edges"])
+                    seen_edges: set[tuple] = set()
+                    unique_edges = []
+                    for e in merged:
+                        if e in seen_edges:
+                            continue
+                        seen_edges.add(e)
+                        unique_edges.append(e)
+                    if not _all_nodes_in_corridor(unique_edges, vein_a_geom, vein_b_geom, corridor_margin):
+                        continue
+                    total_len = sum(G[u][v].get("length_px", 0) for u, v in unique_edges if G.has_edge(u, v))
+                    candidates.append(
+                        {"edges": unique_edges, "endpoints": (pa["anchor"], pb["anchor"]), "length": total_len}
+                    )
+                    used_partial_keys.update(tuple(e) for e in pa["edges"])
+                    used_partial_keys.update(tuple(e) for e in pb["edges"])
+            # Orphans
+            for p in partials_a + partials_b:
+                if any(tuple(e) in used_partial_keys for e in p["edges"]):
+                    continue
+                candidates.append({"edges": p["edges"], "endpoints": p["endpoints"], "length": p["length"]})
+
+        if not candidates:
+            continue
+
+        # Final picker: lowest sum-distance over both endpoint orientations.
+        best = None
+        best_score = float("inf")
+        for c in candidates:
+            ea, eb = c["endpoints"]
+            for orient_a, orient_b in [(ea, eb), (eb, ea)]:
+                da = _node_vein_distance(G, orient_a, vein_a, vein_lines, vein_nodes, max_dist=node_vein_max_dist)
+                db = _node_vein_distance(G, orient_b, vein_b, vein_lines, vein_nodes, max_dist=node_vein_max_dist)
+                if da is not None and db is not None and (da + db) < best_score:
+                    best_score = da + db
+                    best = c
+        if best is None:
+            continue
+
+        for key in best["edges"]:
+            if key not in edge_labels:
+                edge_labels[key] = cv_name
+        logger.info(
+            "Phase 4-pre1: %s labeled via chain-topology (%d edge(s), %.0fpx, score=%.1f)",
+            cv_name,
+            len(best["edges"]),
+            best["length"],
+            best_score,
+        )
+
+
 def _detect_crossveins(
     G: nx.Graph,
     edge_labels: dict[tuple, str],
@@ -1735,6 +2102,9 @@ def _detect_crossveins(
     )
 
     for cv_name, (vein_a, vein_b) in CROSSVEIN_CONNECTIONS.items():
+        # Skip if Phase 4-pre0 / 4-pre1 already labeled this crossvein.
+        if any(label == cv_name for label in edge_labels.values()):
+            continue
         if vein_a not in vein_lines or vein_b not in vein_lines:
             logger.info("Cannot detect %s: %s or %s not labeled", cv_name, vein_a, vein_b)
             continue
