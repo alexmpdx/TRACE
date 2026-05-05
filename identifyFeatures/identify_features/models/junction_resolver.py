@@ -291,28 +291,58 @@ def merge_through_junctions(
                 is_stub = result.degree(n) == 1 and n not in protected_nodes and length < stub_len_cap
                 edges_info.append((n, length, dep, label, is_stub))
 
-            # Find the most collinear pair (angle closest to 180°)
+            # Find the through-vein pair using a two-tier rule:
+            #   1. Same-label preference: when two of the three edges share a
+            #      non-None label, they are the through-vein continuation by
+            #      construction (Phase 1c shortest-path labeled both sides of
+            #      the longitudinal as it crossed this junction). Pick the
+            #      same-label pair regardless of which other pair scores higher
+            #      geometrically. This protects against a steeply-angled
+            #      crossvein on mutant wings (e.g. 20241211_…_0001 PCV) whose
+            #      direction happens to be more collinear with one of the
+            #      longitudinal arms than the longitudinal-pair itself.
+            #   2. Fall back to most-collinear pair when no two edges share a
+            #      label (the original purely-geometric rule).
+            # The 120° angle floor still applies on tier 2; tier 1 trusts
+            # explicit labeling regardless of angle.
             best_pair = None
             best_angle = 0.0
 
+            # Tier 1: same-label pair
             for i in range(3):
                 for j in range(i + 1, 3):
                     ni, li, di, lbl_i, stub_i = edges_info[i]
                     nj, lj, dj, lbl_j, stub_j = edges_info[j]
-
-                    # Don't merge edges with different labels
-                    if lbl_i is not None and lbl_j is not None and lbl_i != lbl_j:
+                    if lbl_i is None or lbl_j is None or lbl_i != lbl_j:
                         continue
-
-                    # Don't pair a dead-end stub as the through-vein continuation
                     if stub_i or stub_j:
                         continue
-
                     if di is not None and dj is not None:
                         angle = angle_between_vectors(di, dj)
                         if angle > best_angle:
                             best_angle = angle
                             best_pair = (i, j)
+
+            # Tier 2: most-collinear pair (only if no same-label pair found)
+            if best_pair is None:
+                for i in range(3):
+                    for j in range(i + 1, 3):
+                        ni, li, di, lbl_i, stub_i = edges_info[i]
+                        nj, lj, dj, lbl_j, stub_j = edges_info[j]
+
+                        # Don't merge edges with different labels
+                        if lbl_i is not None and lbl_j is not None and lbl_i != lbl_j:
+                            continue
+
+                        # Don't pair a dead-end stub as the through-vein continuation
+                        if stub_i or stub_j:
+                            continue
+
+                        if di is not None and dj is not None:
+                            angle = angle_between_vectors(di, dj)
+                            if angle > best_angle:
+                                best_angle = angle
+                                best_pair = (i, j)
 
             if best_pair is None or best_angle < 120.0:
                 continue
