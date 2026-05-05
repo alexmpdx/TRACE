@@ -12,8 +12,9 @@ def get_train_transform(cfg: dict) -> Compose:
     return A.Compose(
         [
             A.Resize(input_cfg["height"], input_cfg["width"]),
-            A.Rotate(limit=aug_cfg["rotation_limit"], border_mode=0, p=0.8),
+            A.Rotate(limit=aug_cfg.get("rotation_limit", 90), border_mode=0, p=0.8),
             A.HorizontalFlip(p=aug_cfg["horizontal_flip_p"]),
+            A.VerticalFlip(p=aug_cfg.get("vertical_flip_p", 0.5)),
             A.RandomScale(scale_limit=aug_cfg["scale_limit"], p=0.5),
             A.PadIfNeeded(
                 min_height=input_cfg["height"],

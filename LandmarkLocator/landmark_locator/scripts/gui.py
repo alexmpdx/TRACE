@@ -14,16 +14,11 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
+
 from landmark_locator.data.dataset import _normalize_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
-)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -41,6 +36,7 @@ from PyQt5.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -54,6 +50,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStatusBar,
     QStyle,
@@ -63,6 +60,13 @@ from PyQt5.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
+)
+
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
 )
 
 # ---------------------------------------------------------------------------
@@ -1097,6 +1101,7 @@ def read_gate_config_from_checkpoint(path: Path) -> tuple[dict, list[str]]:
     full predictor — e.g. the TRACE settings dialog.
     """
     import torch
+
     from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge, _find_fold_checkpoints
 
     p = Path(path)
@@ -1132,6 +1137,472 @@ class GateConfigDialog(QDialog):
 
     def result_override(self) -> dict:
         return self._panel.result_override()
+
+
+# ---------------------------------------------------------------------------
+# Training-config editor + augmentation preview dialogs
+# ---------------------------------------------------------------------------
+_AUG_PREVIEW_COLORS_BGR = [
+    (0, 0, 255),
+    (0, 255, 0),
+    (255, 0, 0),
+    (0, 255, 255),
+    (255, 0, 255),
+    (255, 255, 0),
+    (128, 128, 255),
+    (255, 128, 128),
+]
+
+
+def _draw_kps_for_preview(image_rgb: np.ndarray, keypoints, names, landmark_order) -> np.ndarray:
+    """Overlay landmark keypoints on an RGB image and return BGR for cv2/Qt display."""
+    img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR).copy()
+    color_map = {n: _AUG_PREVIEW_COLORS_BGR[i % len(_AUG_PREVIEW_COLORS_BGR)] for i, n in enumerate(landmark_order)}
+    h, w = img.shape[:2]
+    for (x, y), name in zip(keypoints, names):
+        xi, yi = int(round(x)), int(round(y))
+        if not (0 <= xi < w and 0 <= yi < h):
+            continue
+        color = color_map.get(name, (255, 255, 255))
+        cv2.circle(img, (xi, yi), 5, color, -1)
+        cv2.circle(img, (xi, yi), 6, (0, 0, 0), 1)
+        cv2.putText(img, name[:6], (xi + 7, yi - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+    return img
+
+
+def _bgr_to_qpixmap(img_bgr: np.ndarray) -> QPixmap:
+    h, w = img_bgr.shape[:2]
+    qimg = QImage(img_bgr.data, w, h, 3 * w, QImage.Format_BGR888)
+    return QPixmap.fromImage(qimg.copy())
+
+
+class TrainingConfigDialog(QDialog):
+    """Editable form for the most-edited training-config keys in `configs/default.yaml`.
+
+    Edits are applied to an in-memory copy; OK writes back to the YAML file. Cancel
+    discards. A 'Preview Augmentations…' button opens a live-preview dialog using the
+    current (unsaved) form state.
+    """
+
+    def __init__(self, parent: "LandmarkGUI", config_path: Path) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Training Configuration")
+        self.resize(560, 640)
+        self._parent_gui = parent
+        self._config_path = config_path
+        self._cfg = yaml.safe_load(config_path.read_text()) or {}
+
+        root = QVBoxLayout(self)
+
+        hint = QLabel(
+            "Edit the augmentation and training knobs that drive `landmark-train`. "
+            "Keys not exposed here can still be edited directly in "
+            f"<code>{config_path}</code>."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aaa;")
+        root.addWidget(hint)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+
+        aug = self._cfg.setdefault("augmentation", {})
+        train = self._cfg.setdefault("training", {})
+        opt = train.setdefault("optimizer", {})
+        cv_cfg = self._cfg.setdefault("cv", {})
+
+        self._fields: dict[str, QWidget] = {}
+
+        def _add_int(grid, row, label, default, mn, mx, step=1):
+            grid.addWidget(QLabel(label), row, 0)
+            sb = QSpinBox()
+            sb.setRange(mn, mx)
+            sb.setSingleStep(step)
+            sb.setValue(int(default))
+            grid.addWidget(sb, row, 1)
+            return sb
+
+        def _add_float(grid, row, label, default, mn, mx, step=0.05, decimals=3):
+            grid.addWidget(QLabel(label), row, 0)
+            sb = QDoubleSpinBox()
+            sb.setRange(mn, mx)
+            sb.setSingleStep(step)
+            sb.setDecimals(decimals)
+            sb.setValue(float(default))
+            grid.addWidget(sb, row, 1)
+            return sb
+
+        # --- Augmentation group ---
+        aug_box = QGroupBox("Augmentation")
+        aug_grid = QGridLayout(aug_box)
+        aug_grid.setVerticalSpacing(4)
+        aug_grid.setHorizontalSpacing(8)
+        self._fields["augmentation.rotation_limit"] = _add_int(
+            aug_grid, 0, "rotation_limit (±°)", aug.get("rotation_limit", 90), 0, 180, 5
+        )
+        self._fields["augmentation.horizontal_flip_p"] = _add_float(
+            aug_grid, 1, "horizontal_flip_p", aug.get("horizontal_flip_p", 0.5), 0.0, 1.0, 0.05, 2
+        )
+        self._fields["augmentation.vertical_flip_p"] = _add_float(
+            aug_grid, 2, "vertical_flip_p", aug.get("vertical_flip_p", 0.5), 0.0, 1.0, 0.05, 2
+        )
+        self._fields["augmentation.scale_limit"] = _add_float(
+            aug_grid, 3, "scale_limit", aug.get("scale_limit", 0.15), 0.0, 1.0, 0.05, 2
+        )
+        self._fields["augmentation.blur_p"] = _add_float(
+            aug_grid, 4, "blur_p", aug.get("blur_p", 0.3), 0.0, 1.0, 0.05, 2
+        )
+        self._fields["augmentation.coarse_dropout_p"] = _add_float(
+            aug_grid, 5, "coarse_dropout_p", aug.get("coarse_dropout_p", 0.3), 0.0, 1.0, 0.05, 2
+        )
+        self._fields["augmentation.coarse_dropout_max_holes"] = _add_int(
+            aug_grid, 6, "coarse_dropout_max_holes", aug.get("coarse_dropout_max_holes", 4), 0, 50, 1
+        )
+        self._fields["augmentation.coarse_dropout_max_height"] = _add_int(
+            aug_grid, 7, "coarse_dropout_box_height (px)", aug.get("coarse_dropout_max_height", 40), 0, 512, 5
+        )
+        self._fields["augmentation.coarse_dropout_max_width"] = _add_int(
+            aug_grid, 8, "coarse_dropout_box_width (px)", aug.get("coarse_dropout_max_width", 40), 0, 512, 5
+        )
+        body_layout.addWidget(aug_box)
+
+        # --- Training group ---
+        tr_box = QGroupBox("Training")
+        tr_grid = QGridLayout(tr_box)
+        tr_grid.setVerticalSpacing(4)
+        tr_grid.setHorizontalSpacing(8)
+        self._fields["training.epochs"] = _add_int(tr_grid, 0, "epochs", train.get("epochs", 300), 10, 5000, 10)
+        self._fields["training.batch_size"] = _add_int(tr_grid, 1, "batch_size", train.get("batch_size", 4), 1, 64, 1)
+        self._fields["training.encoder_freeze_epochs"] = _add_int(
+            tr_grid, 2, "encoder_freeze_epochs", train.get("encoder_freeze_epochs", 20), 0, 500, 5
+        )
+        self._fields["training.early_stopping_patience"] = _add_int(
+            tr_grid, 3, "early_stopping_patience", train.get("early_stopping_patience", 50), 0, 500, 5
+        )
+        # Learning rate via QLineEdit so scientific notation (1e-3) works cleanly.
+        tr_grid.addWidget(QLabel("optimizer.lr"), 4, 0)
+        lr_edit = QLineEdit()
+        lr_edit.setText(str(opt.get("lr", 1.0e-3)))
+        lr_edit.setPlaceholderText("e.g. 1e-3")
+        tr_grid.addWidget(lr_edit, 4, 1)
+        self._fields["training.optimizer.lr"] = lr_edit
+        body_layout.addWidget(tr_box)
+
+        # --- Cross-validation group ---
+        cv_box = QGroupBox("Cross-validation")
+        cv_grid = QGridLayout(cv_box)
+        cv_grid.setVerticalSpacing(4)
+        cv_grid.setHorizontalSpacing(8)
+        self._fields["cv.n_folds"] = _add_int(cv_grid, 0, "n_folds", cv_cfg.get("n_folds", 5), 2, 10, 1)
+        body_layout.addWidget(cv_box)
+
+        body_layout.addStretch(1)
+        scroll.setWidget(body)
+        root.addWidget(scroll)
+
+        # --- Buttons ---
+        preview_btn = QPushButton("Preview Augmentations…")
+        preview_btn.clicked.connect(self._on_preview)
+        root.addWidget(preview_btn)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Reset)
+        bb.accepted.connect(self._on_save_and_close)
+        bb.rejected.connect(self.reject)
+        bb.button(QDialogButtonBox.Reset).clicked.connect(self._on_reset)
+        root.addWidget(bb)
+
+    def _form_into_cfg(self) -> dict:
+        """Apply the current form-field values into a copy of self._cfg and return it."""
+        cfg = json.loads(json.dumps(self._cfg))
+        cfg.setdefault("augmentation", {})
+        cfg.setdefault("training", {}).setdefault("optimizer", {})
+        cfg.setdefault("cv", {})
+        for key, widget in self._fields.items():
+            if isinstance(widget, QSpinBox):
+                value = int(widget.value())
+            elif isinstance(widget, QDoubleSpinBox):
+                value = float(widget.value())
+            elif isinstance(widget, QLineEdit):
+                txt = widget.text().strip()
+                try:
+                    value = float(txt)
+                except ValueError:
+                    raise ValueError(f"{key}: '{txt}' is not a valid number")
+            else:
+                continue
+            parts = key.split(".")
+            target = cfg
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = value
+        return cfg
+
+    def _on_preview(self) -> None:
+        try:
+            cfg = self._form_into_cfg()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid value", str(e))
+            return
+        dlg = AugPreviewDialog(self._parent_gui, cfg, parent=self)
+        dlg.exec_()
+
+    def _on_save_and_close(self) -> None:
+        try:
+            cfg = self._form_into_cfg()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid value", str(e))
+            return
+        try:
+            self._config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", f"Could not write {self._config_path}:\n{e}")
+            return
+        self.accept()
+
+    def _on_reset(self) -> None:
+        """Re-read the YAML from disk and repopulate the fields."""
+        self._cfg = yaml.safe_load(self._config_path.read_text()) or {}
+        aug = self._cfg.get("augmentation", {})
+        train = self._cfg.get("training", {})
+        opt = train.get("optimizer", {})
+        cv_cfg = self._cfg.get("cv", {})
+        defaults = {
+            "augmentation.rotation_limit": aug.get("rotation_limit", 90),
+            "augmentation.horizontal_flip_p": aug.get("horizontal_flip_p", 0.5),
+            "augmentation.vertical_flip_p": aug.get("vertical_flip_p", 0.5),
+            "augmentation.scale_limit": aug.get("scale_limit", 0.15),
+            "augmentation.blur_p": aug.get("blur_p", 0.3),
+            "augmentation.coarse_dropout_p": aug.get("coarse_dropout_p", 0.3),
+            "augmentation.coarse_dropout_max_holes": aug.get("coarse_dropout_max_holes", 4),
+            "augmentation.coarse_dropout_max_height": aug.get("coarse_dropout_max_height", 40),
+            "augmentation.coarse_dropout_max_width": aug.get("coarse_dropout_max_width", 40),
+            "training.epochs": train.get("epochs", 300),
+            "training.batch_size": train.get("batch_size", 4),
+            "training.encoder_freeze_epochs": train.get("encoder_freeze_epochs", 20),
+            "training.early_stopping_patience": train.get("early_stopping_patience", 50),
+            "training.optimizer.lr": opt.get("lr", 1.0e-3),
+            "cv.n_folds": cv_cfg.get("n_folds", 5),
+        }
+        for key, value in defaults.items():
+            widget = self._fields[key]
+            if isinstance(widget, QSpinBox):
+                widget.setValue(int(value))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(value))
+            elif isinstance(widget, QLineEdit):
+                widget.setText(str(value))
+
+
+class AugPreviewDialog(QDialog):
+    """Render N augmented training samples with the current train transform.
+
+    Picks an image+annotation from the parent GUI's loaded entries when available,
+    otherwise falls back to the first GeoJSON in `cfg.data.annotation_dir`.
+    """
+
+    def __init__(self, parent_gui: "LandmarkGUI", cfg: dict, parent=None) -> None:
+        super().__init__(parent or parent_gui)
+        self.setWindowTitle("Augmentation Preview")
+        self.resize(900, 720)
+        self._parent_gui = parent_gui
+        self._cfg = cfg
+
+        root = QVBoxLayout(self)
+
+        # --- Top controls ---
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Image:"))
+        self._image_combo = QComboBox()
+        self._populate_image_choices()
+        top.addWidget(self._image_combo, stretch=1)
+        top.addWidget(QLabel("N samples:"))
+        self._n_spin = QSpinBox()
+        self._n_spin.setRange(1, 32)
+        self._n_spin.setValue(8)
+        top.addWidget(self._n_spin)
+        gen_btn = QPushButton("Generate")
+        gen_btn.clicked.connect(self._on_generate)
+        top.addWidget(gen_btn)
+        root.addLayout(top)
+
+        # --- Status / hint ---
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #aaa;")
+        root.addWidget(self._status)
+
+        # --- Grid scroll area ---
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._grid_holder = QWidget()
+        self._grid = QGridLayout(self._grid_holder)
+        self._grid.setSpacing(6)
+        self._scroll.setWidget(self._grid_holder)
+        root.addWidget(self._scroll, stretch=1)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.reject)
+        bb.button(QDialogButtonBox.Close).clicked.connect(self.reject)
+        root.addWidget(bb)
+
+    def _populate_image_choices(self) -> None:
+        """Fill the image picker with parent-GUI entries that have GT, then fall back to training_data."""
+        seen: set[str] = set()
+        # 1. Parent GUI entries that have a GT annotation
+        for entry in getattr(self._parent_gui, "_entries", []) or []:
+            if entry.geojson_path and entry.geojson_path.exists():
+                key = str(entry.path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                self._image_combo.addItem(entry.path.name, (str(entry.path), str(entry.geojson_path)))
+        # 2. Fallback: first few annotated images from cfg.data.annotation_dir
+        try:
+            annotation_dir = Path(self._cfg.get("data", {}).get("annotation_dir", "training_data"))
+            if not annotation_dir.is_absolute():
+                annotation_dir = _project_root / annotation_dir
+            image_dir = Path(self._cfg.get("data", {}).get("image_dir", "training_data_pics"))
+            if not image_dir.is_absolute():
+                image_dir = _project_root / image_dir
+            for gj in sorted(annotation_dir.glob("*.geojson"))[:20]:
+                img_path = image_dir / gj.stem
+                if not img_path.exists():
+                    continue
+                key = str(img_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                self._image_combo.addItem(f"{img_path.name}  (training set)", (str(img_path), str(gj)))
+        except Exception:
+            pass
+
+    def _clear_grid(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _on_generate(self) -> None:
+        import albumentations as A
+
+        from landmark_locator.data.augmentation import get_train_transform
+        from landmark_locator.data.psd_loader import imread_any
+
+        data = self._image_combo.currentData()
+        if not data:
+            self._status.setText("No image available — load images or annotate one first.")
+            return
+        image_path = Path(data[0])
+        geojson_path = Path(data[1]) if data[1] else None
+
+        # Resolve landmark order: prefer parent's, else discover from cfg.data.annotation_dir.
+        landmark_order = list(getattr(self._parent_gui, "_landmark_order", []) or [])
+        geojson_to_landmark = dict(getattr(self._parent_gui, "_geojson_to_landmark", {}) or {})
+        if not landmark_order:
+            try:
+                annotation_dir = Path(self._cfg.get("data", {}).get("annotation_dir", "training_data"))
+                if not annotation_dir.is_absolute():
+                    annotation_dir = _project_root / annotation_dir
+                landmark_order, geojson_to_landmark = discover_landmarks(annotation_dir)
+            except Exception as e:
+                self._status.setText(f"Could not discover landmarks: {e}")
+                return
+
+        cfg = json.loads(json.dumps(self._cfg))
+        cfg.setdefault("heatmap", {})["landmark_order"] = landmark_order
+        cfg["heatmap"]["geojson_to_landmark"] = geojson_to_landmark
+        cfg["heatmap"]["num_landmarks"] = len(landmark_order)
+        # `get_train_transform` requires `input.height`/`width`; default if missing.
+        cfg.setdefault("input", {}).setdefault("height", 352)
+        cfg["input"].setdefault("width", 512)
+
+        image = imread_any(image_path)
+        if image is None:
+            self._status.setText(f"Failed to load image: {image_path}")
+            return
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Parse keypoints if a GT exists
+        landmarks_dict: dict[str, tuple[float, float]] = {}
+        if geojson_path and geojson_path.exists():
+            try:
+                geo = json.loads(geojson_path.read_text())
+                for feat in geo.get("features", []):
+                    geom = feat.get("geometry", {})
+                    props = feat.get("properties", {})
+                    classification = props.get("classification") or {}
+                    name = classification.get("name", "")
+                    internal = geojson_to_landmark.get(name) or geojson_to_landmark.get(_normalize_name(name))
+                    if not internal:
+                        continue
+                    if geom.get("type") == "Point":
+                        x, y = geom["coordinates"]
+                    elif geom.get("type") == "MultiPoint":
+                        x, y = geom["coordinates"][0]
+                    else:
+                        continue
+                    landmarks_dict[internal] = (float(x), float(y))
+            except Exception as e:
+                self._status.setText(f"Annotation parse error: {e}")
+                return
+
+        keypoints = [landmarks_dict.get(n, (0.0, 0.0)) for n in landmark_order]
+        names = list(landmark_order)
+        present = [n for n in landmark_order if n in landmarks_dict]
+
+        try:
+            transform = get_train_transform(cfg)
+        except Exception as e:
+            QMessageBox.warning(self, "Transform error", f"Could not build transform: {e}")
+            return
+
+        n = int(self._n_spin.value())
+        self._clear_grid()
+
+        # Reference (resize-only)
+        ref_t = A.Compose(
+            [A.Resize(cfg["input"]["height"], cfg["input"]["width"])],
+            keypoint_params=A.KeypointParams(format="xy", label_fields=["landmark_names"], remove_invisible=False),
+        )
+        ref = ref_t(image=image_rgb, keypoints=keypoints, landmark_names=names)
+        ref_vis = _draw_kps_for_preview(ref["image"], ref["keypoints"], ref["landmark_names"], landmark_order)
+        self._add_thumb(ref_vis, "REFERENCE", 0)
+
+        for i in range(n):
+            out = transform(image=image_rgb, keypoints=keypoints, landmark_names=names)
+            vis = _draw_kps_for_preview(out["image"], out["keypoints"], out["landmark_names"], landmark_order)
+            self._add_thumb(vis, f"#{i:02d}", i + 1)
+
+        cols = 4
+        # Lay out: keep simple 4-column grid; row computed by caller already used.
+        self._status.setText(
+            f"Image: {image_path.name}  ({image.shape[1]}×{image.shape[0]}) — "
+            f"{len(present)}/{len(landmark_order)} GT landmarks present  "
+            f"({n} augmented + 1 reference)"
+        )
+
+    def _add_thumb(self, img_bgr: np.ndarray, label: str, idx: int) -> None:
+        """Place a (label, image) cell into the grid in row-major order, 4 cols wide."""
+        cols = 4
+        row = (idx // cols) * 2
+        col = idx % cols
+        cell = QWidget()
+        cv = QVBoxLayout(cell)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(2)
+        title = QLabel(label)
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("color: #ddd; font-size: 11px;")
+        pix = _bgr_to_qpixmap(img_bgr).scaledToWidth(200, Qt.SmoothTransformation)
+        img_label = QLabel()
+        img_label.setPixmap(pix)
+        img_label.setAlignment(Qt.AlignCenter)
+        cv.addWidget(title)
+        cv.addWidget(img_label)
+        self._grid.addWidget(cell, row, col)
 
 
 # ---------------------------------------------------------------------------
@@ -1188,13 +1659,9 @@ class LandmarkGUI(QMainWindow):
         self.addToolBar(tb)
 
         act_model = QAction("Load Model", self)
+        act_model.setToolTip("Load a .pt checkpoint, or pick any .pt inside a fold folder to load as an ensemble.")
         act_model.triggered.connect(self._on_load_model)
         tb.addAction(act_model)
-
-        act_ensemble = QAction("Load Fold Folder", self)
-        act_ensemble.setToolTip("Load a folder of best_fold*.pt checkpoints and run ensemble prediction.")
-        act_ensemble.triggered.connect(self._on_load_fold_folder)
-        tb.addAction(act_ensemble)
 
         act_images = QAction("Load Images", self)
         act_images.triggered.connect(self._on_load_folder)
@@ -1204,13 +1671,18 @@ class LandmarkGUI(QMainWindow):
         act_gt.triggered.connect(self._on_set_gt_dir)
         tb.addAction(act_gt)
 
-        act_save = QAction("Save", self)
-        act_save.triggered.connect(self._on_save_all)
-        tb.addAction(act_save)
-
         act_gate = QAction("Gate Config…", self)
         act_gate.triggered.connect(self._on_edit_gate_config)
         tb.addAction(act_gate)
+
+        act_train_cfg = QAction("Train Config…", self)
+        act_train_cfg.setToolTip("Edit augmentation + training hyperparameters in configs/default.yaml.")
+        act_train_cfg.triggered.connect(self._on_edit_train_config)
+        tb.addAction(act_train_cfg)
+
+        act_save = QAction("Save", self)
+        act_save.triggered.connect(self._on_save_all)
+        tb.addAction(act_save)
 
         # Push Train Model button to the right
         spacer = QWidget()
@@ -1416,65 +1888,81 @@ class LandmarkGUI(QMainWindow):
             self._on_image_selected(self._current_idx)
         self.statusBar().showMessage("Gate config updated.")
 
+    def _on_edit_train_config(self) -> None:
+        """Open a dialog to edit augmentation + training hyperparameters in default.yaml."""
+        config_path = _project_root / "configs" / "default.yaml"
+        if not config_path.exists():
+            QMessageBox.warning(self, "Config missing", f"{config_path} does not exist.")
+            return
+        dlg = TrainingConfigDialog(self, config_path)
+        if dlg.exec_() == QDialog.Accepted:
+            self.statusBar().showMessage(f"Training config saved to {config_path.name}.")
+
     # ---- Actions ----
     def _on_load_model(self) -> None:
-        """Load a model checkpoint via file dialog."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Checkpoint", str(_project_root / "checkpoints"), "PyTorch (*.pt *.pth)"
-        )
-        if not path:
-            return
-        try:
-            from landmark_locator.inference.predict import LandmarkPredictor
+        """Load a model: single .pt checkpoint or, if its folder has fold siblings, an ensemble.
 
-            self._predictor = LandmarkPredictor(Path(path))
-            # Update landmark order from the loaded model
-            self._set_landmark_order(
-                self._predictor.landmark_order,
-                self._predictor.geojson_to_landmark,
-            )
-            self._model_label.setText(f"Model: {Path(path).name}")
-            self.statusBar().showMessage(f"Model loaded: {Path(path).name}")
-            # Clear cached predictions so they re-run
-            for entry in self._entries:
-                entry.prediction = None
-            # Refresh current
-            if self._current_idx >= 0:
-                self._on_image_selected(self._current_idx)
-        except Exception as e:
-            self.statusBar().showMessage(f"Failed to load model: {e}")
-
-    def _on_load_fold_folder(self) -> None:
-        """Load a folder of best_fold*.pt checkpoints for ensemble prediction."""
+        UX: file dialog for a .pt; if the chosen file's folder contains additional
+        `best_fold*.pt` siblings (i.e. the user picked one fold of a CV run), prompt
+        whether to load just that file or the whole folder as an ensemble.
+        """
         from landmark_locator.inference.predict import _find_fold_checkpoints, make_predictor
 
-        start = str(_project_root / "trained_models")
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Fold Checkpoint Folder (contains best_fold0.pt, ...)", start
-        )
-        if not folder:
+        start_dir = _project_root / "trained_models"
+        if not start_dir.exists():
+            start_dir = _project_root
+        path, _ = QFileDialog.getOpenFileName(self, "Select Checkpoint", str(start_dir), "PyTorch (*.pt *.pth)")
+        if not path:
             return
-        folder_path = Path(folder)
-        checkpoints = _find_fold_checkpoints(folder_path)
-        if not checkpoints:
-            QMessageBox.warning(self, "No checkpoints", f"No best_fold*.pt in {folder_path}")
-            return
+        chosen = Path(path)
+        target: Path = chosen
+        fold_ckpts = _find_fold_checkpoints(chosen.parent)
+
+        # Ambiguous case: the chosen file lives in a folder with multiple fold checkpoints.
+        # Ask whether to use one or all.
+        if len(fold_ckpts) > 1:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Fold checkpoints detected")
+            msg.setText(
+                f"This folder contains {len(fold_ckpts)} fold checkpoints "
+                f"({', '.join(p.name for p in fold_ckpts[:5])}{'…' if len(fold_ckpts) > 5 else ''})."
+            )
+            msg.setInformativeText("Load as an ensemble (averages all folds) or just the file you selected?")
+            ens_btn = msg.addButton("Load as Ensemble", QMessageBox.AcceptRole)
+            single_btn = msg.addButton("Load Just This One", QMessageBox.AcceptRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.setDefaultButton(ens_btn)
+            msg.exec_()
+            clicked = msg.clickedButton()
+            if clicked == cancel_btn:
+                return
+            if clicked == ens_btn:
+                target = chosen.parent
+
         try:
-            self._predictor = make_predictor(folder_path)
-            self._set_landmark_order(
-                self._predictor.landmark_order,
-                self._predictor.geojson_to_landmark,
-            )
-            self._model_label.setText(f"Ensemble: {folder_path.name}/ ({len(checkpoints)} folds)")
-            self.statusBar().showMessage(
-                f"Ensemble loaded from {folder_path.name}: {len(checkpoints)} folds — predictions will average all of them"
-            )
-            for entry in self._entries:
-                entry.prediction = None
-            if self._current_idx >= 0:
-                self._on_image_selected(self._current_idx)
+            self._predictor = make_predictor(target)
         except Exception as e:
-            self.statusBar().showMessage(f"Failed to load ensemble: {e}")
+            self.statusBar().showMessage(f"Failed to load model: {e}")
+            return
+
+        self._set_landmark_order(
+            self._predictor.landmark_order,
+            self._predictor.geojson_to_landmark,
+        )
+        if target.is_dir():
+            n = len(fold_ckpts)
+            self._model_label.setText(f"Ensemble: {target.name}/ ({n} folds)")
+            self.statusBar().showMessage(
+                f"Ensemble loaded from {target.name}: {n} folds — predictions will average all of them"
+            )
+        else:
+            self._model_label.setText(f"Model: {target.name}")
+            self.statusBar().showMessage(f"Model loaded: {target.name}")
+
+        for entry in self._entries:
+            entry.prediction = None
+        if self._current_idx >= 0:
+            self._on_image_selected(self._current_idx)
 
     def _on_toggle_show_gate(self, checked: bool) -> None:
         """Redraw the current image with/without the gate overlay."""
@@ -1658,15 +2146,30 @@ class LandmarkGUI(QMainWindow):
                 cv2.imwrite(str(out_path), vis)
 
             if save_geojson and preds:
+                pred = entry.prediction or {}
+                reliable_map = pred.get("reliable", {})
+                reason_map = pred.get("gate_reason", {})
+                confidence_map = pred.get("confidences", {})
+                sharpness_map = pred.get("sharpness", {})
+                spr_map = pred.get("second_peak_ratio", {})
+
                 features = []
                 reverse_map = {v: k for k, v in self._geojson_to_landmark.items()}
                 for name, (x, y) in preds.items():
                     geojson_name = reverse_map.get(name, name)
+                    props = {
+                        "classification": {"name": geojson_name},
+                        "reliable": bool(reliable_map.get(name, True)),
+                        "gate_reason": reason_map.get(name, ""),
+                        "confidence": float(confidence_map.get(name, 0.0)),
+                        "sharpness": float(sharpness_map.get(name, 0.0)),
+                        "second_peak_ratio": float(spr_map.get(name, 0.0)),
+                    }
                     features.append(
                         {
                             "type": "Feature",
                             "geometry": {"type": "Point", "coordinates": [x, y]},
-                            "properties": {"classification": {"name": geojson_name}},
+                            "properties": props,
                         }
                     )
                 geojson_path = self._output_dir / f"{entry.path.stem}_landmarks.geojson"

@@ -1,20 +1,70 @@
 confidence:
-  # All landmarks default to the permissive globals. Strict per-landmark overrides
-  # can be added here or via the GUI's Gate Config... dialog on a per-run basis.
   peak:
-    global: 0.10
+    global: 0.1
     per_landmark: {}
   sharpness:
     global: 1.15
     per_landmark: {}
   second_peak_ratio:
-    global: 0.80
+    global: 0.8
     per_landmark: {}
   second_peak_suppression_radius_px: 30
   core_landmarks:
-    - subcostal_break
-    - alula_notch
-    - l1_rs
-    - l2_l3
-    - l4_l5
-    - dtip
+  - subcostal_break
+  - alula_notch
+  - l1_rs
+  - l2_l3
+  - l4_l5
+  - dtip
+data:
+  annotation_dir: training_data
+  image_dir: training_data_pics
+  image_suffix: .tif
+input:
+  width: 512
+  height: 352
+heatmap:
+  sigma: 5
+  num_landmarks: 5
+model:
+  encoder: resnet18
+  pretrained: true
+  decoder_channels:
+  - 256
+  - 128
+  - 64
+  - 32
+training:
+  epochs: 300
+  batch_size: 5
+  num_workers: 0
+  optimizer:
+    type: AdamW
+    lr: 0.001
+    weight_decay: 0.0001
+  scheduler:
+    type: CosineAnnealingLR
+    T_max: 300
+    eta_min: 1.0e-06
+  encoder_freeze_epochs: 20
+  encoder_lr_factor: 0.1
+  early_stopping_patience: 50
+cv:
+  n_folds: 5
+  stratify_by: genotype
+augmentation:
+  rotation_limit: 90
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.5
+  scale_limit: 0.15
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  blur_limit: 5
+  blur_p: 0.3
+  coarse_dropout_max_holes: 4
+  coarse_dropout_max_height: 40
+  coarse_dropout_max_width: 40
+  coarse_dropout_p: 0.3
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs
