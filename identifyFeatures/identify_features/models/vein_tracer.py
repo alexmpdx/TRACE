@@ -152,24 +152,14 @@ def trace_veins_from_landmarks(
     if dbg:
         dbg.dump(G, edge_labels, "initial")
 
-    # Phase 0: DISABLED — merge_through_junctions was welding Y-fork branches
-    # into single edges, which destroyed real PCV/ACV Y-junction topology
-    # (e.g. 0001 PCV) and contributed to longitudinal mislabeling at junctions
-    # (e.g. 0010 L3). The function is preserved in junction_resolver.py for
-    # easy revert; uncomment the block below to re-enable.
-    #
-    # from identify_features.models.junction_resolver import merge_through_junctions
-    # protected = {lm.snapped_node for lm in landmarks.values() if lm.snapped_node is not None}
-    # skel_graph.graph = merge_through_junctions(
-    #     G,
-    #     edge_labels,
-    #     config,
-    #     protected_nodes=protected,
-    #     median_vein_width_px=skel_graph.median_vein_width_px,
-    # )
-    # G = skel_graph.graph
+    # Phase 0: intentional no-op. merge_through_junctions used to run here on
+    # the bare graph, which destroyed real PCV/ACV Y-junction topology before
+    # the labeler had a chance to use it (0001 PCV, 0010 L3). It now runs
+    # further down — after Phase 1c shortest-path has placed primary labels —
+    # so it can clean up the graph for the legacy fallback phases (2 → 2e)
+    # without disturbing the new labeler.
     if dbg:
-        dbg.dump(G, edge_labels, "phase0_merge_junctions_DISABLED")
+        dbg.dump(G, edge_labels, "phase0_skipped")
 
     # Phase 1: Detect costa edges using margin band (on the merged graph)
     costa_band = None
@@ -196,6 +186,67 @@ def trace_veins_from_landmarks(
     _label_longitudinals_via_shortest_path(G, landmarks, edge_labels, config, skel_graph.median_vein_width_px)
     if dbg:
         dbg.dump(G, edge_labels, "phase1c_shortest_path")
+
+    # Phase 1d: Merge longitudinal edges through Y-fork junctions to prep the
+    # graph for the legacy fallback labeling phases (2 → 2e). Only runs when
+    # the fallback will actually need to do work — i.e. at least one of the
+    # 6 longitudinals (L1, Rs, L2, L3, L4, L5) wasn't labeled by Phase 1c.
+    # When shortest-path covered everything, skipping the merge preserves
+    # Y-junction topology that downstream crossvein detection benefits from.
+    # The fallback was designed against a pre-merged graph (single edge per
+    # longitudinal across crossvein junctions); without this step it leaves
+    # veins half-labeled (e.g. L4 missing its proximal half on
+    # 20241205_…_0015). Running merge AFTER the shortest-path labeler
+    # preserves primary labels (merge_through_junctions never combines edges
+    # with different labels and propagates a single existing label across
+    # the merged edge).
+    from identify_features.models.topology import LONGITUDINAL_ENDPOINTS
+
+    labeled_now = set(edge_labels.values())
+    missing_longitudinals = set(LONGITUDINAL_ENDPOINTS.keys()) - labeled_now
+    if missing_longitudinals:
+        from identify_features.models.junction_resolver import merge_through_junctions
+
+        logger.info(
+            "Phase 1d: running merge_through_junctions to prep fallback for missing %s",
+            sorted(missing_longitudinals),
+        )
+        # Only protect longitudinal-anchor landmark nodes from contraction.
+        # Crossvein-anchor landmarks (ACV.a/ACV.p/PCV.a/PCV.p) sit on the
+        # longitudinal trunk at the exact junctions merge_through_junctions
+        # is meant to contract (e.g. PCV.a is where PCV branches off L4 —
+        # protecting it leaves L4 split into 3 edges and breaks fallback
+        # labeling, plus splits the crossvein chain into two pieces so the
+        # second piece gets promoted to EV1 at Phase 4d). The
+        # perpendicularity guard inside merge_through_junctions already
+        # rejects pairs where the third edge is too collinear with the
+        # merged pair (handles the steep-crossvein edge case). Crossvein
+        # detection downstream uses landmark positions, not snapped node
+        # IDs, so contracting these snaps is safe.
+        _CROSSVEIN_ANCHORS = {"ACV.a", "ACV.p", "PCV.a", "PCV.p"}
+        protected = {
+            lm.snapped_node
+            for name, lm in landmarks.items()
+            if lm.snapped_node is not None and name not in _CROSSVEIN_ANCHORS
+        }
+        skel_graph.graph = merge_through_junctions(
+            G,
+            edge_labels,
+            config,
+            protected_nodes=protected,
+            median_vein_width_px=skel_graph.median_vein_width_px,
+        )
+        G = skel_graph.graph
+        # Chain IDs were assigned on the pre-merge graph; rebuild them on the
+        # merged graph so the fallback's _label_with_chain helper sees current
+        # chain boundaries.
+        chain_lines = _assign_chain_ids(G, edge_labels, boundary_nodes=landmark_nodes)
+        if dbg:
+            dbg.dump(G, edge_labels, "phase1d_merge_junctions")
+    else:
+        logger.info("Phase 1d: skipped — Phase 1c labeled all longitudinals")
+        if dbg:
+            dbg.dump(G, edge_labels, "phase1d_skipped")
 
     # Phase 2: Label edges at landmark positions (on the merged graph)
     _label_landmark_edges(
