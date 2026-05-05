@@ -1893,10 +1893,50 @@ def _extend_crossveins_along_corridor(
             vein_nodes[label].add(u)
             vein_nodes[label].add(v)
 
+    # Tolerance for "endpoint is on a longitudinal" — same scale-invariant
+    # cap the chain detector uses (`max(2× median vein width, 60µm)`).
+    anchor_dist_cap = (
+        max(
+            2.0 * median_vein_width_px,
+            config.to_px(60.0) if (config and config.um_per_px) else 0.0,
+        )
+        or 50.0
+    )
+
     for cv_name, vein_pair in CROSSVEIN_CONNECTIONS.items():
         if cv_name not in vein_lines or not vein_lines[cv_name]:
             continue
         vein_a, vein_b = vein_pair
+
+        # Skip extension when the labeled crossvein already reaches BOTH
+        # bounding longitudinals (vein_a and vein_b). The chain detector
+        # accepts a crossvein when each endpoint is within
+        # `node_vein_max_dist` of one of the longitudinals (graph-node
+        # membership OR geometric proximity), so we mirror that here:
+        # check whether some pair of nodes in cv_node_set anchors on
+        # vein_a and another anchors on vein_b. When both are anchored,
+        # the crossvein is anatomically complete — anything the extender
+        # would absorb is an ectopic branch sharing a graph node at one
+        # endpoint (e.g. 0003 PCV: detected as a clean 1-edge chain from
+        # L4 to L5; two ectopics branch off PCV's L4-side endpoint and
+        # were being swallowed by the collinearity gate).
+        cv_node_set = vein_nodes.get(cv_name, set())
+        touches_a = any(
+            _node_vein_distance(G, n, vein_a, vein_lines, vein_nodes, max_dist=anchor_dist_cap) is not None
+            for n in cv_node_set
+        )
+        touches_b = any(
+            _node_vein_distance(G, n, vein_b, vein_lines, vein_nodes, max_dist=anchor_dist_cap) is not None
+            for n in cv_node_set
+        )
+        if touches_a and touches_b:
+            logger.info(
+                "Skipping %s extend pass: already anchored on both %s and %s",
+                cv_name,
+                vein_a,
+                vein_b,
+            )
+            continue
 
         # Track a growing geometry of the labeled crossvein for the
         # centerline-distance gate. MultiLineString is fine even if there's
