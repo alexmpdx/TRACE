@@ -27,7 +27,7 @@ Given a pixel-classifier segmentation of a Drosophila wing (vein/intervein GeoJS
 
 ### Design principle
 
-**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions. This inverts the approach of guessing veins by spatial priors alone.
+**Landmarks are primary, not supplementary.** Vein identity flows outward from landmark anchors. The primary longitudinal labeler traces the pixel-length shortest path between each longitudinal's two anchor landmarks; the legacy landmark-edge / propagation / extension phases now act only as a fallback for what the shortest-path step can't trace. This inverts the approach of guessing veins by spatial priors alone.
 
 ### High-level flow
 
@@ -78,26 +78,38 @@ Landmarks GeoJSON ──┘
 | L5 | Longitudinal | Posterior longitudinal, from L4-L5 junction |
 | L6 | Longitudinal | Short posterior branch off L5 near L4-L5 |
 
-### The 6 reliable landmarks
+### Landmarks
 
-| Landmark | Type | Location |
-|----------|------|----------|
-| subcostal break (SC) | Endpoint | Where L1 meets the costa at the wing margin |
-| alula notch (AN) | Margin reference | Posterior notch at the wing base (hinge trim reference) |
+LandmarkLocator emits up to 13 landmarks per wing. Reliability is **per-landmark** based on LandmarkLocator's confidence-gate verdict (`reliable` flag plus `confidence` / `sharpness` / `second_peak_ratio` heatmap stats). The previous static `RELIABLE_LANDMARKS` / `SOFT_LANDMARKS` / `UNRELIABLE_LANDMARKS` sets in `topology.py` have been retired. A landmark is reliable iff its detector scored above the per-landmark threshold for *this wing*; the same landmark name can be reliable on one wing and unreliable on another.
+
+| Landmark | Type | Anatomical role |
+|----------|------|------------------|
+| subcostal break | Endpoint | Where L1 meets the costa at the wing margin |
+| alula notch | Margin reference | Posterior notch at the wing base (hinge trim reference; never anchored to the graph) |
 | L1-Rs | Junction (deg-3) | Where L1 meets Rs |
 | L2-L3 | Junction (deg-3) | Where Rs splits into L2 and L3 |
 | L4-L5 | Junction (deg-3) | Where L4 and L5 diverge |
 | DTip | Endpoint | Distal tip of L3 at the wing margin |
+| L2.d | Endpoint | Distal endpoint of L2 |
+| L4.d | Endpoint | Distal endpoint of L4 |
+| L5.d | Endpoint | Distal endpoint of L5 |
+| ACV.a / ACV.p | Endpoints | Anterior/posterior anchors of the anterior crossvein |
+| PCV.a / PCV.p | Endpoints | Anterior/posterior anchors of the posterior crossvein |
 
-### The 4 soft landmarks
+### Longitudinal endpoint pairs
 
-Soft landmarks are helpful hints but may be wrong in mutants with premature vein termination. They are never required.
+`topology.LONGITUDINAL_ENDPOINTS` defines which two anchor landmarks bracket each longitudinal vein. The new shortest-path labeler (Phase 1c) walks the pixel-length shortest path between these two anchors per vein; if either landmark is unreliable or unsnapped the longitudinal is left for the production fallback phases.
 
-| Landmark | Location |
-|----------|----------|
-| L2.d | Distal endpoint of L2 |
-| L4.d | Distal endpoint of L4 |
-| L5.d | Distal endpoint of L5 |
+| Vein | Proximal anchor | Distal anchor |
+|------|------------------|---------------|
+| L1 | subcostal break | L1-Rs |
+| Rs | L1-Rs | L2-L3 |
+| L2 | L2-L3 | L2.d |
+| L3 | L2-L3 | DTip |
+| L4 | L4-L5 | L4.d |
+| L5 | L4-L5 | L5.d |
+
+costa is detected separately (margin band, Phase 1). L6 has no clean landmark endpoint pair and is detected later (Phase 3).
 
 ---
 
@@ -124,7 +136,14 @@ Reads a GeoJSON file produced by the pixel classifier. Each feature has `propert
 load_landmarks_geojson(path) → dict[name, Landmark]
 ```
 
-Reads landmark points from the deep-learning detector. Each landmark gets a `reliable` flag based on whether its name appears in `RELIABLE_LANDMARKS` or `SOFT_LANDMARKS`. Unreliable landmarks (ACV.a, ACV.p, PCV.a, PCV.p) are loaded but marked unreliable.
+Reads landmark points from LandmarkLocator. Reliability is now **purely metadata-driven** — `properties.reliable` from the geojson (LandmarkLocator's confidence-gate verdict) is propagated unchanged into `Landmark.reliable`. The static `RELIABLE_LANDMARKS` / `SOFT_LANDMARKS` / `UNRELIABLE_LANDMARKS` sets that previously gated reliability by landmark name have been removed. The four heatmap-stat fields are also carried through:
+
+- `gate_reason` — empty string when reliable; otherwise `"peak<thr"` / `"sharpness<thr"` / `"spr>thr"` indicating which gate failed.
+- `confidence` — peak heatmap intensity at the argmax (≈0–1; lower = model less sure).
+- `sharpness` — peak / mean of the top-k neighborhood (>1 = sharper than flat).
+- `second_peak_ratio` — second-best peak / first peak (0–1; lower = more unimodal). Near 1.0 means the model was torn between two plausible spots.
+
+When `properties.reliable` is missing (older geojsons), the loader defaults to `True` for backward compatibility.
 
 ### 2.3 Compute wing outline
 
@@ -539,38 +558,50 @@ Snaps each reliable landmark to the nearest appropriate graph node, modifying th
 
 ```
 for each reliable landmark:
+    # Branch-specific node selection
     if landmark is a JUNCTION type (L1-Rs, L2-L3, L4-L5):
-        find nearest node with degree >= 3 within snap_radius
-        (prefer high-degree nodes at junction regions)
-        if only degree-1 found: reject and try edge insertion
+        node = nearest node with degree >= 3 within snap_radius
+        if only degree-1 found: reject (will fall through to edge insertion)
     elif landmark is an ENDPOINT type (subcostal break, DTip):
-        find nearest node with degree == 1 within snap_radius
-        # Guard against snapping to a leaf of the wrong vein
-        if snapped to a degree-1 node:
-            compare node_distance to nearest_edge_distance
-            if an edge passes at ≤ 50% of node distance:
-                reject leaf and fall through to edge insertion
+        node = nearest node with degree == 1 within snap_radius
     elif landmark is "alula notch":
-        skip (margin reference only, don't modify graph)
+        skip (margin reference only, never anchored)
     else:
-        find nearest node of any degree within snap_radius
+        node = nearest node of any degree within snap_radius
 
-    if no node found within snap_radius:
-        insert a new node on the nearest edge:
-            project landmark point onto closest edge's LineString
-            split edge at projection point into two edges
-            new node becomes the landmark's snap target
+    # UNIFIED closer-edge override (applies to every branch above)
+    if node is not None:
+        node_dist = distance(landmark, node)
+        edge_dist, edge_uv = nearest edge to landmark
+        edge_is_incident = edge_uv is not None and node ∈ edge_uv
+        far_threshold = 2 × median_vein_width
+        if edge_dist * 2 < node_dist
+           AND (node_dist > far_threshold OR not edge_is_incident):
+            node = None    # bisect on the closer edge instead
+
+    if node is not None:
+        snap landmark to node
+    else:
+        insert a new node on the nearest edge if it lies within
+        edge_insert_cap = 4 × median_vein_width
+        otherwise leave the landmark unsnapped
 ```
 
-**Why different preferences by type?** Junction landmarks should snap to actual junctions (degree-3+ nodes) — snapping them to a degree-1 endpoint would be incorrect. Endpoint landmarks (SC, DTip) should snap to degree-1 nodes where the vein terminates.
+**Why different node-degree preferences by type?** Junction landmarks should snap to actual junctions (degree-3+ nodes) — snapping them to a degree-1 endpoint would be incorrect. Endpoint landmarks (SC, DTip) should snap to degree-1 nodes where the vein terminates.
 
-**Edge insertion**: If no suitable node exists nearby, we split the nearest edge at the point closest to the landmark. This creates a new node precisely where the landmark says a junction should be. The split preserves all edge attributes and creates two new edges.
+**Edge insertion**: When no suitable node exists nearby, we split the nearest edge at the point closest to the landmark, creating a new node precisely where the landmark says the anchor should be. The split preserves all edge attributes and creates two new edges. The fallback is now capped at **4× median vein width** (was previously 4× snap_radius, which let a 294 px misanchor slip through on 20241211_…_0004's L4-L5 — the new cap rejects it and the landmark is left unsnapped).
 
-**Leaf-vs-edge guard** (endpoint landmarks only): A landmark like DTip may have a nearby degree-1 leaf that belongs to a different vein (e.g., a costa fragment terminating near DTip while the real distal endpoint lies on an L3/L4 anastomosis edge passing only a few pixels away). Snapping to the wrong leaf can cause chain-based label propagation to mislabel long spans of skeleton. When a degree-1 leaf is selected, we compute the minimum distance from the landmark to any edge's geometry; if an edge passes at ≤ 50% of the leaf's distance, we reject the leaf and insert a new node on that edge instead.
+**Unified closer-edge override**: When the chosen node is much further than an available edge, we bisect that edge instead. The override fires when either:
+- (a) the node is *far* — `node_dist > 2 × median_vein_width` — and a closer edge is available even if it is incident to the chosen node (catches blatant misanchors like L4.d on `PknCG736-lacZ_engal4_BL12322_0002` snapping 147 px away when its incident edge passes 17 px from the prediction, and L1-Rs on `en-PknRNAi_57804_0008` snapping 129 px away to a node on the wrong side of the wing); or
+- (b) the closer edge is *not incident* to the chosen node — i.e. it belongs to a different chain (catches the original "leaf snapped to a wrapping anastomosis" case for endpoint landmarks).
+
+The 2× median vein width threshold prevents the override from creating *tiny* shared stubs at small-jitter cases. Example: L2-L3 on `en-PknRNAi_57804_0008` lands 35 px (≈1.4× mvw) from the existing junction node. Its own incident edge passes only 3 px from the prediction. Without the threshold, we'd bisect 3 px from the prediction and create a 35 px stub between the new and old nodes — which L2 and L3 (both anchored at L2-L3) would then have to share, with one of them losing the stub to the other in the labeling phase. With the threshold, we just snap to the existing junction node and avoid the conflict.
 
 **Parameters**:
 - `snap_radius_um` (default 100 µm) — Primary: absolute anatomical scale, converted to px via `um_per_px`.
 - `snap_radius_vw` (default 4.0) — Fallback `× median_vein_width`, used only when `um_per_px` is unavailable.
+- Edge-insertion cap: `4 × median_vein_width` (hard-coded in `landmark_anchor.py`).
+- Closer-edge override threshold: `2 × median_vein_width` (hard-coded).
 
 ---
 
@@ -578,46 +609,26 @@ for each reliable landmark:
 
 **Source**: `models/vein_tracer.py`, function `trace_veins_from_landmarks()`
 
-This phase assigns a vein identity label (e.g., "L3", "costa") to each edge in the graph. It operates in 6 phases, each building on the previous one's results.
+This phase assigns a vein identity label (e.g., "L3", "costa") to each edge in the graph. The current ordering is:
+
+1. **Phase 0** — `merge_through_junctions` (DISABLED in production; preserved in `junction_resolver.py` for trivial revert)
+2. **Phase 1** — costa detection
+3. **Phase 1b** — chain-id annotation through degree-2 nodes
+4. **Phase 1c** — landmark-anchored shortest-path labeling **(primary longitudinal labeler)**
+5. **Phases 2 → 2e** — landmark-edge / propagate / extend / propagate / connect / propagate **(fallback for veins Phase 1c didn't trace)**
+6. **Phase 3** — L6 detection
+7. **Phases 4 → 4d** — crossvein detection (primary, junction-based, fallback, extend, repropagate, ectopic)
+8. **Phase 5** — build VeinIdentification objects (and optional Phase 5b crossvein synthesis)
 
 **Central data structure**: `edge_labels: dict[tuple[int,int], str]` — maps canonical edge keys `(min(u,v), max(u,v))` to vein name strings.
 
-### Phase 0: Merge longitudinals through crossvein junctions
+### Phase 0: Merge longitudinals through crossvein junctions (DISABLED)
 
-**Source**: `models/junction_resolver.py`, function `merge_through_junctions()`
+**Source**: `models/junction_resolver.py`, function `merge_through_junctions()` (still defined, no longer called by `trace_veins_from_landmarks`).
 
-**What**: At degree-3 junctions, finds the most collinear pair of edges and merges them into a single edge, leaving the third edge as a branch (crossvein).
+**Status**: As of 2026-05 the call site in `vein_tracer.py` is commented out. The function welded Y-junctions where a real crossvein branches off into single longitudinal edges by collinearity, which destroyed the topology the new shortest-path labeler depends on (e.g. on 0001 it fused the genuine PCV continuation into L4-as-a-single-edge, leaving the PCV stub orphaned). The function body is preserved for trivial revert if any future regression demands it.
 
-**Why**: At a crossvein junction, two longitudinal veins pass through while the crossvein branches off. Without merging, the longitudinals would each be split into separate edges at the junction, complicating labeling. After merging, each longitudinal is a single continuous edge.
-
-**Algorithm**:
-```
-for each degree-3 node:
-    for each pair of edges at this node:
-        angle = angle_between_departure_directions(edge_a, edge_b)
-    best_pair = pair with angle closest to 180° (most collinear)
-
-    GUARD: perpendicularity check
-        third_edge_angle = angle between third edge and merged pair
-        if third_edge is too collinear (> 150°) with either merged edge:
-            skip this junction (it's a divergence, not a crossvein)
-
-    merge best_pair:
-        concatenate their LineStrings through the junction node
-        remove junction node (contract into the merged edge)
-        third edge remains as a branch
-```
-
-**Protected nodes**: Landmark nodes are never contracted. This preserves the topology that the labeling phase depends on.
-
-**Protected edges**: Already-labeled edges (e.g., from a previous pass) are not merged across label boundaries.
-
-**Stub exclusion (length gate)**: A degree-1 neighbor shorter than `max(5 × median_vein_width, stub_len_floor_px)` is flagged as a stub and excluded from the collinear-pair search. Without this, a short ectopic sprout that happens to depart along the same axis as a real vein can outscore the correct through-vein pairing — this is how L3 on 0004/0010 lost its proximal edge to an ectopic branch. The length gate prevents long degree-1 edges (typically real vein fragments whose distal tip was pruned or failed to reach a landmark) from being falsely classified as stubs: on 20241207_en_PknRNAi_108870_0009, a 608 px real L5 fragment terminating at a non-landmark leaf must be kept as a through-vein candidate.
-
-The floor `stub_len_floor_px` is derived anatomically, not hard-coded:
-- If `um_per_px` is available, it is `config.to_px(60.0)` (~60 µm — the empirical minimum length of a real vein fragment).
-- Otherwise it falls back to `2.5 × median_vein_width_px`.
-At the standard 0.483 µm/px this evaluates to ~124 px; on a 2× higher-resolution wing it rises to ~248 px, preserving the anatomical meaning across resolutions.
+**What it used to do**: At each degree-3 node, find the most collinear edge pair (≥ 120°), merge them through the junction into a single edge, and leave the third edge as a branch. Used a stub-length gate (`max(5 × median_vein_width, max(60µm, 2.5×mvw))`) to keep short degree-1 sprouts from being mistaken for through-veins, and a perpendicularity guard (third edge must NOT be > 150° collinear with either merged edge) to skip pure divergence points.
 
 ### Phase 1: Detect costa edges
 
@@ -670,13 +681,52 @@ for each graph edge:
 - `costa_min_in_band_fraction = 0.50` — At least 50% of edge must lie within the margin band.
 - `costa_propagation_max_distance_vw = 4.0` — During later propagation (Phase 2b), costa edges must stay within 4× vein width of the band.
 
-### Phase 2: Label edges at landmark positions
+### Phase 1b: Assign chain ids through degree-2 nodes
+
+**Source**: `vein_tracer.py`, function `_assign_chain_ids()`.
+
+**What**: Annotate each graph edge with a temporary `chain_id` that runs unbroken through degree-2 nodes (and breaks at degree-≥3 nodes and at landmark-anchored nodes, which are always treated as chain boundaries). Used downstream by `_label_with_chain` so labels propagate along entire chains at once when needed.
+
+### Phase 1c: Landmark-anchored shortest-path longitudinal labeling (primary)
+
+**Source**: `vein_tracer.py`, function `_label_longitudinals_via_shortest_path()`.
+
+**What**: For every longitudinal in `topology.LONGITUDINAL_ENDPOINTS` whose two anchor landmarks are reliable AND snapped to graph nodes, find `nx.shortest_path(G, snap_a, snap_b, weight="length_px")` and label every edge along the path as that vein. This is the *primary* longitudinal labeler; the production phases 2 → 2e below run after it as a fallback for veins this step couldn't trace.
+
+**Why**: Anchor landmarks bracket a real vein; the pixel-length shortest path between them, in a graph that's largely vein tissue, is overwhelmingly the vein itself. This bypasses the chain-by-chain landmark-edge / propagation / extension dance that `_label_landmark_edges` and friends used to drive on their own — and which depended on the (now-disabled) `merge_through_junctions` collapsing Y-forks for it.
+
+**Conflict resolution** (when two veins claim the same edge):
+
+```
+For each contested edge, sort claimers by:
+  1. local collinearity at this edge (descending — straighter wins)
+  2. cumulative twist of the full path (ascending — less meandering wins,
+     within a 5° local-collinearity tolerance)
+  3. subset rule (within tolerance — a vein whose full edge-set is a strict
+     subset of another claimer's wins, since otherwise it would have no
+     exclusive tissue)
+  4. vein name (deterministic)
+```
+
+- *Local collinearity*: the average over the disputed edge's two endpoints of the angle between (the edge's outgoing direction at that endpoint) and (the path's other direction at the same endpoint). 180° = the path goes straight through; 0° = full reverse; 90° = T-junction.
+- *Cumulative twist*: `sum_{i in interior} (180° - angle_at_node_i)` along the full path. 0° = perfectly straight; large values = lots of small bends.
+- *Subset rule*: catches the L1-vs-Rs overlap case on `en-PknRNAi_57804_0008` where Rs's path is fully contained inside L1's. Ties go to Rs because otherwise it would never win any of its own edges.
+
+**Endpoint-connectivity gate**: After conflict resolution, each vein's surviving edges must form a connected subgraph that contains *both* its snapped landmark endpoints. If not, the worst-twisting failing vein is dropped and the resolver re-runs (so collateral failures recover). Iterates to a fixed point. Example on `20241211_…_0004`: Rs's path detoured through subcostal break + L2.d (twist 172°), causing L1 to fail too because Rs took L1's middle segment. The gate drops Rs first; on re-resolution, L1 reclaims its middle edge and passes the gate.
+
+**Edges already labeled** (e.g. costa from Phase 1) are never overwritten.
+
+**Outcome**: Veins this step labels are the most reliable. Veins it skips (unreliable landmarks, no path, or dropped by the gate) fall through to the production landmark-edge / propagate / extend / connect phases below.
+
+### Phase 2: Label edges at landmark positions (fallback)
 
 **Source**: `vein_tracer.py`, function `_label_landmark_edges()`
 
+**Status**: Now a *fallback* phase — runs after Phase 1c shortest-path. Only labels edges that Phase 1c didn't already cover (production functions check `if key in edge_labels` before adding new labels). On wings where Phase 1c already labeled all longitudinals, this phase is a no-op.
+
 **What**: Uses landmark positions and the graph topology to label edges directly connected to landmark nodes.
 
-**Why**: This is the core of the landmark-anchored approach. Each reliable landmark tells us exactly which veins meet at that point. By examining the direction and connectivity of edges at each landmark, we can assign confident labels.
+**Why**: When Phase 1c can't trace a longitudinal (unreliable landmarks, no path between snapped nodes, or the endpoint-connectivity gate dropped it), this phase + the propagation / extension / connection chain that follows it picks up the slack — labeling whatever it can from landmark-adjacent edges and growing those labels outward.
 
 #### DTip → L3
 ```
@@ -1407,6 +1457,15 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 |-----------|---------|-------------|
 | `snap_radius_um` | 100µm | Max snap distance (primary) |
 | `snap_radius_vw` | 4.0 | Max snap distance fallback (× vein width, when um_per_px unset) |
+| Edge-insertion cap | `4 × median_vein_width` | Hard-coded in `landmark_anchor.py`. Maximum distance to a candidate edge for the bisection-fallback branch when no graph node is within `snap_radius`. |
+| Closer-edge override threshold | `2 × median_vein_width` | Hard-coded in `landmark_anchor.py`. When the chosen node's snap distance exceeds this, the override fires whenever any edge passes ≤ half the node distance — even if that edge is incident to the chosen node. Below this threshold, the override only fires for non-incident edges (avoids creating tiny shared-stub conflicts). |
+
+### Longitudinal labeling (Phase 1c)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `LONGITUDINAL_ENDPOINTS` | see `topology.py` | Per-vein anchor pair `{vein_name: (proximal_landmark, distal_landmark)}` driving the shortest-path search. |
+| Local-collinearity tie tolerance | 5° | Hard-coded in `_label_longitudinals_via_shortest_path`. Within this window, conflicts go to the lower-twist / subset claimer. |
+| Departure-direction sample window | `config.departure_sample_px(median_vw)` | How far along the polyline to sample for collinearity / twist computation. |
 
 ### Costa detection
 | Parameter | Default | Description |
