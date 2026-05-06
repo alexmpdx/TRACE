@@ -143,6 +143,36 @@ def split_merged_intervein_polygons(
             seeds[comp_labels == comp] = next_label
             next_label += 1
 
+        # Per-component reseed: when the polygon's vein-barrier-free interior
+        # breaks into multiple connected components (because labeled veins
+        # cut through it), h-maxima may only find a peak in the LARGEST
+        # component, leaving the smaller component(s) without a seed. The
+        # watershed would then let an adjacent polygon's seed flood into
+        # the unseeded component (e.g. on BDSC..._0005 where 1st basal
+        # was getting absorbed by the discal seed). Drop one seed per
+        # unseeded sub-component, gated by the same anatomical area floor
+        # as the lost-polygon reseed so we don't promote slivers.
+        num_interior, interior_labels = cv2.connectedComponents(poly_interior.astype(np.uint8))
+        for comp in range(1, num_interior):
+            comp_mask = interior_labels == comp
+            comp_area = int(comp_mask.sum())
+            if comp_area < reseed_min_area_px:
+                continue
+            if (seeds[comp_mask] > 0).any():
+                continue  # this sub-component already has a seed
+            ys, xs = np.where(comp_mask)
+            cy, cx = int(np.median(ys)), int(np.median(xs))
+            if not comp_mask[cy, cx]:
+                cy, cx = int(ys[0]), int(xs[0])
+            seeds[cy, cx] = next_label
+            next_label += 1
+            logger.info(
+                "Intervein splitter: per-component reseed (%d px²) at (%d, %d)",
+                comp_area,
+                cx,
+                cy,
+            )
+
     # --- Step 3: competitive dilation via watershed -------------------------
     # Surface = -EDT(interior) so labels flood from markers outward and meet
     # along midlines of the legal territory.
