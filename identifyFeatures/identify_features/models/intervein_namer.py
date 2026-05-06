@@ -260,6 +260,15 @@ def name_intervein_regions(
     # a region a canonical match was going to want. Each fallback
     # excludes the current claimed-singles set, so successive deferrals
     # see the latest claims.
+    #
+    # Process largest polygons first so anatomically-real regions claim
+    # their names before any small distal slivers do. On
+    # BDSC..._021126_0011, processing in input order had a 63k distal
+    # submarginal sliver claiming "1st posterior" via coverage before
+    # the genuine 940k 1st posterior polygon could; with size-DESC order
+    # the 940k polygon claims first and the sliver falls through to
+    # _absorb_ectopic_fragments, where it merges back into submarginal.
+    deferred_coverage.sort(key=lambda entry: entry[0].area, reverse=True)
     for poly, detected, adjacent_veins in deferred_coverage:
         claimed = _claimed_single_names(results)
         # Try merged region detection first — produces a higher-quality
@@ -410,10 +419,16 @@ def _absorb_ectopic_fragments(
     # Collect named polygons into a set for fast lookup
     named_polys = {id(r.polygon) for r in results}
 
-    # Find all small polygons — both unnamed (not in results) and named fragments
+    # Find all small polygons — both unnamed (not in results) and named fragments.
+    # Apply the same fragment_threshold to unnamed polygons so a large orphan
+    # (e.g. a real region the namer couldn't name because all candidate names
+    # were claimed by other polygons) isn't silently merged into a neighbor.
+    # On BDSC..._021126_0011 the unnamed 940k 1st-posterior polygon was being
+    # absorbed into 2nd posterior, which then dropped the genuine 914k
+    # 2nd posterior via the unary_union → max(area) collapse.
     unnamed_fragments: list[Polygon] = []
     for poly in all_polys:
-        if id(poly) not in named_polys:
+        if id(poly) not in named_polys and poly.area < fragment_threshold:
             unnamed_fragments.append(poly)
 
     named_fragments: list[InterveinRegion] = [r for r in results if r.area_px2 < fragment_threshold]
