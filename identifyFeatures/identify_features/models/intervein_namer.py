@@ -52,11 +52,13 @@ _REGION_ADJACENCY, _REGION_EDGE_SEPARATOR = _build_region_adjacency()
 def _claimed_single_names(results: list[InterveinRegion]) -> frozenset[str]:
     """Names already assigned as canonical single-region polygons.
 
-    Used to suppress merge candidates that would absorb a region whose own
-    polygon has already been observed and named — such a merger would
-    double-count that polygon.
+    Includes both ``identified`` (subset-match) and ``inferred``
+    (coverage-fallback) statuses — once a name is on a polygon, it
+    shouldn't be re-used by a later polygon's merge or coverage path.
+    Compound merged names (containing " + ") are excluded since their
+    sub-region names remain available.
     """
-    return frozenset(r.name for r in results if " + " not in r.name and r.status == "identified")
+    return frozenset(r.name for r in results if " + " not in r.name and r.status in ("identified", "inferred"))
 
 
 def name_intervein_regions(
@@ -115,6 +117,14 @@ def name_intervein_regions(
     # Polygons whose top-specificity match is a tie; resolved after the
     # main loop using the wing PD axis.
     deferred_ties: list[tuple[int, Polygon, frozenset[str], frozenset[str]]] = []
+    # Polygons that fell through to coverage_fallback in the main loop are
+    # deferred until ALL canonical / merged matches have been claimed —
+    # this prevents a low-confidence inferred name from stealing a region
+    # name that a later high-confidence canonical match would have wanted
+    # (BDSC..._021126_0011: a 60k sliver was getting "1st posterior" via
+    # coverage and a 940k polygon got "1st basal" via coverage, then the
+    # genuine 70k 1st basal also primary-matched "1st basal" for a duplicate).
+    deferred_coverage: list[tuple[Polygon, frozenset[str], set[str]]] = []
 
     for i, poly in enumerate(intervein_polys):
         # Handle MultiPolygon — use largest sub-polygon
@@ -181,11 +191,10 @@ def name_intervein_regions(
             )
 
         if name is None:
-            # Coverage fallback: what fraction of expected veins are present?
-            name, status = _coverage_fallback(detected, effective_expected)
-
-        if name is None:
-            logger.debug("Polygon %d: unmatched vein set %s", i, adjacent_veins)
+            # Defer coverage-fallback assignment to the last pass so this
+            # polygon can't claim a name a later canonical-subset match
+            # would want.
+            deferred_coverage.append((poly, detected, set(adjacent_veins)))
             continue
 
         region = InterveinRegion(
@@ -223,7 +232,9 @@ def name_intervein_regions(
             required_names=_tied,
         )
         if name is None:
-            name, status = _coverage_fallback(detected, effective_expected)
+            name, status = _coverage_fallback(
+                detected, effective_expected, claimed_names=_claimed_single_names(results)
+            )
         if name is None:
             logger.debug("Deferred tie polygon unmatched: veins=%s", set(detected))
             continue
@@ -240,6 +251,44 @@ def name_intervein_regions(
             name,
             poly.area,
             set(detected),
+            status,
+        )
+
+    # Second pass: coverage-fallback for polygons that found no canonical
+    # subset match in the main loop. Runs after canonical and merged
+    # regions have all been claimed, so an inferred name can't squat on
+    # a region a canonical match was going to want. Each fallback
+    # excludes the current claimed-singles set, so successive deferrals
+    # see the latest claims.
+    for poly, detected, adjacent_veins in deferred_coverage:
+        claimed = _claimed_single_names(results)
+        # Try merged region detection first — produces a higher-quality
+        # compound name than coverage when applicable.
+        name, status = _check_merged(
+            detected,
+            vein_map,
+            effective_expected,
+            config.max_merge_size,
+            claimed_names=claimed,
+        )
+        if name is None:
+            name, status = _coverage_fallback(detected, effective_expected, claimed_names=claimed)
+        if name is None:
+            logger.debug("Deferred coverage polygon unmatched: veins=%s", adjacent_veins)
+            continue
+        region = InterveinRegion(
+            name=name,
+            polygon=poly,
+            bounding_veins=adjacent_veins,
+            area_px2=poly.area,
+            status=status,
+        )
+        results.append(region)
+        logger.info(
+            "Region %r: %.0fpx² (veins: %s, status: %s)",
+            name,
+            poly.area,
+            adjacent_veins,
             status,
         )
 
@@ -730,15 +779,25 @@ def _check_merged(
 def _coverage_fallback(
     detected: frozenset[str],
     effective_expected: dict[str, set[str]],
+    claimed_names: frozenset[str] = frozenset(),
 ) -> tuple[Optional[str], str]:
     """Score by coverage: fraction of expected veins present in detected set.
 
     Returns (name, "inferred") if best coverage >= 0.5, else (None, "").
+
+    ``claimed_names`` excludes regions already named as canonical singles
+    so the inferred-fallback never duplicates an existing name (e.g. on
+    BDSC..._021126_0011 a polygon whose adjacent_veins didn't include
+    costa was getting "1st basal" via the fallback even though another
+    polygon had already been named "1st basal" — the real intent was
+    "1st posterior" once 1st basal was off the table).
     """
     best_name = None
     best_score = 0.0
 
     for region_name, expected_veins in effective_expected.items():
+        if region_name in claimed_names:
+            continue
         expected = frozenset(expected_veins)
         if not expected:
             continue
