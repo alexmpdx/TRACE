@@ -83,6 +83,11 @@ def parse_args(argv=None):
         help="Keep intermediate chopped images in output folder",
     )
     parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Search subdirectories of the input folder for images (default: top level only).",
+    )
+    parser.add_argument(
         "--include-unreliable-landmarks",
         action="store_true",
         help=(
@@ -190,6 +195,7 @@ def main(argv=None):
         wing_model_dir=args.wing_isolation_model,
         wing_expand_fraction=args.wing_expand_fraction,
         keep_intermediates=args.keep_intermediates,
+        recursive=args.recursive,
     )
 
     # Summary

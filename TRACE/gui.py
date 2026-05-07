@@ -12,7 +12,6 @@ from collections import OrderedDict
 from pathlib import Path
 
 from identify_features.config import PipelineConfig
-from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -37,6 +36,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
@@ -59,7 +60,13 @@ class _SignalLogHandler(logging.Handler):
 
     def emit(self, record):
         try:
-            self._signal.emit(self.format(record))
+            from preprocessing.pipeline import current_image
+
+            text = self.format(record)
+            img = current_image.get()
+            if img:
+                text = f"[{img}] {text}"
+            self._signal.emit(text)
         except Exception:
             pass
 
@@ -176,6 +183,11 @@ class TraceWindow(QMainWindow):
         row.addWidget(self.input_edit, stretch=1)
         row.addWidget(btn)
         fg.addLayout(row)
+
+        self.recursive_chk = QCheckBox("Include subfolders")
+        self.recursive_chk.setToolTip("When checked, also discover images inside subdirectories of the input folder.")
+        self.recursive_chk.toggled.connect(self._refresh_image_list)
+        fg.addWidget(self.recursive_chk)
 
         fg.addWidget(QLabel("Output folder:"))
         row = QHBoxLayout()
@@ -349,10 +361,26 @@ class TraceWindow(QMainWindow):
         if not folder:
             return
         self.input_edit.setText(folder)
-        self._image_paths = discover_images(Path(folder))
+        self._refresh_image_list()
+
+    def _refresh_image_list(self):
+        """Re-discover images using the current input-folder + recursive flag."""
+        folder_text = self.input_edit.text()
+        if not folder_text:
+            self._image_paths = []
+            self.image_list.clear()
+            return
+        folder = Path(folder_text)
+        if not folder.is_dir():
+            return
+        recursive = self.recursive_chk.isChecked()
+        self._image_paths = discover_images(folder, recursive=recursive)
         self.image_list.clear()
         for p in self._image_paths:
-            self.image_list.addItem(p.name)
+            # Show path relative to the input folder when recursing so subfolder
+            # context is visible; otherwise just the name.
+            label = str(p.relative_to(folder)) if recursive else p.name
+            self.image_list.addItem(label)
         self.statusBar().showMessage(f"Found {len(self._image_paths)} images")
 
     def _select_output(self):
@@ -416,6 +444,7 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
+
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)
@@ -550,6 +579,7 @@ class TraceWindow(QMainWindow):
     def _save_settings(self):
         s = self.settings
         s.setValue("input_folder", self.input_edit.text())
+        s.setValue("input_recursive", self.recursive_chk.isChecked())
         s.setValue("output_folder", self.output_edit.text())
         s.setValue("landmark_model", self.lm_edit.text())
         s.setValue("segmentation_model", self.seg_edit.text())
@@ -573,15 +603,13 @@ class TraceWindow(QMainWindow):
 
     def _restore_settings(self):
         s = self.settings
+        saved_recursive = s.value("input_recursive", None)
+        if saved_recursive is not None:
+            self.recursive_chk.setChecked(saved_recursive == "true" or saved_recursive is True)
         val = s.value("input_folder", "")
         if val:
             self.input_edit.setText(val)
-            folder = Path(val)
-            if folder.is_dir():
-                self._image_paths = discover_images(folder)
-                self.image_list.clear()
-                for p in self._image_paths:
-                    self.image_list.addItem(p.name)
+            self._refresh_image_list()
         val = s.value("output_folder", "")
         if val:
             self.output_edit.setText(val)
@@ -716,6 +744,7 @@ class TraceWindow(QMainWindow):
                 gate_override=self._gate_override,
                 wing_isolation_model_dir=wing_model_dir,
                 wing_expand_fraction=self._wing_expand_fraction,
+                recursive=self.recursive_chk.isChecked(),
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
                 landmark_batch_size=self.workers_spin.value(),

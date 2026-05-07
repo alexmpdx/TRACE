@@ -9,6 +9,7 @@ Processes a folder of wing images through three stages:
 Each stage can be run independently or as part of the full pipeline.
 """
 
+import contextvars
 import json
 import shutil
 import threading
@@ -17,6 +18,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Per-image log context. Workers set this to the image filename so log handlers
+# can prepend "[<name>]" to every record. Lives here because preprocessing is
+# the deepest layer shared by TRACE and other downstream callers.
+current_image: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("current_image_name", default=None)
 
 
 def _clean_stem(image_path: Path) -> str:
@@ -66,15 +72,35 @@ IMAGE_EXTENSIONS = {
 }
 
 
-def discover_images(folder: Path) -> list[Path]:
-    """Find supported image files in a folder, skipping hidden/resource-fork files."""
-    images = []
-    for f in sorted(folder.iterdir()):
-        if f.name.startswith(".") or f.name.startswith("._"):
+def _subpath_target_name(path: Path, root: Path) -> str:
+    """Flatten a (possibly nested) image path into a single filename.
+
+    Joins all components of ``path.relative_to(root)`` with ``_``, so e.g.
+    ``root=dir1, path=dir1/folder1/sub/img.tif`` returns ``folder1_sub_img.tif``.
+    Top-level images (relative path has only the basename) round-trip unchanged.
+    Used by recursive discovery to prevent basename collisions when images live
+    in subdirectories of the user's input folder.
+    """
+    return "_".join(path.relative_to(root).parts)
+
+
+def discover_images(folder: Path, recursive: bool = False) -> list[Path]:
+    """Find supported image files in a folder, skipping hidden/resource-fork files.
+
+    When recursive=True, walk all subdirectories; otherwise only the top level.
+    Hidden files/dirs and macOS resource-fork files (._*) are always skipped.
+    """
+    images: list[Path] = []
+    iterator = folder.rglob("*") if recursive else folder.iterdir()
+    for f in iterator:
+        if not f.is_file():
+            continue
+        # Skip hidden files and any path component that is hidden (e.g. .git/foo.tif).
+        if any(part.startswith(".") or part.startswith("._") for part in f.relative_to(folder).parts):
             continue
         if f.suffix.lower() in IMAGE_EXTENSIONS:
             images.append(f)
-    return images
+    return sorted(images)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +319,7 @@ def run_wing_isolation(
     from modeltojson import mask_to_geojson, read_image, run_inference, save_geojson
     from shapely.geometry import MultiPolygon as _MultiPolygon
     from shapely.geometry import Polygon as _Polygon
+    from shapely.geometry import mapping as _shapely_mapping
     from shapely.geometry import shape as _shape
 
     from preprocessing.psd_loader import imwrite_ome_tiff
@@ -341,10 +368,20 @@ def run_wing_isolation(
     else:
         out_image_path = Path(write_masked_image(masked, output_dir / f"{stem}_isolated{ext}"))
 
-    geojson_out_path = None
-    if keep_intermediate_geojson:
-        geojson_out_path = output_dir / f"{stem}_wing.geojson"
-        save_geojson(fc, str(geojson_out_path))
+    # Persist the isolated-wing polygon as a single-feature GeoJSON. Used downstream
+    # by Stage 3 to drive modelTOjson's roi_mask (skips background tiles).
+    geojson_out_path = output_dir / f"{stem}_wing.geojson"
+    wing_fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": _shapely_mapping(out["polygon"]),
+                "properties": {"class": "wing"},
+            }
+        ],
+    }
+    save_geojson(wing_fc, str(geojson_out_path))
 
     return out_image_path, geojson_out_path
 
@@ -381,17 +418,31 @@ def _load_or_cache_modeltojson(model_dir: Path, device, model_cache: dict) -> tu
 # ---------------------------------------------------------------------------
 # Stage 3: Segmentation
 # ---------------------------------------------------------------------------
-def run_segmentation(image_path: Path, model_dir: Path, device, model_cache: dict) -> dict:
+def run_segmentation(
+    image_path: Path,
+    model_dir: Path,
+    device,
+    model_cache: dict,
+    *,
+    roi_geojson_path: Optional[Path] = None,
+) -> dict:
     """Run segmentation inference. Returns GeoJSON FeatureCollection dict.
 
     model_cache is a mutable dict used to cache the loaded model across calls.
+
+    When `roi_geojson_path` is provided, modelTOjson skips tiles outside the ROI;
+    out-of-ROI pixels are dropped from the returned features. Path must be in the
+    same coordinate space as `image_path` (caller's responsibility).
     """
-    from modeltojson import mask_to_geojson, read_image, run_inference
+    from modeltojson import mask_to_geojson, read_image, roi_mask_from_geojson, run_inference
 
     model, metadata = _load_or_cache_modeltojson(model_dir, device, model_cache)
 
     image = read_image(str(image_path))
-    mask = run_inference(model, image, metadata, device)
+    roi_mask = None
+    if roi_geojson_path is not None:
+        roi_mask = roi_mask_from_geojson(str(roi_geojson_path), image.shape)
+    mask = run_inference(model, image, metadata, device, roi_mask=roi_mask)
     fc = mask_to_geojson(mask, metadata["classes"], str(image_path))
 
     # Remove "hinge junk" features — residual hinge tissue not useful downstream
@@ -412,7 +463,8 @@ def save_segmentation_geojson(geojson_fc: dict, output_path: Path) -> None:
 # ---------------------------------------------------------------------------
 @dataclass
 class PipelineResult:
-    image_path: Path
+    image_path: Path  # original input path; user-facing
+    processed_image_path: Optional[Path] = None  # set when the input was copied under a flattened name (recursive runs)
     landmarks: Optional[dict] = None
     landmark_metadata: Optional[dict] = None
     landmarks_geojson_path: Optional[Path] = None
@@ -452,6 +504,7 @@ def process_single_image(
     wing_model_dir: Optional[Path] = None,
     wing_expand_fraction: float = 0.05,
     keep_intermediates: bool = False,
+    target_name: Optional[str] = None,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
@@ -483,12 +536,24 @@ def process_single_image(
     if device is None:
         device = _auto_device()
 
+    # Set per-image log context so handlers can prefix records with [<image>].
+    # No reset: every worker calls set() at the top, so the next iteration on the
+    # same thread overrides the value before any log line can use it.
+    current_image.set(image_path.name)
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy original image to output
-    dest_image = output_dir / image_path.name
+    # Copy original image to output. When `target_name` is supplied (recursive runs
+    # flatten subpaths into a single basename to avoid collisions), use it as the
+    # destination filename and rebind image_path so every downstream stem derives
+    # from the disambiguated name.
+    dest_basename = target_name if target_name else image_path.name
+    dest_image = output_dir / dest_basename
     if not dest_image.exists() or dest_image != image_path:
         shutil.copy2(image_path, dest_image)
+    if target_name:
+        result.processed_image_path = dest_image
+        image_path = dest_image
 
     # Coerce non-cv2-native and lossy formats to a lossless TIF up front so every
     # downstream stage (LandmarkLocator, hinge_chopper, modelTOjson) sees a path
@@ -616,9 +681,21 @@ def process_single_image(
     if do_segment:
         # Use chopped image if available, otherwise original
         seg_input = chopped_path if chopped_path and chopped_path.exists() else image_path
+        # Only pass the wing GeoJSON as ROI when seg_input matches its coord space
+        # (the un-chopped isolated image). Hinge chop translates the frame, so the
+        # original-coords polygon would be misaligned against a chopped image.
+        roi_geojson_path = (
+            result.wing_geojson_path if result.wing_geojson_path is not None and seg_input == image_path else None
+        )
         if progress_callback:
             progress_callback("segmentation", f"Segmenting {image_path.name}")
-        fc = run_segmentation(seg_input, segmentation_model_dir, device, model_cache)
+        fc = run_segmentation(
+            seg_input,
+            segmentation_model_dir,
+            device,
+            model_cache,
+            roi_geojson_path=roi_geojson_path,
+        )
         seg_path = output_dir / f"{stem}.geojson"
         save_segmentation_geojson(fc, seg_path)
         result.segmentation_geojson_path = seg_path
@@ -648,6 +725,7 @@ def process_folder(
     wing_model_dir: Optional[Path] = None,
     wing_expand_fraction: float = 0.05,
     keep_intermediates: bool = False,
+    recursive: bool = False,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -672,9 +750,20 @@ def process_folder(
     if device is None:
         device = _auto_device()
 
-    images = discover_images(input_dir)
+    images = discover_images(input_dir, recursive=recursive)
     if not images:
         raise FileNotFoundError(f"No supported images found in {input_dir}")
+
+    # When recursing, flatten each image's path-relative-to-input into a single
+    # filename so that two images from different subfolders never overwrite each
+    # other in output_dir. Top-level images keep their basename.
+    target_names: dict[Path, Optional[str]] = {}
+    if recursive:
+        for img in images:
+            target_names[img] = _subpath_target_name(img, input_dir)
+    else:
+        for img in images:
+            target_names[img] = None
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -748,6 +837,7 @@ def process_folder(
                 wing_model_dir=wing_model_dir,
                 wing_expand_fraction=wing_expand_fraction,
                 keep_intermediates=keep_intermediates,
+                target_name=target_names.get(img_path),
             )
             _emit(i, img_path.name, "done")
             return result

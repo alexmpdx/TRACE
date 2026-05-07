@@ -263,6 +263,7 @@ def trace_folder(
     gate_override: Optional[dict] = None,
     wing_isolation_model_dir: Optional[Path] = None,
     wing_expand_fraction: float = 0.05,
+    recursive: bool = False,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -347,6 +348,7 @@ def trace_folder(
             wing_isolation_model_dir=wing_isolation_model_dir.resolve() if wing_isolation_model_dir else None,
             wing_expand_fraction=wing_expand_fraction,
             keep_intermediates=keep_intermediates,
+            recursive=recursive,
         )
     finally:
         if temp_dir_obj is not None:
@@ -371,6 +373,7 @@ def _run(
     wing_isolation_model_dir: Optional[Path] = None,
     wing_expand_fraction: float = 0.05,
     keep_intermediates: bool = False,
+    recursive: bool = False,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -388,7 +391,7 @@ def _run(
 
     if not any(stages):
         # Nothing to preprocess and nothing to analyze — emit empty TraceResults per image.
-        return [TraceResult(image_path=img) for img in discover_images(input_dir)]
+        return [TraceResult(image_path=img) for img in discover_images(input_dir, recursive=recursive)]
 
     preproc_results = process_folder(
         input_dir=input_dir,
@@ -406,6 +409,7 @@ def _run(
         wing_model_dir=wing_isolation_model_dir,
         wing_expand_fraction=wing_expand_fraction,
         keep_intermediates=keep_intermediates,
+        recursive=recursive,
     )
 
     results: list[TraceResult] = []
@@ -471,8 +475,21 @@ def _run(
     def _analyze_one(i: int, preproc_result) -> None:
         if cancel_event.is_set():
             return
-        stem = preproc_result.image_path.stem
-        image_in_preproc = preproc_dir / preproc_result.image_path.name
+        # When recursive discovery flattened the input path into a unique basename,
+        # `processed_image_path` points at the renamed copy in preproc_dir; otherwise
+        # we fall back to the original input basename for both stem and lookup.
+        if preproc_result.processed_image_path is not None:
+            stem = preproc_result.processed_image_path.stem
+            image_in_preproc = preproc_result.processed_image_path
+        else:
+            stem = preproc_result.image_path.stem
+            image_in_preproc = preproc_dir / preproc_result.image_path.name
+
+        # Per-image log context — handlers prefix records with [<image>].
+        # Keep the user's original basename so the log identifies the source file.
+        from preprocessing.pipeline import current_image as _current_image
+
+        _current_image.set(preproc_result.image_path.name)
 
         _emit_progress(i, stem, "starting")
         t0 = time.time()

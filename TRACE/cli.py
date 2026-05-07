@@ -91,6 +91,11 @@ def parse_args(argv=None):
         help="Keep preprocessing intermediate files in output/intermediates/",
     )
     parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Search subdirectories of the input folder for images (default: top level only).",
+    )
+    parser.add_argument(
         "--outputs",
         default=",".join(OUTPUT_TYPES.keys()),
         help=(
@@ -276,6 +281,7 @@ def main(argv=None):
 
     # Build PipelineConfig: load from file if given, then apply --scale override.
     from identify_features.config import PipelineConfig
+
     from TRACE.config_io import load_config
 
     if args.config is not None:
@@ -328,6 +334,7 @@ def main(argv=None):
         gate_override=gate_override,
         wing_isolation_model_dir=args.wing_isolation_model,
         wing_expand_fraction=args.wing_expand_fraction,
+        recursive=args.recursive,
     )
 
     # Summary
