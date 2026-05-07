@@ -90,6 +90,7 @@ class PipelineConfigDialog(QDialog):
         wing_isolation_model_path: str = "",
         intermediate_outputs: dict[str, bool] | None = None,
         do_rotation: bool = False,
+        user_landmark_distances: list[dict] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -102,6 +103,9 @@ class PipelineConfigDialog(QDialog):
         self._initial_gate_override = gate_override
         # (kind, widget, extra) tuples indexed by PipelineConfig field name.
         self._widgets: dict[str, tuple[str, Any, Any]] = {}
+        # User-defined landmark distance pairs (TRACE-only post-CSV augmentation).
+        # List of {name_a, name_b, label} dicts so QSettings/JSON round-trips cleanly.
+        self._user_landmark_distances: list[dict] = list(user_landmark_distances or [])
         self._build_ui()
         self._load_from_config(config)
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
@@ -176,6 +180,7 @@ class PipelineConfigDialog(QDialog):
         layout.addWidget(tabs, stretch=1)
 
         tabs.addTab(self._build_general_tab(), "General")
+        tabs.addTab(self._build_custom_distances_tab(), "Custom Distances")
         tabs.addTab(self._build_landmarks_tab(), "Landmarks")
         tabs.addTab(self._build_skel_pruning_tab(), "Skeletonization && Pruning")
         tabs.addTab(self._build_bridging_tab(), "Bridging")
@@ -332,6 +337,10 @@ class PipelineConfigDialog(QDialog):
     def get_intermediate_outputs(self) -> dict[str, bool]:
         return {key: chk.isChecked() for key, chk in self._intermediate_output_chks.items()}
 
+    def get_user_landmark_distances(self) -> list[dict]:
+        """Return the configured custom landmark-distance pairs (list of dicts)."""
+        return list(self._user_landmark_distances)
+
     def _on_wing_isolation_toggled(self, checked: bool):
         self._wing_model_edit.setEnabled(checked)
         self._wing_model_browse.setEnabled(checked)
@@ -361,6 +370,61 @@ class PipelineConfigDialog(QDialog):
         if self._gate_panel is None:
             return self._initial_gate_override
         return self._gate_panel.result_override()
+
+    def _build_custom_distances_tab(self) -> QWidget:
+        """Tab embedding the napari-based landmark-distance picker.
+
+        The whole tab body is a `LandmarkPickerWidget`: file pickers for a
+        sample image + landmarks GeoJSON, an embedded napari canvas, and a
+        side panel for managing the configured pairs.
+        """
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        info = QLabel(
+            "Configure straight-line distances between any two landmarks. Each pair adds "
+            "user_distance_<label>_px (and _um when scale is set) columns to the batch CSV. "
+            "Pairs are stored by landmark name and applied to every wing in the batch."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #aaa;")
+        layout.addWidget(info)
+
+        try:
+            from measurement_maker import LandmarkPair, LandmarkPickerWidget, pairs_from_dicts
+        except ImportError as exc:
+            err = QLabel(
+                "measurement_maker is not importable. Install with:\n\n"
+                "    pip install -e measurementMaker\n\n"
+                f"Import error: {exc}"
+            )
+            err.setWordWrap(True)
+            err.setStyleSheet("color: #f88; padding: 12px;")
+            layout.addWidget(err)
+            layout.addStretch()
+            self._distance_picker = None
+            return w
+
+        initial: list[LandmarkPair] = pairs_from_dicts(self._user_landmark_distances)
+        self._distance_picker = LandmarkPickerWidget(
+            parent=w,
+            initial_pairs=initial,
+            default_image_dir=self._calib_input_path or "",
+        )
+        self._distance_picker.pairs_changed.connect(self._on_distance_pairs_changed)
+        layout.addWidget(self._distance_picker, stretch=1)
+        return w
+
+    def _on_distance_pairs_changed(self, pairs):
+        """Mirror the embedded picker's pair list onto the dialog's serialized state.
+
+        Stored as plain dicts for QSettings/JSON round-trip compatibility.
+        """
+        from dataclasses import asdict
+
+        self._user_landmark_distances = [asdict(p) for p in pairs]
 
     def _build_landmarks_tab(self) -> QWidget:
         """Confidence-gate editor tab. Requires a landmark model path; otherwise placeholder."""

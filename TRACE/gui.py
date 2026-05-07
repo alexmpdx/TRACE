@@ -152,6 +152,9 @@ class TraceWindow(QMainWindow):
         # Intermediate outputs (toggled in Settings → General → Intermediate outputs).
         # Default-on to match historical behavior of every output starting checked.
         self._intermediate_outputs: dict[str, bool] = {key: True for key in INTERMEDIATE_OUTPUTS}
+        # User-defined landmark distance pairs (TRACE-only post-CSV augmentation).
+        # Configured via Settings → Custom Distances.
+        self._user_landmark_distances: list[dict] = []
         self._workers_warning_shown = False
         self._build_ui()
         self._restore_settings()
@@ -281,6 +284,19 @@ class TraceWindow(QMainWindow):
             chk.setChecked(True)
             self.output_checks[key] = chk
             ol.addWidget(chk)
+
+        # Custom landmark distances (configured in Settings → Custom Distances).
+        # When checked, configured pairs are appended to the batch CSV as
+        # user_distance_<label>_{px,um} columns. No-op when no pairs exist
+        # or Batch measurements CSV is unchecked.
+        self.include_custom_measurements_chk = QCheckBox("Include custom landmark distances")
+        self.include_custom_measurements_chk.setChecked(True)
+        self.include_custom_measurements_chk.setToolTip(
+            "Adds the pairs configured in Settings → Custom Distances to the batch CSV "
+            "as user_distance_<label>_px (and _um when scale is set) columns.\n\n"
+            "No effect when no pairs are configured or when 'Batch measurements CSV' is unchecked."
+        )
+        ol.addWidget(self.include_custom_measurements_chk)
 
         left_layout.addWidget(out_group)
 
@@ -521,6 +537,7 @@ class TraceWindow(QMainWindow):
             wing_isolation_model_path=self._wing_isolation_model_path,
             intermediate_outputs=dict(self._intermediate_outputs),
             do_rotation=self._do_rotation,
+            user_landmark_distances=list(self._user_landmark_distances),
         )
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
@@ -532,6 +549,7 @@ class TraceWindow(QMainWindow):
             self._wing_isolation_enabled = dlg.get_wing_isolation_enabled()
             self._wing_isolation_model_path = dlg.get_wing_isolation_model_path()
             self._intermediate_outputs = dlg.get_intermediate_outputs()
+            self._user_landmark_distances = dlg.get_user_landmark_distances()
             # Keep main-window scale spinner in sync.
             val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
             self.scale_spin.blockSignals(True)
@@ -600,6 +618,11 @@ class TraceWindow(QMainWindow):
             "gate_override_json",
             _json.dumps(self._gate_override) if self._gate_override else "",
         )
+        s.setValue(
+            "user_landmark_distances_json",
+            _json.dumps(self._user_landmark_distances) if self._user_landmark_distances else "",
+        )
+        s.setValue("include_custom_measurements", self.include_custom_measurements_chk.isChecked())
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
         for key, on in self._intermediate_outputs.items():
@@ -670,6 +693,19 @@ class TraceWindow(QMainWindow):
                 self._gate_override = _json.loads(saved_gate)
             except Exception:
                 self._gate_override = None
+        saved_uld = s.value("user_landmark_distances_json", "")
+        if saved_uld:
+            try:
+                import json as _json
+
+                parsed = _json.loads(saved_uld)
+                if isinstance(parsed, list):
+                    self._user_landmark_distances = [p for p in parsed if isinstance(p, dict)]
+            except Exception:
+                self._user_landmark_distances = []
+        saved_icm = s.value("include_custom_measurements", None)
+        if saved_icm is not None:
+            self.include_custom_measurements_chk.setChecked(saved_icm == "true" or saved_icm is True)
         workers_val = s.value("max_workers", None)
         if workers_val is not None:
             try:
@@ -753,6 +789,9 @@ class TraceWindow(QMainWindow):
                 wing_expand_fraction=self._wing_expand_fraction,
                 recursive=self.recursive_chk.isChecked(),
                 do_rotation=self._do_rotation,
+                user_landmark_distances=(
+                    list(self._user_landmark_distances) if self.include_custom_measurements_chk.isChecked() else []
+                ),
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
                 landmark_batch_size=self.workers_spin.value(),

@@ -265,6 +265,7 @@ def trace_folder(
     wing_expand_fraction: float = 0.05,
     recursive: bool = False,
     do_rotation: bool = True,
+    user_landmark_distances: Optional[list[dict]] = None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -351,6 +352,7 @@ def trace_folder(
             keep_intermediates=keep_intermediates,
             recursive=recursive,
             do_rotation=do_rotation,
+            user_landmark_distances=user_landmark_distances,
         )
     finally:
         if temp_dir_obj is not None:
@@ -377,6 +379,7 @@ def _run(
     keep_intermediates: bool = False,
     recursive: bool = False,
     do_rotation: bool = True,
+    user_landmark_distances: Optional[list[dict]] = None,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -466,6 +469,8 @@ def _run(
     total = len(successful_preproc)
     stage2_slots: list[Optional[TraceResult]] = [None] * total
     csv_slots: list[Optional[tuple[str, object]]] = [None] * total
+    # specimen stem → path to its landmarks geojson, for post-CSV user-distance augmentation.
+    user_dist_landmark_paths: dict[str, Path] = {}
 
     progress_lock = threading.Lock()
     cancel_event = threading.Event()
@@ -597,6 +602,9 @@ def _run(
             stage2_slots[i] = trace_result
             if "csv" in outputs and wing_result is not None:
                 csv_slots[i] = (stem, wing_result)
+                lm_gj_path = preproc_result.landmarks_geojson_path
+                if lm_gj_path is not None:
+                    user_dist_landmark_paths[stem] = Path(lm_gj_path)
 
             elapsed = time.time() - t0
             _emit_progress(i, stem, f"done ({elapsed:.1f}s)")
@@ -650,5 +658,20 @@ def _run(
             logger.info("Batch CSV: %s (%d wings)", csv_path, len(batch_results))
         except Exception:
             logger.exception("Failed to write batch CSV")
+        else:
+            if user_landmark_distances:
+                try:
+                    from measurement_maker import augment_csv_with_user_distances, pairs_from_dicts
+
+                    pairs = pairs_from_dicts(user_landmark_distances)
+                    if pairs:
+                        augment_csv_with_user_distances(
+                            csv_path,
+                            user_dist_landmark_paths,
+                            pairs,
+                            um_per_px=scale,
+                        )
+                except Exception:
+                    logger.exception("Failed to add user-defined distance columns to CSV")
 
     return results

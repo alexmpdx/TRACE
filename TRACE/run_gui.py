@@ -25,6 +25,10 @@ _rot_dir = str(Path(__file__).resolve().parent.parent / "wingRotator")
 if _rot_dir not in sys.path:
     sys.path.insert(0, _rot_dir)
 
+_mm_dir = str(Path(__file__).resolve().parent.parent / "measurementMaker")
+if _mm_dir not in sys.path:
+    sys.path.insert(0, _mm_dir)
+
 from TRACE.gui import main
 
 if __name__ == "__main__":

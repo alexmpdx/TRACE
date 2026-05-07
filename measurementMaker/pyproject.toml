@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "measurement-maker"
+version = "0.1.0"
+description = "User-defined landmark distance measurements for the TRACE wing pipeline"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "napari[pyqt5]",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["measurement_maker*"]
