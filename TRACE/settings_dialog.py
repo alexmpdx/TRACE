@@ -89,7 +89,7 @@ class PipelineConfigDialog(QDialog):
         wing_isolation_enabled: bool = False,
         wing_isolation_model_path: str = "",
         intermediate_outputs: dict[str, bool] | None = None,
-        do_rotation: bool = True,
+        do_rotation: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -244,6 +244,17 @@ class PipelineConfigDialog(QDialog):
         wig_layout.addLayout(wing_form)
         layout.addWidget(gb)
 
+        gb = QGroupBox("Wing rotation (optional)")
+        rot_layout = QVBoxLayout(gb)
+        self._do_rotation_chk = QCheckBox("Rotate to canonical orientation (Stage 1.5)")
+        self._do_rotation_chk.setToolTip(
+            "When checked, every image is rotated to a canonical right-side-up, "
+            "distal-right orientation after landmark detection (rotation only — no mirror). "
+            "Skipped automatically when fewer than 2 reliable landmarks are available."
+        )
+        rot_layout.addWidget(self._do_rotation_chk)
+        layout.addWidget(gb)
+
         gb = QGroupBox("Vein detection")
         form = QFormLayout(gb)
         self._synthesize_missing_crossveins_mirror = QCheckBox("Synthesize ACV/PCV from landmarks when not detected")
@@ -370,13 +381,6 @@ class PipelineConfigDialog(QDialog):
             "to the rotation fit at reduced weight instead of being dropped."
         )
         form.addRow("", self._include_unreliable_landmarks_chk)
-        self._do_rotation_chk = QCheckBox("Rotate to canonical orientation (Stage 1.5)")
-        self._do_rotation_chk.setToolTip(
-            "When on (default), every image is rotated to a canonical right-side-up, "
-            "distal-right orientation after landmark detection (rotation only — no mirror). "
-            "Skipped automatically when fewer than 2 reliable landmarks are available."
-        )
-        form.addRow("", self._do_rotation_chk)
         layout.addWidget(gb)
 
         if not self._calib_lm_path:
@@ -699,7 +703,7 @@ class PipelineConfigDialog(QDialog):
         self._load_from_config(PipelineConfig())
         self._show_vein_tissue_chk.setChecked(False)
         self._include_unreliable_landmarks_chk.setChecked(False)
-        self._do_rotation_chk.setChecked(True)
+        self._do_rotation_chk.setChecked(False)
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._wing_expand_spin.setValue(0.05)
         self._wing_enable_chk.setChecked(False)

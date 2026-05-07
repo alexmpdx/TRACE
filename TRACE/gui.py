@@ -144,7 +144,7 @@ class TraceWindow(QMainWindow):
         self.config = PipelineConfig()
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
-        self._do_rotation = True
+        self._do_rotation = False
         self._gate_override: dict | None = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
