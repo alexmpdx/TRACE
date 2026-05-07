@@ -21,6 +21,10 @@ _idf_dir = str(Path(__file__).resolve().parent.parent / "identifyFeatures")
 if _idf_dir not in sys.path:
     sys.path.insert(0, _idf_dir)
 
+_rot_dir = str(Path(__file__).resolve().parent.parent / "wingRotator")
+if _rot_dir not in sys.path:
+    sys.path.insert(0, _rot_dir)
+
 from TRACE.cli import main
 
 if __name__ == "__main__":

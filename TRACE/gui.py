@@ -144,6 +144,7 @@ class TraceWindow(QMainWindow):
         self.config = PipelineConfig()
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
+        self._do_rotation = True
         self._gate_override: dict | None = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
@@ -519,11 +520,13 @@ class TraceWindow(QMainWindow):
             wing_isolation_enabled=self._wing_isolation_enabled,
             wing_isolation_model_path=self._wing_isolation_model_path,
             intermediate_outputs=dict(self._intermediate_outputs),
+            do_rotation=self._do_rotation,
         )
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
             self._show_vein_tissue = dlg.get_show_vein_tissue()
             self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
+            self._do_rotation = dlg.get_do_rotation()
             self._gate_override = dlg.get_gate_override()
             self._wing_expand_fraction = dlg.get_wing_expand_fraction()
             self._wing_isolation_enabled = dlg.get_wing_isolation_enabled()
@@ -590,6 +593,7 @@ class TraceWindow(QMainWindow):
         s.setValue("max_workers", self.workers_spin.value())
         s.setValue("show_vein_tissue", self._show_vein_tissue)
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
+        s.setValue("do_rotation", self._do_rotation)
         import json as _json
 
         s.setValue(
@@ -652,6 +656,9 @@ class TraceWindow(QMainWindow):
         saved_svt = s.value("show_vein_tissue", None)
         if saved_svt is not None:
             self._show_vein_tissue = saved_svt == "true" or saved_svt is True
+        saved_dor = s.value("do_rotation", None)
+        if saved_dor is not None:
+            self._do_rotation = saved_dor == "true" or saved_dor is True
         saved_iul = s.value("include_unreliable_landmarks", None)
         if saved_iul is not None:
             self._include_unreliable_landmarks = saved_iul == "true" or saved_iul is True
@@ -745,6 +752,7 @@ class TraceWindow(QMainWindow):
                 wing_isolation_model_dir=wing_model_dir,
                 wing_expand_fraction=self._wing_expand_fraction,
                 recursive=self.recursive_chk.isChecked(),
+                do_rotation=self._do_rotation,
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
                 landmark_batch_size=self.workers_spin.value(),

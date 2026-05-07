@@ -273,6 +273,44 @@ def save_landmarks_geojson(landmarks: dict, output_path: Path, metadata: Optiona
 
 
 # ---------------------------------------------------------------------------
+# Stage 1.5: Wing rotation
+# ---------------------------------------------------------------------------
+def run_rotation(
+    image_path: Path,
+    landmarks_geojson_path: Path,
+    output_dir: Path,
+    landmarks: dict,
+    extra_geojsons: Optional[list[Path]] = None,
+    soft_reliability: bool = False,
+):
+    """Rotate image + landmarks geojson (+ optional extras) to canonical orientation.
+
+    Returns (rotated_image_path, rotated_landmarks_geojson_path, rotated_landmarks_dict,
+    rotation_result) on success, or None when there aren't enough reliable landmarks
+    and the caller should pass the inputs through unchanged.
+    """
+    from wing_rotator import rotate_from_landmarks
+
+    result = rotate_from_landmarks(
+        image_path=image_path,
+        landmarks_geojson_path=landmarks_geojson_path,
+        output_dir=output_dir,
+        extra_geojsons=extra_geojsons,
+        soft_reliability=soft_reliability,
+    )
+    if result is None:
+        return None
+
+    M = result.affine
+    rotated_landmarks: dict = {}
+    for name, (x, y) in landmarks.items():
+        nx = M[0, 0] * x + M[0, 1] * y + M[0, 2]
+        ny = M[1, 0] * x + M[1, 1] * y + M[1, 2]
+        rotated_landmarks[name] = (float(nx), float(ny))
+    return result.rotated_image_path, result.rotated_landmarks_path, rotated_landmarks, result
+
+
+# ---------------------------------------------------------------------------
 # Stage 2: Hinge chopping
 # ---------------------------------------------------------------------------
 def run_hinge_chop(image_path: Path, landmarks: dict, output_path: Path) -> Path:
@@ -472,6 +510,12 @@ class PipelineResult:
     wing_geojson_path: Optional[Path] = None
     chopped_image_path: Optional[Path] = None
     segmentation_geojson_path: Optional[Path] = None
+    rotated_image_path: Optional[Path] = None
+    rotated_landmarks_geojson_path: Optional[Path] = None
+    rotation_angle_deg: Optional[float] = None
+    rotation_rms_residual: Optional[float] = None
+    rotation_n_landmarks: Optional[int] = None
+    rotation_mirror_detected: Optional[bool] = None
     error: Optional[str] = None
     error_stage: Optional[str] = None
     stages_completed: list[str] = field(default_factory=list)
@@ -505,6 +549,7 @@ def process_single_image(
     wing_expand_fraction: float = 0.05,
     keep_intermediates: bool = False,
     target_name: Optional[str] = None,
+    do_rotation: bool = True,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
@@ -525,6 +570,9 @@ def process_single_image(
         wing_expand_fraction: Stage 0 buffer (fraction of sqrt(polygon area)).
         keep_intermediates: when True, the wing GeoJSON intermediate is also written
             alongside the masked image as <stem>_wing.geojson.
+        do_rotation: when True (default), run wingRotator after the landmarks stage to
+            align the image to a canonical right-side-up, distal-right orientation.
+            Skipped silently when there aren't enough reliable landmarks.
     """
     do_landmarks, do_hinge, do_segment = stages
     result = PipelineResult(image_path=image_path)
@@ -652,6 +700,45 @@ def process_single_image(
         result.landmarks_geojson_path = lm_path
         result.stages_completed.append("landmarks")
 
+    # Stage 1.5: Rotation. Runs after landmarks (needs them) and before hinge chop
+    # so every downstream stage operates on a canonically-oriented image. Skipped
+    # silently when there aren't enough reliable landmarks to fit; the original
+    # image remains in use. include_unreliable_landmarks doubles as soft_reliability:
+    # when True, gate-failed landmarks contribute at reduced weight.
+    if do_rotation and do_landmarks and landmarks:
+        if progress_callback:
+            progress_callback("rotation", f"Rotating {image_path.name} to canonical orientation")
+        extras: list[Path] = []
+        if result.wing_geojson_path is not None:
+            extras.append(result.wing_geojson_path)
+        rotated = run_rotation(
+            image_path=image_path,
+            landmarks_geojson_path=lm_path,
+            output_dir=output_dir,
+            landmarks=landmarks,
+            extra_geojsons=extras,
+            soft_reliability=include_unreliable_landmarks,
+        )
+        if rotated is not None:
+            rotated_image, rotated_lm, landmarks, rot_result = rotated
+            image_path = rotated_image
+            stem = _clean_stem(image_path)
+            ext = image_path.suffix
+            raster_ext = ".ome.tif" if ext.lower() in (".psd", ".psb") else ext
+            result.landmarks = landmarks
+            result.landmarks_geojson_path = rotated_lm
+            result.rotated_image_path = rotated_image
+            result.rotated_landmarks_geojson_path = rotated_lm
+            result.rotation_angle_deg = rot_result.angle_deg
+            result.rotation_rms_residual = rot_result.rms_residual
+            result.rotation_n_landmarks = rot_result.n_landmarks_used
+            result.rotation_mirror_detected = rot_result.mirrored_detected
+            if result.wing_geojson_path is not None:
+                rotated_wing = rot_result.extra_outputs.get(result.wing_geojson_path.name)
+                if rotated_wing is not None:
+                    result.wing_geojson_path = rotated_wing
+            result.stages_completed.append("rotation")
+
     # Stage 2: Hinge chop
     chopped_path = None
     if do_hinge:
@@ -726,6 +813,7 @@ def process_folder(
     wing_expand_fraction: float = 0.05,
     keep_intermediates: bool = False,
     recursive: bool = False,
+    do_rotation: bool = True,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -838,6 +926,7 @@ def process_folder(
                 wing_expand_fraction=wing_expand_fraction,
                 keep_intermediates=keep_intermediates,
                 target_name=target_names.get(img_path),
+                do_rotation=do_rotation,
             )
             _emit(i, img_path.name, "done")
             return result

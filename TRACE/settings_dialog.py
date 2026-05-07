@@ -89,6 +89,7 @@ class PipelineConfigDialog(QDialog):
         wing_isolation_enabled: bool = False,
         wing_isolation_model_path: str = "",
         intermediate_outputs: dict[str, bool] | None = None,
+        do_rotation: bool = True,
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -105,6 +106,7 @@ class PipelineConfigDialog(QDialog):
         self._load_from_config(config)
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
         self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
+        self._do_rotation_chk.setChecked(bool(do_rotation))
         self._workers_spin.setValue(int(workers))
         self._wing_expand_spin.setValue(float(wing_expand_fraction))
         self._wing_enable_chk.setChecked(bool(wing_isolation_enabled))
@@ -340,6 +342,9 @@ class PipelineConfigDialog(QDialog):
     def get_include_unreliable_landmarks(self) -> bool:
         return self._include_unreliable_landmarks_chk.isChecked()
 
+    def get_do_rotation(self) -> bool:
+        return self._do_rotation_chk.isChecked()
+
     def get_gate_override(self) -> dict | None:
         """Confidence-gate override built from the Landmarks tab, or None if untouched."""
         if self._gate_panel is None:
@@ -360,9 +365,18 @@ class PipelineConfigDialog(QDialog):
         self._include_unreliable_landmarks_chk.setToolTip(
             "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
             "dropped from the output. When on, they are still emitted (marked reliable=false). "
-            "Core-landmark failures abort the image regardless of this setting."
+            "Core-landmark failures abort the image regardless of this setting. "
+            "Also enables soft-weighting in wingRotator: gate-failed landmarks contribute "
+            "to the rotation fit at reduced weight instead of being dropped."
         )
         form.addRow("", self._include_unreliable_landmarks_chk)
+        self._do_rotation_chk = QCheckBox("Rotate to canonical orientation (Stage 1.5)")
+        self._do_rotation_chk.setToolTip(
+            "When on (default), every image is rotated to a canonical right-side-up, "
+            "distal-right orientation after landmark detection (rotation only — no mirror). "
+            "Skipped automatically when fewer than 2 reliable landmarks are available."
+        )
+        form.addRow("", self._do_rotation_chk)
         layout.addWidget(gb)
 
         if not self._calib_lm_path:
@@ -685,6 +699,7 @@ class PipelineConfigDialog(QDialog):
         self._load_from_config(PipelineConfig())
         self._show_vein_tissue_chk.setChecked(False)
         self._include_unreliable_landmarks_chk.setChecked(False)
+        self._do_rotation_chk.setChecked(True)
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._wing_expand_spin.setValue(0.05)
         self._wing_enable_chk.setChecked(False)

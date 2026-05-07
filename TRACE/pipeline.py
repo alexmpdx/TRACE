@@ -264,6 +264,7 @@ def trace_folder(
     wing_isolation_model_dir: Optional[Path] = None,
     wing_expand_fraction: float = 0.05,
     recursive: bool = False,
+    do_rotation: bool = True,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -349,6 +350,7 @@ def trace_folder(
             wing_expand_fraction=wing_expand_fraction,
             keep_intermediates=keep_intermediates,
             recursive=recursive,
+            do_rotation=do_rotation,
         )
     finally:
         if temp_dir_obj is not None:
@@ -374,6 +376,7 @@ def _run(
     wing_expand_fraction: float = 0.05,
     keep_intermediates: bool = False,
     recursive: bool = False,
+    do_rotation: bool = True,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -410,6 +413,7 @@ def _run(
         wing_expand_fraction=wing_expand_fraction,
         keep_intermediates=keep_intermediates,
         recursive=recursive,
+        do_rotation=do_rotation,
     )
 
     results: list[TraceResult] = []

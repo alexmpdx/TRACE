@@ -135,9 +135,21 @@ def parse_args(argv=None):
         action="store_true",
         help=(
             "Pass low-confidence landmarks to downstream stages (marked reliable=false in GeoJSON). "
-            "Core-landmark failures still abort the image regardless of this flag."
+            "Core-landmark failures still abort the image regardless of this flag. "
+            "Also enables soft-weighting in wingRotator: gate-failed landmarks contribute "
+            "to the rotation fit at reduced weight instead of being dropped."
         ),
     )
+    parser.add_argument(
+        "--no-rotation",
+        dest="do_rotation",
+        action="store_false",
+        help=(
+            "Disable Stage 1.5 (wingRotator). By default, every image is rotated to a "
+            "canonical right-side-up, distal-right orientation after landmark detection."
+        ),
+    )
+    parser.set_defaults(do_rotation=True)
     parser.add_argument(
         "--landmark-batch-size",
         type=int,
@@ -335,6 +347,7 @@ def main(argv=None):
         wing_isolation_model_dir=args.wing_isolation_model,
         wing_expand_fraction=args.wing_expand_fraction,
         recursive=args.recursive,
+        do_rotation=args.do_rotation,
     )
 
     # Summary
