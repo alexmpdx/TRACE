@@ -182,12 +182,14 @@ def _detect_mirror(p: np.ndarray, q: np.ndarray, w: np.ndarray, base_rms: float)
 # ---------------------------------------------------------------------------
 # Affine construction and coordinate / image transform
 # ---------------------------------------------------------------------------
-def _build_affine(image_shape: tuple[int, ...], theta_rad: float) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
-    """Build forward and inverse 2x3 affines for an image rotation that expands
+def _build_affine(image_shape: tuple[int, ...], theta_rad: float) -> tuple[np.ndarray, tuple[int, int]]:
+    """Build a 2x3 forward affine (src→dst) for an image rotation that expands
     the canvas to fit the rotated content.
 
-    Returns (M_forward, M_warp, (new_w, new_h)). M_forward maps src→dst (apply
-    to coordinates). M_warp is what cv2.warpAffine consumes (dst→src).
+    Returns (M_forward, (new_w, new_h)). The same M_forward is applied to image
+    coordinates AND passed to cv2.warpAffine: by default warpAffine treats its
+    matrix as the src→dst forward map and inverts it internally (without the
+    WARP_INVERSE_MAP flag).
     """
     h, w = int(image_shape[0]), int(image_shape[1])
     cos_t, sin_t = math.cos(theta_rad), math.sin(theta_rad)
@@ -207,8 +209,7 @@ def _build_affine(image_shape: tuple[int, ...], theta_rad: float) -> tuple[np.nd
         ],
         dtype=np.float64,
     )
-    M_warp = cv2.invertAffineTransform(M_forward.astype(np.float32))
-    return M_forward, M_warp, (new_w, new_h)
+    return M_forward, (new_w, new_h)
 
 
 def _apply_affine_to_coords(coords, M: np.ndarray):
@@ -357,9 +358,17 @@ def rotate_from_landmarks(
     theta, rms = _weighted_kabsch_2d(p, q, w)
     mirrored_detected = _detect_mirror(p, q, w, rms)
     if mirrored_detected:
+        # Opposite-chirality input. Without reflection we can't make BOTH the PD
+        # axis distal-right AND the AP axis anterior-up — the proper-rotation fit
+        # gives PD distal-right but flips AP (anterior at bottom). Adding 180°
+        # flips both, restoring anterior-up at the cost of PD becoming distal-left.
+        # We prioritize AP-up because downstream stages care more about a
+        # consistent anterior/posterior split than about distal pointing right.
+        theta = math.atan2(math.sin(theta + math.pi), math.cos(theta + math.pi))
         logger.warning(
-            "wing_rotator: mirror residual lower for %s — likely opposite chirality "
-            "from canonical; rotating only (no flip).",
+            "wing_rotator: mirror residual lower for %s — opposite chirality from "
+            "canonical; applying extra 180° so anterior stays up (PD axis ends "
+            "up distal-left).",
             image_path.name,
         )
     if rms > max_residual_ratio * _CANONICAL_PD_SPAN:
@@ -371,11 +380,11 @@ def rotate_from_landmarks(
         )
 
     img = _read_image(image_path)
-    M_forward, M_warp, (new_w, new_h) = _build_affine(img.shape, theta)
+    M_forward, (new_w, new_h) = _build_affine(img.shape, theta)
 
     rotated = cv2.warpAffine(
         img,
-        M_warp,
+        M_forward,
         (new_w, new_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
