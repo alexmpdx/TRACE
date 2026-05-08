@@ -177,10 +177,12 @@ class PipelineConfig:
         return self.ectopic_min_length_um  # degenerate: no scale, no vein width
 
 
-# Named presets covering pruning + bridging fields. Switching a preset replaces
-# only the fields listed here; other config fields are preserved. Each preset
-# is a known-good snapshot captured when the method produced a clean regression
-# — treat them as pinned references, not live copies of PipelineConfig defaults.
+# Named pipeline presets. Each entry is a dict of PipelineConfig field overrides.
+# Switching a preset replaces every field listed here; fields not listed are left
+# untouched. Any PipelineConfig field is fair game — pruning, bridging, tracing,
+# crossvein detection, intervein, etc. — so these dicts can grow as we capture
+# more settings into a known-good combination. Each preset is a pinned snapshot,
+# not a live copy of PipelineConfig defaults.
 PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
     "length-based": {
         # Pruning

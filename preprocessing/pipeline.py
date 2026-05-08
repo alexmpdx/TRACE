@@ -273,7 +273,7 @@ def save_landmarks_geojson(landmarks: dict, output_path: Path, metadata: Optiona
 
 
 # ---------------------------------------------------------------------------
-# Stage 1.5: Wing rotation
+# Stage 3.5: Wing rotation (runs after segmentation as the last preprocessing step)
 # ---------------------------------------------------------------------------
 def run_rotation(
     image_path: Path,
@@ -570,7 +570,7 @@ def process_single_image(
         wing_expand_fraction: Stage 0 buffer (fraction of sqrt(polygon area)).
         keep_intermediates: when True, the wing GeoJSON intermediate is also written
             alongside the masked image as <stem>_wing.geojson.
-        do_rotation: when True (default), run wingRotator after the landmarks stage to
+        do_rotation: when True (default), run wingRotator as the last preprocessing step (after segmentation) to
             align the image to a canonical right-side-up, distal-right orientation.
             Skipped silently when there aren't enough reliable landmarks.
     """
@@ -700,45 +700,6 @@ def process_single_image(
         result.landmarks_geojson_path = lm_path
         result.stages_completed.append("landmarks")
 
-    # Stage 1.5: Rotation. Runs after landmarks (needs them) and before hinge chop
-    # so every downstream stage operates on a canonically-oriented image. Skipped
-    # silently when there aren't enough reliable landmarks to fit; the original
-    # image remains in use. include_unreliable_landmarks doubles as soft_reliability:
-    # when True, gate-failed landmarks contribute at reduced weight.
-    if do_rotation and do_landmarks and landmarks:
-        if progress_callback:
-            progress_callback("rotation", f"Rotating {image_path.name} to canonical orientation")
-        extras: list[Path] = []
-        if result.wing_geojson_path is not None:
-            extras.append(result.wing_geojson_path)
-        rotated = run_rotation(
-            image_path=image_path,
-            landmarks_geojson_path=lm_path,
-            output_dir=output_dir,
-            landmarks=landmarks,
-            extra_geojsons=extras,
-            soft_reliability=include_unreliable_landmarks,
-        )
-        if rotated is not None:
-            rotated_image, rotated_lm, landmarks, rot_result = rotated
-            image_path = rotated_image
-            stem = _clean_stem(image_path)
-            ext = image_path.suffix
-            raster_ext = ".ome.tif" if ext.lower() in (".psd", ".psb") else ext
-            result.landmarks = landmarks
-            result.landmarks_geojson_path = rotated_lm
-            result.rotated_image_path = rotated_image
-            result.rotated_landmarks_geojson_path = rotated_lm
-            result.rotation_angle_deg = rot_result.angle_deg
-            result.rotation_rms_residual = rot_result.rms_residual
-            result.rotation_n_landmarks = rot_result.n_landmarks_used
-            result.rotation_mirror_detected = rot_result.mirrored_detected
-            if result.wing_geojson_path is not None:
-                rotated_wing = rot_result.extra_outputs.get(result.wing_geojson_path.name)
-                if rotated_wing is not None:
-                    result.wing_geojson_path = rotated_wing
-            result.stages_completed.append("rotation")
-
     # Stage 2: Hinge chop
     chopped_path = None
     if do_hinge:
@@ -787,6 +748,56 @@ def process_single_image(
         save_segmentation_geojson(fc, seg_path)
         result.segmentation_geojson_path = seg_path
         result.stages_completed.append("segmentation")
+
+    # Stage 3.5: Rotation. Runs as the LAST preprocessing step so every model
+    # inference (wing isolation, landmark detection, segmentation) sees the
+    # original image. The image and every produced GeoJSON (landmarks, wing,
+    # segmentation) get rotated to a canonical orientation in lockstep, so
+    # downstream identifyFeatures consumes a self-consistent rotated set.
+    # Skipped silently when there aren't enough reliable landmarks to fit;
+    # everything stays in original orientation. include_unreliable_landmarks
+    # doubles as soft_reliability: when True, gate-failed landmarks contribute
+    # at reduced weight.
+    if do_rotation and do_landmarks and landmarks:
+        if progress_callback:
+            progress_callback("rotation", f"Rotating {image_path.name} to canonical orientation")
+        extras: list[Path] = []
+        if result.wing_geojson_path is not None:
+            extras.append(result.wing_geojson_path)
+        if result.segmentation_geojson_path is not None:
+            extras.append(result.segmentation_geojson_path)
+        rotated = run_rotation(
+            image_path=image_path,
+            landmarks_geojson_path=lm_path,
+            output_dir=output_dir,
+            landmarks=landmarks,
+            extra_geojsons=extras,
+            soft_reliability=include_unreliable_landmarks,
+        )
+        if rotated is not None:
+            rotated_image, rotated_lm, landmarks, rot_result = rotated
+            result.landmarks = landmarks
+            result.landmarks_geojson_path = rotated_lm
+            result.rotated_image_path = rotated_image
+            result.rotated_landmarks_geojson_path = rotated_lm
+            result.rotation_angle_deg = rot_result.angle_deg
+            result.rotation_rms_residual = rot_result.rms_residual
+            result.rotation_n_landmarks = rot_result.n_landmarks_used
+            result.rotation_mirror_detected = rot_result.mirrored_detected
+            # Repoint extras to their rotated counterparts so downstream
+            # identifyFeatures reads from a consistent rotated set.
+            if result.wing_geojson_path is not None:
+                rotated_wing = rot_result.extra_outputs.get(result.wing_geojson_path.name)
+                if rotated_wing is not None:
+                    result.wing_geojson_path = rotated_wing
+            if result.segmentation_geojson_path is not None:
+                rotated_seg = rot_result.extra_outputs.get(result.segmentation_geojson_path.name)
+                if rotated_seg is not None:
+                    result.segmentation_geojson_path = rotated_seg
+            # Make the rotated image the canonical one for downstream consumers
+            # (TRACE Stage 2 looks up `processed_image_path` in preproc_dir).
+            result.processed_image_path = rotated_image
+            result.stages_completed.append("rotation")
 
     # Clean up chopped temp file
     if chopped_path and chopped_path.exists() and not keep_chopped:

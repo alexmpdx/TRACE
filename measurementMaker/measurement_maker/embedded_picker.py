@@ -19,6 +19,7 @@ from measurement_maker.distance import load_landmarks_from_geojson
 from measurement_maker.types import LandmarkPair
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -57,6 +58,7 @@ class LandmarkPickerWidget(QWidget):
         self._default_image_dir = default_image_dir
         self._viewer = None  # napari.Viewer (lazy)
         self._points_layer = None
+        self._line_layer = None  # Shapes layer holding the highlight line
         self._names: list[str] = []
         # Snap-back state: keep landmark positions immutable while still
         # allowing the user to click-select them. (Setting `editable=False`
@@ -111,8 +113,13 @@ class LandmarkPickerWidget(QWidget):
         row.addWidget(btn_lm)
         outer.addLayout(row)
 
-        # Row 3: load button
+        # Row 3: viewer options + load button
         row = QHBoxLayout()
+        self._show_labels_chk = QCheckBox("Show landmark labels")
+        self._show_labels_chk.setChecked(True)
+        self._show_labels_chk.setToolTip("Toggle the yellow text labels next to each landmark.")
+        self._show_labels_chk.toggled.connect(self._on_show_labels_toggled)
+        row.addWidget(self._show_labels_chk)
         row.addStretch()
         self._load_btn = QPushButton("Load wing into viewer")
         self._load_btn.clicked.connect(self._load_clicked)
@@ -137,8 +144,8 @@ class LandmarkPickerWidget(QWidget):
         left_col.setSpacing(4)
         left_col.addWidget(
             QLabel(
-                "1. Click 'S' on the napari toolbar to enable Select.\n"
-                "2. Click one landmark, then SHIFT-click another.\n"
+                "1. Click a landmark to select it (turns orange).\n"
+                "2. SHIFT-click a second landmark.\n"
                 "3. Type a label, click 'Add pair'."
             )
         )
@@ -166,15 +173,27 @@ class LandmarkPickerWidget(QWidget):
         right_col.addWidget(QLabel("Configured pairs:"))
         self._list = QListWidget()
         self._list.setMaximumHeight(80)
+        self._list.currentRowChanged.connect(self._on_pair_row_changed)
         right_col.addWidget(self._list)
-        btns = QHBoxLayout()
+        btns_row1 = QHBoxLayout()
         rem_btn = QPushButton("Remove")
         rem_btn.clicked.connect(self._remove_pair)
         clr_btn = QPushButton("Clear all")
         clr_btn.clicked.connect(self._clear_pairs)
-        btns.addWidget(rem_btn)
-        btns.addWidget(clr_btn)
-        right_col.addLayout(btns)
+        btns_row1.addWidget(rem_btn)
+        btns_row1.addWidget(clr_btn)
+        right_col.addLayout(btns_row1)
+
+        btns_row2 = QHBoxLayout()
+        save_btn = QPushButton("Save…")
+        save_btn.setToolTip("Save the current pair list to a JSON file.")
+        save_btn.clicked.connect(self._save_pairs_to_file)
+        load_btn = QPushButton("Load…")
+        load_btn.setToolTip("Load a previously-saved pair list from a JSON file.")
+        load_btn.clicked.connect(self._load_pairs_from_file)
+        btns_row2.addWidget(save_btn)
+        btns_row2.addWidget(load_btn)
+        right_col.addLayout(btns_row2)
         pp.addLayout(right_col, stretch=1)
 
         self._splitter.addWidget(pair_panel)
@@ -271,7 +290,7 @@ class LandmarkPickerWidget(QWidget):
         self._points_layer = self._viewer.add_points(
             coords_yx,
             name="landmarks",
-            size=40,
+            size=90,
             face_color="cyan",
             border_color="black",
             border_width=0.15,
@@ -280,7 +299,7 @@ class LandmarkPickerWidget(QWidget):
                 "string": "{name}",
                 "size": 12,
                 "color": "yellow",
-                "translation": [-25, 0],
+                "translation": [-30, 0],
             },
         )
         self._points_layer.mode = "select"
@@ -297,9 +316,34 @@ class LandmarkPickerWidget(QWidget):
 
         try:
             self._points_layer.events.highlight.connect(self._update_selection_label)
+            self._points_layer.events.highlight.connect(self._update_face_colors)
         except Exception:
             logger.debug("embedded_picker: could not connect highlight event", exc_info=True)
         self._update_selection_label()
+        self._update_face_colors()
+        # Apply the current label-toggle state to the freshly-created text layer.
+        self._on_show_labels_toggled(self._show_labels_chk.isChecked())
+
+        # Highlight line for the currently-selected configured pair. Created
+        # last so it renders on top of the image and points.
+        self._line_layer = self._viewer.add_shapes(
+            name="distance",
+            shape_type="line",
+            edge_color="magenta",
+            edge_width=8,
+        )
+        self._line_layer.editable = False
+        # napari makes the most-recently-added layer the active one, which
+        # routes mouse clicks away from the points layer and breaks landmark
+        # selection. Force the points layer back to active so click-to-select
+        # keeps working with the user-friendly select tool.
+        try:
+            self._viewer.layers.selection.active = self._points_layer
+        except Exception:
+            logger.debug("embedded_picker: could not set points layer active", exc_info=True)
+        # If a row in the pair list is already selected (e.g. seeded from
+        # initial_pairs and clicked before this load), redraw the line.
+        self._on_pair_row_changed(self._list.currentRow())
 
     def _create_viewer(self):
         """Create the napari Viewer and reparent its canvas into the tab."""
@@ -344,6 +388,26 @@ class LandmarkPickerWidget(QWidget):
         sel = self._selected_names()
         self._sel_label.setText("Selected: " + ", ".join(sel) if sel else "Selected: (none)")
 
+    def _update_face_colors(self, _event=None):
+        """Recolor selected landmarks orange; unselected stay cyan."""
+        if self._points_layer is None or not self._names:
+            return
+        sel = self._points_layer.selected_data
+        n = len(self._names)
+        try:
+            self._points_layer.face_color = ["orange" if i in sel else "cyan" for i in range(n)]
+        except Exception:
+            logger.debug("embedded_picker: face_color update failed", exc_info=True)
+
+    def _on_show_labels_toggled(self, checked: bool):
+        """Show/hide the yellow text labels next to each landmark."""
+        if self._points_layer is None:
+            return
+        try:
+            self._points_layer.text.visible = checked
+        except Exception:
+            logger.debug("embedded_picker: failed to toggle text visibility", exc_info=True)
+
     def _add_pair(self):
         if self._points_layer is None:
             QMessageBox.warning(self, "Load a wing first", "Load a sample wing image + landmarks before adding pairs.")
@@ -366,6 +430,8 @@ class LandmarkPickerWidget(QWidget):
         self._pairs.append(LandmarkPair(name_a=sel[0], name_b=sel[1], label=label))
         self._label_edit.clear()
         self._refresh_list()
+        # Select the new row so the highlight line draws immediately.
+        self._list.setCurrentRow(len(self._pairs) - 1)
         self.pairs_changed.emit(list(self._pairs))
 
     def _remove_pair(self):
@@ -394,6 +460,107 @@ class LandmarkPickerWidget(QWidget):
         self._list.clear()
         for pair in self._pairs:
             self._list.addItem(f"{pair.label}: {pair.name_a} ↔ {pair.name_b}")
+
+    # --- Highlight line ----------------------------------------------------
+    def _on_pair_row_changed(self, row: int):
+        """When the user picks a pair in the list, draw a line between its endpoints.
+
+        Called with row=-1 when no pair is selected (e.g. after Clear all),
+        in which case the line is removed.
+        """
+        if self._line_layer is None or self._original_coords is None:
+            return
+        self._clear_line()
+        if row < 0 or row >= len(self._pairs):
+            return
+        pair = self._pairs[row]
+        if pair.name_a not in self._names or pair.name_b not in self._names:
+            # Pair references landmarks not present in the loaded wing —
+            # leave the line cleared without bothering the user.
+            return
+        idx_a = self._names.index(pair.name_a)
+        idx_b = self._names.index(pair.name_b)
+        coords = self._original_coords
+        y1, x1 = coords[idx_a]
+        y2, x2 = coords[idx_b]
+        import numpy as np
+
+        self._line_layer.add(
+            np.array([[y1, x1], [y2, x2]]),
+            shape_type="line",
+        )
+
+    def _clear_line(self):
+        if self._line_layer is None or len(self._line_layer.data) == 0:
+            return
+        self._line_layer.selected_data = set(range(len(self._line_layer.data)))
+        self._line_layer.remove_selected()
+
+    # --- Save / Load -------------------------------------------------------
+    def _save_pairs_to_file(self):
+        if not self._pairs:
+            QMessageBox.information(self, "No pairs", "No pairs configured to save.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save landmark distance pairs",
+            self._default_image_dir,
+            "JSON (*.json);;All files (*)",
+            options=self._FILE_DIALOG_OPTS,
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path = path + ".json"
+        try:
+            import json
+
+            from measurement_maker import pairs_to_dicts
+
+            with open(path, "w") as fh:
+                json.dump(pairs_to_dicts(self._pairs), fh, indent=2)
+        except Exception as exc:
+            logger.exception("Failed to save pairs")
+            QMessageBox.critical(self, "Save failed", str(exc))
+
+    def _load_pairs_from_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load landmark distance pairs",
+            self._default_image_dir,
+            "JSON (*.json);;All files (*)",
+            options=self._FILE_DIALOG_OPTS,
+        )
+        if not path:
+            return
+        try:
+            import json
+
+            from measurement_maker import pairs_from_dicts
+
+            with open(path) as fh:
+                data = json.load(fh)
+            if not isinstance(data, list):
+                raise ValueError("Expected a JSON list of {name_a, name_b, label} entries.")
+            loaded = pairs_from_dicts(data)
+            if not loaded:
+                raise ValueError("File contains no valid pairs.")
+        except Exception as exc:
+            logger.exception("Failed to load pairs")
+            QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        if self._pairs:
+            confirm = QMessageBox.question(
+                self,
+                "Replace configured pairs?",
+                f"Replace the {len(self._pairs)} currently configured pair(s) with the "
+                f"{len(loaded)} loaded pair(s)?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+        self.set_pairs(loaded)
 
     # --- Cleanup ------------------------------------------------------------
     def closeEvent(self, event):  # noqa: N802 — Qt API

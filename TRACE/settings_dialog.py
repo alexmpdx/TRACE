@@ -15,10 +15,11 @@ individual field types.
 
 from __future__ import annotations
 
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
-from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
+from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -43,6 +44,7 @@ from PyQt5.QtWidgets import (
 )
 
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
+from TRACE.presets_loader import load_presets
 
 
 def _merge_gate_override(base: dict, override: dict) -> dict:
@@ -164,11 +166,15 @@ class PipelineConfigDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # Preset row — replaces pruning + bridging fields with a named snapshot.
+        # Preset row — applies every field listed in the preset dict (any
+        # PipelineConfig field, not just pruning/bridging). Presets are loaded
+        # from TRACE/presets/*.json, so adding a new preset is just dropping a
+        # JSON file in that folder — no code change needed.
+        self._presets = load_presets()
         preset_row = QHBoxLayout()
-        preset_row.addWidget(QLabel("Pruning / bridging preset:"))
+        preset_row.addWidget(QLabel("Pipeline preset:"))
         self._preset_combo = QComboBox()
-        for preset_name in PIPELINE_PRESETS:
+        for preset_name in self._presets:
             self._preset_combo.addItem(preset_name)
         preset_row.addWidget(self._preset_combo, stretch=1)
         apply_btn = QPushButton("Apply preset")
@@ -251,10 +257,13 @@ class PipelineConfigDialog(QDialog):
 
         gb = QGroupBox("Wing rotation (optional)")
         rot_layout = QVBoxLayout(gb)
-        self._do_rotation_chk = QCheckBox("Rotate to canonical orientation (Stage 1.5)")
+        self._do_rotation_chk = QCheckBox("Rotate to canonical orientation (final preprocessing step)")
         self._do_rotation_chk.setToolTip(
-            "When checked, every image is rotated to a canonical right-side-up, "
-            "distal-right orientation after landmark detection (rotation only — no mirror). "
+            "When checked, the image and every produced GeoJSON (landmarks, wing, "
+            "segmentation) are rotated to a canonical right-side-up, distal-right "
+            "orientation as the LAST preprocessing step. All model inferences "
+            "(wing isolation, landmark detection, segmentation) still run on the "
+            "original un-rotated image; only identifyFeatures sees the rotated set. "
             "Skipped automatically when fewer than 2 reliable landmarks are available."
         )
         rot_layout.addWidget(self._do_rotation_chk)
@@ -781,7 +790,9 @@ class PipelineConfigDialog(QDialog):
 
     def _apply_selected_preset(self):
         name = self._preset_combo.currentText()
-        if not name:
+        if not name or name not in self._presets:
             return
-        new_config = apply_preset(self.get_config(), name)
+        # Apply the preset's overrides on top of the user's current widget
+        # state — fields not listed in the preset are preserved.
+        new_config = dataclass_replace(self.get_config(), **self._presets[name])
         self._load_from_config(new_config)

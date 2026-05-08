@@ -145,8 +145,9 @@ def parse_args(argv=None):
         dest="do_rotation",
         action="store_false",
         help=(
-            "Disable Stage 1.5 (wingRotator). By default, every image is rotated to a "
-            "canonical right-side-up, distal-right orientation after landmark detection."
+            "Disable wingRotator. By default, the image and every produced GeoJSON are rotated "
+            "to a canonical right-side-up, distal-right orientation as the last preprocessing step "
+            "(after segmentation, before identifyFeatures). All model inferences run on the original."
         ),
     )
     parser.set_defaults(do_rotation=True)
