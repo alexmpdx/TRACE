@@ -6,11 +6,12 @@ from typing import Optional
 import numpy as np
 import torch
 import yaml
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
 from landmark_locator.data.dataset import LandmarkDataset, discover_landmarks, extract_genotype
 from landmark_locator.models.unet import LandmarkUNet
 from landmark_locator.training.losses import HeatmapMSELoss
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 
 def get_device(requested: Optional[str] = None) -> torch.device:
@@ -22,6 +23,23 @@ def get_device(requested: Optional[str] = None) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def log_config_summary(cfg: dict) -> None:
+    """Print the full training config to stdout so the run log captures every knob.
+
+    Called from both the CLI (`run_training`) and the GUI training thread so saved
+    `training.log` files always carry the exact augmentation + training + CV settings
+    used. Skips the noisy auto-injected `geojson_to_landmark` map for readability.
+    """
+    log_cfg = {k: v for k, v in cfg.items() if k != "confidence"}
+    if "heatmap" in log_cfg:
+        log_cfg["heatmap"] = {k: v for k, v in log_cfg["heatmap"].items() if k != "geojson_to_landmark"}
+    print("=" * 60)
+    print("TRAINING CONFIGURATION")
+    print("=" * 60)
+    print(yaml.safe_dump(log_cfg, sort_keys=False, default_flow_style=False).rstrip())
+    print("=" * 60)
 
 
 def _populate_landmark_config(cfg: dict, annotation_dir: Path) -> None:
@@ -293,6 +311,8 @@ def run_training(
 
     # Auto-discover landmarks from annotation files
     _populate_landmark_config(cfg, annotation_dir)
+
+    log_config_summary(cfg)
 
     splits = create_cv_splits(annotation_dir, cfg["cv"]["n_folds"])
     output_dir = Path(output_dir)

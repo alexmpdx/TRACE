@@ -53,7 +53,7 @@ cv:
   n_folds: 5
   stratify_by: genotype
 augmentation:
-  rotation_limit: 90
+  rotation_limit: 45
   horizontal_flip_p: 0.5
   vertical_flip_p: 0.5
   scale_limit: 0.15

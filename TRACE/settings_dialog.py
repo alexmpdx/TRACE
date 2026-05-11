@@ -111,6 +111,8 @@ class PipelineConfigDialog(QDialog):
         intermediate_outputs: dict[str, bool] | None = None,
         do_rotation: bool = False,
         user_landmark_distances: list[dict] | None = None,
+        distance_sample_image: str = "",
+        distance_sample_landmarks: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -126,6 +128,11 @@ class PipelineConfigDialog(QDialog):
         # User-defined landmark distance pairs (TRACE-only post-CSV augmentation).
         # List of {name_a, name_b, label} dicts so QSettings/JSON round-trips cleanly.
         self._user_landmark_distances: list[dict] = list(user_landmark_distances or [])
+        # Last-used sample image + landmarks GeoJSON for the picker — pre-fills
+        # the file pickers on the Custom Distances tab so the user doesn't have
+        # to re-browse each session.
+        self._distance_sample_image = distance_sample_image
+        self._distance_sample_landmarks = distance_sample_landmarks
         self._build_ui()
         self._load_from_config(config)
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
@@ -337,6 +344,18 @@ class PipelineConfigDialog(QDialog):
     def get_intermediate_outputs(self) -> dict[str, bool]:
         return {key: chk.isChecked() for key, chk in self._intermediate_output_chks.items()}
 
+    def get_distance_sample_image(self) -> str:
+        """Last-entered sample-image path in the Custom Distances picker."""
+        if self._distance_picker is None:
+            return self._distance_sample_image
+        return self._distance_picker.image_path()
+
+    def get_distance_sample_landmarks(self) -> str:
+        """Last-entered landmarks-GeoJSON path in the Custom Distances picker."""
+        if self._distance_picker is None:
+            return self._distance_sample_landmarks
+        return self._distance_picker.landmarks_path()
+
     def get_user_landmark_distances(self) -> list[dict]:
         """Return the configured custom landmark-distance pairs (list of dicts)."""
         return list(self._user_landmark_distances)
@@ -417,6 +436,8 @@ class PipelineConfigDialog(QDialog):
             parent=w,
             initial_pairs=initial,
             default_image_dir=self._calib_input_path or "",
+            initial_image_path=self._distance_sample_image,
+            initial_landmarks_path=self._distance_sample_landmarks,
         )
         self._distance_picker.pairs_changed.connect(self._on_distance_pairs_changed)
         layout.addWidget(self._distance_picker, stretch=1)

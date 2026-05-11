@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -641,6 +642,7 @@ class TrainingThread(QThread):
                 _populate_landmark_config,
                 create_cv_splits,
                 get_device,
+                log_config_summary,
                 train_fold,
             )
 
@@ -664,6 +666,7 @@ class TrainingThread(QThread):
                     annotation_dir = _project_root / annotation_dir
 
             _populate_landmark_config(cfg, annotation_dir)
+            log_config_summary(cfg)
             splits = create_cv_splits(annotation_dir, cfg["cv"]["n_folds"])
 
             current_fold = {"value": 0}
@@ -707,11 +710,204 @@ class TrainingThread(QThread):
             sys.stdout = old_stdout
 
 
+class SweepRunnerThread(QThread):
+    """Background worker that runs `python -m landmark_locator.scripts.sweep_aug` as a subprocess.
+
+    Emits each stdout line via `progress`. Emits `finished_sweep` with the subprocess
+    return code on completion.
+    """
+
+    progress = pyqtSignal(str)
+    finished_sweep = pyqtSignal(int)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        rotations: list[int],
+        vflips: list[float],
+        all_folds: bool,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._rotations = rotations
+        self._vflips = vflips
+        self._all_folds = all_folds
+        self._proc: Optional[subprocess.Popen] = None
+        self._stop_requested = False
+
+    def run(self) -> None:
+        cmd = [
+            sys.executable,
+            "-u",
+            "-m",
+            "landmark_locator.scripts.sweep_aug",
+            "--rotations",
+            *[str(r) for r in self._rotations],
+            "--vflips",
+            *[str(v) for v in self._vflips],
+        ]
+        if self._all_folds:
+            cmd.append("--all-folds")
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as e:
+            self.error.emit(f"Failed to start sweep: {e}")
+            return
+        assert self._proc.stdout is not None
+        try:
+            for line in self._proc.stdout:
+                if self._stop_requested:
+                    break
+                self.progress.emit(line.rstrip("\n"))
+            rc = self._proc.wait()
+        except Exception as e:
+            self.error.emit(str(e))
+            return
+        self.finished_sweep.emit(rc)
+
+    def stop(self) -> None:
+        self._stop_requested = True
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+
+class SweepDialog(QDialog):
+    """Configure and launch an augmentation sweep, streaming live progress to a log view."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Augmentation Sweep")
+        self.resize(820, 620)
+        self._thread: Optional[SweepRunnerThread] = None
+
+        root = QVBoxLayout(self)
+        hint = QLabel(
+            "Trains every combination of rotation_limit × vertical_flip_p in sequence, then "
+            "ranks them by validation pixel error. Fold 0 only is fast (~30 min/combo on MPS). "
+            "All folds is the full 5-fold CV (~5× slower)."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aaa;")
+        root.addWidget(hint)
+
+        # Inputs
+        form = QGridLayout()
+        form.addWidget(QLabel("Rotation values (comma-separated):"), 0, 0)
+        self._rot_edit = QLineEdit("30, 45, 60")
+        form.addWidget(self._rot_edit, 0, 1)
+        form.addWidget(QLabel("Vertical-flip probabilities (comma-separated):"), 1, 0)
+        self._vflip_edit = QLineEdit("0.0, 0.25")
+        form.addWidget(self._vflip_edit, 1, 1)
+        form.addWidget(QLabel("Folds:"), 2, 0)
+        self._folds_combo = QComboBox()
+        self._folds_combo.addItem("Fold 0 only (fast triage)", False)
+        self._folds_combo.addItem("All 5 folds (full CV)", True)
+        form.addWidget(self._folds_combo, 2, 1)
+        root.addLayout(form)
+
+        # Output log
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setStyleSheet("background: #111; color: #ddd; font-family: monospace; font-size: 11px;")
+        root.addWidget(self._log, stretch=1)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        self._start_btn = QPushButton("Start Sweep")
+        self._start_btn.clicked.connect(self._on_start)
+        btn_row.addWidget(self._start_btn)
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._on_stop)
+        btn_row.addWidget(self._stop_btn)
+        btn_row.addStretch(1)
+        self._close_btn = QPushButton("Close")
+        self._close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self._close_btn)
+        root.addLayout(btn_row)
+
+    def _parse_list(self, text: str, kind) -> list:
+        out = []
+        for part in text.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out.append(kind(part))
+            except ValueError:
+                raise ValueError(f"'{part}' is not a valid {kind.__name__}")
+        return out
+
+    def _on_start(self) -> None:
+        try:
+            rotations = self._parse_list(self._rot_edit.text(), int)
+            vflips = self._parse_list(self._vflip_edit.text(), float)
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid input", str(e))
+            return
+        if not rotations or not vflips:
+            QMessageBox.warning(self, "Invalid input", "Provide at least one rotation and one vflip value.")
+            return
+        all_folds = bool(self._folds_combo.currentData())
+
+        n_combos = len(rotations) * len(vflips)
+        n_folds = 5 if all_folds else 1
+        self._log.append(f"Starting sweep: {n_combos} combos × {n_folds} fold(s)")
+        self._log.append(f"  rotations: {rotations}")
+        self._log.append(f"  vflips:    {vflips}")
+        self._log.append("")
+
+        self._start_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        self._rot_edit.setEnabled(False)
+        self._vflip_edit.setEnabled(False)
+        self._folds_combo.setEnabled(False)
+
+        self._thread = SweepRunnerThread(rotations, vflips, all_folds, self)
+        self._thread.progress.connect(self._on_progress)
+        self._thread.finished_sweep.connect(self._on_finished)
+        self._thread.error.connect(self._on_error)
+        self._thread.start()
+
+    def _on_stop(self) -> None:
+        if self._thread is not None:
+            self._log.append("\n[GUI] Stop requested — terminating sweep subprocess…")
+            self._thread.stop()
+            self._stop_btn.setEnabled(False)
+
+    def _on_progress(self, line: str) -> None:
+        self._log.append(line)
+        self._log.verticalScrollBar().setValue(self._log.verticalScrollBar().maximum())
+
+    def _on_finished(self, rc: int) -> None:
+        self._log.append(f"\n[GUI] Sweep finished (rc={rc}).")
+        self._stop_btn.setEnabled(False)
+        self._start_btn.setEnabled(True)
+        self._rot_edit.setEnabled(True)
+        self._vflip_edit.setEnabled(True)
+        self._folds_combo.setEnabled(True)
+
+    def _on_error(self, msg: str) -> None:
+        self._log.append(f"\n[GUI] Error: {msg}")
+        self._stop_btn.setEnabled(False)
+        self._start_btn.setEnabled(True)
+
+
 class TrainingDialog(QDialog):
     """Modal dialog showing live training log output and error chart."""
 
     def __init__(self, model_name: str = "", landmark_order: list[str] | None = None, max_epochs: int = 0, parent=None):
         super().__init__(parent)
+        self._model_name = model_name
         title = f"Training — {model_name}" if model_name else "Training"
         self.setWindowTitle(title)
         self.resize(820, 600)
@@ -1314,9 +1510,19 @@ class TrainingConfigDialog(QDialog):
         root.addWidget(scroll)
 
         # --- Buttons ---
+        action_row = QHBoxLayout()
         preview_btn = QPushButton("Preview Augmentations…")
         preview_btn.clicked.connect(self._on_preview)
-        root.addWidget(preview_btn)
+        action_row.addWidget(preview_btn)
+        sweep_btn = QPushButton("Run Augmentation Sweep…")
+        sweep_btn.setToolTip(
+            "Train multiple combinations of rotation_limit × vertical_flip_p in sequence "
+            "and rank them by validation pixel error. Saves config to default.yaml first."
+        )
+        sweep_btn.clicked.connect(self._on_sweep)
+        action_row.addWidget(sweep_btn)
+        action_row.addStretch(1)
+        root.addLayout(action_row)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Reset)
         bb.accepted.connect(self._on_save_and_close)
@@ -1357,6 +1563,26 @@ class TrainingConfigDialog(QDialog):
             QMessageBox.warning(self, "Invalid value", str(e))
             return
         dlg = AugPreviewDialog(self._parent_gui, cfg, parent=self)
+        dlg.exec_()
+
+    def _on_sweep(self) -> None:
+        """Save the current config to disk, then open the SweepDialog.
+
+        The sweep subprocess derives its base config from the YAML on disk, so any
+        unsaved form edits would be ignored — save first to make the user's intent
+        explicit. We do not auto-close this dialog so the user can come back to it.
+        """
+        try:
+            cfg = self._form_into_cfg()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid value", str(e))
+            return
+        try:
+            self._config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", f"Could not write {self._config_path}:\n{e}")
+            return
+        dlg = SweepDialog(parent=self)
         dlg.exec_()
 
     def _on_save_and_close(self) -> None:
@@ -2277,6 +2503,13 @@ class LandmarkGUI(QMainWindow):
             self._train_dialog.append_log(f"Error chart saved: {chart_path}")
         except Exception as e:
             self._train_dialog.append_log(f"Warning: could not save chart: {e}")
+        # Save the run log as a text file
+        log_path = run_dir / "training.log"
+        try:
+            log_path.write_text(self._train_dialog._log.toPlainText())
+            self._train_dialog.append_log(f"Training log saved: {log_path}")
+        except Exception as e:
+            self._train_dialog.append_log(f"Warning: could not save log: {e}")
         # Auto-load fold 0 for quick inspection
         fold0 = Path(ckpt_dir) / "best_fold0.pt"
         if not fold0.exists():
@@ -2304,6 +2537,13 @@ class LandmarkGUI(QMainWindow):
         self._train_dialog.append_log(f"\nERROR: {msg}")
         self._train_dialog.enable_close()
         self.statusBar().showMessage(f"Training failed: {msg}")
+        # Save the run log as a text file even on failure — the log is what diagnoses the failure.
+        try:
+            run_dir = _project_root / "trained_models" / self._train_dialog._model_name
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "training.log").write_text(self._train_dialog._log.toPlainText())
+        except Exception:
+            pass
 
     # ---- Heatmap overlay ----
     def _on_heatmap_clicked(self, name: str) -> None:

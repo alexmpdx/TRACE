@@ -310,6 +310,24 @@ def name_intervein_regions(
     frag_buffer = median_vein_width_px * 2 if median_vein_width_px > 0 else buffer_px * 2
     _absorb_ectopic_fragments(results, all_polys, frag_buffer)
 
+    # Final pass: any polygon still unnamed at this point is typically a
+    # piece of an adjacent region cut off by a slide defect (or a
+    # fragment too large to be absorbed by _absorb_ectopic_fragments's
+    # size cap). Re-run the naming logic on each leftover with a
+    # preference for the name of the adjacent named region with the
+    # longest shared boundary, then merge the leftover into that
+    # neighbor's polygon via unary_union.
+    _name_leftover_regions(
+        results,
+        all_polys,
+        vein_buffers,
+        vein_map,
+        effective_expected,
+        config,
+        min_length,
+        frag_buffer,
+    )
+
     return results
 
 
@@ -478,6 +496,126 @@ def _absorb_ectopic_fragments(
                 best_result.name,
                 best_length,
             )
+
+
+def _name_leftover_regions(
+    results: list[InterveinRegion],
+    all_polys: list[Polygon],
+    vein_buffers: dict[str, Polygon],
+    vein_map: dict[str, "VeinIdentification"],
+    effective_expected: dict[str, set[str]],
+    config: PipelineConfig,
+    min_length: float,
+    gap_buffer_px: float,
+) -> None:
+    """Final naming pass for polygons still unnamed after all earlier
+    passes. Typically these are pieces of an adjacent region split off
+    by an external slide defect (or fragments too large to be absorbed
+    by ``_absorb_ectopic_fragments``'s size cap).
+
+    Strategy: for each leftover polygon
+      1. compute its adjacent_veins via the same boundary-buffer test
+         used in the main loop;
+      2. find named neighbors by intersecting the leftover (buffered by
+         ``gap_buffer_px``) with each named region's boundary, scoring
+         by shared-boundary length;
+      3. run canonical → merged → coverage naming on the leftover, but
+         prefer any candidate whose name matches a named neighbor;
+      4. if no candidate matches a neighbor, default to the
+         longest-shared-boundary neighbor's name;
+      5. merge the leftover into the chosen neighbor's polygon via
+         ``unary_union`` (the neighbor's polygon becomes a MultiPolygon
+         if the union spans a thin vein-tissue gap).
+
+    No claimed_names exclusion is applied — this is the final naming
+    chance and the candidate space is already constrained by the
+    "must match a neighbor" preference.
+    """
+    if not results:
+        return
+
+    named_polys = {id(r.polygon) for r in results}
+    leftovers = [p for p in all_polys if id(p) not in named_polys and not p.is_empty]
+    if not leftovers:
+        return
+
+    for poly in leftovers:
+        # Adjacent veins (same logic as main loop)
+        boundary = poly.boundary
+        adjacent_veins: set[str] = set()
+        for vein_id, buf in vein_buffers.items():
+            try:
+                inter = boundary.intersection(buf)
+                if not inter.is_empty and inter.length >= min_length:
+                    adjacent_veins.add(vein_id)
+            except Exception:
+                continue
+        detected = frozenset(adjacent_veins)
+
+        # Named neighbors by shared-boundary length (buffered to bridge
+        # any thin vein-tissue gap from segmentation).
+        buffered = poly.buffer(gap_buffer_px)
+        neighbor_shared: list[tuple[InterveinRegion, float]] = []
+        for r in results:
+            if r.polygon is None or r.polygon.is_empty:
+                continue
+            try:
+                shared = r.polygon.boundary.intersection(buffered).length
+            except Exception:
+                continue
+            if shared > 0:
+                neighbor_shared.append((r, shared))
+        if not neighbor_shared:
+            continue  # orphan island; nothing to absorb into
+        neighbor_shared.sort(key=lambda nb: -nb[1])
+        neighbor_names = {nb[0].name for nb in neighbor_shared}
+
+        # Try canonical subset match, preferring a name that matches a
+        # neighbor (in most-specific-first order).
+        chosen_name: Optional[str] = None
+        canonical_candidates = sorted(
+            (
+                (region_name, len(expected_veins))
+                for region_name, expected_veins in effective_expected.items()
+                if frozenset(expected_veins) <= detected
+            ),
+            key=lambda c: -c[1],
+        )
+        for cand_name, _ in canonical_candidates:
+            if cand_name in neighbor_names:
+                chosen_name = cand_name
+                break
+
+        if chosen_name is None:
+            mname, _ = _check_merged(detected, vein_map, effective_expected, config.max_merge_size)
+            if mname in neighbor_names:
+                chosen_name = mname
+
+        if chosen_name is None:
+            cname, _ = _coverage_fallback(detected, effective_expected)
+            if cname in neighbor_names:
+                chosen_name = cname
+
+        if chosen_name is None:
+            # Last resort: longest-shared-boundary neighbor's name.
+            chosen_name = neighbor_shared[0][0].name
+            source = "longest-shared-boundary"
+        else:
+            source = "naming-pipeline (matched neighbor)"
+
+        # Merge leftover into the chosen-name neighbor with the longest
+        # shared boundary (when multiple same-name neighbors exist).
+        target = next(nb[0] for nb in neighbor_shared if nb[0].name == chosen_name)
+        merged = unary_union([target.polygon, poly])
+        target.polygon = merged
+        target.area_px2 = merged.area
+        logger.info(
+            "Leftover polygon (%dpx²) absorbed into %r [%s], shared boundary %.0fpx",
+            int(poly.area),
+            chosen_name,
+            source,
+            neighbor_shared[0][1],
+        )
 
 
 def _detect_absorbed_merges(

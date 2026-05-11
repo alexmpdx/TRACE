@@ -35,6 +35,32 @@ from PyQt5.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 
+# Friendly anatomical descriptions for the raw GeoJSON landmark names produced
+# by LandmarkLocator. The picker stores pairs by raw name (so the same pair
+# applies cleanly across wings), but every user-visible label is run through
+# `_display()` so the UI shows the anatomical name instead.
+_LANDMARK_DISPLAY_NAMES: dict[str, str] = {
+    "ACV.a": "ACV-L3 junction",
+    "ACV.p": "ACV-L4 junction",
+    "alula notch": "alula notch",
+    "DTip": "L3 distal end",
+    "L1-Rs": "L1-Rs junction",
+    "L2.d": "L2 distal end",
+    "L2-L3": "L2-L3-Rs junction",
+    "L4.d": "L4 distal end",
+    "L4-L5": "L4-L5 junction",
+    "L5.d": "L5 distal end",
+    "PCV.a": "PCV-L4 junction",
+    "PCV.p": "PCV-L5 junction",
+    "subcostal break": "subcostal break",
+}
+
+
+def _display(name: str) -> str:
+    """Friendly anatomical name for a raw GeoJSON landmark name, falling back to the raw form."""
+    return _LANDMARK_DISPLAY_NAMES.get(name, name)
+
+
 class LandmarkPickerWidget(QWidget):
     """Embeddable napari-based picker.
 
@@ -52,10 +78,14 @@ class LandmarkPickerWidget(QWidget):
         parent: Optional[QWidget] = None,
         initial_pairs: Optional[list[LandmarkPair]] = None,
         default_image_dir: str = "",
+        initial_image_path: str = "",
+        initial_landmarks_path: str = "",
     ):
         super().__init__(parent)
         self._pairs: list[LandmarkPair] = list(initial_pairs or [])
         self._default_image_dir = default_image_dir
+        self._initial_image_path = initial_image_path
+        self._initial_landmarks_path = initial_landmarks_path
         self._viewer = None  # napari.Viewer (lazy)
         self._points_layer = None
         self._line_layer = None  # Shapes layer holding the highlight line
@@ -67,6 +97,13 @@ class LandmarkPickerWidget(QWidget):
         self._snapping_back = False
         self._build_ui()
         self._refresh_list()
+        # Pre-fill the file pickers with any remembered paths so the user
+        # doesn't have to re-browse every session. Auto-loading is left to a
+        # manual click — opening the dialog should be cheap (no GPU init).
+        if self._initial_image_path:
+            self._image_edit.setText(self._initial_image_path)
+        if self._initial_landmarks_path:
+            self._lm_edit.setText(self._initial_landmarks_path)
 
     # --- Public API ---------------------------------------------------------
     def pairs(self) -> list[LandmarkPair]:
@@ -82,6 +119,14 @@ class LandmarkPickerWidget(QWidget):
     def set_default_image_dir(self, path: str):
         """Suggest a starting directory for the file pickers."""
         self._default_image_dir = path or ""
+
+    def image_path(self) -> str:
+        """Currently entered sample-image path (may be empty)."""
+        return self._image_edit.text().strip()
+
+    def landmarks_path(self) -> str:
+        """Currently entered landmarks-GeoJSON path (may be empty)."""
+        return self._lm_edit.text().strip()
 
     # --- UI construction ---------------------------------------------------
     def _build_ui(self):
@@ -294,7 +339,8 @@ class LandmarkPickerWidget(QWidget):
             face_color="cyan",
             border_color="black",
             border_width=0.15,
-            features={"name": names},
+            # Pair lookups use raw names (self._names); napari shows friendly labels.
+            features={"name": [_display(n) for n in names]},
             text={
                 "string": "{name}",
                 "size": 12,
@@ -386,7 +432,7 @@ class LandmarkPickerWidget(QWidget):
 
     def _update_selection_label(self, _event=None):
         sel = self._selected_names()
-        self._sel_label.setText("Selected: " + ", ".join(sel) if sel else "Selected: (none)")
+        self._sel_label.setText("Selected: " + ", ".join(_display(n) for n in sel) if sel else "Selected: (none)")
 
     def _update_face_colors(self, _event=None):
         """Recolor selected landmarks orange; unselected stay cyan."""
@@ -459,7 +505,7 @@ class LandmarkPickerWidget(QWidget):
     def _refresh_list(self):
         self._list.clear()
         for pair in self._pairs:
-            self._list.addItem(f"{pair.label}: {pair.name_a} ↔ {pair.name_b}")
+            self._list.addItem(f"{pair.label}: {_display(pair.name_a)} ↔ {_display(pair.name_b)}")
 
     # --- Highlight line ----------------------------------------------------
     def _on_pair_row_changed(self, row: int):

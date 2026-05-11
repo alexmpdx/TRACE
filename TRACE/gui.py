@@ -175,6 +175,10 @@ class TraceWindow(QMainWindow):
         # User-defined landmark distance pairs (TRACE-only post-CSV augmentation).
         # Configured via Settings → Custom Distances.
         self._user_landmark_distances: list[dict] = []
+        # Last-used sample image + landmarks GeoJSON for the picker, so users
+        # don't have to re-browse every session.
+        self._distance_sample_image: str = ""
+        self._distance_sample_landmarks: str = ""
         self._workers_warning_shown = False
         self._build_ui()
         self._restore_settings()
@@ -496,6 +500,8 @@ class TraceWindow(QMainWindow):
             intermediate_outputs=dict(self._intermediate_outputs),
             do_rotation=self._do_rotation,
             user_landmark_distances=list(self._user_landmark_distances),
+            distance_sample_image=self._distance_sample_image,
+            distance_sample_landmarks=self._distance_sample_landmarks,
         )
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
@@ -510,6 +516,8 @@ class TraceWindow(QMainWindow):
             self._segmentation_model_path = dlg.get_segmentation_model_path()
             self._intermediate_outputs = dlg.get_intermediate_outputs()
             self._user_landmark_distances = dlg.get_user_landmark_distances()
+            self._distance_sample_image = dlg.get_distance_sample_image()
+            self._distance_sample_landmarks = dlg.get_distance_sample_landmarks()
             # Keep main-window scale spinner in sync.
             val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
             self.scale_spin.blockSignals(True)
@@ -583,6 +591,8 @@ class TraceWindow(QMainWindow):
             _json.dumps(self._user_landmark_distances) if self._user_landmark_distances else "",
         )
         s.setValue("include_custom_measurements", self.include_custom_measurements_chk.isChecked())
+        s.setValue("distance_sample_image", self._distance_sample_image)
+        s.setValue("distance_sample_landmarks", self._distance_sample_landmarks)
         for key, chk in self.output_checks.items():
             s.setValue(f"output/{key}", chk.isChecked())
         for key, on in self._intermediate_outputs.items():
@@ -666,6 +676,12 @@ class TraceWindow(QMainWindow):
         saved_icm = s.value("include_custom_measurements", None)
         if saved_icm is not None:
             self.include_custom_measurements_chk.setChecked(saved_icm == "true" or saved_icm is True)
+        saved_dsi = s.value("distance_sample_image", "")
+        if saved_dsi:
+            self._distance_sample_image = saved_dsi
+        saved_dsl = s.value("distance_sample_landmarks", "")
+        if saved_dsl:
+            self._distance_sample_landmarks = saved_dsl
         workers_val = s.value("max_workers", None)
         if workers_val is not None:
             try:
