@@ -72,6 +72,7 @@ def _process_one(args_tuple):
         preset,
         show_vein_tissue,
         synthesize_missing_crossveins,
+        skip_intervein_regions,
     ) = args_tuple
     try:
         config = PipelineConfig()
@@ -80,6 +81,7 @@ def _process_one(args_tuple):
         if um_per_px is not None:
             config.um_per_px = um_per_px
         config.synthesize_missing_crossveins = synthesize_missing_crossveins
+        config.skip_intervein_regions = skip_intervein_regions
         if verbose:
             logging.basicConfig(level=logging.INFO)
 
@@ -106,6 +108,8 @@ def _process_one(args_tuple):
                     )
 
         n_veins = sum(1 for v in result.veins if v.centerline is not None)
+        if skip_intervein_regions:
+            return stem, True, f"{stem}: {n_veins} veins (intervein regions skipped)", result
         n_regions = len(result.intervein_regions)
         return stem, True, f"{stem}: {n_veins} veins, {n_regions}/7 regions", result
     except Exception as e:
@@ -188,6 +192,11 @@ def main():
         help="Disable Phase 5b landmark-based ACV/PCV synthesis; preserves merged intervein regions when no crossvein is detected in the skeleton",
     )
     parser.add_argument(
+        "--skip-intervein-regions",
+        action="store_true",
+        help="Skip §6.1 intervein polygon splitting and §6.2 intervein region naming. Use when only vein outputs are needed; saves the watershed/distance-transform work. §6.3 vein tissue assignment still runs so overlays render filled vein polygons.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -216,6 +225,7 @@ def _run_single(args):
     if args.um_per_px is not None:
         config.um_per_px = args.um_per_px
     config.synthesize_missing_crossveins = args.synthesize_missing_crossveins
+    config.skip_intervein_regions = args.skip_intervein_regions
 
     result = identify_wing(
         args.detection,
@@ -261,7 +271,10 @@ def _run_single(args):
                     print(f"CV ratio overlay: {cv_path}")
 
     n_veins = sum(1 for v in result.veins if v.centerline is not None)
-    print(f"{result.specimen_id}: {n_veins} veins, {len(result.intervein_regions)}/7 regions")
+    if config.skip_intervein_regions:
+        print(f"{result.specimen_id}: {n_veins} veins (intervein regions skipped)")
+    else:
+        print(f"{result.specimen_id}: {n_veins} veins, {len(result.intervein_regions)}/7 regions")
     print(f"Output: {out_path}")
 
     if result.warnings:
@@ -295,6 +308,7 @@ def _run_batch(args):
             args.preset,
             args.show_vein_tissue,
             args.synthesize_missing_crossveins,
+            args.skip_intervein_regions,
         )
         for stem, det, lm, img in specimens
     ]

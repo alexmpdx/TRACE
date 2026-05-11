@@ -183,37 +183,45 @@ def identify_wing(
     wing_axis = compute_wing_axis(landmarks)
 
     # Step 5: Trace veins
-    logger.info("Step 4-5: Tracing veins")
+    logger.info("Step 5: Tracing veins")
     veins = trace_veins_from_landmarks(skel, landmarks, wing_outline, config, wing_axis=wing_axis)
 
-    # Step 5.5a: Assign vein tissue polygons
+    # Step 6: Intervein Labeling — three passes (see docs/pipeline_reference.md §6)
+    # Execution order is tissue first so the splitter's barrier mask can reuse vein tissue geometry.
+
+    # Step 6.3: Vein Tissue Polygon Assignment
+    # Always runs (cheap, and downstream rendering / GeoJSON export need tissue polygons).
     assign_vein_tissue_polygons(veins, skel.median_vein_width_px, config, wing_outline)
 
-    # Step 5.5a': Re-merge regions split by purely-interior ectopic veins
-    intervein_polys = _fill_interior_ectopic_veins(intervein_polys, veins, wing_outline, skel.median_vein_width_px)
+    if config.skip_intervein_regions:
+        logger.info("Step 6.1/6.2 skipped (skip_intervein_regions=True)")
+        regions: list = []
+    else:
+        # Step 6.3 follow-up: Re-merge regions split by purely-interior ectopic veins
+        intervein_polys = _fill_interior_ectopic_veins(intervein_polys, veins, wing_outline, skel.median_vein_width_px)
 
-    # Step 5.5b: Split merged intervein polygons
-    logger.info("Step 5.5: Splitting merged intervein polygons")
-    intervein_polys = split_merged_intervein_polygons(
-        intervein_polys,
-        veins,
-        wing_outline,
-        image_shape,
-        skel.median_vein_width_px,
-        config,
-    )
+        # Step 6.1: Intervein Polygon Splitting
+        logger.info("Step 6.1: Splitting merged intervein polygons")
+        intervein_polys = split_merged_intervein_polygons(
+            intervein_polys,
+            veins,
+            wing_outline,
+            image_shape,
+            skel.median_vein_width_px,
+            config,
+        )
 
-    # Step 6: Name intervein regions
-    logger.info("Step 6: Naming intervein regions")
-    regions = name_intervein_regions(
-        intervein_polys,
-        veins,
-        landmarks,
-        config,
-        skel.median_vein_width_px,
-        wing_outline,
-        wing_axis,
-    )
+        # Step 6.2: Intervein Region Naming
+        logger.info("Step 6.2: Naming intervein regions")
+        regions = name_intervein_regions(
+            intervein_polys,
+            veins,
+            landmarks,
+            config,
+            skel.median_vein_width_px,
+            wing_outline,
+            wing_axis,
+        )
 
     result.veins = veins
     result.intervein_regions = regions

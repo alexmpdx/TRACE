@@ -17,7 +17,10 @@ class PipelineConfig:
     """
 
     # -- Scale --
-    um_per_px: float | None = 0.483  # Microns per pixel (0.483 for standard test data)
+    # Default None so a fresh GUI session shows the "[conversion factor]" placeholder
+    # in the µm/px spinbox and forces the user to enter their own value before running.
+    # Existing users with a saved config keep whatever scale they previously set.
+    um_per_px: float | None = None
 
     # -- Skeletonization --
     skeleton_methods: list[SkeletonMethod] = field(default_factory=lambda: [SkeletonMethod.RIDGE])
@@ -112,6 +115,11 @@ class PipelineConfig:
     crossvein_max_length_vw: float = 25.0  # Max crossvein length as × median vein width
     synthesize_missing_crossveins: bool = (
         False  # Phase 5b: draw ACV/PCV centerlines from landmarks when graph detection fails; disable to preserve fused-region output
+    )
+
+    # -- Intervein labeling --
+    skip_intervein_regions: bool = (
+        False  # When True, skip §6.1 polygon splitting and §6.2 region naming (saves resources when only vein outputs are needed). §6.3 vein tissue assignment still runs so overlays and exports retain vein tissue polygons.
     )
 
     # -- Intervein naming --

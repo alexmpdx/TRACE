@@ -287,7 +287,10 @@ def main(argv=None):
     print()
 
     outputs = {o.strip() for o in args.outputs.split(",") if o.strip()}
-    invalid = outputs - set(OUTPUT_TYPES.keys())
+    # Accept the legacy "overlay" key for back-compat; trace_folder() rewrites
+    # it into ("vein_overlay", "intervein_overlay") at the entry point.
+    valid_keys = set(OUTPUT_TYPES.keys()) | {"overlay"}
+    invalid = outputs - valid_keys
     if invalid:
         print(f"Error: unknown output keys: {sorted(invalid)}", file=sys.stderr)
         sys.exit(1)

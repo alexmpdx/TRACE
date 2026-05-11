@@ -12,7 +12,6 @@ from collections import OrderedDict
 from pathlib import Path
 
 from identify_features.config import PipelineConfig
-from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -37,8 +36,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
-from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES, trace_folder
+from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TOOLTIPS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
 
 # ---------------------------------------------------------------------------
@@ -206,7 +207,9 @@ class TraceWindow(QMainWindow):
         self.input_edit = QLineEdit()
         self.input_edit.setReadOnly(True)
         self.input_edit.setPlaceholderText("Select input folder...")
+        self.input_edit.setToolTip("Folder containing wing images to process. Click Browse... to select.")
         btn = QPushButton("Browse...")
+        btn.setToolTip("Pick the folder containing wing images.")
         btn.clicked.connect(self._select_input)
         row.addWidget(self.input_edit, stretch=1)
         row.addWidget(btn)
@@ -222,7 +225,11 @@ class TraceWindow(QMainWindow):
         self.output_edit = QLineEdit()
         self.output_edit.setReadOnly(True)
         self.output_edit.setPlaceholderText("Select output folder...")
+        self.output_edit.setToolTip(
+            "Folder where all outputs (overlays, CSV, GeoJSONs, intermediates) will be written."
+        )
         btn = QPushButton("Browse...")
+        btn.setToolTip("Pick the folder where outputs will be written.")
         btn.clicked.connect(self._select_output)
         row.addWidget(self.output_edit, stretch=1)
         row.addWidget(btn)
@@ -239,10 +246,13 @@ class TraceWindow(QMainWindow):
         sg.addWidget(QLabel("\u00b5m/px:"))
         self.scale_spin = QDoubleSpinBox()
         self.scale_spin.setDecimals(4)
-        self.scale_spin.setRange(0.0, 100.0)
-        self.scale_spin.setValue(self.config.um_per_px or 0.0)
+        self.scale_spin.setRange(0.0001, 100.0)
         self.scale_spin.setSingleStep(0.001)
-        self.scale_spin.setSpecialValueText("pixel only")
+        # When the spinbox is at its minimum, show this placeholder instead of a number.
+        # Treated as "user hasn't entered a scale yet" — Run Pipeline will refuse.
+        self.scale_spin.setSpecialValueText("[conversion factor]")
+        self.scale_spin.setValue(self.config.um_per_px if self.config.um_per_px else self.scale_spin.minimum())
+        self.scale_spin.setToolTip("Microns per pixel — used to convert every measurement to physical units (µm, µm²).")
         self.scale_spin.valueChanged.connect(self._on_scale_changed)
         sg.addWidget(self.scale_spin, stretch=1)
         left_layout.addWidget(scale_group)
@@ -251,12 +261,18 @@ class TraceWindow(QMainWindow):
         settings_group = QGroupBox("Pipeline settings")
         stg = QVBoxLayout(settings_group)
         self.btn_settings = QPushButton("Edit settings...")
+        self.btn_settings.setToolTip(
+            "Open the full settings dialog: tabs for General, Custom Distances, "
+            "Landmarks, Models, Skeletonization & Pruning, Bridging, Tracing, Intervein."
+        )
         self.btn_settings.clicked.connect(self._open_settings_dialog)
         stg.addWidget(self.btn_settings)
         io_row = QHBoxLayout()
         btn_import = QPushButton("Import...")
+        btn_import.setToolTip("Load a previously-exported pipeline-config JSON file. Replaces the current settings.")
         btn_import.clicked.connect(self._import_config)
         btn_export = QPushButton("Export...")
+        btn_export.setToolTip("Save the current pipeline-config to a JSON file for reuse (CLI --config or GUI Import).")
         btn_export.clicked.connect(self._export_config)
         io_row.addWidget(btn_import)
         io_row.addWidget(btn_export)
@@ -272,6 +288,9 @@ class TraceWindow(QMainWindow):
                 continue
             chk = QCheckBox(label)
             chk.setChecked(True)
+            tip = OUTPUT_TOOLTIPS.get(key)
+            if tip:
+                chk.setToolTip(tip)
             self.output_checks[key] = chk
             ol.addWidget(chk)
 
@@ -319,8 +338,10 @@ class TraceWindow(QMainWindow):
         # -- Run / Cancel --
         btn_layout = QHBoxLayout()
         self.btn_run = QPushButton("Run Pipeline")
+        self.btn_run.setToolTip("Start processing every image in the input folder. Opens the output folder when done.")
         self.btn_run.clicked.connect(self._run_pipeline)
         self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setToolTip("Stop the running batch at the next safe point. Partial results are kept.")
         self.btn_cancel.clicked.connect(self._cancel_pipeline)
         self.btn_cancel.setEnabled(False)
         btn_layout.addWidget(self.btn_run)
@@ -398,7 +419,9 @@ class TraceWindow(QMainWindow):
     # Pipeline settings (PipelineConfig)
     # -----------------------------------------------------------------------
     def _on_scale_changed(self, val: float):
-        self.config.um_per_px = val if val > 0 else None
+        # The spinbox minimum doubles as the "[conversion factor]" placeholder
+        # state — treat it as no scale entered.
+        self.config.um_per_px = val if val > self.scale_spin.minimum() else None
 
     def reset_workers_warning(self):
         """Re-arm the spinner-change parallel-workers warning so it fires again on the next bump above 1.
@@ -424,6 +447,7 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
+
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)
@@ -538,7 +562,7 @@ class TraceWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Import failed", f"Could not load config:\n{e}")
             return
-        val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
+        val = self.config.um_per_px if self.config.um_per_px else self.scale_spin.minimum()
         self.scale_spin.blockSignals(True)
         self.scale_spin.setValue(val)
         self.scale_spin.blockSignals(False)
@@ -638,6 +662,14 @@ class TraceWindow(QMainWindow):
         self.scale_spin.blockSignals(True)
         self.scale_spin.setValue(scale_val)
         self.scale_spin.blockSignals(False)
+        # Migrate legacy "output/overlay" setting → both new keys (vein + intervein).
+        legacy_overlay = s.value("output/overlay", None)
+        if legacy_overlay is not None:
+            legacy_on = legacy_overlay == "true" or legacy_overlay is True
+            for new_key in ("vein_overlay", "intervein_overlay"):
+                if s.value(f"output/{new_key}", None) is None:
+                    s.setValue(f"output/{new_key}", legacy_on)
+            s.remove("output/overlay")
         for key, chk in self.output_checks.items():
             saved = s.value(f"output/{key}", None)
             if saved is not None:
@@ -709,6 +741,13 @@ class TraceWindow(QMainWindow):
         if not self._segmentation_model_path:
             QMessageBox.warning(
                 self, "Missing Model", "Please select a segmentation model folder in Settings → Models."
+            )
+            return
+        if self.config.um_per_px is None:
+            QMessageBox.warning(
+                self,
+                "Missing Scale",
+                "Please enter a µm/px conversion factor in the Scale field before running.",
             )
             return
 
@@ -821,6 +860,15 @@ class TraceWindow(QMainWindow):
             for r in results:
                 if r.error:
                     self._log(f"  {r.image_path.name} ({r.error_stage}): {r.error.splitlines()[0]}")
+
+        # Open the output folder in the system file manager so the user can
+        # see results without hunting for the path.
+        out_dir = self.output_edit.text().strip()
+        if out_dir and Path(out_dir).is_dir():
+            from PyQt5.QtCore import QUrl
+            from PyQt5.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir))
 
     def _on_error(self, msg):
         self.btn_run.setEnabled(True)

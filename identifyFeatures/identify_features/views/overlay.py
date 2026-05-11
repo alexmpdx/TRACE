@@ -114,23 +114,28 @@ def render_overlay(
     veins: list[VeinIdentification],
     regions: list[InterveinRegion],
     show_vein_tissue: bool = False,
+    show_veins: bool = True,
+    show_regions: bool = True,
 ) -> np.ndarray:
     """Render veins and regions as a color overlay on the wing image.
 
     Layers (bottom to top):
-    1. Light-opacity colored fills inside intervein regions
-    2. (optional) Vein tissue polygon fills if ``show_vein_tissue`` is True
-    3. Vein centerline strokes
-    4. Ectopic vein ID labels
-    5. Region name labels (with [M]/[I] status suffixes)
-    6. Color-key legend in the upper-left corner
+    1. Light-opacity colored fills inside intervein regions  (skipped if not show_regions)
+    2. (optional) Vein tissue polygon fills if ``show_vein_tissue``  (skipped if not show_veins)
+    3. Vein centerline strokes  (skipped if not show_veins)
+    4. Ectopic vein ID labels  (skipped if not show_veins)
+    5. Region name labels (with [M]/[I] status suffixes)  (skipped if not show_regions)
+    6. Color-key legend in the upper-left corner  (skipped if not show_veins; only veins are keyed)
 
     Args:
         base_image: BGR base image (e.g. original wing photo).
         veins: Identified veins with centerline and tissue_polygon.
         regions: Named intervein regions with polygon.
-        show_vein_tissue: If True, overlay buffered vein tissue polygons.
+        show_vein_tissue: If True (and show_veins), overlay buffered vein tissue polygons.
             Default False: skeleton centerlines only.
+        show_veins: If True, draw vein-related layers (tissue fills, centerlines,
+            ectopic labels, legend). Default True.
+        show_regions: If True, draw intervein region fills and labels. Default True.
 
     Returns:
         BGR overlay image (same dimensions as base_image).
@@ -138,15 +143,16 @@ def render_overlay(
     img = base_image.copy()
 
     # Layer 1: low-opacity colored region fills
-    region_layer = img.copy()
-    for r in regions:
-        color = _region_bgr(r.name)
-        for ring in _polygon_rings(r.polygon):
-            cv2.fillPoly(region_layer, [ring], color)
-    img = cv2.addWeighted(region_layer, _REGION_FILL_OPACITY, img, 1.0 - _REGION_FILL_OPACITY, 0)
+    if show_regions:
+        region_layer = img.copy()
+        for r in regions:
+            color = _region_bgr(r.name)
+            for ring in _polygon_rings(r.polygon):
+                cv2.fillPoly(region_layer, [ring], color)
+        img = cv2.addWeighted(region_layer, _REGION_FILL_OPACITY, img, 1.0 - _REGION_FILL_OPACITY, 0)
 
     # Layer 2: optional vein tissue fills
-    if show_vein_tissue:
+    if show_veins and show_vein_tissue:
         vein_layer = img.copy()
         for v in veins:
             if v.tissue_polygon is None:
@@ -156,44 +162,48 @@ def render_overlay(
         img = cv2.addWeighted(vein_layer, 0.5, img, 0.5, 0)
 
     # Layer 3: vein centerlines — thickness scales with image size
-    h, w = img.shape[:2]
-    stroke_scale = max(1.0, min(h, w) / 1800.0)
-    vein_thickness = max(3, int(round(5 * stroke_scale)))
-    for v in veins:
-        if v.centerline is None:
-            continue
-        pts = np.array(v.centerline.coords, dtype=np.int32)
-        cv2.polylines(img, [pts], False, _vein_bgr(v.vein_id), vein_thickness)
+    if show_veins:
+        h, w = img.shape[:2]
+        stroke_scale = max(1.0, min(h, w) / 1800.0)
+        vein_thickness = max(3, int(round(5 * stroke_scale)))
+        for v in veins:
+            if v.centerline is None:
+                continue
+            pts = np.array(v.centerline.coords, dtype=np.int32)
+            cv2.polylines(img, [pts], False, _vein_bgr(v.vein_id), vein_thickness)
 
     # Layer 4: ectopic vein labels
-    for v in veins:
-        if v.centerline is None or not v.vein_id.startswith("EV"):
-            continue
-        mx, my = int(v.centerline.centroid.x), int(v.centerline.centroid.y)
-        cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 12)
-        cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, _EV_COLOR_BGR, 5)
+    if show_veins:
+        for v in veins:
+            if v.centerline is None or not v.vein_id.startswith("EV"):
+                continue
+            mx, my = int(v.centerline.centroid.x), int(v.centerline.centroid.y)
+            cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 12)
+            cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, _EV_COLOR_BGR, 5)
 
     # Layer 5: region labels
-    for r in regions:
-        if r.polygon is None:
-            continue
-        cx, cy = int(r.polygon.centroid.x), int(r.polygon.centroid.y)
-        label = r.name
-        if r.status == "merged":
-            label += " [M]"
-        elif r.status == "inferred":
-            label += " [I]"
-        font_scale = 2.0
-        thickness_bg = 8
-        thickness_fg = 3
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness_fg)
-        tx = cx - tw // 2
-        ty = cy + th // 2
-        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness_bg)
-        cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness_fg)
+    if show_regions:
+        for r in regions:
+            if r.polygon is None:
+                continue
+            cx, cy = int(r.polygon.centroid.x), int(r.polygon.centroid.y)
+            label = r.name
+            if r.status == "merged":
+                label += " [M]"
+            elif r.status == "inferred":
+                label += " [I]"
+            font_scale = 2.0
+            thickness_bg = 8
+            thickness_fg = 3
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness_fg)
+            tx = cx - tw // 2
+            ty = cy + th // 2
+            cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness_bg)
+            cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness_fg)
 
-    # Layer 6: color key
-    _draw_color_key(img, veins)
+    # Layer 6: color key (vein swatches; only meaningful when veins are drawn)
+    if show_veins:
+        _draw_color_key(img, veins)
 
     return img
 
@@ -204,9 +214,18 @@ def render_overlay_to_file(
     regions: list[InterveinRegion],
     out_path: Path,
     show_vein_tissue: bool = False,
+    show_veins: bool = True,
+    show_regions: bool = True,
 ) -> None:
     """Render overlay and write to a PNG file."""
-    img_out = render_overlay(base_image, veins, regions, show_vein_tissue=show_vein_tissue)
+    img_out = render_overlay(
+        base_image,
+        veins,
+        regions,
+        show_vein_tissue=show_vein_tissue,
+        show_veins=show_veins,
+        show_regions=show_regions,
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), img_out)
 

@@ -190,7 +190,7 @@ Six phases, each building on previous results:
 
 Originally planned as a separate `crossvein_detector.py`. Implemented as Phases 4 and 4b inside `vein_tracer.py` because crossvein detection depends on the labeled longitudinals produced by earlier phases. No separate module needed.
 
-### Step 5.5: Split Merged Intervein Polygons — DONE
+### Step 5.5: Split Merged Intervein Polygons — DONE (pipeline_reference §6.1)
 
 **File:** `models/intervein_splitter.py`, entry point `split_merged_intervein_polygons()`
 
@@ -204,7 +204,7 @@ Preprocessing pass that sits between vein tracing and intervein naming. Addresse
 
 The existing merge-detection (`_check_merged` in `intervein_namer.py`) stays in place as a safety net for merges the morphological pass misses.
 
-### Step 6: Name Intervein Regions — DONE
+### Step 6: Name Intervein Regions — DONE (pipeline_reference §6.2)
 
 **File:** `models/intervein_namer.py`, entry point `name_intervein_regions()`
 
@@ -242,7 +242,7 @@ Multi-factor scoring (0.0–1.0) for every identification:
 - **Crossveins:** connectivity to expected longitudinals, orientation, length, position
 - **Regions:** all bounding veins identified, area within range, AP position correct
 
-### Step 10: Assign Vein Tissue Polygons — DONE
+### Step 10: Assign Vein Tissue Polygons — DONE (pipeline_reference §6.3)
 
 **File:** `models/intervein_splitter.py`, function `assign_vein_tissue_polygons()`
 

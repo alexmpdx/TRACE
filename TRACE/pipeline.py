@@ -25,6 +25,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("TRACE")
 
 # User-selectable Stage 2 outputs. Keys are internal IDs; values are GUI labels.
+# vein_overlay and intervein_overlay together produce a single overlay PNG; the
+# checkbox combination controls what gets drawn:
+#   both selected  → combined vein + intervein overlay
+#   vein only      → vein-only overlay (intervein pipeline skipped for speed)
+#   intervein only → intervein-only overlay (no vein layers)
+#   neither        → no overlay PNG written
 OUTPUT_TYPES = OrderedDict(
     [
         ("wing_isolated_image", "Isolated single-wing image (Stage 0; requires wing-isolation model)"),
@@ -32,12 +38,48 @@ OUTPUT_TYPES = OrderedDict(
         ("landmarks_overlay", "Landmark points overlay PNG"),
         ("segmentation_overlay", "Vein/intervein inference overlay PNG"),
         ("geojson", "GeoJSON (named veins & regions)"),
-        ("overlay", "Overlay PNG"),
+        ("vein_overlay", "Vein overlay PNG"),
+        ("intervein_overlay", "Intervein region overlay PNG"),
         ("ap_overlay", "AP compartment overlay PNG"),
         ("cv_ratio_overlay", "CV ratio overlay PNG"),
         ("csv", "Batch measurements CSV"),
     ]
 )
+
+# Per-output tooltips for the GUI checkboxes. Keys match OUTPUT_TYPES.
+OUTPUT_TOOLTIPS = {
+    "wing_isolated_image": (
+        "Save the masked single-wing image produced by Stage 0 (wingIsolator). "
+        "Only generated when a wing-isolation model is configured."
+    ),
+    "chopped_image": ("Save the hinge-removed image written by HingeChopper before segmentation."),
+    "landmarks_overlay": ("Render predicted landmark points on a PNG copy of the input image."),
+    "segmentation_overlay": ("Render the raw vein/intervein semantic-segmentation classes on top of the image."),
+    "geojson": (
+        "Per-wing GeoJSON file with named vein centerlines and intervein region polygons "
+        "(consumable by QuPath, napari, etc.)."
+    ),
+    "vein_overlay": ("Render labeled vein centerlines (L1–L5, ACV, PCV, costa, …) on a PNG copy of the image."),
+    "intervein_overlay": (
+        "Render named intervein regions (marginal, submarginal, discal, …) on a PNG copy of the image."
+    ),
+    "ap_overlay": ("Render the anterior/posterior compartments split by the L3-L4 axis."),
+    "cv_ratio_overlay": ("Render the cv-ratio (anterior crossvein vs. posterior crossvein position) visualization."),
+    "csv": (
+        "Single batch-level CSV with one row per image: vein lengths, region areas, "
+        "wing dimensions, and any configured custom landmark distances."
+    ),
+}
+
+# Back-compat: legacy "overlay" key is rewritten to the pair below at the
+# entry to trace_folder() / _run(). Anything reading OUTPUT_TYPES sees the
+# new keys only.
+_LEGACY_OVERLAY_ALIASES = {"overlay": ("vein_overlay", "intervein_overlay")}
+
+# Outputs that require Step 6.1/6.2 (intervein polygon splitting + region naming).
+# Used to decide whether to set PipelineConfig.skip_intervein_regions = True
+# when nothing requested actually needs the intervein output.
+_INTERVEIN_DEPENDENT_OUTPUTS = frozenset({"intervein_overlay", "geojson", "csv"})
 
 # Outputs that are upstream/intermediate artifacts (preprocessing or raw analysis files).
 # In the GUI these live in the Settings dialog → General tab. The remaining keys are
@@ -83,7 +125,8 @@ _OUTPUT_STAGE_REQUIREMENTS = {
     "landmarks_overlay": (True, False, False),
     "segmentation_overlay": (True, True, True),
     "geojson": (True, True, True),
-    "overlay": (True, True, True),
+    "vein_overlay": (True, True, True),
+    "intervein_overlay": (True, True, True),
     "ap_overlay": (True, True, True),
     "cv_ratio_overlay": (True, True, True),
     "csv": (True, True, True),
@@ -91,7 +134,14 @@ _OUTPUT_STAGE_REQUIREMENTS = {
 
 # Outputs that require running Stage 2 (identifyFeatures analysis), as opposed to
 # just copying / rendering preprocessing artifacts.
-_STAGE2_ANALYSIS_OUTPUTS = {"geojson", "overlay", "ap_overlay", "cv_ratio_overlay", "csv"}
+_STAGE2_ANALYSIS_OUTPUTS = {
+    "geojson",
+    "vein_overlay",
+    "intervein_overlay",
+    "ap_overlay",
+    "cv_ratio_overlay",
+    "csv",
+}
 
 
 def _required_stages(outputs: set[str]) -> tuple[bool, bool, bool]:
@@ -313,11 +363,25 @@ def trace_folder(
 
     if outputs is None:
         outputs = set(OUTPUT_TYPES.keys())
+    else:
+        # Migrate legacy "overlay" → both new keys so old configs/CLI invocations
+        # keep producing the combined overlay.
+        outputs = set(outputs)
+        for legacy_key, replacements in _LEGACY_OVERLAY_ALIASES.items():
+            if legacy_key in outputs:
+                outputs.discard(legacy_key)
+                outputs.update(replacements)
 
     if config is None:
         from identify_features.config import PipelineConfig
 
         config = PipelineConfig()
+
+    # Skip §6.1/§6.2 (the resource-heavy intervein passes) when no requested
+    # output depends on intervein region data. §6.3 vein tissue assignment
+    # still runs because vein_overlay / overlay rendering needs tissue polygons.
+    if not (outputs & _INTERVEIN_DEPENDENT_OUTPUTS):
+        config.skip_intervein_regions = True
 
     if keep_intermediates:
         preproc_dir = output_dir / "intermediates"
@@ -522,7 +586,8 @@ def _run(
 
             needs_base = bool(
                 {
-                    "overlay",
+                    "vein_overlay",
+                    "intervein_overlay",
                     "ap_overlay",
                     "cv_ratio_overlay",
                     "landmarks_overlay",
@@ -539,7 +604,9 @@ def _run(
                 if base is None:
                     logger.warning("%s: could not read image for overlays, skipping PNG outputs", stem)
 
-            if "overlay" in outputs and base is not None and wing_result is not None:
+            want_vein = "vein_overlay" in outputs
+            want_intervein = "intervein_overlay" in outputs
+            if (want_vein or want_intervein) and base is not None and wing_result is not None:
                 ov_path = output_dir / f"{stem}_overlay.png"
                 render_overlay_to_file(
                     base,
@@ -547,6 +614,8 @@ def _run(
                     wing_result.intervein_regions,
                     ov_path,
                     show_vein_tissue=show_vein_tissue,
+                    show_veins=want_vein,
+                    show_regions=want_intervein,
                 )
                 trace_result.overlay_path = ov_path
 

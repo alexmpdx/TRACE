@@ -7,15 +7,80 @@ A step-by-step guide to the landmark-anchored Drosophila wing vein identificatio
 ## Table of Contents
 
 1. [Overview](#1-overview)
+    - [What the pipeline does](#what-the-pipeline-does)
+    - [Design principle](#design-principle)
+    - [High-level flow](#high-level-flow)
+    - [The 10 canonical veins](#the-10-canonical-veins)
+    - [Landmarks](#landmarks)
+    - [Longitudinal endpoint pairs](#longitudinal-endpoint-pairs)
 2. [Input Parsing](#2-input-parsing)
-3. [Skeleton Building](#3-skeleton-building) (17 steps)
+    - 2.1. [Load detection GeoJSON](#21-load-detection-geojson)
+    - 2.2. [Load landmarks GeoJSON](#22-load-landmarks-geojson)
+    - 2.3. [Compute wing outline](#23-compute-wing-outline)
+3. [Skeleton Building](#3-skeleton-building)
+    - 3.1. [Rasterize vein polygons to binary mask](#31-rasterize-vein-polygons-to-binary-mask)
+    - 3.2. [Skeletonize (RIDGE method)](#32-skeletonize-ridge-method)
+    - 3.3. [Compute median vein width](#33-compute-median-vein-width)
+    - 3.4. [Local-width-aware branch pruning](#34-local-width-aware-branch-pruning)
+    - 3.5. [Build raw graph from skeleton](#35-build-raw-graph-from-skeleton)
+    - 3.6. [Simplify graph (contract degree-2 nodes)](#36-simplify-graph-contract-degree-2-nodes)
+    - 3.7. [Merge nearby junction nodes](#37-merge-nearby-junction-nodes)
+    - 3.8. [Gap bridging (first pass)](#38-gap-bridging-first-pass)
+    - 3.9. [Remove redundant overlapping edges](#39-remove-redundant-overlapping-edges)
+    - 3.10. [Absorb tiny segments](#310-absorb-tiny-segments)
+    - 3.11. [Merge close nodes](#311-merge-close-nodes)
+    - 3.12. [Remove small isolated fragments](#312-remove-small-isolated-fragments)
+    - 3.13. [Gap bridging (second pass)](#313-gap-bridging-second-pass)
+    - 3.14. [Cleanup before final bridge pass](#314-cleanup-before-final-bridge-pass)
+    - 3.15. [Gap bridging (third pass — relaxed facing for short stubs)](#315-gap-bridging-third-pass--relaxed-facing-for-short-stubs)
+    - 3.16. [Final single-pass stub removal (local vein width)](#316-final-single-pass-stub-removal-local-vein-width)
+    - 3.17. [Snap edge endpoints to node positions](#317-snap-edge-endpoints-to-node-positions)
 4. [Landmark Anchoring](#4-landmark-anchoring)
-5. [Vein Labeling](#5-vein-labeling) (Phases 0-5b, including 4a-4d)
-5.5. [Intervein Polygon Splitting](#55-intervein-polygon-splitting-morphological-open-under-constraint)
-5.6. [Intervein Region Naming](#56-intervein-region-naming)
-5.7. [Vein Tissue Polygon Assignment](#57-vein-tissue-polygon-assignment)
-6. [Output](#6-output)
-7. [Parameter Reference](#7-parameter-reference)
+    - [What it does](#what-it-does)
+    - [Algorithm](#algorithm)
+5. [Vein Labeling](#5-vein-labeling)
+    - [Phase 0: Merge longitudinals through crossvein junctions (DISABLED)](#phase-0-merge-longitudinals-through-crossvein-junctions-disabled)
+    - [Phase 1: Detect costa edges](#phase-1-detect-costa-edges)
+    - [Phase 1b: Assign chain ids through degree-2 nodes](#phase-1b-assign-chain-ids-through-degree-2-nodes)
+    - [Phase 1c: Landmark-anchored shortest-path longitudinal labeling (primary)](#phase-1c-landmark-anchored-shortest-path-longitudinal-labeling-primary)
+    - [Phase 2: Label edges at landmark positions (fallback)](#phase-2-label-edges-at-landmark-positions-fallback)
+    - [Phase 2b: Propagate labels through degree-2 nodes](#phase-2b-propagate-labels-through-degree-2-nodes)
+    - [Phase 2c: Extend to distal landmarks](#phase-2c-extend-to-distal-landmarks)
+    - [Phase 2d: Re-propagate after extension](#phase-2d-re-propagate-after-extension)
+    - [Phase 2e: Connect disconnected vein fragments](#phase-2e-connect-disconnected-vein-fragments)
+    - [Phase 3: Detect L6](#phase-3-detect-l6)
+    - [Phase 4: Detect crossveins (primary method)](#phase-4-detect-crossveins-primary-method)
+    - [Phase 4a: Junction-based crossvein detection](#phase-4a-junction-based-crossvein-detection)
+    - [Phase 4b: Fallback crossvein detection using landmarks](#phase-4b-fallback-crossvein-detection-using-landmarks)
+    - [Phase 4c: Post-crossvein degree-2 propagation](#phase-4c-post-crossvein-degree-2-propagation)
+    - [Phase 4d: Label ectopic veins (EV1, EV2, …)](#phase-4d-label-ectopic-veins-ev1-ev2-)
+    - [Phase 5: Build VeinIdentification objects](#phase-5-build-veinidentification-objects)
+    - [Phase 5b: Synthesize crossveins from landmarks (fallback)](#phase-5b-synthesize-crossveins-from-landmarks-fallback)
+6. [Intervein Labeling](#6-intervein-labeling)
+    - 6.1. [Intervein Polygon Splitting](#61-intervein-polygon-splitting-h-maxima-seed-detection--watershed)
+    - 6.2. [Intervein Region Naming](#62-intervein-region-naming)
+    - 6.3. [Vein Tissue Polygon Assignment](#63-vein-tissue-polygon-assignment)
+7. [Output](#7-output)
+    - 7.1. [VeinIdentification objects](#71-veinidentification-objects)
+    - 7.2. [InterveinRegion objects](#72-interveinregion-objects)
+    - 7.3. [GeoJSON export (GT_naming format)](#73-geojson-export-gt_naming-format)
+    - 7.4. [CSV export](#74-csv-export)
+    - 7.5. [Overlay images](#75-overlay-images)
+8. [Parameter Reference](#8-parameter-reference)
+    - [Scale](#scale)
+    - [Skeletonization](#skeletonization)
+    - [Pruning](#pruning)
+    - [Gap bridging (pass 1)](#gap-bridging-pass-1)
+    - [Gap bridging (pass 2)](#gap-bridging-pass-2)
+    - [Gap bridging (pass 3 — relaxed facing for short stubs)](#gap-bridging-pass-3--relaxed-facing-for-short-stubs)
+    - [Landmark anchoring](#landmark-anchoring)
+    - [Longitudinal labeling (Phase 1c)](#longitudinal-labeling-phase-1c)
+    - [Costa detection](#costa-detection)
+    - [Crossvein detection](#crossvein-detection)
+    - [Vein tracing](#vein-tracing)
+    - [Intervein polygon splitting (§6.1)](#intervein-polygon-splitting-61)
+    - [Intervein region naming](#intervein-region-naming)
+    - [Ectopic detection](#ectopic-detection)
 
 ---
 
@@ -1157,7 +1222,7 @@ for each unique label in edge_labels:
 
 **What**: For each crossvein (ACV, PCV) still missing after Phases 4/4a/4b, draw a synthetic centerline between the crossvein's landmark points and attach it as a `VeinIdentification` with `status = VeinStatus.INFERRED`.
 
-**Why**: On wings where the pixel classifier fuses L3+ACV+L4 (or L4+PCV+L5) into a single tissue blob, the skeleton has no separate crossvein path at all — every stub-based detection phase (Phase 4, 4a, 4b) returns nothing. Without a crossvein centerline, downstream intervein splitting (§5.5) cannot use the crossvein as a barrier, and 1st-basal + 1st-posterior (or discal + 2nd-posterior) end up as a single fused region named `"1st basal + 1st posterior"`. A synthetic centerline drawn from `ACV.a → ACV.p` (or `PCV.a → PCV.p`) is geometrically close enough to the true crossvein location to serve as a splitter barrier, even when no actual skeleton tissue exists there.
+**Why**: On wings where the pixel classifier fuses L3+ACV+L4 (or L4+PCV+L5) into a single tissue blob, the skeleton has no separate crossvein path at all — every stub-based detection phase (Phase 4, 4a, 4b) returns nothing. Without a crossvein centerline, downstream intervein splitting (§6.1) cannot use the crossvein as a barrier, and 1st-basal + 1st-posterior (or discal + 2nd-posterior) end up as a single fused region named `"1st basal + 1st posterior"`. A synthetic centerline drawn from `ACV.a → ACV.p` (or `PCV.a → PCV.p`) is geometrically close enough to the true crossvein location to serve as a splitter barrier, even when no actual skeleton tissue exists there.
 
 **Algorithm**:
 ```
@@ -1190,11 +1255,25 @@ for (crossvein_name, endpoint_landmarks) in [
 
 ---
 
-## 5.5. Intervein Polygon Splitting (h-maxima seed detection + watershed)
+## 6. Intervein Labeling
+
+The vein-labeling pipeline (Section 5) produces labeled vein centerlines. Intervein labeling produces the polygonal regions between those veins and the filled tissue polygons around each vein. Three passes contribute, all running after Section 5:
+
+- **Intervein Polygon Splitting** (§6.1) — re-split classifier-fused intervein polygons using vein centerlines as watershed barriers.
+- **Intervein Region Naming** (§6.2) — assign canonical region names (marginal, submarginal, 1st basal, …) by matching adjacent veins to `topology.REGION_EXPECTED_VEINS`.
+- **Vein Tissue Polygon Assignment** (§6.3) — buffer each vein centerline to tissue width and clip to the wing outline, populating `VeinIdentification.tissue_polygon` for downstream rendering and export.
+
+Code execution order in `controllers/pipeline.py` is: vein tissue assignment first (§6.3), then intervein polygon splitting (§6.1), then intervein region naming (§6.2). The intervein splitter consumes the vein tissue boundaries from §6.3 to define its barrier mask.
+
+**Skipping intervein regions** — set `PipelineConfig.skip_intervein_regions = True` (CLI: `--skip-intervein-regions`) to bypass §6.1 and §6.2 entirely. Use this when only vein outputs are needed; the watershed and distance-transform work in §6.1 is the heaviest part of the pipeline. §6.3 still runs because vein tissue polygons feed downstream rendering and GeoJSON export. When skipped, `WingResult.intervein_regions` is an empty list and no region rows are written to the CSV or GeoJSON; vein rows are unaffected.
+
+---
+
+## 6.1. Intervein Polygon Splitting (h-maxima seed detection + watershed)
 
 **Source**: `models/intervein_splitter.py`, function `split_merged_intervein_polygons()`
 
-**What**: Preprocessing pass that runs between vein labeling (Step 5) and intervein region naming (Step 6). The pixel classifier occasionally fuses adjacent intervein regions where a crossvein is short or interrupted. This pass physically re-splits such polygons using h-maxima peak detection on the distance transform, followed by constrained watershed.
+**What**: Preprocessing pass that runs between vein labeling (Section 5) and intervein region naming (§6.2). The pixel classifier occasionally fuses adjacent intervein regions where a crossvein is short or interrupted. This pass physically re-splits such polygons using h-maxima peak detection on the distance transform, followed by constrained watershed.
 
 **Why**: Downstream region naming (`intervein_namer.py`) can only label the polygons it's given. If the classifier merged discal and 2nd posterior into one blob, the namer can at best report a `"discal + 2nd posterior"` merge label. This stage attempts to produce two separate polygons so each region gets its own entry.
 
@@ -1257,11 +1336,11 @@ for each label:
 
 ---
 
-## 5.6. Intervein Region Naming
+## 6.2. Intervein Region Naming
 
 **Source**: `models/intervein_namer.py`, function `name_intervein_regions()`
 
-**What**: Assigns a region name (marginal, submarginal, 1st basal, 1st posterior, discal, 2nd posterior, 3rd posterior) to each intervein polygon output by Step 5.5 by matching the polygon's adjacent veins against `topology.REGION_EXPECTED_VEINS`.
+**What**: Assigns a region name (marginal, submarginal, 1st basal, 1st posterior, discal, 2nd posterior, 3rd posterior) to each intervein polygon output by §6.1 by matching the polygon's adjacent veins against `topology.REGION_EXPECTED_VEINS`.
 
 **Pipeline**:
 1. **Adjacency**: buffer each identified vein centerline by `vein_buffer_vw × median vein width` and compute the set of veins whose buffered footprint intersects the polygon boundary by at least `adjacency_min_length_vw × median vein width`.
@@ -1302,7 +1381,7 @@ This correctly handles 3+ region fusions that pair-only detection missed, e.g. `
 
 ---
 
-## 5.7. Vein Tissue Polygon Assignment
+## 6.3. Vein Tissue Polygon Assignment
 
 **Source**: `models/intervein_splitter.py`, function `assign_vein_tissue_polygons()`
 
@@ -1324,9 +1403,9 @@ for each vein with a centerline:
 
 ---
 
-## 6. Output
+## 7. Output
 
-### 6.1 VeinIdentification objects
+### 7.1 VeinIdentification objects
 
 Each run produces a `list[VeinIdentification]` — one per canonical vein plus any ectopic veins (EV1, EV2, ...):
 
@@ -1341,7 +1420,7 @@ Each run produces a `list[VeinIdentification]` — one per canonical vein plus a
 | `length_px` | float | Total length in pixels |
 | `evidence` | list[str] | How the vein was identified (e.g., "3 edges") |
 
-### 6.2 InterveinRegion objects
+### 7.2 InterveinRegion objects
 
 The naming stage produces a `list[InterveinRegion]` with 7 entries (one per canonical region):
 
@@ -1353,7 +1432,7 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 | `bounding_veins` | set[str] | Veins adjacent to this region |
 | `status` | str | "identified", "merged", "inferred" |
 
-### 6.3 GeoJSON export (GT_naming format)
+### 7.3 GeoJSON export (GT_naming format)
 
 **Source**: `views/geojson_export.py`, function `export_geojson()`
 
@@ -1366,7 +1445,7 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 - `properties.classification.color`: RGB array from `VEIN_COLORS` / `REGION_COLORS`
 - `properties.measurements`: area in pixels, area in µm² (if `um_per_px` provided), vein length in pixels/µm
 
-### 6.4 CSV export
+### 7.4 CSV export
 
 **Source**: `views/csv_export.py`
 
@@ -1383,7 +1462,7 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 - **CV ratio**: Crossvein distance divided by wing length (dimensionless)
 - **Anterior/posterior compartment areas**: Wing split along L4 vein axis. Method: minimum rotated bounding box around L4 centerline → anterior long edge (closer to L3) → distal (DTip) end shifted anteriorly by 0.5× median L4 vein width to align with tissue edge → extended to bisect wing outline. Halves labeled by proximity to L3 (anterior) vs L5 (posterior).
 
-### 6.5 Overlay images
+### 7.5 Overlay images
 
 **Source**: `views/overlay.py`
 
@@ -1395,7 +1474,7 @@ Three overlay PNGs generated per specimen (with `--overlay` flag):
 
 ---
 
-## 7. Parameter Reference
+## 8. Parameter Reference
 
 All parameters live in `config.py` as fields of `PipelineConfig`. Distance thresholds specified in µm are converted to pixels using `um_per_px = 0.483`.
 
@@ -1492,7 +1571,7 @@ All parameters live in `config.py` as fields of `PipelineConfig`. Distance thres
 | `merge_max_gap_um` | 50µm | Max gap for line merging in output |
 | `soft_landmark_reach_metric` | `"path_length"` | Tier 2c L4/L5 reach metric: `"path_length"` (Dijkstra over `length_px`) or `"hops"` (BFS) |
 
-### Intervein polygon splitting (§5.5)
+### Intervein polygon splitting (§6.1)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `intervein_split_h_vw` | 2.0 | h-maxima depth threshold (× median vein width) for seed detection |
