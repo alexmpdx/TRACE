@@ -42,9 +42,27 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
 from TRACE.presets_loader import load_presets
+
+# Friendly display names for the GateConfigPanel landmark labels. The shorthand
+# is what LandmarkLocator stores internally; the right-hand text is what the
+# Landmarks tab should show users.
+_LANDMARK_DISPLAY_NAMES: dict[str, str] = {
+    "acv_a": "ACV-L3 junction",
+    "acv_p": "ACV-L4 junction",
+    "alula_notch": "alula notch",
+    "dtip": "L3 distal end",
+    "l1_rs": "L1-Rs junction",
+    "l2_d": "L2 distal end",
+    "l2_l3": "L2-L3-Rs junction",
+    "l4_d": "L4 distal end",
+    "l4_l5": "L4-L5 junction",
+    "l5_d": "L5 distal end",
+    "pcv_a": "PCV-L4 junction",
+    "pcv_p": "PCV-L5 junction",
+    "subcostal_break": "subcostal break",
+}
 
 
 def _merge_gate_override(base: dict, override: dict) -> dict:
@@ -123,7 +141,7 @@ class PipelineConfigDialog(QDialog):
         # Apply current intermediate-output state to the checkboxes.
         if intermediate_outputs:
             for key, chk in self._intermediate_output_chks.items():
-                chk.setChecked(bool(intermediate_outputs.get(key, True)))
+                chk.setChecked(bool(intermediate_outputs.get(key, False)))
 
     # -----------------------------------------------------------------------
     # Public API
@@ -188,6 +206,7 @@ class PipelineConfigDialog(QDialog):
         tabs.addTab(self._build_general_tab(), "General")
         tabs.addTab(self._build_custom_distances_tab(), "Custom Distances")
         tabs.addTab(self._build_landmarks_tab(), "Landmarks")
+        tabs.addTab(self._build_models_tab(), "Models")
         tabs.addTab(self._build_skel_pruning_tab(), "Skeletonization && Pruning")
         tabs.addTab(self._build_bridging_tab(), "Bridging")
         tabs.addTab(self._build_tracing_tab(), "Tracing")
@@ -220,39 +239,11 @@ class PipelineConfigDialog(QDialog):
         self._wing_enable_chk = QCheckBox("Enable wing isolation (Stage 0)")
         self._wing_enable_chk.setToolTip(
             "When enabled, every input image is masked through wingIsolator before "
-            "LandmarkLocator sees it. Useful when images contain multiple wings."
+            "LandmarkLocator sees it. Useful when images contain multiple wings. "
+            "Pick the wing-identification model in the Models tab."
         )
         self._wing_enable_chk.toggled.connect(self._on_wing_isolation_toggled)
         wig_layout.addWidget(self._wing_enable_chk)
-
-        wig_layout.addWidget(QLabel("Wing identification model folder:"))
-        wing_row = QHBoxLayout()
-        self._wing_model_edit = QLineEdit()
-        self._wing_model_edit.setReadOnly(True)
-        self._wing_model_edit.setPlaceholderText("Select wing-identification model folder...")
-        self._wing_model_edit.setToolTip(
-            "modelTOjson model directory for wing/background segmentation. The model's "
-            "metadata.json must declare a 'wing' class."
-        )
-        self._wing_model_browse = QPushButton("Browse...")
-        self._wing_model_browse.clicked.connect(self._select_wing_model_folder)
-        wing_row.addWidget(self._wing_model_edit, stretch=1)
-        wing_row.addWidget(self._wing_model_browse)
-        wig_layout.addLayout(wing_row)
-
-        wing_form = QFormLayout()
-        self._wing_expand_spin = QDoubleSpinBox()
-        self._wing_expand_spin.setRange(0.0, 1.0)
-        self._wing_expand_spin.setDecimals(3)
-        self._wing_expand_spin.setSingleStep(0.01)
-        self._wing_expand_spin.setValue(0.05)
-        self._wing_expand_spin.setToolTip(
-            "Stage 0 mask buffer, as a fraction of sqrt(wing area). "
-            "0 = exact polygon (no buffer); 0.05 = ~5% expansion. "
-            "Used only when wing isolation is enabled."
-        )
-        wing_form.addRow("Buffer (× √area)", self._wing_expand_spin)
-        wig_layout.addLayout(wing_form)
         layout.addWidget(gb)
 
         gb = QGroupBox("Wing rotation (optional)")
@@ -299,7 +290,7 @@ class PipelineConfigDialog(QDialog):
             if key not in INTERMEDIATE_OUTPUTS:
                 continue
             chk = QCheckBox(label)
-            chk.setChecked(True)
+            chk.setChecked(False)
             self._intermediate_output_chks[key] = chk
             im_layout.addWidget(chk)
         layout.addWidget(gb)
@@ -357,8 +348,13 @@ class PipelineConfigDialog(QDialog):
 
     def _select_wing_model_folder(self):
         from PyQt5.QtWidgets import QFileDialog
+        from TRACE.gui import _picker_initial_path
 
-        folder = QFileDialog.getExistingDirectory(self, "Select Wing-Identification Model Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Wing-Identification Model Folder",
+            _picker_initial_path(self._wing_model_edit.text()),
+        )
         if folder:
             self._wing_model_edit.setText(folder)
 
@@ -483,10 +479,148 @@ class PipelineConfigDialog(QDialog):
         if self._initial_gate_override:
             gate_config = _merge_gate_override(gate_config, self._initial_gate_override)
 
-        self._gate_panel = GateConfigPanel(gate_config, landmark_order, w)
+        self._gate_panel = GateConfigPanel(gate_config, landmark_order, w, display_names=_LANDMARK_DISPLAY_NAMES)
         layout.addWidget(self._gate_panel)
         layout.addStretch(1)
         return w
+
+    def _build_models_tab(self) -> QWidget:
+        """Pipeline model paths: landmark, segmentation, and (optional) wing isolation."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        # -- Landmark model --
+        gb = QGroupBox("Landmark model")
+        lm_layout = QVBoxLayout(gb)
+        lm_layout.addWidget(QLabel("Checkpoint (.pt) or fold folder (best_fold*.pt):"))
+        lm_row = QHBoxLayout()
+        self._lm_model_edit = QLineEdit()
+        self._lm_model_edit.setReadOnly(True)
+        self._lm_model_edit.setPlaceholderText("Select .pt checkpoint or fold folder...")
+        self._lm_model_edit.setToolTip(
+            "Pick a single .pt checkpoint for fast single-fold inference, "
+            "or pick a folder containing best_fold*.pt for 5-fold ensemble "
+            "(~5× slower, more robust)."
+        )
+        btn_lm_file = QPushButton("File...")
+        btn_lm_file.clicked.connect(self._select_landmark_model_file)
+        btn_lm_folder = QPushButton("Folder...")
+        btn_lm_folder.setToolTip("Pick a folder of best_fold*.pt checkpoints (5-fold ensemble).")
+        btn_lm_folder.clicked.connect(self._select_landmark_model_folder)
+        lm_row.addWidget(self._lm_model_edit, stretch=1)
+        lm_row.addWidget(btn_lm_file)
+        lm_row.addWidget(btn_lm_folder)
+        lm_layout.addLayout(lm_row)
+        if self._calib_lm_path:
+            self._lm_model_edit.setText(self._calib_lm_path)
+        layout.addWidget(gb)
+
+        # -- Segmentation model --
+        gb = QGroupBox("Segmentation model")
+        seg_layout = QVBoxLayout(gb)
+        seg_layout.addWidget(QLabel("Model folder (contains metadata.json + weights):"))
+        seg_row = QHBoxLayout()
+        self._seg_model_edit = QLineEdit()
+        self._seg_model_edit.setReadOnly(True)
+        self._seg_model_edit.setPlaceholderText("Select segmentation model folder...")
+        btn_seg = QPushButton("Browse...")
+        btn_seg.clicked.connect(self._select_segmentation_model_folder)
+        seg_row.addWidget(self._seg_model_edit, stretch=1)
+        seg_row.addWidget(btn_seg)
+        seg_layout.addLayout(seg_row)
+        if self._calib_seg_path:
+            self._seg_model_edit.setText(self._calib_seg_path)
+        layout.addWidget(gb)
+
+        # -- Wing isolation model (Stage 0, optional) --
+        # The enable/disable checkbox lives on the General tab; this group
+        # holds the model path + buffer parameter only.
+        gb = QGroupBox("Wing isolation model (optional)")
+        wig_layout = QVBoxLayout(gb)
+        wig_layout.addWidget(QLabel("Wing identification model folder:"))
+        wing_row = QHBoxLayout()
+        self._wing_model_edit = QLineEdit()
+        self._wing_model_edit.setReadOnly(True)
+        self._wing_model_edit.setPlaceholderText("Select wing-identification model folder...")
+        self._wing_model_edit.setToolTip(
+            "modelTOjson model directory for wing/background segmentation. The model's "
+            "metadata.json must declare a 'wing' class."
+        )
+        self._wing_model_browse = QPushButton("Browse...")
+        self._wing_model_browse.clicked.connect(self._select_wing_model_folder)
+        wing_row.addWidget(self._wing_model_edit, stretch=1)
+        wing_row.addWidget(self._wing_model_browse)
+        wig_layout.addLayout(wing_row)
+
+        wing_form = QFormLayout()
+        self._wing_expand_spin = QDoubleSpinBox()
+        self._wing_expand_spin.setRange(0.0, 1.0)
+        self._wing_expand_spin.setDecimals(3)
+        self._wing_expand_spin.setSingleStep(0.01)
+        self._wing_expand_spin.setValue(0.05)
+        self._wing_expand_spin.setToolTip(
+            "Stage 0 mask buffer, as a fraction of sqrt(wing area). "
+            "0 = exact polygon (no buffer); 0.05 = ~5% expansion. "
+            "Used only when wing isolation is enabled."
+        )
+        wing_form.addRow("Buffer (× √area)", self._wing_expand_spin)
+        wig_layout.addLayout(wing_form)
+        layout.addWidget(gb)
+
+        layout.addStretch(1)
+        return w
+
+    def get_landmark_model_path(self) -> str:
+        return self._lm_model_edit.text().strip()
+
+    def get_segmentation_model_path(self) -> str:
+        return self._seg_model_edit.text().strip()
+
+    def _select_landmark_model_file(self):
+        from PyQt5.QtWidgets import QFileDialog
+        from TRACE.gui import _picker_initial_path
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Landmark Model Checkpoint",
+            _picker_initial_path(self._lm_model_edit.text()),
+            "PyTorch Checkpoint (*.pt);;All Files (*)",
+        )
+        if path:
+            self._lm_model_edit.setText(path)
+
+    def _select_landmark_model_folder(self):
+        from pathlib import Path as _P
+
+        from PyQt5.QtWidgets import QFileDialog
+        from TRACE.gui import _picker_initial_path
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Fold Checkpoint Folder (contains best_fold*.pt)",
+            _picker_initial_path(self._lm_model_edit.text()),
+        )
+        if folder:
+            if not sorted(_P(folder).glob("best_fold*.pt")):
+                QMessageBox.warning(
+                    self,
+                    "No fold checkpoints",
+                    f"No best_fold*.pt files in {folder}. Pick a folder containing 5-fold CV checkpoints.",
+                )
+                return
+            self._lm_model_edit.setText(folder)
+
+    def _select_segmentation_model_folder(self):
+        from PyQt5.QtWidgets import QFileDialog
+        from TRACE.gui import _picker_initial_path
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Segmentation Model Folder",
+            _picker_initial_path(self._seg_model_edit.text()),
+        )
+        if folder:
+            self._seg_model_edit.setText(folder)
 
     def _build_skel_pruning_tab(self) -> QWidget:
         w = QWidget()
@@ -783,7 +917,7 @@ class PipelineConfigDialog(QDialog):
         self._wing_model_edit.clear()
         self._on_wing_isolation_toggled(False)
         for chk in self._intermediate_output_chks.values():
-            chk.setChecked(True)
+            chk.setChecked(False)
         parent = self.parent()
         if parent is not None and hasattr(parent, "reset_workers_warning"):
             parent.reset_workers_warning()

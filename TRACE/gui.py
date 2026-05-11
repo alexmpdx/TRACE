@@ -12,6 +12,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from identify_features.config import PipelineConfig
+from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -36,8 +37,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES, trace_folder
 from TRACE.settings_dialog import PipelineConfigDialog
@@ -48,6 +47,22 @@ from TRACE.settings_dialog import PipelineConfigDialog
 
 
 _CAPTURED_LOGGERS = ("identify_features", "TRACE", "preprocessing")
+
+
+def _picker_initial_path(current: str) -> str:
+    """Sane initial path for QFileDialog: walk up `current` to the first existing
+    file/dir, or fall back to '/' (Finder's 'Computer' view) when nothing in the
+    saved path exists. Empty input always returns '/'.
+    """
+    if current:
+        p = Path(current)
+        if p.exists():
+            return str(p)
+        while p != p.parent:
+            p = p.parent
+            if p.exists():
+                return str(p)
+    return "/"
 
 
 class _SignalLogHandler(logging.Handler):
@@ -123,7 +138,7 @@ class TraceWorker(QThread):
 
 class TraceWindow(QMainWindow):
     _PARALLEL_WORKERS_DETAILS_TEXT = (
-        "Each worker runs the full identifyFeatures pipeline on one wing "
+        "Each worker runs the full pipeline on one wing "
         "and uses significant CPU and RAM. Setting this value too high can:\n\n"
         "  • Exhaust system RAM and cause the process to be killed\n"
         "  • Saturate all CPU cores and freeze other applications\n"
@@ -149,9 +164,14 @@ class TraceWindow(QMainWindow):
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
         self._wing_isolation_model_path = ""
+        # Model paths (configured via Settings → Models). Plain strings rather
+        # than QLineEdit widgets — the dialog owns the editing UI.
+        self._landmark_model_path = ""
+        self._segmentation_model_path = ""
         # Intermediate outputs (toggled in Settings → General → Intermediate outputs).
-        # Default-on to match historical behavior of every output starting checked.
-        self._intermediate_outputs: dict[str, bool] = {key: True for key in INTERMEDIATE_OUTPUTS}
+        # Default-off so a fresh batch only writes the final overlays + CSV; users
+        # opt in to intermediates per-key in the Settings dialog.
+        self._intermediate_outputs: dict[str, bool] = {key: False for key in INTERMEDIATE_OUTPUTS}
         # User-defined landmark distance pairs (TRACE-only post-CSV augmentation).
         # Configured via Settings → Custom Distances.
         self._user_landmark_distances: list[dict] = []
@@ -206,42 +226,8 @@ class TraceWindow(QMainWindow):
 
         left_layout.addWidget(folder_group)
 
-        # -- Models --
-        model_group = QGroupBox("Models")
-        mg = QVBoxLayout(model_group)
-
-        mg.addWidget(QLabel("Landmark model (.pt or fold folder):"))
-        row = QHBoxLayout()
-        self.lm_edit = QLineEdit()
-        self.lm_edit.setReadOnly(True)
-        self.lm_edit.setPlaceholderText("Select .pt checkpoint or fold folder...")
-        self.lm_edit.setToolTip(
-            "Pick a single .pt checkpoint for fast single-fold inference, "
-            "or pick a folder containing best_fold*.pt for 5-fold ensemble "
-            "(~5× slower, more robust)."
-        )
-        btn_file = QPushButton("File...")
-        btn_file.clicked.connect(self._select_landmark_model)
-        btn_folder = QPushButton("Folder...")
-        btn_folder.setToolTip("Pick a folder of best_fold*.pt checkpoints (5-fold ensemble).")
-        btn_folder.clicked.connect(self._select_landmark_model_folder)
-        row.addWidget(self.lm_edit, stretch=1)
-        row.addWidget(btn_file)
-        row.addWidget(btn_folder)
-        mg.addLayout(row)
-
-        mg.addWidget(QLabel("Segmentation model folder:"))
-        row = QHBoxLayout()
-        self.seg_edit = QLineEdit()
-        self.seg_edit.setReadOnly(True)
-        self.seg_edit.setPlaceholderText("Select segmentation model folder...")
-        btn = QPushButton("Browse...")
-        btn.clicked.connect(self._select_seg_model)
-        row.addWidget(self.seg_edit, stretch=1)
-        row.addWidget(btn)
-        mg.addLayout(row)
-
-        left_layout.addWidget(model_group)
+        # Model paths live as plain instance state — configured in
+        # Settings → Models (no widgets in the main window).
 
         # -- Scale --
         scale_group = QGroupBox("Scale")
@@ -300,21 +286,9 @@ class TraceWindow(QMainWindow):
 
         left_layout.addWidget(out_group)
 
-        # -- Parallel workers --
-        # Custom header so the "?" help button sits directly next to the section title.
-        workers_header = QHBoxLayout()
-        workers_title = QLabel("Parallel processing")
-        workers_title.setStyleSheet("font-weight: bold;")
-        workers_header.addWidget(workers_title)
-        self.workers_help_btn = QToolButton()
-        self.workers_help_btn.setText("?")
-        self.workers_help_btn.setToolTip("Show parallel-workers warning")
-        self.workers_help_btn.setAutoRaise(True)
-        self.workers_help_btn.clicked.connect(self._show_workers_warning_info)
-        workers_header.addWidget(self.workers_help_btn)
-        workers_header.addStretch()
-        left_layout.addLayout(workers_header)
-
+        # -- Parallel processing --
+        workers_group = QGroupBox("Parallel processing")
+        wg = QVBoxLayout(workers_group)
         workers_row = QHBoxLayout()
         workers_row.addWidget(QLabel("Workers:"))
         self.workers_spin = QSpinBox()
@@ -329,7 +303,14 @@ class TraceWindow(QMainWindow):
         )
         self.workers_spin.valueChanged.connect(self._on_workers_changed)
         workers_row.addWidget(self.workers_spin, stretch=1)
-        left_layout.addLayout(workers_row)
+        self.workers_help_btn = QToolButton()
+        self.workers_help_btn.setText("?")
+        self.workers_help_btn.setToolTip("Show parallel-workers warning")
+        self.workers_help_btn.setAutoRaise(True)
+        self.workers_help_btn.clicked.connect(self._show_workers_warning_info)
+        workers_row.addWidget(self.workers_help_btn)
+        wg.addLayout(workers_row)
+        left_layout.addWidget(workers_group)
 
         # -- Run / Cancel --
         btn_layout = QHBoxLayout()
@@ -374,7 +355,9 @@ class TraceWindow(QMainWindow):
     # Folder / model selection
     # -----------------------------------------------------------------------
     def _select_input(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Input Folder", _picker_initial_path(self.input_edit.text())
+        )
         if not folder:
             return
         self.input_edit.setText(folder)
@@ -401,35 +384,11 @@ class TraceWindow(QMainWindow):
         self.statusBar().showMessage(f"Found {len(self._image_paths)} images")
 
     def _select_output(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Output Folder", _picker_initial_path(self.output_edit.text())
+        )
         if folder:
             self.output_edit.setText(folder)
-
-    def _select_landmark_model(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Landmark Model Checkpoint", "", "PyTorch Checkpoint (*.pt);;All Files (*)"
-        )
-        if path:
-            self.lm_edit.setText(path)
-
-    def _select_landmark_model_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Fold Checkpoint Folder (contains best_fold*.pt)", "")
-        if folder:
-            from pathlib import Path as _P
-
-            if not sorted(_P(folder).glob("best_fold*.pt")):
-                QMessageBox.warning(
-                    self,
-                    "No fold checkpoints",
-                    f"No best_fold*.pt files in {folder}. Pick a folder containing 5-fold CV checkpoints.",
-                )
-                return
-            self.lm_edit.setText(folder)
-
-    def _select_seg_model(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Segmentation Model Folder")
-        if folder:
-            self.seg_edit.setText(folder)
 
     # -----------------------------------------------------------------------
     # Pipeline settings (PipelineConfig)
@@ -461,7 +420,6 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
-
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)
@@ -480,7 +438,7 @@ class TraceWindow(QMainWindow):
         layout.addWidget(msg)
 
         calib = CalibrateWidget(dlg)
-        calib.set_paths(self.input_edit.text(), self.lm_edit.text(), self.seg_edit.text())
+        calib.set_paths(self.input_edit.text(), self._landmark_model_path, self._segmentation_model_path)
         calib.applied.connect(lambda v: self.workers_spin.setValue(int(v)))
         layout.addWidget(calib)
 
@@ -529,8 +487,8 @@ class TraceWindow(QMainWindow):
             include_unreliable_landmarks=self._include_unreliable_landmarks,
             workers=self.workers_spin.value(),
             input_path=self.input_edit.text(),
-            landmark_model_path=self.lm_edit.text(),
-            segmentation_model_path=self.seg_edit.text(),
+            landmark_model_path=self._landmark_model_path,
+            segmentation_model_path=self._segmentation_model_path,
             gate_override=self._gate_override,
             wing_expand_fraction=self._wing_expand_fraction,
             wing_isolation_enabled=self._wing_isolation_enabled,
@@ -548,6 +506,8 @@ class TraceWindow(QMainWindow):
             self._wing_expand_fraction = dlg.get_wing_expand_fraction()
             self._wing_isolation_enabled = dlg.get_wing_isolation_enabled()
             self._wing_isolation_model_path = dlg.get_wing_isolation_model_path()
+            self._landmark_model_path = dlg.get_landmark_model_path()
+            self._segmentation_model_path = dlg.get_segmentation_model_path()
             self._intermediate_outputs = dlg.get_intermediate_outputs()
             self._user_landmark_distances = dlg.get_user_landmark_distances()
             # Keep main-window scale spinner in sync.
@@ -602,8 +562,8 @@ class TraceWindow(QMainWindow):
         s.setValue("input_folder", self.input_edit.text())
         s.setValue("input_recursive", self.recursive_chk.isChecked())
         s.setValue("output_folder", self.output_edit.text())
-        s.setValue("landmark_model", self.lm_edit.text())
-        s.setValue("segmentation_model", self.seg_edit.text())
+        s.setValue("landmark_model", self._landmark_model_path)
+        s.setValue("segmentation_model", self._segmentation_model_path)
         s.setValue("wing_isolation_enabled", self._wing_isolation_enabled)
         s.setValue("wing_isolation_model", self._wing_isolation_model_path)
         s.setValue("wing_expand_fraction", self._wing_expand_fraction)
@@ -642,10 +602,10 @@ class TraceWindow(QMainWindow):
             self.output_edit.setText(val)
         val = s.value("landmark_model", "")
         if val:
-            self.lm_edit.setText(val)
+            self._landmark_model_path = val
         val = s.value("segmentation_model", "")
         if val:
-            self.seg_edit.setText(val)
+            self._segmentation_model_path = val
         val = s.value("wing_isolation_model", "")
         if val:
             self._wing_isolation_model_path = val
@@ -727,11 +687,13 @@ class TraceWindow(QMainWindow):
         if not self.output_edit.text():
             QMessageBox.warning(self, "Missing Output", "Please select an output folder.")
             return
-        if not self.lm_edit.text():
-            QMessageBox.warning(self, "Missing Model", "Please select a landmark model.")
+        if not self._landmark_model_path:
+            QMessageBox.warning(self, "Missing Model", "Please select a landmark model in Settings → Models.")
             return
-        if not self.seg_edit.text():
-            QMessageBox.warning(self, "Missing Model", "Please select a segmentation model folder.")
+        if not self._segmentation_model_path:
+            QMessageBox.warning(
+                self, "Missing Model", "Please select a segmentation model folder in Settings → Models."
+            )
             return
 
         # Warn on JPEG inputs (lossy compression)
@@ -776,8 +738,8 @@ class TraceWindow(QMainWindow):
             kwargs=dict(
                 input_dir=Path(self.input_edit.text()),
                 output_dir=Path(self.output_edit.text()),
-                landmark_checkpoint=Path(self.lm_edit.text()),
-                segmentation_model_dir=Path(self.seg_edit.text()),
+                landmark_checkpoint=Path(self._landmark_model_path),
+                segmentation_model_dir=Path(self._segmentation_model_path),
                 config=self.config,
                 keep_intermediates=False,
                 outputs=self._selected_outputs(),
@@ -875,8 +837,18 @@ def _apply_dark_palette(app: QApplication):
     app.setPalette(p)
     # Force tooltips to match the dark dialog look — without this, on macOS
     # they fall back to the unstyled native popup and ignore the palette.
+    # QGroupBox border is bumped to a lighter shade (#7a7a7a) so the section
+    # bounding boxes on the main window stand out against the dark background;
+    # the title needs an explicit margin/padding so it doesn't overlap the
+    # border line when we set an explicit border.
     app.setStyleSheet(
-        "QToolTip { background-color: #2d2d2d; color: #d0d0d0; " "border: 1px solid #555555; padding: 4px; }"
+        "QToolTip { background-color: #2d2d2d; color: #d0d0d0;"
+        " border: 1px solid #555555; padding: 4px; }"
+        " QGroupBox { border: 1px solid #7a7a7a; border-radius: 4px;"
+        " margin-top: 10px; padding-top: 6px; }"
+        " QGroupBox::title { subcontrol-origin: margin;"
+        " subcontrol-position: top left; left: 8px; padding: 0 4px;"
+        " color: #d0d0d0; }"
     )
 
 

@@ -915,9 +915,19 @@ class GateConfigPanel(QWidget):
     via `result_override()` when the host dialog/window accepts.
     """
 
-    def __init__(self, gate_config: dict, landmark_order: list[str], parent=None) -> None:
+    def __init__(
+        self,
+        gate_config: dict,
+        landmark_order: list[str],
+        parent=None,
+        *,
+        display_names: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._landmark_order = list(landmark_order)
+        # Optional friendly labels keyed by internal name (e.g. "acv_a" → "ACV-L3 junction").
+        # Falls back to the internal name when a mapping is missing for a given landmark.
+        self._display_names = dict(display_names or {})
         # Deep-copy so the host can revert by discarding the panel.
         self._cfg = json.loads(json.dumps(gate_config))
         self._rows: dict[str, dict] = {}
@@ -950,7 +960,7 @@ class GateConfigPanel(QWidget):
         sharp_pl = self._cfg.get("sharpness", {}).get("per_landmark", {}) or {}
         spr_pl = self._cfg.get("second_peak_ratio", {}).get("per_landmark", {}) or {}
         for i, name in enumerate(self._landmark_order, start=1):
-            grid.addWidget(QLabel(name), i, 0)
+            grid.addWidget(QLabel(self._display_names.get(name, name)), i, 0)
 
             combo = QComboBox()
             combo.addItems(["Permissive", "Strict", "Custom"])

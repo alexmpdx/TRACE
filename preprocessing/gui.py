@@ -38,6 +38,22 @@ from PyQt5.QtWidgets import (
 )
 
 
+def _picker_initial_path(current: str) -> str:
+    """Sane initial path for QFileDialog: walk up `current` to the first existing
+    file/dir, or fall back to '/' (Finder's 'Computer' view) when nothing in the
+    saved path exists. Empty input always returns '/'.
+    """
+    if current:
+        p = Path(current)
+        if p.exists():
+            return str(p)
+        while p != p.parent:
+            p = p.parent
+            if p.exists():
+                return str(p)
+    return "/"
+
+
 # ---------------------------------------------------------------------------
 # Worker thread
 # ---------------------------------------------------------------------------
@@ -277,7 +293,9 @@ class PreprocessingWindow(QMainWindow):
 
     # --- Folder/model selection ---
     def _select_input(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Input Folder", _picker_initial_path(self.input_edit.text())
+        )
         if not folder:
             return
         self.input_edit.setText(folder)
@@ -288,7 +306,9 @@ class PreprocessingWindow(QMainWindow):
         self.statusBar().showMessage(f"Found {len(self._image_paths)} images")
 
     def _select_output(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Output Folder", _picker_initial_path(self.output_edit.text())
+        )
         if folder:
             self.output_edit.setText(folder)
 
@@ -296,14 +316,18 @@ class PreprocessingWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Landmark Model Checkpoint",
-            "",
+            _picker_initial_path(self.lm_edit.text()),
             "PyTorch Checkpoint (*.pt);;All Files (*)",
         )
         if path:
             self.lm_edit.setText(path)
 
     def _select_landmark_model_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Fold Checkpoint Folder (contains best_fold*.pt)", "")
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Fold Checkpoint Folder (contains best_fold*.pt)",
+            _picker_initial_path(self.lm_edit.text()),
+        )
         if folder:
             from pathlib import Path as _P
 
@@ -319,12 +343,16 @@ class PreprocessingWindow(QMainWindow):
             self.lm_edit.setText(folder)
 
     def _select_seg_model(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Segmentation Model Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Segmentation Model Folder", _picker_initial_path(self.seg_edit.text())
+        )
         if folder:
             self.seg_edit.setText(folder)
 
     def _select_wing_model(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Wing-Identification Model Folder")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Wing-Identification Model Folder", _picker_initial_path(self.wing_edit.text())
+        )
         if folder:
             self.wing_edit.setText(folder)
 

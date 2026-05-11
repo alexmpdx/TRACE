@@ -111,7 +111,7 @@ class PipelineConfig:
     crossvein_min_length_vw: float = 4.0  # Min crossvein length as × median vein width
     crossvein_max_length_vw: float = 25.0  # Max crossvein length as × median vein width
     synthesize_missing_crossveins: bool = (
-        True  # Phase 5b: draw ACV/PCV centerlines from landmarks when graph detection fails; disable to preserve fused-region output
+        False  # Phase 5b: draw ACV/PCV centerlines from landmarks when graph detection fails; disable to preserve fused-region output
     )
 
     # -- Intervein naming --
@@ -189,7 +189,7 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
         "enable_basic_prune": True,
         "enable_small_fragment_removal": True,
         "min_component_edge_fraction": 0.05,
-        "synthesize_missing_crossveins": True,
+        "synthesize_missing_crossveins": False,
         "prune_methods": [],
         "prune_min_length_um": None,
         "prune_min_length_vein_widths": 2.0,
@@ -235,7 +235,7 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
         "enable_basic_prune": False,
         "enable_small_fragment_removal": False,
         "min_component_edge_fraction": 0.05,
-        "synthesize_missing_crossveins": True,
+        "synthesize_missing_crossveins": False,
         "prune_methods": [PruneMethod.DISTANCE_MAP],
         "prune_min_length_um": None,
         "prune_min_length_vein_widths": 2.0,

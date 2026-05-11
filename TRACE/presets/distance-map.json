@@ -2,7 +2,7 @@
   "enable_basic_prune": false,
   "enable_small_fragment_removal": false,
   "min_component_edge_fraction": 0.05,
-  "synthesize_missing_crossveins": true,
+  "synthesize_missing_crossveins": false,
   "prune_methods": ["distance-map"],
   "prune_min_length_um": null,
   "prune_min_length_vein_widths": 2.0,
