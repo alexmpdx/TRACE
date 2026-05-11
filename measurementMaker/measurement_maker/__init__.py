@@ -14,7 +14,7 @@ Public API:
 - LandmarkPickerWidget: embeddable QWidget hosting the napari canvas + pair list
 """
 
-from measurement_maker.csv_augment import augment_csv_with_user_distances
+from measurement_maker.csv_augment import augment_csv_with_user_distances, write_distances_csv
 from measurement_maker.distance import (
     compute_pair_distance_px,
     load_landmarks_from_geojson,
@@ -28,6 +28,7 @@ __all__ = [
     "load_landmarks_from_geojson",
     "compute_pair_distance_px",
     "augment_csv_with_user_distances",
+    "write_distances_csv",
     "LandmarkPickerWidget",
 ]
 

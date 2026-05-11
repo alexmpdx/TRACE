@@ -137,3 +137,88 @@ def augment_csv_with_user_distances(
         len(new_columns),
         csv_path.name,
     )
+
+
+def write_distances_csv(
+    csv_path: Path,
+    specimen_landmarks: dict[str, Path],
+    pairs: list[LandmarkPair],
+    um_per_px: Optional[float],
+) -> None:
+    """Write a fresh CSV with just user-distance columns — no identifyFeatures CSV needed.
+
+    Used by TRACE's fast path: when the only requested Stage 2 output is the
+    batch CSV and the user has configured custom distance pairs, we skip
+    identifyFeatures entirely and produce the CSV directly from each wing's
+    landmark GeoJSON.
+
+    Args:
+        csv_path: Output path; parent dirs are created if missing.
+        specimen_landmarks: {specimen_id: path to *_landmarks.geojson}.
+            One CSV row is written per entry, in insertion order.
+        pairs: User-configured distance pairs. Empty list is a no-op.
+        um_per_px: Scale; when None only `_px` columns are written.
+
+    Missing landmarks on a particular wing produce a blank cell for that
+    pair on that wing (logged at WARNING).
+    """
+    if not pairs:
+        logger.info("write_distances_csv: no pairs configured; skipping write")
+        return
+    if not specimen_landmarks:
+        logger.info("write_distances_csv: no specimens; skipping write")
+        return
+
+    has_scale = um_per_px is not None and um_per_px > 0
+    fieldnames: list[str] = ["specimen_id"]
+    taken: set[str] = set(fieldnames)
+    pair_cols: list[tuple[LandmarkPair, str, Optional[str]]] = []
+    for pair in pairs:
+        px_col, um_col = _column_names(pair, has_scale)
+        px_col = _dedupe_suffix(px_col, taken)
+        taken.add(px_col)
+        fieldnames.append(px_col)
+        if um_col is not None:
+            um_col = _dedupe_suffix(um_col, taken)
+            taken.add(um_col)
+            fieldnames.append(um_col)
+        pair_cols.append((pair, px_col, um_col))
+
+    rows: list[dict[str, str]] = []
+    for specimen_id, lm_path in specimen_landmarks.items():
+        landmarks: dict[str, tuple[float, float]] = {}
+        if lm_path is not None and lm_path.exists():
+            landmarks = load_landmarks_from_geojson(lm_path)
+        row: dict[str, str] = {"specimen_id": specimen_id}
+        for pair, px_col, um_col in pair_cols:
+            dist_px = compute_pair_distance_px(landmarks, pair.name_a, pair.name_b)
+            if dist_px is None:
+                row[px_col] = ""
+                if um_col is not None:
+                    row[um_col] = ""
+                logger.warning(
+                    "write_distances_csv: %s missing landmark(s) %r/%r for pair %r",
+                    specimen_id,
+                    pair.name_a,
+                    pair.name_b,
+                    pair.label,
+                )
+                continue
+            row[px_col] = f"{dist_px:.1f}"
+            if um_col is not None:
+                row[um_col] = f"{dist_px * um_per_px:.1f}"
+        rows.append(row)
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    logger.info(
+        "write_distances_csv: wrote %s with %d pair(s) × %d wing(s)",
+        csv_path.name,
+        len(pair_cols),
+        len(rows),
+    )

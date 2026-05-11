@@ -449,8 +449,24 @@ def _run(
     from preprocessing.pipeline import PipelineResult as _PreprocResult
     from preprocessing.pipeline import discover_images, process_folder
 
-    stages = _required_stages(outputs)
-    needs_lm, needs_hinge, needs_seg = stages
+    # Fast path: only the batch CSV is requested and the user has configured
+    # custom landmark-distance pairs. We can skip identifyFeatures entirely
+    # AND skip hinge chopping + segmentation, since measurementMaker only
+    # needs the landmark GeoJSONs to compute distances.
+    requested_analysis_outputs = _STAGE2_ANALYSIS_OUTPUTS & outputs
+    fast_csv_path = bool(user_landmark_distances) and requested_analysis_outputs == {"csv"}
+
+    if fast_csv_path:
+        # Landmarks only — measurementMaker doesn't need vein tissue or hinge masks.
+        # If the user also requested intermediate artifacts that need other
+        # stages (chopped_image, segmentation_overlay), promote those stages.
+        needs_lm = True
+        needs_hinge = "chopped_image" in outputs
+        needs_seg = "segmentation_overlay" in outputs
+        stages = (needs_lm, needs_hinge, needs_seg)
+    else:
+        stages = _required_stages(outputs)
+        needs_lm, needs_hinge, needs_seg = stages
 
     # --- Stage 1: Preprocessing ---
     logger.info("=== Stage 1: Preprocessing (stages=%s) ===", stages)
@@ -527,7 +543,14 @@ def _run(
         render_overlay_to_file,
     )
 
-    needs_analysis = bool(_STAGE2_ANALYSIS_OUTPUTS & outputs)
+    # `fast_csv_path` was computed at the top of _run and already trimmed the
+    # preprocessing stages. Here it just disables Stage 2 analysis.
+    needs_analysis = bool(requested_analysis_outputs) and not fast_csv_path
+    if fast_csv_path:
+        logger.info(
+            "=== Stage 2 fast path: writing user-distance CSV without identifyFeatures (%d pair(s)) ===",
+            len(user_landmark_distances),
+        )
 
     scale = config.um_per_px
     total = len(successful_preproc)
@@ -669,8 +692,12 @@ def _run(
                     pass
 
             stage2_slots[i] = trace_result
-            if "csv" in outputs and wing_result is not None:
-                csv_slots[i] = (stem, wing_result)
+            if "csv" in outputs:
+                if wing_result is not None:
+                    csv_slots[i] = (stem, wing_result)
+                # Always record the landmark path when CSV is requested — both
+                # the augmenter (post-export_csv_batch) and the fast-path
+                # writer rely on it. wing_result may be None on the fast path.
                 lm_gj_path = preproc_result.landmarks_geojson_path
                 if lm_gj_path is not None:
                     user_dist_landmark_paths[stem] = Path(lm_gj_path)
@@ -720,27 +747,45 @@ def _run(
         raise InterruptedError("Cancelled by user")
 
     # --- Batch CSV ---
-    if "csv" in outputs and batch_results:
+    if "csv" in outputs:
         csv_path = output_dir / "measurements.csv"
-        try:
-            export_csv_batch(batch_results, csv_path, um_per_px=scale)
-            logger.info("Batch CSV: %s (%d wings)", csv_path, len(batch_results))
-        except Exception:
-            logger.exception("Failed to write batch CSV")
-        else:
-            if user_landmark_distances:
-                try:
-                    from measurement_maker import augment_csv_with_user_distances, pairs_from_dicts
+        if fast_csv_path:
+            # Fast path: identifyFeatures did not run, so there is no
+            # measurements.csv to augment. Write one from scratch using only
+            # the landmark coordinates + configured pairs.
+            try:
+                from measurement_maker import pairs_from_dicts, write_distances_csv
 
-                    pairs = pairs_from_dicts(user_landmark_distances)
-                    if pairs:
-                        augment_csv_with_user_distances(
-                            csv_path,
-                            user_dist_landmark_paths,
-                            pairs,
-                            um_per_px=scale,
-                        )
-                except Exception:
-                    logger.exception("Failed to add user-defined distance columns to CSV")
+                pairs = pairs_from_dicts(user_landmark_distances)
+                if pairs:
+                    write_distances_csv(
+                        csv_path,
+                        user_dist_landmark_paths,
+                        pairs,
+                        um_per_px=scale,
+                    )
+            except Exception:
+                logger.exception("Fast-path: failed to write user-distance CSV")
+        elif batch_results:
+            try:
+                export_csv_batch(batch_results, csv_path, um_per_px=scale)
+                logger.info("Batch CSV: %s (%d wings)", csv_path, len(batch_results))
+            except Exception:
+                logger.exception("Failed to write batch CSV")
+            else:
+                if user_landmark_distances:
+                    try:
+                        from measurement_maker import augment_csv_with_user_distances, pairs_from_dicts
+
+                        pairs = pairs_from_dicts(user_landmark_distances)
+                        if pairs:
+                            augment_csv_with_user_distances(
+                                csv_path,
+                                user_dist_landmark_paths,
+                                pairs,
+                                um_per_px=scale,
+                            )
+                    except Exception:
+                        logger.exception("Failed to add user-defined distance columns to CSV")
 
     return results

@@ -161,7 +161,7 @@ class LandmarkPickerWidget(QWidget):
         # Row 3: viewer options + load button
         row = QHBoxLayout()
         self._show_labels_chk = QCheckBox("Show landmark labels")
-        self._show_labels_chk.setChecked(True)
+        self._show_labels_chk.setChecked(False)
         self._show_labels_chk.setToolTip("Toggle the yellow text labels next to each landmark.")
         self._show_labels_chk.toggled.connect(self._on_show_labels_toggled)
         row.addWidget(self._show_labels_chk)
