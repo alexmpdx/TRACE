@@ -12,7 +12,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from identify_features.config import PipelineConfig
-from PyQt5.QtCore import QSettings, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
@@ -39,7 +39,14 @@ from PyQt5.QtWidgets import (
 
 from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
-from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TOOLTIPS, OUTPUT_TYPES, trace_folder
+from TRACE.pipeline import (
+    DEFAULT_MAX_WORKERS,
+    INTERMEDIATE_OUTPUTS,
+    MEASUREMENT_GROUPS,
+    OUTPUT_TOOLTIPS,
+    OUTPUT_TYPES,
+    trace_folder,
+)
 from TRACE.settings_dialog import PipelineConfigDialog
 
 # ---------------------------------------------------------------------------
@@ -48,6 +55,27 @@ from TRACE.settings_dialog import PipelineConfigDialog
 
 
 _CAPTURED_LOGGERS = ("identify_features", "TRACE", "preprocessing")
+
+
+class _PlaceholderSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox that shows a real QLineEdit placeholder (auto-dimmed, clears on
+    focus) instead of `setSpecialValueText`. When the user hasn't entered a value
+    (spinbox is at its minimum), `textFromValue` returns an empty string so
+    QLineEdit's normal placeholder rendering kicks in.
+
+    Configure by calling `set_placeholder("...")` on the instance.
+    """
+
+    def set_placeholder(self, text: str) -> None:
+        self.lineEdit().setPlaceholderText(text)
+        # Force the displayed text to refresh — without this the previous numeric
+        # rendering can linger until the next value change.
+        self.lineEdit().setText(self.textFromValue(self.value()))
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 — Qt API
+        if value == self.minimum() and self.lineEdit().placeholderText():
+            return ""
+        return super().textFromValue(value)
 
 
 def _picker_initial_path(current: str) -> str:
@@ -199,14 +227,14 @@ class TraceWindow(QMainWindow):
         left_layout.setContentsMargins(4, 4, 4, 4)
 
         # -- Folders --
-        folder_group = QGroupBox("Folders")
+        folder_group = QGroupBox("Images and Results Locations")
         fg = QVBoxLayout(folder_group)
 
-        fg.addWidget(QLabel("Input folder:"))
+        fg.addWidget(QLabel("Images to analyze:"))
         row = QHBoxLayout()
         self.input_edit = QLineEdit()
         self.input_edit.setReadOnly(True)
-        self.input_edit.setPlaceholderText("Select input folder...")
+        self.input_edit.setPlaceholderText("select folder")
         self.input_edit.setToolTip("Folder containing wing images to process. Click Browse... to select.")
         btn = QPushButton("Browse...")
         btn.setToolTip("Pick the folder containing wing images.")
@@ -220,11 +248,11 @@ class TraceWindow(QMainWindow):
         self.recursive_chk.toggled.connect(self._refresh_image_list)
         fg.addWidget(self.recursive_chk)
 
-        fg.addWidget(QLabel("Output folder:"))
+        fg.addWidget(QLabel("Save results to:"))
         row = QHBoxLayout()
         self.output_edit = QLineEdit()
         self.output_edit.setReadOnly(True)
-        self.output_edit.setPlaceholderText("Select output folder...")
+        self.output_edit.setPlaceholderText("select folder")
         self.output_edit.setToolTip(
             "Folder where all outputs (overlays, CSV, GeoJSONs, intermediates) will be written."
         )
@@ -244,14 +272,15 @@ class TraceWindow(QMainWindow):
         scale_group = QGroupBox("Scale")
         sg = QHBoxLayout(scale_group)
         sg.addWidget(QLabel("\u00b5m/px:"))
-        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin = _PlaceholderSpinBox()
         self.scale_spin.setDecimals(4)
         self.scale_spin.setRange(0.0001, 100.0)
         self.scale_spin.setSingleStep(0.001)
-        # When the spinbox is at its minimum, show this placeholder instead of a number.
-        # Treated as "user hasn't entered a scale yet" — Run Pipeline will refuse.
-        self.scale_spin.setSpecialValueText("[conversion factor]")
+        # QLineEdit-native placeholder (auto-dimmed, clears on click) — shown when
+        # the spinbox is at its minimum. Treated as "no scale entered" — Run
+        # Pipeline refuses to start.
         self.scale_spin.setValue(self.config.um_per_px if self.config.um_per_px else self.scale_spin.minimum())
+        self.scale_spin.set_placeholder("[conversion factor]")
         self.scale_spin.setToolTip("Microns per pixel — used to convert every measurement to physical units (µm, µm²).")
         self.scale_spin.valueChanged.connect(self._on_scale_changed)
         sg.addWidget(self.scale_spin, stretch=1)
@@ -277,12 +306,23 @@ class TraceWindow(QMainWindow):
         io_row.addWidget(btn_import)
         io_row.addWidget(btn_export)
         stg.addLayout(io_row)
+        self.btn_reset_gui = QPushButton("Reset GUI to defaults")
+        self.btn_reset_gui.setToolTip(
+            "Clear every persisted setting — input/output folders, model paths, scale, "
+            "pipeline config, custom distance pairs, workers warning suppression — and "
+            "snap every widget back to the state a first-time user would see."
+        )
+        self.btn_reset_gui.clicked.connect(self._reset_gui_to_defaults)
+        stg.addWidget(self.btn_reset_gui)
         left_layout.addWidget(settings_group)
 
         # -- Output selection (final outputs only; intermediates live in Settings → General) --
         out_group = QGroupBox("Outputs")
         ol = QVBoxLayout(out_group)
         self.output_checks: OrderedDict[str, QCheckBox] = OrderedDict()
+        # Nested measurement-group checkboxes for the CSV output.
+        self.csv_group_checks: OrderedDict[str, QCheckBox] = OrderedDict()
+        self._csv_group_container: QWidget | None = None
         for key, label in OUTPUT_TYPES.items():
             if key in INTERMEDIATE_OUTPUTS:
                 continue
@@ -293,19 +333,45 @@ class TraceWindow(QMainWindow):
                 chk.setToolTip(tip)
             self.output_checks[key] = chk
             ol.addWidget(chk)
-
-        # Custom landmark distances (configured in Settings → Custom Distances).
-        # When checked, configured pairs are appended to the batch CSV as
-        # user_distance_<label>_{px,um} columns. No-op when no pairs exist
-        # or Batch measurements CSV is unchecked.
-        self.include_custom_measurements_chk = QCheckBox("Include custom landmark distances")
-        self.include_custom_measurements_chk.setChecked(True)
-        self.include_custom_measurements_chk.setToolTip(
-            "Adds the pairs configured in Settings → Custom Distances to the batch CSV "
-            "as user_distance_<label>_px (and _um when scale is set) columns.\n\n"
-            "No effect when no pairs are configured or when 'Batch measurements CSV' is unchecked."
-        )
-        ol.addWidget(self.include_custom_measurements_chk)
+            # Nest the measurement-group checkboxes directly under "csv".
+            if key == "csv":
+                self._csv_group_container = QWidget()
+                cgl = QVBoxLayout(self._csv_group_container)
+                cgl.setContentsMargins(24, 0, 0, 0)  # left-indent for hierarchy
+                cgl.setSpacing(2)
+                for gkey, glabel in MEASUREMENT_GROUPS.items():
+                    gchk = QCheckBox(glabel)
+                    gchk.setChecked(True)
+                    self.csv_group_checks[gkey] = gchk
+                    cgl.addWidget(gchk)
+                # Custom landmark distances also writes only into the batch CSV,
+                # so it sits alongside the measurement-group sub-checkboxes and
+                # tracks the parent CSV checkbox's enabled state.
+                cd_row = QHBoxLayout()
+                cd_row.setContentsMargins(0, 0, 0, 0)
+                self.include_custom_measurements_chk = QCheckBox("Custom distances")
+                self.include_custom_measurements_chk.setChecked(True)
+                self.include_custom_measurements_chk.setToolTip(
+                    "Adds the pairs configured in Settings → Custom Distances to the batch CSV "
+                    "as user_distance_<label>_px (and _um when scale is set) columns.\n\n"
+                    "No effect when no pairs are configured."
+                )
+                cd_row.addWidget(self.include_custom_measurements_chk)
+                self.btn_edit_custom_distances = QPushButton("Edit...")
+                self.btn_edit_custom_distances.setToolTip(
+                    "Open the Settings dialog at the Custom Distances tab to add/edit/remove "
+                    "landmark distance pairs."
+                )
+                self.btn_edit_custom_distances.clicked.connect(
+                    lambda: self._open_settings_dialog(initial_tab="Custom Distances")
+                )
+                cd_row.addWidget(self.btn_edit_custom_distances)
+                cd_row.addStretch()
+                cgl.addLayout(cd_row)
+                ol.addWidget(self._csv_group_container)
+                # Enable/disable nested checkboxes with parent CSV state.
+                chk.toggled.connect(self._csv_group_container.setEnabled)
+                self._csv_group_container.setEnabled(chk.isChecked())
 
         left_layout.addWidget(out_group)
 
@@ -433,6 +499,16 @@ class TraceWindow(QMainWindow):
         self._workers_warning_shown = False
 
     def _on_workers_changed(self, val: int):
+        self.maybe_show_workers_warning(val)
+
+    def maybe_show_workers_warning(self, val: int) -> None:
+        """Show the parallel-workers warning dialog once if `val` exceeds the
+        default. Public entry point shared by the main-window Workers spinbox
+        and the Settings → General → Parallel processing spinbox.
+
+        No-op when the warning has already fired this session or the user has
+        permanently suppressed it via the dialog's 'Don't show again' checkbox.
+        """
         if val <= DEFAULT_MAX_WORKERS or self._workers_warning_shown:
             return
         if self.settings.value("workers_warning_suppressed", False, type=bool):
@@ -507,7 +583,7 @@ class TraceWindow(QMainWindow):
             self.settings.setValue("workers_warning_suppressed", True)
         return True
 
-    def _open_settings_dialog(self):
+    def _open_settings_dialog(self, initial_tab: str | None = None):
         dlg = PipelineConfigDialog(
             self.config,
             self,
@@ -527,6 +603,8 @@ class TraceWindow(QMainWindow):
             distance_sample_image=self._distance_sample_image,
             distance_sample_landmarks=self._distance_sample_landmarks,
         )
+        if initial_tab:
+            dlg.select_tab(initial_tab)
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
             self._show_vein_tissue = dlg.get_show_vein_tissue()
@@ -581,6 +659,73 @@ class TraceWindow(QMainWindow):
             return
         self._log(f"Exported config to {path}")
 
+    def _reset_gui_to_defaults(self):
+        """Wipe all persisted QSettings and snap every widget back to factory defaults.
+
+        Equivalent to deleting the QSettings file and relaunching the GUI — useful
+        when a user wants the first-time experience back without restarting.
+        """
+        reply = QMessageBox.warning(
+            self,
+            "Reset GUI to defaults",
+            "This will clear every saved setting — input/output folders, model paths, "
+            "scale, pipeline configuration, custom distance pairs, and any 'don't show "
+            "again' warning suppressions — and snap every widget back to its first-launch "
+            "state.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # Wipe persisted settings.
+        self.settings.clear()
+        self.settings.sync()
+
+        # Reset instance state to __init__ defaults.
+        self.config = PipelineConfig()
+        self._show_vein_tissue = False
+        self._include_unreliable_landmarks = False
+        self._do_rotation = False
+        self._gate_override = None
+        self._wing_expand_fraction = 0.05
+        self._wing_isolation_enabled = False
+        self._wing_isolation_model_path = ""
+        self._landmark_model_path = ""
+        self._segmentation_model_path = ""
+        self._intermediate_outputs = {key: False for key in INTERMEDIATE_OUTPUTS}
+        self._user_landmark_distances = []
+        self._distance_sample_image = ""
+        self._distance_sample_landmarks = ""
+        self._workers_warning_shown = False
+        self._image_paths = []
+
+        # Snap every widget back. blockSignals where the slot would re-fire a
+        # warning or write back to a no-longer-stale value.
+        self.input_edit.clear()
+        self.output_edit.clear()
+        self.recursive_chk.blockSignals(True)
+        self.recursive_chk.setChecked(False)
+        self.recursive_chk.blockSignals(False)
+        self.image_list.clear()
+
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(self.scale_spin.minimum())
+        self.scale_spin.blockSignals(False)
+
+        self.workers_spin.blockSignals(True)
+        self.workers_spin.setValue(DEFAULT_MAX_WORKERS)
+        self.workers_spin.blockSignals(False)
+
+        for chk in self.output_checks.values():
+            chk.setChecked(True)
+        for gchk in self.csv_group_checks.values():
+            gchk.setChecked(True)
+        self.include_custom_measurements_chk.setChecked(True)
+
+        self.log_text.clear()
+        self.statusBar().showMessage("GUI reset to defaults")
+
     # -----------------------------------------------------------------------
     # Settings persistence
     # -----------------------------------------------------------------------
@@ -621,6 +766,8 @@ class TraceWindow(QMainWindow):
             s.setValue(f"output/{key}", chk.isChecked())
         for key, on in self._intermediate_outputs.items():
             s.setValue(f"output/{key}", on)
+        for gkey, gchk in self.csv_group_checks.items():
+            s.setValue(f"csv_group/{gkey}", gchk.isChecked())
 
     def _restore_settings(self):
         s = self.settings
@@ -678,6 +825,23 @@ class TraceWindow(QMainWindow):
             saved = s.value(f"output/{key}", None)
             if saved is not None:
                 self._intermediate_outputs[key] = saved == "true" or saved is True
+        # Migrate legacy csv_group keys from the earlier split:
+        #   wing_dimensions (area + length) → wing_area (just area)
+        #   crossvein_distance              → cv_ratio (now also owns wing length)
+        # Only write the new key if it hasn't already been saved.
+        for old_key, new_key in (("wing_dimensions", "wing_area"), ("crossvein_distance", "cv_ratio")):
+            legacy = s.value(f"csv_group/{old_key}", None)
+            if legacy is not None:
+                if s.value(f"csv_group/{new_key}", None) is None:
+                    s.setValue(f"csv_group/{new_key}", legacy == "true" or legacy is True)
+                s.remove(f"csv_group/{old_key}")
+        for gkey, gchk in self.csv_group_checks.items():
+            saved = s.value(f"csv_group/{gkey}", None)
+            if saved is not None:
+                gchk.setChecked(saved == "true" or saved is True)
+        # Sync the nested-group container's enabled state with the parent CSV checkbox.
+        if self._csv_group_container is not None and "csv" in self.output_checks:
+            self._csv_group_container.setEnabled(self.output_checks["csv"].isChecked())
         saved_svt = s.value("show_vein_tissue", None)
         if saved_svt is not None:
             self._show_vein_tissue = saved_svt == "true" or saved_svt is True
@@ -809,6 +973,7 @@ class TraceWindow(QMainWindow):
                 user_landmark_distances=(
                     list(self._user_landmark_distances) if self.include_custom_measurements_chk.isChecked() else []
                 ),
+                csv_measurement_groups={gkey for gkey, gchk in self.csv_group_checks.items() if gchk.isChecked()},
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
                 landmark_batch_size=self.workers_spin.value(),

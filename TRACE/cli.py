@@ -5,7 +5,13 @@ import logging
 import sys
 from pathlib import Path
 
-from TRACE.pipeline import DEFAULT_MAX_WORKERS, OUTPUT_TYPES, trace_folder
+from TRACE.pipeline import (
+    ALL_MEASUREMENT_GROUPS,
+    DEFAULT_MAX_WORKERS,
+    MEASUREMENT_GROUPS,
+    OUTPUT_TYPES,
+    trace_folder,
+)
 
 
 def parse_args(argv=None):
@@ -102,6 +108,17 @@ def parse_args(argv=None):
             "Comma-separated Stage 2 outputs to produce. "
             f"Valid keys: {','.join(OUTPUT_TYPES.keys())}. "
             "Pass an empty string to skip Stage 2."
+        ),
+    )
+    parser.add_argument(
+        "--csv-groups",
+        default=",".join(MEASUREMENT_GROUPS.keys()),
+        help=(
+            "Comma-separated measurement groups to include in the batch CSV. "
+            f"Valid keys: {','.join(MEASUREMENT_GROUPS.keys())}. "
+            "Affects column selection and gates the compute behind each group "
+            "(e.g. omitting intervein_areas skips §6.1/§6.2; omitting ap_areas "
+            "skips compute_ap_split). Default: all."
         ),
     )
     parser.add_argument(
@@ -295,6 +312,12 @@ def main(argv=None):
         print(f"Error: unknown output keys: {sorted(invalid)}", file=sys.stderr)
         sys.exit(1)
 
+    csv_groups = {g.strip() for g in args.csv_groups.split(",") if g.strip()}
+    invalid_groups = csv_groups - set(ALL_MEASUREMENT_GROUPS)
+    if invalid_groups:
+        print(f"Error: unknown csv group keys: {sorted(invalid_groups)}", file=sys.stderr)
+        sys.exit(1)
+
     # Build PipelineConfig: load from file if given, then apply --scale override.
     from identify_features.config import PipelineConfig
 
@@ -352,6 +375,7 @@ def main(argv=None):
         wing_expand_fraction=args.wing_expand_fraction,
         recursive=args.recursive,
         do_rotation=args.do_rotation,
+        csv_measurement_groups=csv_groups,
     )
 
     # Summary

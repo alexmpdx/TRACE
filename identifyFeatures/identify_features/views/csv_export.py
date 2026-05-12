@@ -11,6 +11,7 @@ import csv
 import logging
 import math
 import warnings
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -29,6 +30,26 @@ logger = logging.getLogger(__name__)
 _VEIN_DISPLAY = {v: ("costal vein" if v == "costa" else v) for v in VEIN_AP_ORDER}
 
 NOT_IDENTIFIED = "not identified"
+
+# Measurement groups exposed to the CSV-output UI. Each group toggles a coherent
+# block of columns AND the compute work behind it (e.g. dropping "ap_areas"
+# skips compute_ap_split). The "specimen" column is always present.
+#
+# Wing length lives in `cv_ratio` rather than `wing_area` because the CV ratio is
+# (crossvein distance / wing length) and the two values are usually reported
+# together. Selecting `cv_ratio` writes wing-length, crossvein-distance, and
+# CV-ratio columns; selecting `wing_area` only writes wing-area columns.
+MEASUREMENT_GROUPS: "OrderedDict[str, str]" = OrderedDict(
+    [
+        ("wing_area", "Wing area"),
+        ("vein_lengths", "Vein lengths"),
+        ("intervein_areas", "Intervein region areas"),
+        ("cv_ratio", "CV ratio (CV distance, wing length)"),
+        ("ap_areas", "AP compartment areas"),
+    ]
+)
+
+ALL_MEASUREMENT_GROUPS: frozenset[str] = frozenset(MEASUREMENT_GROUPS.keys())
 
 
 def compute_ap_split(
@@ -153,68 +174,74 @@ def _compute_ap_areas(
 def _wing_measurements(
     wing_result: Optional[WingResult],
     scale: Optional[float],
+    groups: Optional[set[str]] = None,
 ) -> dict[str, str]:
     """Compute wing-level measurements from a WingResult.
 
     Returns dict with keys: wing_area_px, wing_area_um2, wing_length_px,
-    wing_length_um, crossvein_distance_px, crossvein_distance_um.
-    """
-    vals: dict[str, str] = {}
+    wing_length_um, crossvein_distance_px, crossvein_distance_um, cv_ratio,
+    anterior_area_px, anterior_area_um2, posterior_area_px, posterior_area_um2.
 
-    # Wing area
-    outline = wing_result.wing_outline if wing_result else None
-    if outline is not None:
-        vals["wing_area_px"] = f"{outline.area:.1f}"
-        vals["wing_area_um2"] = f"{outline.area * scale**2:.1f}" if scale else ""
-    else:
-        vals["wing_area_px"] = ""
-        vals["wing_area_um2"] = ""
+    When ``groups`` is provided, computations and corresponding keys for groups
+    not in the set are skipped (the keys are still present in the dict but as
+    empty strings, so callers can do unconditional dict lookups).
+    """
+    g = set(groups) if groups is not None else set(ALL_MEASUREMENT_GROUPS)
+    vals: dict[str, str] = {
+        "wing_area_px": "",
+        "wing_area_um2": "",
+        "wing_length_px": "",
+        "wing_length_um": "",
+        "crossvein_distance_px": "",
+        "crossvein_distance_um": "",
+        "cv_ratio": "",
+        "anterior_area_px": "",
+        "anterior_area_um2": "",
+        "posterior_area_px": "",
+        "posterior_area_um2": "",
+    }
 
     landmarks = wing_result.landmarks if wing_result else {}
 
-    # Wing length: L1-Rs to DTip
-    l1rs = landmarks.get("L1-Rs")
-    dtip = landmarks.get("DTip")
-    if l1rs and dtip:
-        dist = math.hypot(dtip.x - l1rs.x, dtip.y - l1rs.y)
-        vals["wing_length_px"] = f"{dist:.1f}"
-        vals["wing_length_um"] = f"{dist * scale:.1f}" if scale else ""
-    else:
-        vals["wing_length_px"] = ""
-        vals["wing_length_um"] = ""
+    # Wing area only
+    if "wing_area" in g:
+        outline = wing_result.wing_outline if wing_result else None
+        if outline is not None:
+            vals["wing_area_px"] = f"{outline.area:.1f}"
+            vals["wing_area_um2"] = f"{outline.area * scale**2:.1f}" if scale else ""
 
-    # Crossvein distance: ACV.p to PCV.a
-    acvp = landmarks.get("ACV.p")
-    pcva = landmarks.get("PCV.a")
-    if acvp and pcva:
-        dist = math.hypot(pcva.x - acvp.x, pcva.y - acvp.y)
-        vals["crossvein_distance_px"] = f"{dist:.1f}"
-        vals["crossvein_distance_um"] = f"{dist * scale:.1f}" if scale else ""
-    else:
-        vals["crossvein_distance_px"] = ""
-        vals["crossvein_distance_um"] = ""
+    # CV ratio block: wing length + crossvein distance + CV ratio
+    if "cv_ratio" in g:
+        # Wing length: L1-Rs to DTip
+        l1rs = landmarks.get("L1-Rs")
+        dtip = landmarks.get("DTip")
+        if l1rs and dtip:
+            dist = math.hypot(dtip.x - l1rs.x, dtip.y - l1rs.y)
+            vals["wing_length_px"] = f"{dist:.1f}"
+            vals["wing_length_um"] = f"{dist * scale:.1f}" if scale else ""
 
-    # CV ratio: crossvein distance / wing length (dimensionless)
-    if vals["crossvein_distance_px"] and vals["wing_length_px"]:
-        cv_ratio = float(vals["crossvein_distance_px"]) / float(vals["wing_length_px"])
-        vals["cv_ratio"] = f"{cv_ratio:.4f}"
-    else:
-        vals["cv_ratio"] = ""
+        # Crossvein distance: ACV.p to PCV.a
+        acvp = landmarks.get("ACV.p")
+        pcva = landmarks.get("PCV.a")
+        if acvp and pcva:
+            dist = math.hypot(pcva.x - acvp.x, pcva.y - acvp.y)
+            vals["crossvein_distance_px"] = f"{dist:.1f}"
+            vals["crossvein_distance_um"] = f"{dist * scale:.1f}" if scale else ""
 
-    # Anterior/posterior compartment areas
-    ant_area, post_area = _compute_ap_areas(wing_result)
-    if ant_area is not None:
-        vals["anterior_area_px"] = f"{ant_area:.1f}"
-        vals["anterior_area_um2"] = f"{ant_area * scale**2:.1f}" if scale else ""
-    else:
-        vals["anterior_area_px"] = ""
-        vals["anterior_area_um2"] = ""
-    if post_area is not None:
-        vals["posterior_area_px"] = f"{post_area:.1f}"
-        vals["posterior_area_um2"] = f"{post_area * scale**2:.1f}" if scale else ""
-    else:
-        vals["posterior_area_px"] = ""
-        vals["posterior_area_um2"] = ""
+        # CV ratio = crossvein distance / wing length (dimensionless)
+        if vals["crossvein_distance_px"] and vals["wing_length_px"]:
+            cv_ratio = float(vals["crossvein_distance_px"]) / float(vals["wing_length_px"])
+            vals["cv_ratio"] = f"{cv_ratio:.4f}"
+
+    # Anterior/posterior compartment areas (skip compute_ap_split when not needed)
+    if "ap_areas" in g:
+        ant_area, post_area = _compute_ap_areas(wing_result)
+        if ant_area is not None:
+            vals["anterior_area_px"] = f"{ant_area:.1f}"
+            vals["anterior_area_um2"] = f"{ant_area * scale**2:.1f}" if scale else ""
+        if post_area is not None:
+            vals["posterior_area_px"] = f"{post_area:.1f}"
+            vals["posterior_area_um2"] = f"{post_area * scale**2:.1f}" if scale else ""
 
     return vals
 
@@ -244,123 +271,144 @@ def export_csv(
     um_per_px: Optional[float] = None,
     specimen_id: Optional[str] = None,
     wing_result: Optional[WingResult] = None,
+    groups: Optional[set[str]] = None,
 ) -> None:
     """Write long-format measurements CSV for a single specimen.
 
     One row per feature with columns: specimen, feature, category, type,
     status, area_px, area_um2, length_px, length_um.
-    Wing-level measurements (wing area, wing length, crossvein distance)
-    appear as rows with category "wing".
+
+    ``groups`` filters which measurement groups produce rows (see
+    MEASUREMENT_GROUPS). None = all groups (back-compat default).
     """
     scale = um_per_px if um_per_px is not None and um_per_px > 0 else None
+    g = set(groups) if groups is not None else set(ALL_MEASUREMENT_GROUPS)
     rows: list[dict] = []
     sid = specimen_id or ""
 
-    # Wing-level measurements
-    wm = _wing_measurements(wing_result, scale)
-    rows.append(
-        {
-            "specimen": sid,
-            "feature": "wing",
-            "category": "wing",
-            "type": "",
-            "status": "",
-            "area_px": wm["wing_area_px"],
-            "area_um2": wm["wing_area_um2"],
-            "length_px": wm["wing_length_px"],
-            "length_um": wm["wing_length_um"],
-        }
-    )
-    rows.append(
-        {
-            "specimen": sid,
-            "feature": "crossvein distance",
-            "category": "wing",
-            "type": "",
-            "status": "",
-            "area_px": "",
-            "area_um2": "",
-            "length_px": wm["crossvein_distance_px"],
-            "length_um": wm["crossvein_distance_um"],
-            "ratio": "",
-        }
-    )
-    rows.append(
-        {
-            "specimen": sid,
-            "feature": "CV ratio",
-            "category": "wing",
-            "type": "",
-            "status": "",
-            "area_px": "",
-            "area_um2": "",
-            "length_px": "",
-            "length_um": "",
-            "ratio": wm["cv_ratio"],
-        }
-    )
-    rows.append(
-        {
-            "specimen": sid,
-            "feature": "anterior compartment",
-            "category": "wing",
-            "type": "",
-            "status": "",
-            "area_px": wm["anterior_area_px"],
-            "area_um2": wm["anterior_area_um2"],
-            "length_px": "",
-            "length_um": "",
-        }
-    )
-    rows.append(
-        {
-            "specimen": sid,
-            "feature": "posterior compartment",
-            "category": "wing",
-            "type": "",
-            "status": "",
-            "area_px": wm["posterior_area_px"],
-            "area_um2": wm["posterior_area_um2"],
-            "length_px": "",
-            "length_um": "",
-        }
-    )
-
-    for v in veins:
-        area_px = f"{v.tissue_polygon.area:.1f}" if v.tissue_polygon is not None else ""
-        area_um2 = f"{v.tissue_polygon.area * scale**2:.1f}" if v.tissue_polygon is not None and scale else ""
-        length_px = f"{v.centerline.length:.1f}" if v.centerline is not None else ""
-        length_um = f"{v.centerline.length * scale:.1f}" if v.centerline is not None and scale else ""
+    # Wing-level measurements (computed only for groups in scope)
+    wm = _wing_measurements(wing_result, scale, groups=g)
+    if "wing_area" in g:
         rows.append(
             {
                 "specimen": sid,
-                "feature": v.vein_id,
-                "category": "vein",
-                "type": v.vein_type.value,
-                "status": v.status.value,
-                "area_px": area_px,
-                "area_um2": area_um2,
-                "length_px": length_px,
-                "length_um": length_um,
-            }
-        )
-
-    for r in regions:
-        area_px = f"{r.area_px2:.1f}" if r.polygon is not None else ""
-        area_um2 = f"{r.area_px2 * scale**2:.1f}" if r.polygon is not None and scale else ""
-        rows.append(
-            {
-                "specimen": sid,
-                "feature": r.name,
-                "category": "region",
+                "feature": "wing",
+                "category": "wing",
                 "type": "",
-                "status": r.status if r.status else "identified",
-                "area_px": area_px,
-                "area_um2": area_um2,
+                "status": "",
+                "area_px": wm["wing_area_px"],
+                "area_um2": wm["wing_area_um2"],
                 "length_px": "",
                 "length_um": "",
             }
         )
+    if "cv_ratio" in g:
+        rows.append(
+            {
+                "specimen": sid,
+                "feature": "wing length",
+                "category": "wing",
+                "type": "",
+                "status": "",
+                "area_px": "",
+                "area_um2": "",
+                "length_px": wm["wing_length_px"],
+                "length_um": wm["wing_length_um"],
+            }
+        )
+        rows.append(
+            {
+                "specimen": sid,
+                "feature": "crossvein distance",
+                "category": "wing",
+                "type": "",
+                "status": "",
+                "area_px": "",
+                "area_um2": "",
+                "length_px": wm["crossvein_distance_px"],
+                "length_um": wm["crossvein_distance_um"],
+                "ratio": "",
+            }
+        )
+        rows.append(
+            {
+                "specimen": sid,
+                "feature": "CV ratio",
+                "category": "wing",
+                "type": "",
+                "status": "",
+                "area_px": "",
+                "area_um2": "",
+                "length_px": "",
+                "length_um": "",
+                "ratio": wm["cv_ratio"],
+            }
+        )
+    if "ap_areas" in g:
+        rows.append(
+            {
+                "specimen": sid,
+                "feature": "anterior compartment",
+                "category": "wing",
+                "type": "",
+                "status": "",
+                "area_px": wm["anterior_area_px"],
+                "area_um2": wm["anterior_area_um2"],
+                "length_px": "",
+                "length_um": "",
+            }
+        )
+        rows.append(
+            {
+                "specimen": sid,
+                "feature": "posterior compartment",
+                "category": "wing",
+                "type": "",
+                "status": "",
+                "area_px": wm["posterior_area_px"],
+                "area_um2": wm["posterior_area_um2"],
+                "length_px": "",
+                "length_um": "",
+            }
+        )
+
+    if "vein_lengths" in g:
+        for v in veins:
+            area_px = f"{v.tissue_polygon.area:.1f}" if v.tissue_polygon is not None else ""
+            area_um2 = f"{v.tissue_polygon.area * scale**2:.1f}" if v.tissue_polygon is not None and scale else ""
+            length_px = f"{v.centerline.length:.1f}" if v.centerline is not None else ""
+            length_um = f"{v.centerline.length * scale:.1f}" if v.centerline is not None and scale else ""
+            rows.append(
+                {
+                    "specimen": sid,
+                    "feature": v.vein_id,
+                    "category": "vein",
+                    "type": v.vein_type.value,
+                    "status": v.status.value,
+                    "area_px": area_px,
+                    "area_um2": area_um2,
+                    "length_px": length_px,
+                    "length_um": length_um,
+                }
+            )
+
+    if "intervein_areas" in g:
+        for r in regions:
+            area_px = f"{r.area_px2:.1f}" if r.polygon is not None else ""
+            area_um2 = f"{r.area_px2 * scale**2:.1f}" if r.polygon is not None and scale else ""
+            rows.append(
+                {
+                    "specimen": sid,
+                    "feature": r.name,
+                    "category": "region",
+                    "type": "",
+                    "status": r.status if r.status else "identified",
+                    "area_px": area_px,
+                    "area_um2": area_um2,
+                    "length_px": "",
+                    "length_um": "",
+                }
+            )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as f:
@@ -374,37 +422,43 @@ def export_csv(
 # ---------------------------------------------------------------------------
 
 
-def _build_fieldnames(include_um: bool) -> list[str]:
-    """Build the canonical wide-format column list."""
+def _build_fieldnames(include_um: bool, groups: Optional[set[str]] = None) -> list[str]:
+    """Build the canonical wide-format column list, filtered by ``groups``.
+
+    When ``groups`` is None, all measurement groups are included.
+    """
+    g = set(groups) if groups is not None else set(ALL_MEASUREMENT_GROUPS)
     fields = ["specimen"]
-    # Wing-level measurements first
-    fields.append("wing area_px")
-    if include_um:
-        fields.append("wing area_um2")
-    fields.append("wing length_px")
-    if include_um:
-        fields.append("wing length_um")
-    fields.append("crossvein distance_px")
-    if include_um:
-        fields.append("crossvein distance_um")
-    fields.append("CV ratio")
-    fields.append("anterior area_px")
-    if include_um:
-        fields.append("anterior area_um2")
-    fields.append("posterior area_px")
-    if include_um:
-        fields.append("posterior area_um2")
-    # Per-vein
-    for vein_id in VEIN_AP_ORDER:
-        name = _VEIN_DISPLAY[vein_id]
-        fields.append(f"{name} length_px")
+    if "wing_area" in g:
+        fields.append("wing area_px")
         if include_um:
-            fields.append(f"{name} length_um")
-    # Per-region
-    for region in REGION_AP_ORDER:
-        fields.append(f"{region} area_px")
+            fields.append("wing area_um2")
+    if "cv_ratio" in g:
+        fields.append("wing length_px")
         if include_um:
-            fields.append(f"{region} area_um2")
+            fields.append("wing length_um")
+        fields.append("crossvein distance_px")
+        if include_um:
+            fields.append("crossvein distance_um")
+        fields.append("CV ratio")
+    if "ap_areas" in g:
+        fields.append("anterior area_px")
+        if include_um:
+            fields.append("anterior area_um2")
+        fields.append("posterior area_px")
+        if include_um:
+            fields.append("posterior area_um2")
+    if "vein_lengths" in g:
+        for vein_id in VEIN_AP_ORDER:
+            name = _VEIN_DISPLAY[vein_id]
+            fields.append(f"{name} length_px")
+            if include_um:
+                fields.append(f"{name} length_um")
+    if "intervein_areas" in g:
+        for region in REGION_AP_ORDER:
+            fields.append(f"{region} area_px")
+            if include_um:
+                fields.append(f"{region} area_um2")
     return fields
 
 
@@ -414,67 +468,70 @@ def _build_row(
     um_per_px: Optional[float] = None,
     specimen_id: Optional[str] = None,
     wing_result: Optional[WingResult] = None,
+    groups: Optional[set[str]] = None,
 ) -> dict[str, str]:
-    """Build a single wide-format row dict for one specimen."""
+    """Build a single wide-format row dict for one specimen, filtered by ``groups``."""
     scale = um_per_px if um_per_px is not None and um_per_px > 0 else None
     include_um = scale is not None
+    g = set(groups) if groups is not None else set(ALL_MEASUREMENT_GROUPS)
 
     row: dict[str, str] = {"specimen": specimen_id or ""}
 
-    # Wing-level measurements
-    wm = _wing_measurements(wing_result, scale)
-    row["wing area_px"] = wm["wing_area_px"]
-    if include_um:
-        row["wing area_um2"] = wm["wing_area_um2"]
-    row["wing length_px"] = wm["wing_length_px"]
-    if include_um:
-        row["wing length_um"] = wm["wing_length_um"]
-    row["crossvein distance_px"] = wm["crossvein_distance_px"]
-    if include_um:
-        row["crossvein distance_um"] = wm["crossvein_distance_um"]
-    row["CV ratio"] = wm["cv_ratio"]
-    row["anterior area_px"] = wm["anterior_area_px"]
-    if include_um:
-        row["anterior area_um2"] = wm["anterior_area_um2"]
-    row["posterior area_px"] = wm["posterior_area_px"]
-    if include_um:
-        row["posterior area_um2"] = wm["posterior_area_um2"]
+    # Wing-level measurements (computed only for groups in scope)
+    wm = _wing_measurements(wing_result, scale, groups=g)
+    if "wing_area" in g:
+        row["wing area_px"] = wm["wing_area_px"]
+        if include_um:
+            row["wing area_um2"] = wm["wing_area_um2"]
+    if "cv_ratio" in g:
+        row["wing length_px"] = wm["wing_length_px"]
+        if include_um:
+            row["wing length_um"] = wm["wing_length_um"]
+        row["crossvein distance_px"] = wm["crossvein_distance_px"]
+        if include_um:
+            row["crossvein distance_um"] = wm["crossvein_distance_um"]
+        row["CV ratio"] = wm["cv_ratio"]
+    if "ap_areas" in g:
+        row["anterior area_px"] = wm["anterior_area_px"]
+        if include_um:
+            row["anterior area_um2"] = wm["anterior_area_um2"]
+        row["posterior area_px"] = wm["posterior_area_px"]
+        if include_um:
+            row["posterior area_um2"] = wm["posterior_area_um2"]
 
-    # Index veins by id (skip ectopic)
-    vein_map: dict[str, VeinIdentification] = {}
-    for v in veins:
-        if not v.vein_id.startswith("EV"):
-            vein_map[v.vein_id] = v
+    # Per-vein lengths
+    if "vein_lengths" in g:
+        vein_map: dict[str, VeinIdentification] = {}
+        for v in veins:
+            if not v.vein_id.startswith("EV"):
+                vein_map[v.vein_id] = v
+        for vein_id in VEIN_AP_ORDER:
+            name = _VEIN_DISPLAY[vein_id]
+            v = vein_map.get(vein_id)
+            if v is None or v.centerline is None:
+                row[f"{name} length_px"] = NOT_IDENTIFIED
+                if include_um:
+                    row[f"{name} length_um"] = NOT_IDENTIFIED
+            else:
+                row[f"{name} length_px"] = f"{v.centerline.length:.1f}"
+                if include_um:
+                    row[f"{name} length_um"] = f"{v.centerline.length * scale:.1f}"
 
-    # Vein columns
-    for vein_id in VEIN_AP_ORDER:
-        name = _VEIN_DISPLAY[vein_id]
-        v = vein_map.get(vein_id)
-        if v is None or v.centerline is None:
-            row[f"{name} length_px"] = NOT_IDENTIFIED
-            if include_um:
-                row[f"{name} length_um"] = NOT_IDENTIFIED
-        else:
-            row[f"{name} length_px"] = f"{v.centerline.length:.1f}"
-            if include_um:
-                row[f"{name} length_um"] = f"{v.centerline.length * scale:.1f}"
-
-    # Index regions by name
-    region_map: dict[str, InterveinRegion] = {}
-    for r in regions:
-        region_map[r.name] = r
-
-    # Region columns
-    for region_name in REGION_AP_ORDER:
-        r = region_map.get(region_name)
-        if r is None or r.polygon is None:
-            row[f"{region_name} area_px"] = NOT_IDENTIFIED
-            if include_um:
-                row[f"{region_name} area_um2"] = NOT_IDENTIFIED
-        else:
-            row[f"{region_name} area_px"] = f"{r.area_px2:.1f}"
-            if include_um:
-                row[f"{region_name} area_um2"] = f"{r.area_px2 * scale**2:.1f}"
+    # Per-region areas
+    if "intervein_areas" in g:
+        region_map: dict[str, InterveinRegion] = {}
+        for r in regions:
+            region_map[r.name] = r
+        for region_name in REGION_AP_ORDER:
+            r = region_map.get(region_name)
+            if r is None or r.polygon is None:
+                row[f"{region_name} area_px"] = NOT_IDENTIFIED
+                if include_um:
+                    row[f"{region_name} area_um2"] = NOT_IDENTIFIED
+            else:
+                row[f"{region_name} area_px"] = f"{r.area_px2:.1f}"
+                if include_um:
+                    row[f"{region_name} area_um2"] = f"{r.area_px2 * scale**2:.1f}"
 
     return row
 
@@ -483,11 +540,16 @@ def export_csv_batch(
     all_results: list[tuple[str, WingResult]],
     out_path: Path,
     um_per_px: Optional[float] = None,
+    groups: Optional[set[str]] = None,
 ) -> None:
-    """Write wide-format measurements CSV for multiple specimens (one row each)."""
+    """Write wide-format measurements CSV for multiple specimens (one row each).
+
+    ``groups`` controls which measurement groups appear as columns (see
+    MEASUREMENT_GROUPS). None = all groups (back-compat default).
+    """
     scale = um_per_px if um_per_px is not None and um_per_px > 0 else None
     include_um = scale is not None
-    fieldnames = _build_fieldnames(include_um)
+    fieldnames = _build_fieldnames(include_um, groups=groups)
 
     rows = []
     for specimen_id, wing_result in sorted(all_results, key=lambda x: x[0]):
@@ -498,6 +560,7 @@ def export_csv_batch(
                 um_per_px,
                 specimen_id,
                 wing_result=wing_result,
+                groups=groups,
             )
         )
 

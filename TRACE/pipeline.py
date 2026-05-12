@@ -76,6 +76,12 @@ OUTPUT_TOOLTIPS = {
 # new keys only.
 _LEGACY_OVERLAY_ALIASES = {"overlay": ("vein_overlay", "intervein_overlay")}
 
+# Re-export so GUI/CLI can import groups + labels from a single module.
+from identify_features.views.csv_export import (  # noqa: E402
+    ALL_MEASUREMENT_GROUPS,
+    MEASUREMENT_GROUPS,
+)
+
 # Outputs that require Step 6.1/6.2 (intervein polygon splitting + region naming).
 # Used to decide whether to set PipelineConfig.skip_intervein_regions = True
 # when nothing requested actually needs the intervein output.
@@ -316,6 +322,7 @@ def trace_folder(
     recursive: bool = False,
     do_rotation: bool = True,
     user_landmark_distances: Optional[list[dict]] = None,
+    csv_measurement_groups: Optional[set[str]] = None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -377,10 +384,18 @@ def trace_folder(
 
         config = PipelineConfig()
 
+    # Default measurement groups: all of them.
+    if csv_measurement_groups is None:
+        csv_measurement_groups = set(ALL_MEASUREMENT_GROUPS)
+    else:
+        csv_measurement_groups = set(csv_measurement_groups)
+
     # Skip §6.1/§6.2 (the resource-heavy intervein passes) when no requested
     # output depends on intervein region data. §6.3 vein tissue assignment
     # still runs because vein_overlay / overlay rendering needs tissue polygons.
-    if not (outputs & _INTERVEIN_DEPENDENT_OUTPUTS):
+    # CSV is intervein-dependent only when its "intervein_areas" group is on.
+    csv_needs_intervein = "csv" in outputs and "intervein_areas" in csv_measurement_groups
+    if not ((outputs & (_INTERVEIN_DEPENDENT_OUTPUTS - {"csv"})) or csv_needs_intervein):
         config.skip_intervein_regions = True
 
     if keep_intermediates:
@@ -417,6 +432,7 @@ def trace_folder(
             recursive=recursive,
             do_rotation=do_rotation,
             user_landmark_distances=user_landmark_distances,
+            csv_measurement_groups=csv_measurement_groups,
         )
     finally:
         if temp_dir_obj is not None:
@@ -444,6 +460,7 @@ def _run(
     recursive: bool = False,
     do_rotation: bool = True,
     user_landmark_distances: Optional[list[dict]] = None,
+    csv_measurement_groups: Optional[set[str]] = None,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -768,7 +785,7 @@ def _run(
                 logger.exception("Fast-path: failed to write user-distance CSV")
         elif batch_results:
             try:
-                export_csv_batch(batch_results, csv_path, um_per_px=scale)
+                export_csv_batch(batch_results, csv_path, um_per_px=scale, groups=csv_measurement_groups)
                 logger.info("Batch CSV: %s (%d wings)", csv_path, len(batch_results))
             except Exception:
                 logger.exception("Failed to write batch CSV")
