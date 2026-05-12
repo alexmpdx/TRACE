@@ -42,12 +42,147 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
 from TRACE.presets_loader import load_presets
 
 # Friendly display names for the GateConfigPanel landmark labels. The shorthand
 # is what LandmarkLocator stores internally; the right-hand text is what the
 # Landmarks tab should show users.
+# Tooltips for every PipelineConfig field shown in the dialog. Keyed by the
+# field name passed to _add_float / _add_int / _add_opt_float / _add_bool / etc.
+# The helpers automatically look up the tooltip and apply it to both the widget
+# and its form-row label so hovering either surfaces the description.
+_FIELD_TOOLTIPS: dict[str, str] = {
+    # -- General → Scale --
+    "um_per_px": "Microns per pixel — used to convert every measurement to physical units (µm, µm²).",
+    # -- Skeletonization & Pruning --
+    "skeleton_methods": (
+        "Which skeletonization method(s) to run when extracting vein centerlines from "
+        "the vein-tissue mask. RIDGE (Frangi-like ridge response) is the production default."
+    ),
+    "smooth_sigma": "Gaussian sigma (px) used to smooth the vein-tissue mask before skeletonization.",
+    "enable_basic_prune": (
+        "Step 4: length-based pruning of skeleton branches. Disable to keep every short "
+        "branch the skeletonizer produces (useful for debugging)."
+    ),
+    "enable_small_fragment_removal": (
+        "Steps 11/14: discard isolated tiny skeleton components. Disable to keep every " "disconnected fragment."
+    ),
+    "min_component_edge_fraction": (
+        "Final-pass orphan cull: drop any connected component whose total edge length is "
+        "below this fraction of the graph's combined edge length. 0 = keep every component."
+    ),
+    "prune_methods": (
+        "Optional additional pruning methods layered on top of the length-based prune. "
+        "Most pipelines leave this empty."
+    ),
+    "prune_min_length_um": (
+        "Minimum branch length to keep (µm). When unchecked, uses an auto threshold "
+        "derived from the median vein width."
+    ),
+    "prune_min_length_vein_widths": "Auto prune threshold as a multiple of the median vein width.",
+    "final_stub_vein_widths": "Final stub-removal threshold: branches shorter than this × median vein width are dropped.",
+    "junction_merge_vein_widths": (
+        "Tight junction merge radius: combine degree-2/3 nodes that are within this × "
+        "median vein width. 0 disables the merge."
+    ),
+    "prune_radius_ratio_threshold": (
+        "Distance-map pruning: an endpoint is treated as noise when its ridge radius is "
+        "below this fraction of its junction's radius."
+    ),
+    "prune_scale_sigmas": "Sigmas (px) for multi-scale persistence pruning — comma-separated.",
+    "prune_single_scale_sigma": "Sigma (px) used by single-scale pruning methods.",
+    "collinear_min_angle": (
+        "Minimum angle (deg) at which two edges meeting at a degree-2 node are merged "
+        "into one. 180 = perfectly straight."
+    ),
+    # -- Bridging (3 passes) --
+    "bridge_max_gap_um": "Pass 1: maximum absolute gap (µm) between two edge endpoints eligible for bridging.",
+    "bridge_gap_fraction": "Pass 1: gap allowance as a fraction of max(edge lengths).",
+    "bridge_direction_window_um": "Pass 1: distance (µm) along each edge used to compute its outgoing direction.",
+    "bridge_min_combined_length_um": "Pass 1: minimum combined length (µm) of both edges to qualify.",
+    "bridge_on_axis_max_angle": "Pass 1: strict on-axis angle (deg) — the longer edge's tangent must point within this of the gap vector.",
+    "bridge_on_axis_relaxed_cap": "Pass 1: cap (deg) for the shorter edge's relaxed on-axis tolerance.",
+    "bridge_min_facing_angle": "Pass 1: minimum angle (deg) between the two edges' outgoing directions (closer to 180 = facing each other).",
+    "bridge_direction_max_edge_fraction": "Pass 1: cap on the direction-window length as a fraction of the edge length (long edges).",
+    "bridge2_max_gap_um": "Pass 2: maximum absolute gap (µm) between endpoints.",
+    "bridge2_gap_fraction": "Pass 2: gap allowance as a fraction of max(edge lengths).",
+    "bridge2_min_gap_vw": "Pass 2: floor on the adaptive gap, expressed as × median vein width.",
+    "bridge2_direction_window_um": "Pass 2: distance (µm) along each edge used to compute direction.",
+    "bridge2_min_combined_length_um": "Pass 2: minimum combined edge length (µm). Used only when the × vein-width override is disabled.",
+    "bridge2_min_combined_length_vw": (
+        "Pass 2: minimum combined edge length as × median vein width. When checked, overrides the µm version."
+    ),
+    "bridge2_on_axis_max_angle": "Pass 2: on-axis max angle (deg).",
+    "bridge2_on_axis_relaxed_cap": "Pass 2: relaxed on-axis cap (deg).",
+    "bridge2_min_facing_angle": "Pass 2: minimum facing angle (deg) between the two edges.",
+    "bridge3_max_gap_vw": "Pass 3: maximum gap as × median vein width — relaxed pass for short stubs.",
+    "bridge3_short_edge_vw": "Pass 3: threshold (× median vein width) below which an edge counts as 'short' for this pass.",
+    "bridge3_relaxed_facing_angle": "Pass 3: relaxed facing-angle threshold (deg) for qualifying short-stub pairs.",
+    "bridge3_direction_window_um": "Pass 3: distance (µm) along each edge used to compute direction.",
+    "bridge3_on_axis_max_angle": "Pass 3: on-axis max angle (deg).",
+    "bridge3_on_axis_relaxed_cap": "Pass 3: relaxed on-axis cap (deg).",
+    # -- Tracing — landmark anchoring + vein tracing --
+    "snap_radius_um": (
+        "Primary landmark-to-skeleton snap radius (µm). A landmark must lie within this "
+        "distance of a skeleton node to anchor."
+    ),
+    "snap_radius_vw": "Fallback snap radius as × median vein width — used when no µm-per-pixel scale is set.",
+    "departure_sample_um": (
+        "Distance (µm) along an edge used to compute the outgoing departure direction " "from an anchored landmark."
+    ),
+    "departure_sample_vw": "Fallback departure sample distance as × median vein width — used when no µm-per-pixel scale is set.",
+    "tangent_continuity_max_angle": (
+        "Maximum tangent deflection (deg) allowed when continuing a vein through a junction. "
+        "Larger = more permissive about veins making sharp turns."
+    ),
+    "merge_max_gap_um": "Maximum gap (µm) between two collinear line segments when merging them into one vein.",
+    "distal_landmark_search_vw": "Search radius (× median vein width) for extending toward a distal landmark when its anchor edge is short.",
+    "costa_min_in_band_fraction": "Minimum fraction of an edge's length that must lie inside the wing margin band for it to be classified as costa.",
+    "costa_propagation_max_distance_vw": "Maximum distance (× median vein width) from the margin band for costa propagation through chained edges.",
+    # -- Crossveins --
+    "crossvein_min_angle": "Minimum angle (deg) between a candidate crossvein and the L4 it connects to.",
+    "crossvein_max_length_frac": "Maximum crossvein length as a fraction of the wing's proximodistal axis.",
+    "crossvein_min_length_vw": "Minimum crossvein length as × median vein width.",
+    "crossvein_max_length_vw": "Maximum crossvein length as × median vein width.",
+    "synthesize_missing_crossveins": (
+        "Phase 5b: when graph detection can't find ACV/PCV, synthesize them from landmark "
+        "positions. Disable to preserve the fused-region output."
+    ),
+    # -- Ectopic detection --
+    "ectopic_min_length_um": "Minimum length (µm) for a detected ectopic vein to be kept.",
+    "ectopic_min_length_vw": "Fallback minimum ectopic length as × median vein width — used when no µm-per-pixel scale is set.",
+    # -- Intervein labeling / naming --
+    "skip_intervein_regions": (
+        "Skip §6.1 polygon splitting and §6.2 region naming. Saves resources when only "
+        "vein outputs are needed. Vein-tissue assignment still runs."
+    ),
+    "vein_buffer_vw": "Buffer radius around each vein centerline (× median vein width) used when assigning tissue polygons to veins.",
+    "adjacency_min_length_vw": "Minimum shared boundary length (× median vein width) for two intervein regions to be considered adjacent.",
+    "max_merge_size": "Maximum number of regions in an N-way merge. Uncheck for no cap.",
+    "intervein_split_h_vw": "h-maxima depth threshold for the intervein splitter, as × median vein width.",
+    "intervein_split_reseed_min_area_um2": (
+        "Intervein splitter: when a large region gets absorbed during open-under-constraint, "
+        "reseed it if its area exceeds this threshold (µm²)."
+    ),
+    "intervein_split_vein_barrier_vw": "Buffer radius around vein centerlines used as a barrier during intervein splitting (× median vein width).",
+    "intervein_split_wing_buffer_vw": "Inset (× median vein width) from the wing outline during intervein splitting.",
+}
+
+
+# Tooltips for the Intermediate-output checkboxes in the General tab.
+_INTERMEDIATE_TOOLTIPS: dict[str, str] = {
+    "wing_isolated_image": (
+        "Keep the Stage 0 isolated single-wing image (the wingIsolator-masked input) in the output folder."
+    ),
+    "chopped_image": ("Keep the hinge-removed image produced by HingeChopper in the output folder."),
+    "landmarks_overlay": ("Keep the landmark-points overlay PNG (rendered over the input image) in the output folder."),
+    "segmentation_overlay": ("Keep the raw vein/intervein semantic-segmentation overlay PNG in the output folder."),
+    "geojson": ("Keep the per-wing GeoJSON file (named veins + intervein regions) in the output folder."),
+}
+
+
 _LANDMARK_DISPLAY_NAMES: dict[str, str] = {
     "acv_a": "ACV-L3 junction",
     "acv_p": "ACV-L4 junction",
@@ -138,7 +273,11 @@ class PipelineConfigDialog(QDialog):
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
         self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
         self._do_rotation_chk.setChecked(bool(do_rotation))
+        # Block signals so the initial-sync setValue doesn't re-trigger the
+        # parallel-workers warning every time the Settings dialog opens.
+        self._workers_spin.blockSignals(True)
         self._workers_spin.setValue(int(workers))
+        self._workers_spin.blockSignals(False)
         self._wing_expand_spin.setValue(float(wing_expand_fraction))
         self._wing_enable_chk.setChecked(bool(wing_isolation_enabled))
         if wing_isolation_model_path:
@@ -158,7 +297,16 @@ class PipelineConfigDialog(QDialog):
         kwargs: dict[str, Any] = {}
         for name, (kind, widget, extra) in self._widgets.items():
             if kind == self._KIND_FLOAT:
-                kwargs[name] = widget.value()
+                # When a spinbox has a QLineEdit placeholder set (via the
+                # _PlaceholderSpinBox.set_placeholder helper) and the user left
+                # it at the minimum, treat that as None — the placeholder state
+                # means "no value entered yet" (e.g. um_per_px before the user
+                # has supplied a conversion factor).
+                placeholder = widget.lineEdit().placeholderText() if hasattr(widget, "lineEdit") else ""
+                if placeholder and widget.value() <= widget.minimum():
+                    kwargs[name] = None
+                else:
+                    kwargs[name] = widget.value()
             elif kind == self._KIND_INT:
                 kwargs[name] = widget.value()
             elif kind == self._KIND_OPT_FLOAT:
@@ -199,25 +347,30 @@ class PipelineConfigDialog(QDialog):
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Pipeline preset:"))
         self._preset_combo = QComboBox()
+        self._preset_combo.setToolTip(
+            "Named bundles of pipeline-config settings stored as JSON in TRACE/presets/. "
+            "Pick one and click Apply preset to overwrite the listed fields."
+        )
         for preset_name in self._presets:
             self._preset_combo.addItem(preset_name)
         preset_row.addWidget(self._preset_combo, stretch=1)
         apply_btn = QPushButton("Apply preset")
+        apply_btn.setToolTip("Overwrite all fields listed in the selected preset. Fields not in the preset are kept.")
         apply_btn.clicked.connect(self._apply_selected_preset)
         preset_row.addWidget(apply_btn)
         layout.addLayout(preset_row)
 
-        tabs = QTabWidget()
-        layout.addWidget(tabs, stretch=1)
+        self._tabs = QTabWidget()
+        layout.addWidget(self._tabs, stretch=1)
 
-        tabs.addTab(self._build_general_tab(), "General")
-        tabs.addTab(self._build_custom_distances_tab(), "Custom Distances")
-        tabs.addTab(self._build_landmarks_tab(), "Landmarks")
-        tabs.addTab(self._build_models_tab(), "Models")
-        tabs.addTab(self._build_skel_pruning_tab(), "Skeletonization && Pruning")
-        tabs.addTab(self._build_bridging_tab(), "Bridging")
-        tabs.addTab(self._build_tracing_tab(), "Tracing")
-        tabs.addTab(self._build_intervein_tab(), "Intervein")
+        self._tabs.addTab(self._build_general_tab(), "General")
+        self._tabs.addTab(self._build_custom_distances_tab(), "Custom Distances")
+        self._tabs.addTab(self._build_landmarks_tab(), "Landmarks")
+        self._tabs.addTab(self._build_models_tab(), "Models")
+        self._tabs.addTab(self._build_skel_pruning_tab(), "Skeletonization && Pruning")
+        self._tabs.addTab(self._build_bridging_tab(), "Bridging")
+        self._tabs.addTab(self._build_tracing_tab(), "Tracing")
+        self._tabs.addTab(self._build_intervein_tab(), "Intervein")
 
         # Keep the General-tab mirror of "synthesize missing crossveins" in sync
         # with the canonical checkbox on the Tracing tab.
@@ -238,7 +391,12 @@ class PipelineConfigDialog(QDialog):
 
         gb = QGroupBox("Scale")
         form = QFormLayout(gb)
-        self._add_opt_float(form, "um_per_px", "Microns per pixel", 0.0, 100.0, 4, 0.001, "use pixels")
+        self._add_float(form, "um_per_px", "Microns per pixel", 0.0001, 100.0, 4, 0.001)
+        # Show the same "[conversion factor]" placeholder as the main-window scale
+        # spinner when the user hasn't entered a value. The _PlaceholderSpinBox
+        # subclass (from _add_float) renders this via QLineEdit's native
+        # placeholder mechanism, so clicking the field clears it automatically.
+        self._widgets["um_per_px"][1].set_placeholder("[conversion factor]")
         layout.addWidget(gb)
 
         gb = QGroupBox("Wing isolation (optional)")
@@ -270,9 +428,7 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Vein detection")
         form = QFormLayout(gb)
         self._synthesize_missing_crossveins_mirror = QCheckBox("Synthesize ACV/PCV from landmarks when not detected")
-        self._synthesize_missing_crossveins_mirror.setToolTip(
-            "Mirror of the same option on the Tracing tab. Toggling here updates both."
-        )
+        self._synthesize_missing_crossveins_mirror.setToolTip(_FIELD_TOOLTIPS["synthesize_missing_crossveins"])
         form.addRow("", self._synthesize_missing_crossveins_mirror)
         layout.addWidget(gb)
 
@@ -298,6 +454,9 @@ class PipelineConfigDialog(QDialog):
                 continue
             chk = QCheckBox(label)
             chk.setChecked(False)
+            tip = _INTERMEDIATE_TOOLTIPS.get(key)
+            if tip:
+                chk.setToolTip(tip)
             self._intermediate_output_chks[key] = chk
             im_layout.addWidget(chk)
         layout.addWidget(gb)
@@ -321,6 +480,7 @@ class PipelineConfigDialog(QDialog):
             "Applies to both Stage 1 (hinge chop, segmentation) and Stage 2 (analysis).\n"
             "The landmark forward pass is GPU-batched once upfront."
         )
+        self._workers_spin.valueChanged.connect(self._on_workers_changed)
         form.addRow("Workers", self._workers_spin)
         gb_layout.addLayout(form)
 
@@ -331,6 +491,19 @@ class PipelineConfigDialog(QDialog):
 
     def get_workers(self) -> int:
         return int(self._workers_spin.value())
+
+    def select_tab(self, name: str) -> None:
+        """Switch the active tab by visible label. No-op when `name` doesn't match."""
+        for i in range(self._tabs.count()):
+            if self._tabs.tabText(i) == name:
+                self._tabs.setCurrentIndex(i)
+                return
+
+    def _on_workers_changed(self, val: int) -> None:
+        """Forward worker-count bumps to the parent window's shared warning logic."""
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "maybe_show_workers_warning"):
+            parent.maybe_show_workers_warning(val)
 
     def get_wing_expand_fraction(self) -> float:
         return float(self._wing_expand_spin.value())
@@ -367,6 +540,7 @@ class PipelineConfigDialog(QDialog):
 
     def _select_wing_model_folder(self):
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -524,6 +698,7 @@ class PipelineConfigDialog(QDialog):
             "(~5× slower, more robust)."
         )
         btn_lm_file = QPushButton("File...")
+        btn_lm_file.setToolTip("Pick a single .pt checkpoint for fast single-fold landmark inference.")
         btn_lm_file.clicked.connect(self._select_landmark_model_file)
         btn_lm_folder = QPushButton("Folder...")
         btn_lm_folder.setToolTip("Pick a folder of best_fold*.pt checkpoints (5-fold ensemble).")
@@ -544,7 +719,12 @@ class PipelineConfigDialog(QDialog):
         self._seg_model_edit = QLineEdit()
         self._seg_model_edit.setReadOnly(True)
         self._seg_model_edit.setPlaceholderText("Select segmentation model folder...")
+        self._seg_model_edit.setToolTip(
+            "modelTOjson model directory (contains metadata.json + weights). Produces the "
+            "vein/intervein semantic segmentation used by identifyFeatures."
+        )
         btn_seg = QPushButton("Browse...")
+        btn_seg.setToolTip("Pick the segmentation model folder.")
         btn_seg.clicked.connect(self._select_segmentation_model_folder)
         seg_row.addWidget(self._seg_model_edit, stretch=1)
         seg_row.addWidget(btn_seg)
@@ -599,6 +779,7 @@ class PipelineConfigDialog(QDialog):
 
     def _select_landmark_model_file(self):
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         path, _ = QFileDialog.getOpenFileName(
@@ -614,6 +795,7 @@ class PipelineConfigDialog(QDialog):
         from pathlib import Path as _P
 
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -633,6 +815,7 @@ class PipelineConfigDialog(QDialog):
 
     def _select_segmentation_model_folder(self):
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -808,20 +991,37 @@ class PipelineConfigDialog(QDialog):
     # -----------------------------------------------------------------------
     # Widget factories
     # -----------------------------------------------------------------------
+    def _apply_field_tooltip(self, form: QFormLayout, widget, name: str):
+        """Apply the tooltip for field `name` (from _FIELD_TOOLTIPS) to widget + form-row label."""
+        tooltip = _FIELD_TOOLTIPS.get(name)
+        if not tooltip:
+            return
+        widget.setToolTip(tooltip)
+        lbl = form.labelForField(widget)
+        if lbl is not None:
+            lbl.setToolTip(tooltip)
+
     def _add_float(
         self, form: QFormLayout, name: str, label: str, minv: float, maxv: float, decimals: int, step: float
     ):
-        spin = QDoubleSpinBox()
+        # Use _PlaceholderSpinBox so any caller can opt into a QLineEdit-native
+        # placeholder via `.set_placeholder(...)`. Behaves identically to a plain
+        # QDoubleSpinBox when no placeholder is configured.
+        from TRACE.gui import _PlaceholderSpinBox
+
+        spin = _PlaceholderSpinBox()
         spin.setRange(minv, maxv)
         spin.setDecimals(decimals)
         spin.setSingleStep(step)
         form.addRow(label, spin)
+        self._apply_field_tooltip(form, spin, name)
         self._widgets[name] = (self._KIND_FLOAT, spin, None)
 
     def _add_int(self, form: QFormLayout, name: str, label: str, minv: int, maxv: int):
         spin = QSpinBox()
         spin.setRange(minv, maxv)
         form.addRow(label, spin)
+        self._apply_field_tooltip(form, spin, name)
         self._widgets[name] = (self._KIND_INT, spin, None)
 
     def _add_opt_float(
@@ -848,6 +1048,13 @@ class PipelineConfigDialog(QDialog):
         hbox.addWidget(spin, stretch=1)
         check.toggled.connect(spin.setEnabled)
         form.addRow(label, row)
+        tooltip = _FIELD_TOOLTIPS.get(name)
+        if tooltip:
+            row.setToolTip(tooltip)
+            spin.setToolTip(tooltip)
+            lbl = form.labelForField(row)
+            if lbl is not None:
+                lbl.setToolTip(tooltip)
         self._widgets[name] = (self._KIND_OPT_FLOAT, row, (check, spin))
 
     def _add_opt_int(self, form: QFormLayout, name: str, label: str, minv: int, maxv: int, off_label: str):
@@ -862,6 +1069,13 @@ class PipelineConfigDialog(QDialog):
         hbox.addWidget(spin, stretch=1)
         check.toggled.connect(spin.setEnabled)
         form.addRow(label, row)
+        tooltip = _FIELD_TOOLTIPS.get(name)
+        if tooltip:
+            row.setToolTip(tooltip)
+            spin.setToolTip(tooltip)
+            lbl = form.labelForField(row)
+            if lbl is not None:
+                lbl.setToolTip(tooltip)
         self._widgets[name] = (self._KIND_OPT_INT, row, (check, spin))
 
     def _add_enum_list(self, form: QFormLayout, name: str, label: str, enum_cls: type, allowed_values=None):
@@ -876,17 +1090,20 @@ class PipelineConfigDialog(QDialog):
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
             lw.addItem(item)
         form.addRow(label, lw)
+        self._apply_field_tooltip(form, lw, name)
         self._widgets[name] = (self._KIND_ENUM_LIST, lw, enum_cls)
 
     def _add_float_list(self, form: QFormLayout, name: str, label: str):
         edit = QLineEdit()
         edit.setPlaceholderText("e.g. 2.0, 4.0, 8.0, 16.0")
         form.addRow(label, edit)
+        self._apply_field_tooltip(form, edit, name)
         self._widgets[name] = (self._KIND_FLOAT_LIST, edit, None)
 
     def _add_bool(self, form: QFormLayout, name: str, label: str):
         check = QCheckBox()
         form.addRow(label, check)
+        self._apply_field_tooltip(form, check, name)
         self._widgets[name] = (self._KIND_BOOL, check, None)
 
     # -----------------------------------------------------------------------
@@ -896,6 +1113,11 @@ class PipelineConfigDialog(QDialog):
         for name, (kind, widget, extra) in self._widgets.items():
             val = getattr(config, name)
             if kind == self._KIND_FLOAT:
+                # Some PipelineConfig fields are float | None (e.g. um_per_px). The GUI
+                # treats them as plain floats; fall back to the widget's current value
+                # when the saved/imported config has None so we don't crash on float(None).
+                if val is None:
+                    continue
                 widget.setValue(float(val))
             elif kind == self._KIND_INT:
                 widget.setValue(int(val))
@@ -929,6 +1151,11 @@ class PipelineConfigDialog(QDialog):
 
     def _reset_defaults(self):
         self._load_from_config(PipelineConfig())
+        # Scale: PipelineConfig.um_per_px defaults to None; _load_from_config skips
+        # None floats, so explicitly snap the spinbox to its minimum (which shows
+        # the "[conversion factor]" placeholder).
+        um_spin = self._widgets["um_per_px"][1]
+        um_spin.setValue(um_spin.minimum())
         self._show_vein_tissue_chk.setChecked(False)
         self._include_unreliable_landmarks_chk.setChecked(False)
         self._do_rotation_chk.setChecked(False)

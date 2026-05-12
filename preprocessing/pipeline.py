@@ -219,6 +219,7 @@ def run_landmarks(
     predictor_cache: dict,
     *,
     include_unreliable_landmarks: bool = False,
+    confidence_override: Optional[dict] = None,
 ) -> tuple[dict, dict]:
     """Predict landmarks. Returns (landmarks, metadata) keyed by GeoJSON names.
 
@@ -227,9 +228,15 @@ def run_landmarks(
 
     metadata[name] -> {reliable, gate_reason, confidence, sharpness, second_peak_ratio}.
 
+    `confidence_override`: optional gate-config override (same shape as the
+    `confidence:` block in `configs/default.yaml`). Must be threaded in by the
+    per-image fallback so it stays consistent with the batch-prefetch path —
+    otherwise the cache rebuilds a predictor with the model's bundled core
+    landmarks and aborts images the user explicitly cleared from the gate.
+
     Raises landmark_locator.LowConfidenceLandmarkError if a core landmark fails the gate.
     """
-    predictor = _predictor_from_cache(checkpoint_path, predictor_cache)
+    predictor = _predictor_from_cache(checkpoint_path, predictor_cache, confidence_override=confidence_override)
     result = predictor.predict_from_path(image_path, include_unreliable=include_unreliable_landmarks)
     return _shape_predict_result(predictor, result)
 
@@ -550,6 +557,7 @@ def process_single_image(
     keep_intermediates: bool = False,
     target_name: Optional[str] = None,
     do_rotation: bool = True,
+    gate_override: Optional[dict] = None,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
@@ -692,6 +700,7 @@ def process_single_image(
                 landmark_checkpoint,
                 predictor_cache,
                 include_unreliable_landmarks=include_unreliable_landmarks,
+                confidence_override=gate_override,
             )
         result.landmarks = landmarks
         result.landmark_metadata = landmark_metadata
@@ -938,6 +947,7 @@ def process_folder(
                 keep_intermediates=keep_intermediates,
                 target_name=target_names.get(img_path),
                 do_rotation=do_rotation,
+                gate_override=gate_override,
             )
             _emit(i, img_path.name, "done")
             return result

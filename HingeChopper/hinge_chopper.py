@@ -60,23 +60,45 @@ def load_landmarks(path):
     return landmarks
 
 
+# Priority-ordered fallbacks for a "distal-side reference point" used to tell
+# which side of the hinge line is anatomically distal (kept) vs proximal (chopped).
+# All five are distal-margin landmarks; DTip is preferred but any one of them
+# suffices for the side-test, so a single low-confidence dtip prediction no
+# longer aborts the whole image when other distal landmarks are reliable.
+_DISTAL_REFERENCE_PRIORITY = ("DTip", "L4.d", "L2.d", "L5.d", "L4-L5", "L1-Rs")
+
+
+def _pick_distal_reference(landmarks):
+    """Return the (x, y) of the first available distal-side landmark, or None."""
+    for name in _DISTAL_REFERENCE_PRIORITY:
+        if name in landmarks:
+            return landmarks[name]
+    return None
+
+
 def build_hinge_line(landmarks):
     """Construct ordered hinge line: subcostal_break → [L1-Rs] → [L4-L5] → alula_notch.
 
     When both L1-Rs and L4-L5 are present, the segment between them is shifted
-    proximally (away from DTip) by 25% of the distance between them, perpendicular
-    to their connecting line.
+    proximally (away from a distal-side reference point) by 25% of the distance
+    between them, perpendicular to their connecting line. DTip is the preferred
+    reference but any distal-margin landmark in `_DISTAL_REFERENCE_PRIORITY` works.
     """
-    for req in ("DTip", "subcostal break", "alula notch"):
+    for req in ("subcostal break", "alula notch"):
         if req not in landmarks:
             raise ValueError(f"Missing required landmark: {req}")
+    distal_ref = _pick_distal_reference(landmarks)
+    if distal_ref is None:
+        raise ValueError(
+            "Missing required distal-side landmark " f"(expected one of: {', '.join(_DISTAL_REFERENCE_PRIORITY)})"
+        )
 
     points = [landmarks["subcostal break"]]
 
     if "L1-Rs" in landmarks and "L4-L5" in landmarks:
         l1rs = np.array(landmarks["L1-Rs"], dtype=np.float64)
         l4l5 = np.array(landmarks["L4-L5"], dtype=np.float64)
-        dtip = np.array(landmarks["DTip"], dtype=np.float64)
+        dtip = np.array(distal_ref, dtype=np.float64)
 
         seg_vec = l4l5 - l1rs
         seg_len = np.linalg.norm(seg_vec)
@@ -338,7 +360,7 @@ def chop_hinge(image_path, landmarks_path, output_path):
     landmarks = load_landmarks(landmarks_path)
     hinge_pts = build_hinge_line(landmarks)
     extended_pts = extend_to_image_edges(hinge_pts, landmarks, width, height)
-    dtip = landmarks["DTip"]
+    dtip = _pick_distal_reference(landmarks)
     proximal_mask = make_proximal_mask(extended_pts, dtip, width, height)
 
     # Black out proximal region
@@ -402,7 +424,7 @@ def chop_hinge_from_landmarks(image_path, landmarks, output_path):
     height, width = image.shape[:2]
     hinge_pts = build_hinge_line(landmarks)
     extended_pts = extend_to_image_edges(hinge_pts, landmarks, width, height)
-    dtip = landmarks["DTip"]
+    dtip = _pick_distal_reference(landmarks)
     proximal_mask = make_proximal_mask(extended_pts, dtip, width, height)
 
     image[proximal_mask] = 0

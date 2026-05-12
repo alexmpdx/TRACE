@@ -82,8 +82,8 @@ class CalibrateWidget(QWidget):
         self._calibrate_btn.setToolTip(
             "Measure peak Stage 2 memory on one image from your input folder, "
             "then suggest a safe Workers value for this machine.\n"
-            "Requires the Input folder, Landmark model, and Segmentation model "
-            "to be set in the main window. Takes ~1 minute."
+            "Requires the Input folder (main window) and the Landmark + Segmentation "
+            "models (Settings → Models) to be set. Takes ~1 minute."
         )
         self._calibrate_btn.clicked.connect(self._start_calibration)
         header.addWidget(self._calibrate_btn)

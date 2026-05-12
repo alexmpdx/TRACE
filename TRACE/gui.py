@@ -314,7 +314,8 @@ class TraceWindow(QMainWindow):
         )
         self.btn_reset_gui.clicked.connect(self._reset_gui_to_defaults)
         stg.addWidget(self.btn_reset_gui)
-        left_layout.addWidget(settings_group)
+        # settings_group is appended to left_layout at the bottom of this method
+        # so it sits below the Outputs and Parallel processing sections.
 
         # -- Output selection (final outputs only; intermediates live in Settings → General) --
         out_group = QGroupBox("Outputs")
@@ -400,6 +401,10 @@ class TraceWindow(QMainWindow):
         workers_row.addWidget(self.workers_help_btn)
         wg.addLayout(workers_row)
         left_layout.addWidget(workers_group)
+
+        # Pipeline settings sits at the bottom so the section the user touches
+        # most often (Outputs + Parallel processing) is closer to eye-level.
+        left_layout.addWidget(settings_group)
 
         # -- Run / Cancel --
         btn_layout = QHBoxLayout()
