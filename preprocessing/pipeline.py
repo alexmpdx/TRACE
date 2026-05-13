@@ -289,6 +289,7 @@ def run_rotation(
     landmarks: dict,
     extra_geojsons: Optional[list[Path]] = None,
     soft_reliability: bool = False,
+    mirror_correct: bool = False,
 ):
     """Rotate image + landmarks geojson (+ optional extras) to canonical orientation.
 
@@ -304,6 +305,7 @@ def run_rotation(
         output_dir=output_dir,
         extra_geojsons=extra_geojsons,
         soft_reliability=soft_reliability,
+        mirror_correct=mirror_correct,
     )
     if result is None:
         return None
@@ -557,6 +559,7 @@ def process_single_image(
     keep_intermediates: bool = False,
     target_name: Optional[str] = None,
     do_rotation: bool = True,
+    rotation_mirror_correct: bool = False,
     gate_override: Optional[dict] = None,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
@@ -581,6 +584,10 @@ def process_single_image(
         do_rotation: when True (default), run wingRotator as the last preprocessing step (after segmentation) to
             align the image to a canonical right-side-up, distal-right orientation.
             Skipped silently when there aren't enough reliable landmarks.
+        rotation_mirror_correct: when True AND a wing is detected as opposite chirality,
+            apply a vertical reflection on top of the rotation so the wing ends up
+            distal-right AND anterior-up (at the cost of flipping biological chirality).
+            Default False keeps chirality and lets such wings end up distal-left.
     """
     do_landmarks, do_hinge, do_segment = stages
     result = PipelineResult(image_path=image_path)
@@ -782,6 +789,7 @@ def process_single_image(
             landmarks=landmarks,
             extra_geojsons=extras,
             soft_reliability=include_unreliable_landmarks,
+            mirror_correct=rotation_mirror_correct,
         )
         if rotated is not None:
             rotated_image, rotated_lm, landmarks, rot_result = rotated
@@ -834,6 +842,7 @@ def process_folder(
     keep_intermediates: bool = False,
     recursive: bool = False,
     do_rotation: bool = True,
+    rotation_mirror_correct: bool = False,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -947,6 +956,7 @@ def process_folder(
                 keep_intermediates=keep_intermediates,
                 target_name=target_names.get(img_path),
                 do_rotation=do_rotation,
+                rotation_mirror_correct=rotation_mirror_correct,
                 gate_override=gate_override,
             )
             _emit(i, img_path.name, "done")

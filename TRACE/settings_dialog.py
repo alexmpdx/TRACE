@@ -174,7 +174,9 @@ _FIELD_TOOLTIPS: dict[str, str] = {
 # Tooltips for the Intermediate-output checkboxes in the General tab.
 _INTERMEDIATE_TOOLTIPS: dict[str, str] = {
     "wing_isolated_image": (
-        "Keep the Stage 0 isolated single-wing image (the wingIsolator-masked input) in the output folder."
+        "Keep the isolated wing image (the wingIsolator-masked input) in the output folder. "
+        "Requires the wing isolation step to be enabled and a wing-isolation model to be "
+        "configured in the Models tab."
     ),
     "chopped_image": ("Keep the hinge-removed image produced by HingeChopper in the output folder."),
     "landmarks_overlay": ("Keep the landmark-points overlay PNG (rendered over the input image) in the output folder."),
@@ -245,6 +247,7 @@ class PipelineConfigDialog(QDialog):
         wing_isolation_model_path: str = "",
         intermediate_outputs: dict[str, bool] | None = None,
         do_rotation: bool = False,
+        rotation_mirror_correct: bool = False,
         user_landmark_distances: list[dict] | None = None,
         distance_sample_image: str = "",
         distance_sample_landmarks: str = "",
@@ -273,6 +276,10 @@ class PipelineConfigDialog(QDialog):
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
         self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
         self._do_rotation_chk.setChecked(bool(do_rotation))
+        self._rotation_mirror_correct_chk.setChecked(bool(rotation_mirror_correct))
+        # Mirror-correct only meaningful when rotation is enabled.
+        self._rotation_mirror_correct_chk.setEnabled(bool(do_rotation))
+        self._do_rotation_chk.toggled.connect(self._rotation_mirror_correct_chk.setEnabled)
         # Block signals so the initial-sync setValue doesn't re-trigger the
         # parallel-workers warning every time the Settings dialog opens.
         self._workers_spin.blockSignals(True)
@@ -396,33 +403,40 @@ class PipelineConfigDialog(QDialog):
         # spinner when the user hasn't entered a value. The _PlaceholderSpinBox
         # subclass (from _add_float) renders this via QLineEdit's native
         # placeholder mechanism, so clicking the field clears it automatically.
-        self._widgets["um_per_px"][1].set_placeholder("[conversion factor]")
+        self._widgets["um_per_px"][1].set_placeholder("conversion factor")
         layout.addWidget(gb)
 
-        gb = QGroupBox("Wing isolation (optional)")
-        wig_layout = QVBoxLayout(gb)
-        self._wing_enable_chk = QCheckBox("Enable wing isolation (Stage 0)")
+        gb = QGroupBox("Optional preprocessing steps")
+        opt_layout = QVBoxLayout(gb)
+        self._wing_enable_chk = QCheckBox("Wing isolation")
         self._wing_enable_chk.setToolTip(
             "When enabled, every input image is masked through wingIsolator before "
             "LandmarkLocator sees it. Useful when images contain multiple wings. "
-            "Pick the wing-identification model in the Models tab."
+            "Requires a wing-isolation model — pick it in the Models tab."
         )
         self._wing_enable_chk.toggled.connect(self._on_wing_isolation_toggled)
-        wig_layout.addWidget(self._wing_enable_chk)
-        layout.addWidget(gb)
-
-        gb = QGroupBox("Wing rotation (optional)")
-        rot_layout = QVBoxLayout(gb)
-        self._do_rotation_chk = QCheckBox("Rotate to canonical orientation (final preprocessing step)")
+        opt_layout.addWidget(self._wing_enable_chk)
+        self._do_rotation_chk = QCheckBox("Rotate wing")
         self._do_rotation_chk.setToolTip(
-            "When checked, the image and every produced GeoJSON (landmarks, wing, "
-            "segmentation) are rotated to a canonical right-side-up, distal-right "
-            "orientation as the LAST preprocessing step. All model inferences "
-            "(wing isolation, landmark detection, segmentation) still run on the "
-            "original un-rotated image; only identifyFeatures sees the rotated set. "
-            "Skipped automatically when fewer than 2 reliable landmarks are available."
+            "When checked, each wing is rotated so it sits right-side-up rather than at "
+            "a skewed angle (rotation only — no mirroring or flipping). Runs as the LAST "
+            "preprocessing step: every model inference (wing isolation, landmark "
+            "detection, segmentation) still happens on the original un-rotated image, "
+            "and the image + every produced GeoJSON (landmarks, wing, segmentation) are "
+            "rotated together so identifyFeatures sees a self-consistent set. Skipped "
+            "automatically when fewer than 2 reliable landmarks are available."
         )
-        rot_layout.addWidget(self._do_rotation_chk)
+        opt_layout.addWidget(self._do_rotation_chk)
+        self._rotation_mirror_correct_chk = QCheckBox("Flip opposite-chirality wings to distal-right")
+        self._rotation_mirror_correct_chk.setToolTip(
+            "When checked AND wingRotator detects a wing of opposite chirality from the "
+            "canonical (right-wing) template, apply a vertical reflection on top of the "
+            "rotation so the wing ends up distal-right AND anterior-up. Useful for visual "
+            "consistency across mixed left+right wing batches, but flips biological "
+            "chirality (a left wing is mirrored to look like a right wing). Default off: "
+            "rotation only, opposite-chirality wings end up distal-left, anterior-up."
+        )
+        opt_layout.addWidget(self._rotation_mirror_correct_chk)
         layout.addWidget(gb)
 
         gb = QGroupBox("Vein detection")
@@ -562,6 +576,9 @@ class PipelineConfigDialog(QDialog):
 
     def get_do_rotation(self) -> bool:
         return self._do_rotation_chk.isChecked()
+
+    def get_rotation_mirror_correct(self) -> bool:
+        return self._rotation_mirror_correct_chk.isChecked()
 
     def get_gate_override(self) -> dict | None:
         """Confidence-gate override built from the Landmarks tab, or None if untouched."""
@@ -1159,6 +1176,7 @@ class PipelineConfigDialog(QDialog):
         self._show_vein_tissue_chk.setChecked(False)
         self._include_unreliable_landmarks_chk.setChecked(False)
         self._do_rotation_chk.setChecked(False)
+        self._rotation_mirror_correct_chk.setChecked(False)
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._wing_expand_spin.setValue(0.05)
         self._wing_enable_chk.setChecked(False)

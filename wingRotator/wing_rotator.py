@@ -319,6 +319,7 @@ def rotate_from_landmarks(
     min_landmarks: int = 2,
     max_residual_ratio: float = 0.25,
     skip_threshold_deg: float = 1.0,
+    mirror_correct: bool = False,
 ) -> Optional[RotationResult]:
     """Rotate image + landmarks (+ optional extra GeoJSONs) to canonical orientation.
 
@@ -337,6 +338,11 @@ def rotate_from_landmarks(
         skip_threshold_deg: when |theta| < this, the rotation is treated as a
             near-no-op and we still emit outputs (for downstream consistency)
             but log a "skipped" note
+        mirror_correct: when True AND mirror is detected, apply a horizontal
+            flip on top of the proper-rotation fit so opposite-chirality
+            wings end up distal-right AND anterior-up (at the cost of a true
+            reflection — biological chirality is flipped). Default False keeps
+            chirality and lets such wings end up distal-left, anterior-up.
 
     Returns RotationResult on success, or None when the fit cannot proceed.
     """
@@ -357,20 +363,37 @@ def rotate_from_landmarks(
 
     theta, rms = _weighted_kabsch_2d(p, q, w)
     mirrored_detected = _detect_mirror(p, q, w, rms)
+    apply_horizontal_flip = False
     if mirrored_detected:
-        # Opposite-chirality input. Without reflection we can't make BOTH the PD
-        # axis distal-right AND the AP axis anterior-up — the proper-rotation fit
-        # gives PD distal-right but flips AP (anterior at bottom). Adding 180°
-        # flips both, restoring anterior-up at the cost of PD becoming distal-left.
-        # We prioritize AP-up because downstream stages care more about a
-        # consistent anterior/posterior split than about distal pointing right.
-        theta = math.atan2(math.sin(theta + math.pi), math.cos(theta + math.pi))
-        logger.warning(
-            "wing_rotator: mirror residual lower for %s — opposite chirality from "
-            "canonical; applying extra 180° so anterior stays up (PD axis ends "
-            "up distal-left).",
-            image_path.name,
-        )
+        if mirror_correct:
+            # Reflection path: keep the proper-rotation theta (so PD is
+            # distal-right after rotation) and compose a horizontal flip
+            # over the rotated canvas after _build_affine. Result is
+            # anterior-up AND distal-right — but biological chirality is
+            # flipped (a left wing is mirrored to look like a right wing).
+            apply_horizontal_flip = True
+            logger.warning(
+                "wing_rotator: mirror residual lower for %s — opposite chirality; "
+                "mirror_correct=True, applying horizontal flip so anterior is up "
+                "AND distal is right (chirality is reflected).",
+                image_path.name,
+            )
+        else:
+            # Rotation-only path. Without reflection we can't make BOTH the PD
+            # axis distal-right AND the AP axis anterior-up — the proper-rotation
+            # fit gives PD distal-right but flips AP (anterior at bottom). Adding
+            # 180° flips both, restoring anterior-up at the cost of PD becoming
+            # distal-left. We prioritize AP-up because downstream stages care
+            # more about a consistent anterior/posterior split than about
+            # distal pointing right.
+            theta = math.atan2(math.sin(theta + math.pi), math.cos(theta + math.pi))
+            logger.warning(
+                "wing_rotator: mirror residual lower for %s — opposite chirality from "
+                "canonical; applying extra 180° so anterior stays up (PD axis ends "
+                "up distal-left). Pass mirror_correct=True to instead flip for "
+                "canonical distal-right at the cost of reflecting chirality.",
+                image_path.name,
+            )
     if rms > max_residual_ratio * _CANONICAL_PD_SPAN:
         logger.warning(
             "wing_rotator: high Procrustes residual (%.1f, threshold %.1f) for %s; " "rotation may be unreliable",
@@ -381,6 +404,20 @@ def rotate_from_landmarks(
 
     img = _read_image(image_path)
     M_forward, (new_w, new_h) = _build_affine(img.shape, theta)
+
+    if apply_horizontal_flip:
+        # Proper-rotation fit already gives PD distal-right but anterior-down for
+        # opposite-chirality inputs. Compose a vertical flip (mirror across the
+        # horizontal axis) so anterior moves to top while distal stays on the right.
+        # In homogeneous form: flip @ M, where flip = [[1, 0, 0], [0, -1, h-1]].
+        # Result: negate row-1 of the linear part and offset ty by (h-1).
+        M_forward = np.array(
+            [
+                [M_forward[0, 0], M_forward[0, 1], M_forward[0, 2]],
+                [-M_forward[1, 0], -M_forward[1, 1], (new_h - 1) - M_forward[1, 2]],
+            ],
+            dtype=np.float64,
+        )
 
     rotated = cv2.warpAffine(
         img,

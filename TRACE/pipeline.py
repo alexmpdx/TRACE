@@ -33,11 +33,11 @@ logger = logging.getLogger("TRACE")
 #   neither        → no overlay PNG written
 OUTPUT_TYPES = OrderedDict(
     [
-        ("wing_isolated_image", "Isolated single-wing image (Stage 0; requires wing-isolation model)"),
-        ("chopped_image", "Chopped (hinge-removed) image"),
+        ("wing_isolated_image", "Isolated wing image"),
+        ("chopped_image", "Wing after hinge removal"),
         ("landmarks_overlay", "Landmark points overlay PNG"),
         ("segmentation_overlay", "Vein/intervein inference overlay PNG"),
-        ("geojson", "GeoJSON (named veins & regions)"),
+        ("geojson", "Vein/intervein inference GeoJSON"),
         ("vein_overlay", "Vein overlay PNG"),
         ("intervein_overlay", "Intervein region overlay PNG"),
         ("ap_overlay", "AP compartment overlay PNG"),
@@ -49,8 +49,9 @@ OUTPUT_TYPES = OrderedDict(
 # Per-output tooltips for the GUI checkboxes. Keys match OUTPUT_TYPES.
 OUTPUT_TOOLTIPS = {
     "wing_isolated_image": (
-        "Save the masked single-wing image produced by Stage 0 (wingIsolator). "
-        "Only generated when a wing-isolation model is configured."
+        "Save the masked single-wing image produced by wingIsolator. "
+        "Requires the wing isolation step to be enabled and a wing-isolation "
+        "model to be configured in the Models tab."
     ),
     "chopped_image": ("Save the hinge-removed image written by HingeChopper before segmentation."),
     "landmarks_overlay": ("Render predicted landmark points on a PNG copy of the input image."),
@@ -162,6 +163,67 @@ def _required_stages(outputs: set[str]) -> tuple[bool, bool, bool]:
         needs_hinge = needs_hinge or hinge
         needs_seg = needs_seg or seg
     return (needs_lm, needs_hinge, needs_seg)
+
+
+# ---------------------------------------------------------------------------
+# Progress-bar weight model
+# ---------------------------------------------------------------------------
+# Baseline wall-time shares for a "default" all-outputs run, measured on a
+# 133-image / 47-min reference (Workers=5). The progress bar uses these to map
+# Stage 1 and Stage 2 image-count events onto a single 0–100 scale, so the bar
+# fills monotonically across the whole pipeline instead of restarting at 0%
+# when Stage 2 begins.
+#
+# Within-stage component shares (also from the reference run):
+#   Stage 1 (≈17% of total):
+#     wing_isolation ≈ 7.5% of total
+#     segmentation   ≈ 6.7% of total
+#     everything else ≈ 2.8% of total
+#   Stage 2 (≈83% of total):
+#     intervein splitter ≈ 70% of total
+#     everything else    ≈ 13% of total
+#
+# When the user turns off wing isolation or skips the intervein steps, we
+# subtract that component's slice and renormalize. The shares are approximate
+# (per-image timing varies wildly with image content), but they're far more
+# accurate than treating Stage 1 and Stage 2 as equal-weight bars.
+_PROGRESS_STAGE1_TOTAL_SHARE = 17.0
+_PROGRESS_STAGE2_TOTAL_SHARE = 83.0
+_PROGRESS_S1_WING_ISO_SHARE = 7.5
+_PROGRESS_S2_INTERVEIN_SHARE = 70.0
+
+
+def compute_progress_weights(
+    outputs: set[str],
+    *,
+    wing_isolation_enabled: bool,
+    skip_intervein_regions: bool,
+) -> tuple[float, float]:
+    """Return (stage1_share, stage2_share) summing to 1.0.
+
+    Used by the GUI progress bar to place Stage 1 and Stage 2 events on a
+    unified 0–100 scale that reflects their relative wall-time cost. Falls
+    back to (1.0, 0.0) when no Stage 2 outputs are selected.
+    """
+    has_stage2 = bool(_STAGE2_ANALYSIS_OUTPUTS & outputs)
+    if not has_stage2:
+        return (1.0, 0.0)
+
+    s1 = _PROGRESS_STAGE1_TOTAL_SHARE
+    s2 = _PROGRESS_STAGE2_TOTAL_SHARE
+    if not wing_isolation_enabled:
+        s1 -= _PROGRESS_S1_WING_ISO_SHARE
+    # The intervein splitter is gated by `skip_intervein_regions` (set
+    # automatically when no intervein-dependent outputs are requested).
+    needs_intervein = bool(_INTERVEIN_DEPENDENT_OUTPUTS & outputs)
+    if skip_intervein_regions or not needs_intervein:
+        s2 -= _PROGRESS_S2_INTERVEIN_SHARE
+
+    total = s1 + s2
+    if total <= 0:
+        # Defensive — shouldn't happen but avoid div-by-zero.
+        return (1.0, 0.0)
+    return (s1 / total, s2 / total)
 
 
 # BGR fallback colors for segmentation classes if the GeoJSON feature has no color.
@@ -321,6 +383,7 @@ def trace_folder(
     wing_expand_fraction: float = 0.05,
     recursive: bool = False,
     do_rotation: bool = True,
+    rotation_mirror_correct: bool = False,
     user_landmark_distances: Optional[list[dict]] = None,
     csv_measurement_groups: Optional[set[str]] = None,
 ) -> list[TraceResult]:
@@ -431,6 +494,7 @@ def trace_folder(
             keep_intermediates=keep_intermediates,
             recursive=recursive,
             do_rotation=do_rotation,
+            rotation_mirror_correct=rotation_mirror_correct,
             user_landmark_distances=user_landmark_distances,
             csv_measurement_groups=csv_measurement_groups,
         )
@@ -459,6 +523,7 @@ def _run(
     keep_intermediates: bool = False,
     recursive: bool = False,
     do_rotation: bool = True,
+    rotation_mirror_correct: bool = False,
     user_landmark_distances: Optional[list[dict]] = None,
     csv_measurement_groups: Optional[set[str]] = None,
 ) -> list[TraceResult]:
@@ -514,6 +579,7 @@ def _run(
         keep_intermediates=keep_intermediates,
         recursive=recursive,
         do_rotation=do_rotation,
+        rotation_mirror_correct=rotation_mirror_correct,
     )
 
     results: list[TraceResult] = []

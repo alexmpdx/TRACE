@@ -95,6 +95,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Include landmarks flagged reliable=false at reduced weight (default: drop them).",
     )
     parser.add_argument(
+        "--mirror-correct",
+        action="store_true",
+        help=(
+            "When mirror is detected, apply a horizontal flip so opposite-chirality "
+            "wings end up distal-right AND anterior-up (default off: rotation-only, "
+            "such wings end up distal-left, anterior-up with chirality preserved)."
+        ),
+    )
+    parser.add_argument(
         "--min-landmarks",
         type=int,
         default=2,
@@ -141,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
                 extra_geojsons=per_image_extras,
                 soft_reliability=args.soft_reliability,
                 min_landmarks=args.min_landmarks,
+                mirror_correct=args.mirror_correct,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("failed to rotate %s: %s", img_path.name, exc)

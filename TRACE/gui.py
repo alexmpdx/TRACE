@@ -10,9 +10,10 @@ import time
 import traceback
 from collections import OrderedDict
 from pathlib import Path
+from typing import Optional
 
 from identify_features.config import PipelineConfig
-from PyQt5.QtCore import QEvent, QObject, QSettings, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
@@ -45,6 +46,7 @@ from TRACE.pipeline import (
     MEASUREMENT_GROUPS,
     OUTPUT_TOOLTIPS,
     OUTPUT_TYPES,
+    compute_progress_weights,
     trace_folder,
 )
 from TRACE.settings_dialog import PipelineConfigDialog
@@ -189,6 +191,7 @@ class TraceWindow(QMainWindow):
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
         self._do_rotation = False
+        self._rotation_mirror_correct = False
         self._gate_override: dict | None = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
@@ -209,6 +212,35 @@ class TraceWindow(QMainWindow):
         self._distance_sample_image: str = ""
         self._distance_sample_landmarks: str = ""
         self._workers_warning_shown = False
+        # Highest percentage shown on the progress bar this run — parallel
+        # workers emit events out of order so we hold the bar at its peak
+        # (never rewinds). Reset to 0 at the start of every run.
+        self._progress_pct_high = 0
+        # Stage1/Stage2 wall-time weight split on the unified progress bar.
+        # Recomputed from the current output selection at run start so the
+        # bar reflects "fraction of wall time done" rather than raw image count.
+        self._progress_stage1_share = 1.0
+        self._progress_stage2_share = 0.0
+        # Wall-clock + smoothed ETA tracking.
+        self._run_start_time: Optional[float] = None
+        self._eta_smoothed_seconds: Optional[float] = None
+        # Per-stage throughput tracking for the hybrid ETA. Reset on every
+        # stage transition (preprocessing → analysis).
+        self._current_stage: Optional[str] = None
+        self._stage_first_event_time: Optional[float] = None
+        self._stage_completions: int = 0
+        self._stage_total: int = 0
+        # Locked-in (not recomputed every tick) timestamps + average so the
+        # smoothed bar can interpolate between "done" events without
+        # collapsing to zero on every refresh.
+        self._last_completion_time: Optional[float] = None
+        self._avg_time_per_image: Optional[float] = None
+        # 250ms QTimer that refreshes the bar + ETA between completion events.
+        # Without this, parallel-worker batches arrive in clusters and the
+        # bar sits frozen for tens of seconds between bursts of "done" events.
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(250)
+        self._progress_timer.timeout.connect(self._refresh_progress)
         self._build_ui()
         self._restore_settings()
 
@@ -227,7 +259,7 @@ class TraceWindow(QMainWindow):
         left_layout.setContentsMargins(4, 4, 4, 4)
 
         # -- Folders --
-        folder_group = QGroupBox("Images and Results Locations")
+        folder_group = QGroupBox("Input and Output Folders")
         fg = QVBoxLayout(folder_group)
 
         fg.addWidget(QLabel("Images to analyze:"))
@@ -280,7 +312,7 @@ class TraceWindow(QMainWindow):
         # the spinbox is at its minimum. Treated as "no scale entered" — Run
         # Pipeline refuses to start.
         self.scale_spin.setValue(self.config.um_per_px if self.config.um_per_px else self.scale_spin.minimum())
-        self.scale_spin.set_placeholder("[conversion factor]")
+        self.scale_spin.set_placeholder("conversion factor")
         self.scale_spin.setToolTip("Microns per pixel — used to convert every measurement to physical units (µm, µm²).")
         self.scale_spin.valueChanged.connect(self._on_scale_changed)
         sg.addWidget(self.scale_spin, stretch=1)
@@ -300,13 +332,13 @@ class TraceWindow(QMainWindow):
         btn_import = QPushButton("Import...")
         btn_import.setToolTip("Load a previously-exported pipeline-config JSON file. Replaces the current settings.")
         btn_import.clicked.connect(self._import_config)
-        btn_export = QPushButton("Export...")
+        btn_export = QPushButton("Save...")
         btn_export.setToolTip("Save the current pipeline-config to a JSON file for reuse (CLI --config or GUI Import).")
         btn_export.clicked.connect(self._export_config)
         io_row.addWidget(btn_import)
         io_row.addWidget(btn_export)
         stg.addLayout(io_row)
-        self.btn_reset_gui = QPushButton("Reset GUI to defaults")
+        self.btn_reset_gui = QPushButton("wipe my memories")
         self.btn_reset_gui.setToolTip(
             "Clear every persisted setting — input/output folders, model paths, scale, "
             "pipeline config, custom distance pairs, workers warning suppression — and "
@@ -436,7 +468,11 @@ class TraceWindow(QMainWindow):
         right_layout.addWidget(self.log_text, stretch=1)
 
         self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
         right_layout.addWidget(self.progress)
+        self.eta_label = QLabel("")
+        self.eta_label.setStyleSheet("color: #888;")
+        right_layout.addWidget(self.eta_label)
 
         # --- Assemble ---
         splitter = QSplitter(Qt.Horizontal)
@@ -604,6 +640,7 @@ class TraceWindow(QMainWindow):
             wing_isolation_model_path=self._wing_isolation_model_path,
             intermediate_outputs=dict(self._intermediate_outputs),
             do_rotation=self._do_rotation,
+            rotation_mirror_correct=self._rotation_mirror_correct,
             user_landmark_distances=list(self._user_landmark_distances),
             distance_sample_image=self._distance_sample_image,
             distance_sample_landmarks=self._distance_sample_landmarks,
@@ -615,6 +652,7 @@ class TraceWindow(QMainWindow):
             self._show_vein_tissue = dlg.get_show_vein_tissue()
             self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
             self._do_rotation = dlg.get_do_rotation()
+            self._rotation_mirror_correct = dlg.get_rotation_mirror_correct()
             self._gate_override = dlg.get_gate_override()
             self._wing_expand_fraction = dlg.get_wing_expand_fraction()
             self._wing_isolation_enabled = dlg.get_wing_isolation_enabled()
@@ -692,6 +730,7 @@ class TraceWindow(QMainWindow):
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
         self._do_rotation = False
+        self._rotation_mirror_correct = False
         self._gate_override = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
@@ -754,6 +793,7 @@ class TraceWindow(QMainWindow):
         s.setValue("show_vein_tissue", self._show_vein_tissue)
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
         s.setValue("do_rotation", self._do_rotation)
+        s.setValue("rotation_mirror_correct", self._rotation_mirror_correct)
         import json as _json
 
         s.setValue(
@@ -853,6 +893,9 @@ class TraceWindow(QMainWindow):
         saved_dor = s.value("do_rotation", None)
         if saved_dor is not None:
             self._do_rotation = saved_dor == "true" or saved_dor is True
+        saved_rmc = s.value("rotation_mirror_correct", None)
+        if saved_rmc is not None:
+            self._rotation_mirror_correct = saved_rmc == "true" or saved_rmc is True
         saved_iul = s.value("include_unreliable_landmarks", None)
         if saved_iul is not None:
             self._include_unreliable_landmarks = saved_iul == "true" or saved_iul is True
@@ -946,7 +989,31 @@ class TraceWindow(QMainWindow):
         # UI state
         self.btn_run.setEnabled(False)
         self.btn_cancel.setEnabled(True)
+        self._progress_pct_high = 0
         self.progress.setValue(0)
+        # Clear any stylesheet leftover from the previous run's success
+        # state (the bar turns green on a clean finish — reset it here so
+        # the new run starts in the default palette color).
+        self.progress.setStyleSheet("")
+        self._run_start_time = time.monotonic()
+        self._eta_smoothed_seconds = None
+        self._current_stage = None
+        self._stage_first_event_time = None
+        self._stage_completions = 0
+        self._stage_total = 0
+        self._last_completion_time = None
+        self._avg_time_per_image = None
+        self.eta_label.setText("Estimating time until pipeline finishes…")
+        self._progress_timer.start()
+        # Pre-compute the Stage1/Stage2 wall-time weight split for the chosen
+        # outputs so per-image progress events land on a unified 0–100 scale
+        # that reflects relative wall-time cost (Stage 2 dominates by ~5×).
+        outputs_now = self._selected_outputs()
+        self._progress_stage1_share, self._progress_stage2_share = compute_progress_weights(
+            outputs_now,
+            wing_isolation_enabled=self._wing_isolation_enabled,
+            skip_intervein_regions=getattr(self.config, "skip_intervein_regions", False),
+        )
         self.log_text.clear()
         self._save_settings()
         self._log("Starting TRACE pipeline...")
@@ -975,6 +1042,7 @@ class TraceWindow(QMainWindow):
                 wing_expand_fraction=self._wing_expand_fraction,
                 recursive=self.recursive_chk.isChecked(),
                 do_rotation=self._do_rotation,
+                rotation_mirror_correct=self._rotation_mirror_correct,
                 user_landmark_distances=(
                     list(self._user_landmark_distances) if self.include_custom_measurements_chk.isChecked() else []
                 ),
@@ -1004,20 +1072,174 @@ class TraceWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     def _on_progress(self, idx, total, name, stage, detail):
-        self.progress.setMaximum(total)
-        self.progress.setValue(idx + 1)
+        """Update internal stage-tracking state on each progress event.
+
+        Doesn't touch the progress bar / ETA directly — that happens via
+        _refresh_progress, which is called both here and from a 250ms QTimer
+        so the bar interpolates smoothly between completion events.
+        """
+        # Detect stage transitions so the hybrid ETA can reset its throughput
+        # tracker (Stage 2 per-image cost is wildly different from Stage 1).
+        if stage in ("preprocessing", "analysis") and stage != self._current_stage:
+            self._current_stage = stage
+            self._stage_first_event_time = time.monotonic()
+            self._stage_completions = 0
+            self._stage_total = total
+            self._last_completion_time = None
+            self._avg_time_per_image = None
+        self._stage_total = max(self._stage_total, total)
+
+        # Each image fires multiple progress events ("starting", "landmarks: …",
+        # "hinge: …", "segmentation: …", "done"). Only the "done" event
+        # represents an actual completion. Lock in the average time per image
+        # at each completion so the smoothing interpolator has a stable
+        # per-tick value (otherwise recomputing avg = elapsed/K every tick
+        # forces fractional-progress-since-last-completion to 0).
+        is_done = isinstance(detail, str) and detail.startswith("done")
+        if is_done and self._stage_first_event_time is not None:
+            self._stage_completions = max(self._stage_completions, idx + 1)
+            self._last_completion_time = time.monotonic()
+            stage_elapsed = self._last_completion_time - self._stage_first_event_time
+            self._avg_time_per_image = stage_elapsed / max(self._stage_completions, 1)
+
+        self._refresh_progress()
         msg = f"[{idx + 1}/{total}] {name}: {stage} - {detail}"
         self.statusBar().showMessage(msg)
         self._log(msg)
 
+    def _smoothed_within_stage_fraction(self) -> float:
+        """Return 0.0..1.0 reflecting smoothed progress within the current stage.
+
+        Between completion events the value advances linearly toward the next
+        expected completion based on the locked-in average time per image,
+        so the bar doesn't sit frozen for tens of seconds when parallel
+        workers complete in clustered bursts.
+        """
+        if self._stage_total <= 0 or self._stage_first_event_time is None:
+            return 0.0
+        if self._last_completion_time is None or self._avg_time_per_image is None:
+            # No completions yet in this stage — bar stays at the previous
+            # stage's final position (or 0 for Stage 1). Honest: we don't
+            # have a per-image time to extrapolate from yet.
+            return 0.0
+        time_since_last = max(0.0, time.monotonic() - self._last_completion_time)
+        # Fractional advance toward the next completion (0 → 1 over avg).
+        # Cap at 1.0 so we never appear to have completed an image we haven't.
+        fractional = min(1.0, time_since_last / max(self._avg_time_per_image, 0.01))
+        estimated = min(float(self._stage_total), self._stage_completions + fractional)
+        return estimated / self._stage_total
+
+    def _refresh_progress(self) -> None:
+        """Compute the smoothed pct + ETA from current state. Called both
+        when a progress event arrives and from a 250ms QTimer."""
+        if self._current_stage is None:
+            return
+        within_stage = self._smoothed_within_stage_fraction()
+        if self._current_stage == "analysis":
+            pct_float = (self._progress_stage1_share + self._progress_stage2_share * within_stage) * 100.0
+        else:
+            pct_float = self._progress_stage1_share * within_stage * 100.0
+        pct = min(99, int(pct_float))
+        if pct > self._progress_pct_high:
+            self._progress_pct_high = pct
+            self.progress.setValue(pct)
+        # ETA updates every tick whether or not pct ticked over an integer
+        # boundary, so the displayed time also evolves smoothly.
+        self._update_eta()
+
+    @staticmethod
+    def _format_eta(seconds: float) -> str:
+        import math
+
+        if not math.isfinite(seconds) or seconds <= 0:
+            return "Estimating time until pipeline finishes…"
+        # Sub-minute precision is noisy with per-image variance and parallelism;
+        # round to minutes and use a "<1m" floor so the displayed value isn't
+        # misleadingly specific.
+        total_minutes = int(round(seconds / 60))
+        if total_minutes < 1:
+            return "<1m until pipeline finishes"
+        if total_minutes < 60:
+            return f"~{total_minutes}m until pipeline finishes"
+        h, m = divmod(total_minutes, 60)
+        return f"~{h}h {m}m until pipeline finishes"
+
+    def _update_eta(self) -> None:
+        """Recompute the smoothed ETA and update the label under the progress bar.
+
+        Hybrid of two estimates:
+          • Percent-based (prior): elapsed × (100 − pct) / pct. Stable from the
+            first event because it leans on the Stage 1 / Stage 2 wall-time
+            weights from `compute_progress_weights`, but uniformly off when a
+            run's per-image cost deviates from the reference workload.
+          • Throughput-based (empirical): observe images-per-second in the
+            current stage and divide remaining images by it. Auto-adapts to
+            this run's actual cost profile, but needs ≥2 samples to be stable.
+        Blend weight grows from 0 → 1 as Stage samples accumulate (full
+        throughput at 3 completions), then we exponentially smooth so the
+        displayed value doesn't whiplash on outlier images.
+        """
+        if self._run_start_time is None or self._progress_pct_high <= 0:
+            return
+        elapsed = time.monotonic() - self._run_start_time
+        pct = self._progress_pct_high
+        percent_eta = elapsed * (100 - pct) / pct
+
+        eta_raw = percent_eta
+        if self._stage_first_event_time is not None and self._stage_completions >= 2 and self._stage_total > 0:
+            stage_elapsed = time.monotonic() - self._stage_first_event_time
+            if stage_elapsed > 0:
+                throughput = self._stage_completions / stage_elapsed  # images/sec
+                stage_remaining = max(0, self._stage_total - self._stage_completions)
+                stage_remaining_seconds = stage_remaining / max(throughput, 1e-6)
+
+                if self._current_stage == "preprocessing":
+                    # Project full-Stage-1 wall time from observed throughput,
+                    # then derive total run from the Stage 1 share prior. Stage 2
+                    # remaining is what's left after now.
+                    if self._progress_stage1_share > 0:
+                        full_stage1 = self._stage_total / max(throughput, 1e-6)
+                        total_predicted = full_stage1 / self._progress_stage1_share
+                        throughput_eta = max(0.0, total_predicted - elapsed)
+                    else:
+                        throughput_eta = stage_remaining_seconds
+                else:
+                    # Stage 2 (analysis) — empirical throughput on remaining images.
+                    throughput_eta = stage_remaining_seconds
+
+                # Blend: w grows with completed samples in the current stage.
+                # Full throughput-based at 3 completions; below that we blend
+                # in the percent-based prior to absorb sample noise.
+                threshold = 3.0
+                w = min(1.0, self._stage_completions / threshold)
+                eta_raw = w * throughput_eta + (1 - w) * percent_eta
+
+        # Exponential moving average — α=0.3 favors stability over reactivity.
+        alpha = 0.3
+        if self._eta_smoothed_seconds is None:
+            self._eta_smoothed_seconds = eta_raw
+        else:
+            self._eta_smoothed_seconds = alpha * eta_raw + (1 - alpha) * self._eta_smoothed_seconds
+        self.eta_label.setText(self._format_eta(self._eta_smoothed_seconds))
+
     def _on_all_done(self, results):
         self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+        self._progress_timer.stop()
 
         if not results:
             self._log("\nPipeline cancelled or no results.")
             self.statusBar().showMessage("Cancelled")
+            self.eta_label.setText("")
             return
+
+        # Pipeline finished cleanly — release the 99% cap and snap to 100.
+        self._progress_pct_high = 100
+        self.progress.setValue(100)
+        # Recolor the filled chunk green to make completion visually obvious.
+        # Cleared at the start of the next run by _run_pipeline.
+        self.progress.setStyleSheet("QProgressBar::chunk { background-color: #5cb85c; }")
+        self.eta_label.setText("Done")
 
         succeeded = sum(1 for r in results if r.error is None)
         failed = sum(1 for r in results if r.error is not None)
@@ -1043,6 +1265,8 @@ class TraceWindow(QMainWindow):
     def _on_error(self, msg):
         self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+        self._progress_timer.stop()
+        self.eta_label.setText("")
         self._log(f"\nFatal error: {msg}")
         QMessageBox.critical(self, "Pipeline Error", msg)
 

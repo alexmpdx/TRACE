@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 WingRotator rotates a Drosophila wing image (and its associated GeoJSONs) into a canonical right-side-up, distal-right orientation using a reliability-weighted Procrustes fit against a hardcoded landmark template. It's invoked as Stage 1.5 of `preprocessing` (between LandmarkLocator and HingeChopper) so every downstream stage operates on a normalized wing.
 
-**Rotation only — no reflection.** Per design, the rotator never mirrors; left-vs-right wing chirality is preserved. Opposite-chirality inputs are detected and given an extra 180° rotation on top of the proper-rotation fit so anterior stays at the top of the image (the cost is that PD ends up distal-left instead of distal-right for those wings — a consistent AP split matters more for downstream stages than which way the wing points along the long axis).
+**Rotation only by default — opt-in reflection.** The rotator defaults to rotation-only; left-vs-right wing chirality is preserved. Opposite-chirality inputs are detected and given an extra 180° rotation on top of the proper-rotation fit so anterior stays at the top of the image (the cost is that PD ends up distal-left instead of distal-right for those wings — a consistent AP split matters more for downstream stages than which way the wing points along the long axis).
+
+Pass `mirror_correct=True` (CLI: `--mirror-correct` / `--rotation-mirror-correct`; TRACE GUI: "Flip opposite-chirality wings to distal-right" checkbox) to instead apply a vertical reflection on top of the proper-rotation fit, so opposite-chirality wings end up distal-right AND anterior-up. This makes mixed left+right batches visually uniform, but biological chirality is flipped (a left wing is mirrored to look like a right wing).
 
 ## Running
 

@@ -109,6 +109,18 @@ def parse_args(argv=None):
     )
     parser.set_defaults(do_rotation=True)
     parser.add_argument(
+        "--rotation-mirror-correct",
+        dest="rotation_mirror_correct",
+        action="store_true",
+        help=(
+            "When wingRotator detects opposite chirality, apply a vertical reflection on top "
+            "of the rotation so the wing ends up distal-right AND anterior-up. Default off: "
+            "rotation only, opposite-chirality wings end up distal-left, anterior-up "
+            "(biological chirality preserved)."
+        ),
+    )
+    parser.set_defaults(rotation_mirror_correct=False)
+    parser.add_argument(
         "--landmark-batch-size",
         type=int,
         default=0,
@@ -210,6 +222,7 @@ def main(argv=None):
         keep_intermediates=args.keep_intermediates,
         recursive=args.recursive,
         do_rotation=args.do_rotation,
+        rotation_mirror_correct=args.rotation_mirror_correct,
     )
 
     # Summary
