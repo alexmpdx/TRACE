@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 def _column_names(pair: LandmarkPair, has_scale: bool) -> tuple[str, Optional[str]]:
     """Return (px_col, um_col_or_None) for a pair, deduped at the caller."""
     suffix = safe_label(pair.label)
-    px = f"user_distance_{suffix}_px"
-    um = f"user_distance_{suffix}_um" if has_scale else None
+    px = f"custom_{suffix}_px"
+    um = f"custom_{suffix}_um" if has_scale else None
     return px, um
 
 

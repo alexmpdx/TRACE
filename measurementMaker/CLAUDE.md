@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Purpose
 
-User-defined landmark distance measurements bolted onto the TRACE pipeline. The user picks two landmarks once on a sample wing (via a napari canvas embedded in the TRACE settings dialog) and the straight-line distance between them is computed for every wing in a TRACE batch run, appended as `user_distance_<label>_{px,um}` columns in the consolidated `measurements.csv`.
+User-defined landmark distance measurements bolted onto the TRACE pipeline. The user picks two landmarks once on a sample wing (via a napari canvas embedded in the TRACE settings dialog) and the straight-line distance between them is computed for every wing in a TRACE batch run, appended as `custom_<label>_{px,um}` columns in the consolidated `measurements.csv`.
 
 ## Relationship to other modules
 
