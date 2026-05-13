@@ -80,6 +80,30 @@ class _PlaceholderSpinBox(QDoubleSpinBox):
         return super().textFromValue(value)
 
 
+# Bundled default-model folders. Used to preload the three model paths on a
+# first-time launch (no saved QSettings) and after "wipe my memories" so the
+# user doesn't have to browse for them. Each entry is checked for existence
+# at runtime — missing folders fall back to "" (empty), forcing the user to
+# pick one in Settings → Models.
+_DEFAULT_MODELS_DIR = Path(__file__).resolve().parent / "models"
+_DEFAULT_MODEL_PATHS = {
+    "landmark": _DEFAULT_MODELS_DIR / "landmarks",
+    "segmentation": _DEFAULT_MODELS_DIR / "vein-intervein",
+    "wing_isolation": _DEFAULT_MODELS_DIR / "wingIsolation",
+}
+
+
+def _default_model_path(key: str) -> str:
+    """Return the bundled default model folder for `key` as a string, or "" if missing.
+
+    Keys: "landmark", "segmentation", "wing_isolation".
+    """
+    path = _DEFAULT_MODEL_PATHS.get(key)
+    if path is None:
+        return ""
+    return str(path) if path.is_dir() else ""
+
+
 def _picker_initial_path(current: str) -> str:
     """Sane initial path for QFileDialog: walk up `current` to the first existing
     file/dir, or fall back to '/' (Finder's 'Computer' view) when nothing in the
@@ -195,11 +219,13 @@ class TraceWindow(QMainWindow):
         self._gate_override: dict | None = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
-        self._wing_isolation_model_path = ""
+        self._wing_isolation_model_path = _default_model_path("wing_isolation")
         # Model paths (configured via Settings → Models). Plain strings rather
-        # than QLineEdit widgets — the dialog owns the editing UI.
-        self._landmark_model_path = ""
-        self._segmentation_model_path = ""
+        # than QLineEdit widgets — the dialog owns the editing UI. Initialized
+        # to the bundled TRACE/models/* folders so a first-time launch has
+        # working defaults; overridden by saved QSettings values when present.
+        self._landmark_model_path = _default_model_path("landmark")
+        self._segmentation_model_path = _default_model_path("segmentation")
         # Intermediate outputs (toggled in Settings → General → Intermediate outputs).
         # Default-off so a fresh batch only writes the final overlays + CSV; users
         # opt in to intermediates per-key in the Settings dialog.
@@ -386,7 +412,7 @@ class TraceWindow(QMainWindow):
                 self.include_custom_measurements_chk.setChecked(True)
                 self.include_custom_measurements_chk.setToolTip(
                     "Adds the pairs configured in Settings → Custom Distances to the batch CSV "
-                    "as user_distance_<label>_px (and _um when scale is set) columns.\n\n"
+                    "as custom_<label>_px (and _um when scale is set) columns.\n\n"
                     "No effect when no pairs are configured."
                 )
                 cd_row.addWidget(self.include_custom_measurements_chk)
@@ -734,9 +760,12 @@ class TraceWindow(QMainWindow):
         self._gate_override = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
-        self._wing_isolation_model_path = ""
-        self._landmark_model_path = ""
-        self._segmentation_model_path = ""
+        # Wipe-my-memories re-applies the bundled defaults (TRACE/models/*)
+        # so a fresh user gets working model paths without having to browse.
+        # The Settings dialog's Restore Defaults button does NOT touch these.
+        self._wing_isolation_model_path = _default_model_path("wing_isolation")
+        self._landmark_model_path = _default_model_path("landmark")
+        self._segmentation_model_path = _default_model_path("segmentation")
         self._intermediate_outputs = {key: False for key in INTERMEDIATE_OUTPUTS}
         self._user_landmark_distances = []
         self._distance_sample_image = ""
@@ -826,15 +855,15 @@ class TraceWindow(QMainWindow):
         val = s.value("output_folder", "")
         if val:
             self.output_edit.setText(val)
+        # Fall back to bundled defaults (TRACE/models/*) when no saved value
+        # exists — first-time launch preloads the model paths so the user
+        # only has to point them elsewhere if they want a different model.
         val = s.value("landmark_model", "")
-        if val:
-            self._landmark_model_path = val
+        self._landmark_model_path = val if val else _default_model_path("landmark")
         val = s.value("segmentation_model", "")
-        if val:
-            self._segmentation_model_path = val
+        self._segmentation_model_path = val if val else _default_model_path("segmentation")
         val = s.value("wing_isolation_model", "")
-        if val:
-            self._wing_isolation_model_path = val
+        self._wing_isolation_model_path = val if val else _default_model_path("wing_isolation")
         saved_wing = s.value("wing_isolation_enabled", None)
         if saved_wing is not None:
             self._wing_isolation_enabled = saved_wing == "true" or saved_wing is True

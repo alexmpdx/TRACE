@@ -277,9 +277,16 @@ class PipelineConfigDialog(QDialog):
         self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
         self._do_rotation_chk.setChecked(bool(do_rotation))
         self._rotation_mirror_correct_chk.setChecked(bool(rotation_mirror_correct))
-        # Mirror-correct only meaningful when rotation is enabled.
-        self._rotation_mirror_correct_chk.setEnabled(bool(do_rotation))
+        # Mirror-correct only meaningful when rotation is enabled. Auto-enable
+        # rotation if the user (or a config import) checks flip while rotate
+        # is off, so they can't end up requesting an output that won't run.
+        self._rotation_mirror_correct_chk.setEnabled(self._do_rotation_chk.isChecked())
         self._do_rotation_chk.toggled.connect(self._rotation_mirror_correct_chk.setEnabled)
+        self._rotation_mirror_correct_chk.toggled.connect(
+            lambda checked: (
+                self._do_rotation_chk.setChecked(True) if checked and not self._do_rotation_chk.isChecked() else None
+            )
+        )
         # Block signals so the initial-sync setValue doesn't re-trigger the
         # parallel-workers warning every time the Settings dialog opens.
         self._workers_spin.blockSignals(True)
@@ -410,8 +417,9 @@ class PipelineConfigDialog(QDialog):
         opt_layout = QVBoxLayout(gb)
         self._wing_enable_chk = QCheckBox("Wing isolation")
         self._wing_enable_chk.setToolTip(
-            "When enabled, every input image is masked through wingIsolator before "
-            "LandmarkLocator sees it. Useful when images contain multiple wings. "
+            "Isolates the main (image-centered) wing and masks out everything else "
+            "before the rest of the pipeline sees the image. Useful when the frame "
+            "contains multiple wings or stray tissue around the wing of interest. "
             "Requires a wing-isolation model — pick it in the Models tab."
         )
         self._wing_enable_chk.toggled.connect(self._on_wing_isolation_toggled)
@@ -427,7 +435,7 @@ class PipelineConfigDialog(QDialog):
             "automatically when fewer than 2 reliable landmarks are available."
         )
         opt_layout.addWidget(self._do_rotation_chk)
-        self._rotation_mirror_correct_chk = QCheckBox("Flip opposite-chirality wings to distal-right")
+        self._rotation_mirror_correct_chk = QCheckBox("Flip wing to canonical orientation")
         self._rotation_mirror_correct_chk.setToolTip(
             "When checked AND wingRotator detects a wing of opposite chirality from the "
             "canonical (right-wing) template, apply a vertical reflection on top of the "
@@ -473,6 +481,22 @@ class PipelineConfigDialog(QDialog):
                 chk.setToolTip(tip)
             self._intermediate_output_chks[key] = chk
             im_layout.addWidget(chk)
+        # The "Isolated wing image" intermediate output is only meaningful when
+        # the Wing isolation preprocessing step runs. Mirror the same UX as
+        # the Rotate-wing → Flip-wing pair: the dependent checkbox grays out
+        # when the parent is off, and toggling the dependent on auto-enables
+        # the parent so the user doesn't end up with an output they can't get.
+        iso_chk = self._intermediate_output_chks.get("wing_isolated_image")
+        if iso_chk is not None:
+            iso_chk.setEnabled(self._wing_enable_chk.isChecked())
+            self._wing_enable_chk.toggled.connect(iso_chk.setEnabled)
+            iso_chk.toggled.connect(
+                lambda checked: (
+                    self._wing_enable_chk.setChecked(True)
+                    if checked and not self._wing_enable_chk.isChecked()
+                    else None
+                )
+            )
         layout.addWidget(gb)
 
         gb = QGroupBox("Parallel processing")
@@ -600,7 +624,7 @@ class PipelineConfigDialog(QDialog):
 
         info = QLabel(
             "Configure straight-line distances between any two landmarks. Each pair adds "
-            "user_distance_<label>_px (and _um when scale is set) columns to the batch CSV. "
+            "custom_<label>_px (and _um when scale is set) columns to the batch CSV. "
             "Pairs are stored by landmark name and applied to every wing in the batch."
         )
         info.setWordWrap(True)
@@ -702,7 +726,7 @@ class PipelineConfigDialog(QDialog):
         layout = QVBoxLayout(w)
 
         # -- Landmark model --
-        gb = QGroupBox("Landmark model")
+        gb = QGroupBox("Landmark points")
         lm_layout = QVBoxLayout(gb)
         lm_layout.addWidget(QLabel("Checkpoint (.pt) or fold folder (best_fold*.pt):"))
         lm_row = QHBoxLayout()
@@ -729,7 +753,7 @@ class PipelineConfigDialog(QDialog):
         layout.addWidget(gb)
 
         # -- Segmentation model --
-        gb = QGroupBox("Segmentation model")
+        gb = QGroupBox("Wing features")
         seg_layout = QVBoxLayout(gb)
         seg_layout.addWidget(QLabel("Model folder (contains metadata.json + weights):"))
         seg_row = QHBoxLayout()
@@ -753,9 +777,9 @@ class PipelineConfigDialog(QDialog):
         # -- Wing isolation model (Stage 0, optional) --
         # The enable/disable checkbox lives on the General tab; this group
         # holds the model path + buffer parameter only.
-        gb = QGroupBox("Wing isolation model (optional)")
+        gb = QGroupBox("Wing isolation (optional)")
         wig_layout = QVBoxLayout(gb)
-        wig_layout.addWidget(QLabel("Wing identification model folder:"))
+        wig_layout.addWidget(QLabel("Model folder (contains metadata.json + weights):"))
         wing_row = QHBoxLayout()
         self._wing_model_edit = QLineEdit()
         self._wing_model_edit.setReadOnly(True)
@@ -1180,7 +1204,9 @@ class PipelineConfigDialog(QDialog):
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._wing_expand_spin.setValue(0.05)
         self._wing_enable_chk.setChecked(False)
-        self._wing_model_edit.clear()
+        # Model paths (Landmark, Segmentation, Wing isolation) are intentionally
+        # preserved across Restore Defaults — the user has to "wipe my memories"
+        # on the main window to fall back to the bundled TRACE/models/* defaults.
         self._on_wing_isolation_toggled(False)
         for chk in self._intermediate_output_chks.values():
             chk.setChecked(False)
