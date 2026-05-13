@@ -21,8 +21,9 @@ from typing import Any
 
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEvent, Qt, QTimer
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -271,6 +272,14 @@ class PipelineConfigDialog(QDialog):
         # to re-browse each session.
         self._distance_sample_image = distance_sample_image
         self._distance_sample_landmarks = distance_sample_landmarks
+        # {disabled_child_chk: parent_chk_to_pulse}. Populated by build steps
+        # (rotate→flip, wing-isolation→isolated-wing-image). The dialog-level
+        # event filter pulses the parent when the user clicks a grayed child.
+        self._pulse_dependencies: dict[QCheckBox, QCheckBox] = {}
+        # {child_chk: hint_label}. Shown alongside the child when the user
+        # clicks it while the parent is off, hidden again when the parent
+        # becomes checked.
+        self._dependency_hints: dict[QCheckBox, QLabel] = {}
         self._build_ui()
         self._load_from_config(config)
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
@@ -287,6 +296,10 @@ class PipelineConfigDialog(QDialog):
                 self._do_rotation_chk.setChecked(True) if checked and not self._do_rotation_chk.isChecked() else None
             )
         )
+        self._pulse_dependencies[self._rotation_mirror_correct_chk] = self._do_rotation_chk
+        self._do_rotation_chk.toggled.connect(
+            lambda checked: self._hide_hint(self._rotation_mirror_correct_chk) if checked else None
+        )
         # Block signals so the initial-sync setValue doesn't re-trigger the
         # parallel-workers warning every time the Settings dialog opens.
         self._workers_spin.blockSignals(True)
@@ -302,6 +315,75 @@ class PipelineConfigDialog(QDialog):
         if intermediate_outputs:
             for key, chk in self._intermediate_output_chks.items():
                 chk.setChecked(bool(intermediate_outputs.get(key, False)))
+        # Catch mouse-press events on disabled dependent checkboxes so we can
+        # pulse the parent. Disabled widgets don't receive events themselves
+        # (and the event propagates only to the nearest enabled ancestor, not
+        # the dialog), so the filter must sit on the application and route by
+        # global position.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    # -----------------------------------------------------------------------
+    # Dependent-checkbox pulse
+    # -----------------------------------------------------------------------
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and self._pulse_dependencies:
+            global_pos = event.globalPos()
+            for child, parent_chk in self._pulse_dependencies.items():
+                if not child.isEnabled() and child.isVisible():
+                    local = child.mapFromGlobal(global_pos)
+                    if child.rect().contains(local):
+                        self._pulse_parent_text(parent_chk)
+                        hint = self._dependency_hints.get(child)
+                        if hint is not None:
+                            hint.show()
+                        break
+        return super().eventFilter(obj, event)
+
+    def closeEvent(self, event):
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        super().closeEvent(event)
+
+    def _pulse_parent_text(self, chk: QCheckBox) -> None:
+        """Single brief text-color flash on a QCheckBox. Indicator untouched."""
+        if chk.property("_pulse_active"):
+            return
+        saved = chk.styleSheet()
+        chk.setProperty("_pulse_active", True)
+        chk.setStyleSheet("QCheckBox { color: #4aa3ff; }")
+
+        def _restore():
+            chk.setStyleSheet(saved)
+            chk.setProperty("_pulse_active", False)
+
+        QTimer.singleShot(350, _restore)
+
+    def _hide_hint(self, child: QCheckBox) -> None:
+        hint = self._dependency_hints.get(child)
+        if hint is not None:
+            hint.hide()
+
+    def _wrap_with_hint(self, chk: QCheckBox, hint_text: str) -> tuple[QWidget, QLabel]:
+        """Pair a checkbox with a 'requires X' label without altering its size.
+
+        Returns (row_widget, hint_label). The HBox uses zero margins and a
+        trailing stretch so the checkbox keeps its natural sizeHint — the
+        stretch absorbs any extra horizontal space.
+        """
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        row_layout.addWidget(chk)
+        hint = QLabel(hint_text)
+        hint.setStyleSheet("color: #4aa3ff;")
+        hint.hide()
+        row_layout.addWidget(hint)
+        row_layout.addStretch(1)
+        return row, hint
 
     # -----------------------------------------------------------------------
     # Public API
@@ -444,7 +526,9 @@ class PipelineConfigDialog(QDialog):
             "chirality (a left wing is mirrored to look like a right wing). Default off: "
             "rotation only, opposite-chirality wings end up distal-left, anterior-up."
         )
-        opt_layout.addWidget(self._rotation_mirror_correct_chk)
+        flip_row, flip_hint = self._wrap_with_hint(self._rotation_mirror_correct_chk, "requires Rotate wing")
+        opt_layout.addWidget(flip_row)
+        self._dependency_hints[self._rotation_mirror_correct_chk] = flip_hint
         layout.addWidget(gb)
 
         gb = QGroupBox("Vein detection")
@@ -480,7 +564,12 @@ class PipelineConfigDialog(QDialog):
             if tip:
                 chk.setToolTip(tip)
             self._intermediate_output_chks[key] = chk
-            im_layout.addWidget(chk)
+            if key == "wing_isolated_image":
+                iso_row, iso_hint = self._wrap_with_hint(chk, "requires Wing isolation")
+                im_layout.addWidget(iso_row)
+                self._dependency_hints[chk] = iso_hint
+            else:
+                im_layout.addWidget(chk)
         # The "Isolated wing image" intermediate output is only meaningful when
         # the Wing isolation preprocessing step runs. Mirror the same UX as
         # the Rotate-wing → Flip-wing pair: the dependent checkbox grays out
@@ -497,6 +586,8 @@ class PipelineConfigDialog(QDialog):
                     else None
                 )
             )
+            self._pulse_dependencies[iso_chk] = self._wing_enable_chk
+            self._wing_enable_chk.toggled.connect(lambda checked: self._hide_hint(iso_chk) if checked else None)
         layout.addWidget(gb)
 
         gb = QGroupBox("Parallel processing")
