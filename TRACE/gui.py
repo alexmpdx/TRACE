@@ -495,6 +495,10 @@ class TraceWindow(QMainWindow):
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
+        # Snapshot the default Highlight color so we can revert after a green
+        # completion paint without forcing the bar into stylesheet-rendering
+        # mode (which subtly shifts indentation, border, and text position).
+        self._progress_default_highlight = self.progress.palette().color(QPalette.Highlight)
         right_layout.addWidget(self.progress)
         self.eta_label = QLabel("")
         self.eta_label.setStyleSheet("color: #888;")
@@ -1020,10 +1024,11 @@ class TraceWindow(QMainWindow):
         self.btn_cancel.setEnabled(True)
         self._progress_pct_high = 0
         self.progress.setValue(0)
-        # Clear any stylesheet leftover from the previous run's success
-        # state (the bar turns green on a clean finish — reset it here so
-        # the new run starts in the default palette color).
-        self.progress.setStyleSheet("")
+        # Restore the default Highlight color (the bar turns green on a clean
+        # finish — reset it here so the new run starts in the default color).
+        pal = self.progress.palette()
+        pal.setColor(QPalette.Highlight, self._progress_default_highlight)
+        self.progress.setPalette(pal)
         self._run_start_time = time.monotonic()
         self._eta_smoothed_seconds = None
         self._current_stage = None
@@ -1265,9 +1270,13 @@ class TraceWindow(QMainWindow):
         # Pipeline finished cleanly — release the 99% cap and snap to 100.
         self._progress_pct_high = 100
         self.progress.setValue(100)
-        # Recolor the filled chunk green to make completion visually obvious.
-        # Cleared at the start of the next run by _run_pipeline.
-        self.progress.setStyleSheet("QProgressBar::chunk { background-color: #5cb85c; }")
+        # Recolor the filled chunk green via palette (not stylesheet) so the
+        # native rendering path stays in place — only the chunk color shifts,
+        # no indentation/border/text changes. Reverted at the start of the
+        # next run by _run_pipeline.
+        pal = self.progress.palette()
+        pal.setColor(QPalette.Highlight, QColor("#5cb85c"))
+        self.progress.setPalette(pal)
         self.eta_label.setText("Done")
 
         succeeded = sum(1 for r in results if r.error is None)

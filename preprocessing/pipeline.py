@@ -659,6 +659,11 @@ def process_single_image(
     # Stage 0: Wing isolation (optional). When wing_model_dir is set, mask out
     # non-main-wing pixels and rebind image_path so all downstream stages see
     # the single-wing image. result.image_path remains the original input.
+    # Stash the un-masked image path so the final rotation step can produce a
+    # rotated full-background canvas for Stage 2 overlays. Masking only zeros
+    # pixels (no crop/translate), so the same affine that rotates the masked
+    # image + GeoJSONs also rotates the un-masked image consistently.
+    unmasked_image_path = image_path
     if wing_model_dir is not None:
         if progress_callback:
             progress_callback("wing_isolation", f"Isolating main wing for {image_path.name}")
@@ -745,12 +750,11 @@ def process_single_image(
     if do_segment:
         # Use chopped image if available, otherwise original
         seg_input = chopped_path if chopped_path and chopped_path.exists() else image_path
-        # Only pass the wing GeoJSON as ROI when seg_input matches its coord space
-        # (the un-chopped isolated image). Hinge chop translates the frame, so the
-        # original-coords polygon would be misaligned against a chopped image.
-        roi_geojson_path = (
-            result.wing_geojson_path if result.wing_geojson_path is not None and seg_input == image_path else None
-        )
+        # Wing isolation (Stage 0) and hinge chop both modify pixel values in place —
+        # neither crops nor translates — so the wing polygon coords are valid against
+        # any combination of (isolated, chopped, neither). Always pass the ROI when
+        # wing isolation produced a polygon so modelTOjson can skip background tiles.
+        roi_geojson_path = result.wing_geojson_path
         if progress_callback:
             progress_callback("segmentation", f"Segmenting {image_path.name}")
         fc = run_segmentation(
@@ -776,14 +780,19 @@ def process_single_image(
     # at reduced weight.
     if do_rotation and do_landmarks and landmarks:
         if progress_callback:
-            progress_callback("rotation", f"Rotating {image_path.name} to canonical orientation")
+            progress_callback("rotation", f"Rotating {unmasked_image_path.name} to canonical orientation")
         extras: list[Path] = []
         if result.wing_geojson_path is not None:
             extras.append(result.wing_geojson_path)
         if result.segmentation_geojson_path is not None:
             extras.append(result.segmentation_geojson_path)
+        # Rotate the un-masked image so Stage 2 overlays render on the full
+        # background, not the wing-isolation mask. DL stages already ran on
+        # the masked image; their GeoJSON outputs are in pre-rotation pixel
+        # coords that match the un-masked image 1:1 (masking only zeros
+        # pixels), so the same affine produces a consistent rotated set.
         rotated = run_rotation(
-            image_path=image_path,
+            image_path=unmasked_image_path,
             landmarks_geojson_path=lm_path,
             output_dir=output_dir,
             landmarks=landmarks,
