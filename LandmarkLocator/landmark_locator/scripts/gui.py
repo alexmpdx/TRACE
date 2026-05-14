@@ -1421,38 +1421,98 @@ class GateConfigPanel(QWidget):
             self._sync_row_editability(name)
 
 
-def read_gate_config_from_checkpoint(path: Path) -> tuple[dict, list[str]]:
-    """Inspect a checkpoint file (or fold folder) and return (gate_config, landmark_order).
+def _find_gate_yaml(folder: Path) -> Optional[Path]:
+    """Locate the gate-config YAML in `folder` with tiered name matching.
 
-    Used by callers that want to populate a `GateConfigPanel` without instantiating a
-    full predictor — e.g. the TRACE settings dialog. The returned gate_config has any
-    sidecar `gate_config.yaml` (model-folder default) already merged on top of the
-    checkpoint-embedded gate, so callers see the same defaults the predictor would use.
+    Priority (highest → lowest):
+      1. Exact stem match: `gate_config.yaml` or `gate_config.yml`.
+      2. Prefix match: stem starts with `gate_config` (e.g. `gate_config_0p1.yaml`).
+      3. Substring match: stem contains `gate_config` anywhere.
+      4. Any `.yaml`/`.yml` file in the folder.
+    Ties within a tier are broken by shortest stem (closer to the canonical
+    name) then alphabetically.
     """
-    import torch
-
-    from landmark_locator.inference.predict import (
-        DEFAULT_GATE_CONFIG,
-        _deep_merge,
-        _find_fold_checkpoints,
-        _load_sidecar_gate,
+    if not folder.is_dir():
+        return None
+    yaml_files = sorted(
+        [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in (".yaml", ".yml")],
+        key=lambda f: (len(f.stem), f.name.lower()),
     )
+    if not yaml_files:
+        return None
 
-    p = Path(path)
-    target = p
-    if p.is_dir():
-        ckpts = _find_fold_checkpoints(p)
-        if not ckpts:
-            raise FileNotFoundError(f"No best_fold*.pt in {p}")
-        target = ckpts[0]
-    ckpt = torch.load(target, map_location="cpu", weights_only=False)
-    cfg = ckpt.get("config", {}) or {}
-    gate_config = _deep_merge(DEFAULT_GATE_CONFIG, cfg.get("confidence", {}) or {})
-    _, sidecar_gate = _load_sidecar_gate(target)
-    if sidecar_gate:
-        gate_config = _deep_merge(gate_config, sidecar_gate)
-    landmark_order = list(cfg.get("heatmap", {}).get("landmark_order", []) or [])
+    def _exact(f: Path) -> bool:
+        return f.stem.lower() == "gate_config"
+
+    def _prefix(f: Path) -> bool:
+        return f.stem.lower().startswith("gate_config")
+
+    def _contains(f: Path) -> bool:
+        return "gate_config" in f.stem.lower()
+
+    for predicate in (_exact, _prefix, _contains):
+        match = next((f for f in yaml_files if predicate(f)), None)
+        if match is not None:
+            return match
+    return yaml_files[0]
+
+
+def read_gate_config(path: Path) -> tuple[dict, list[str]]:
+    """Read the sidecar `gate_config.yaml` for a model and return (gate_config, landmark_order).
+
+    `path` may be either a model folder or a specific checkpoint file. Used by
+    UI callers (TRACE settings dialog, LandmarkLocator GUI) that want to
+    populate a `GateConfigPanel` without instantiating a full predictor.
+
+    The YAML alone is sufficient because:
+      - Gate thresholds live in the sidecar (the previously-used
+        checkpoint-embedded `config.confidence` block is no longer consulted).
+      - `landmark_order` is derived from the YAML's `confidence.peak.per_landmark`
+        keys. For UI display purposes any stable order works; if a caller
+        needs the model's authoritative training order it should pull it
+        from a live `Predictor` instance instead.
+    """
+    import yaml
+
+    from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge
+
+    p = Path(path).resolve()
+    # Search for the sidecar YAML in two folders: alongside the model files
+    # (or inside the model folder), and the parent folder (legacy nested
+    # layout: <model>/checkpoints/best_fold*.pt + <model>/gate_config.yaml).
+    search_dirs = [
+        p if p.is_dir() else p.parent,
+        p.parent if p.is_dir() else p.parent.parent,
+    ]
+    sidecar = None
+    for d in search_dirs:
+        match = _find_gate_yaml(d)
+        if match is not None:
+            sidecar = match
+            break
+    if sidecar is None:
+        # No sidecar YAML — return library defaults so callers can still
+        # populate a UI editor (the user will see fallback values instead
+        # of a red error). Callers that strictly require the model's
+        # calibrated values should check `landmark_order` for emptiness.
+        return dict(DEFAULT_GATE_CONFIG), []
+
+    data = yaml.safe_load(sidecar.read_text()) or {}
+    # Accept both shapes: full doc with `confidence:` block, or just the block itself.
+    sidecar_block = data.get("confidence", data)
+    gate_config = _deep_merge(DEFAULT_GATE_CONFIG, sidecar_block or {})
+
+    # Derive landmark_order from the YAML — every per-landmark block lists
+    # every landmark, so taking the keys of `peak.per_landmark` gives a
+    # stable display order that matches whatever the calibration script
+    # emitted.
+    pl = (gate_config.get("peak") or {}).get("per_landmark") or {}
+    landmark_order = list(pl.keys())
     return gate_config, landmark_order
+
+
+# Back-compat alias for older callers that still import the previous name.
+read_gate_config_from_checkpoint = read_gate_config
 
 
 class GateConfigDialog(QDialog):

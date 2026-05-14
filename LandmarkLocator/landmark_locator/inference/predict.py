@@ -234,8 +234,11 @@ class LandmarkPredictor:
         self.geojson_to_landmark: dict[str, str] = cfg["heatmap"].get("geojson_to_landmark", {})
 
         # Gate-config precedence (lowest → highest):
-        #   DEFAULT_GATE_CONFIG  ←  checkpoint-embedded  ←  sidecar gate_config.yaml  ←  runtime override
-        base_gate = _deep_merge(DEFAULT_GATE_CONFIG, cfg.get("confidence", {}) or {})
+        #   DEFAULT_GATE_CONFIG  ←  sidecar gate_config.yaml  ←  runtime override
+        # The checkpoint's embedded `config.confidence` block is intentionally
+        # ignored — gate thresholds are now sourced exclusively from the
+        # sidecar YAML so they can be tuned without retraining.
+        base_gate = dict(DEFAULT_GATE_CONFIG)
         self.sidecar_gate_path, sidecar_gate = _load_sidecar_gate(checkpoint_path)
         if sidecar_gate:
             base_gate = _deep_merge(base_gate, sidecar_gate)

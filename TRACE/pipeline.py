@@ -37,7 +37,7 @@ OUTPUT_TYPES = OrderedDict(
         ("chopped_image", "Wing after hinge removal"),
         ("landmarks_overlay", "Landmark points overlay PNG"),
         ("segmentation_overlay", "Vein/intervein inference overlay PNG"),
-        ("geojson", "Vein/intervein inference GeoJSON"),
+        ("geojson", "Named vein and intervein GeoJSON"),
         ("vein_overlay", "Vein overlay PNG"),
         ("intervein_overlay", "Intervein region overlay PNG"),
         ("ap_overlay", "AP compartment overlay PNG"),

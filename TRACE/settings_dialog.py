@@ -50,7 +50,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
 from TRACE.presets_loader import load_presets
 
@@ -589,6 +588,10 @@ class PipelineConfigDialog(QDialog):
 
         self._tabs.addTab(self._wrap_scrollable(self._build_general_tab()), "General")
         self._tabs.addTab(self._wrap_scrollable(self._build_custom_distances_tab()), "Custom Distances")
+        # Remembered so _reset_defaults can rebuild this tab in-place after
+        # the model path changes — otherwise the gate panel keeps showing
+        # the prior model's state (or its error message).
+        self._landmarks_tab_index = self._tabs.count()
         self._tabs.addTab(self._wrap_scrollable(self._build_landmarks_tab()), "Landmarks")
         self._tabs.addTab(self._wrap_scrollable(self._build_models_tab()), "Models")
         self._tabs.addTab(self._wrap_scrollable(self._build_skel_pruning_tab()), "Skeletonization && Pruning")
@@ -602,6 +605,13 @@ class PipelineConfigDialog(QDialog):
         mirror = self._synthesize_missing_crossveins_mirror
         canonical.toggled.connect(lambda v: mirror.setChecked(v) if mirror.isChecked() != v else None)
         mirror.toggled.connect(lambda v: canonical.setChecked(v) if canonical.isChecked() != v else None)
+
+        # Rebuild the Landmarks tab whenever the landmark model path changes
+        # so the gate panel re-reads gate_config.yaml from the new folder.
+        # Connected here (not in _build_models_tab) because _lm_model_edit
+        # only exists after the Models tab is built, and the Landmarks tab
+        # needs to exist (we replace it in-place).
+        self._lm_model_edit.textChanged.connect(self._rebuild_landmarks_tab)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
         btns.accepted.connect(self.accept)
@@ -887,7 +897,6 @@ class PipelineConfigDialog(QDialog):
 
     def _select_wing_model_folder(self):
         from PyQt5.QtWidgets import QFileDialog
-
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -1009,14 +1018,31 @@ class PipelineConfigDialog(QDialog):
             return w
 
         try:
-            from landmark_locator.scripts.gui import GateConfigPanel, read_gate_config_from_checkpoint
+            from landmark_locator.scripts.gui import GateConfigPanel, read_gate_config
 
-            gate_config, landmark_order = read_gate_config_from_checkpoint(Path(self._calib_lm_path))
+            gate_config, landmark_order = read_gate_config(Path(self._calib_lm_path))
         except Exception as exc:
             err = QLabel(f"Could not read gate config from {self._calib_lm_path}: {exc}")
             err.setWordWrap(True)
             err.setStyleSheet("color: #f88; padding: 12px;")
             layout.addWidget(err)
+            layout.addStretch()
+            return w
+
+        if not landmark_order:
+            # read_gate_config returned the library DEFAULT_GATE_CONFIG fallback
+            # because the model folder has no gate_config.yaml. Tell the user
+            # what's missing rather than rendering an empty panel.
+            msg = QLabel(
+                f"The selected landmark model folder has no gate_config.yaml:\n"
+                f"  {self._calib_lm_path}\n\n"
+                "Switch to a model that ships a sidecar gate_config.yaml "
+                "(e.g. TRACE/models/landmarks), or click Restore Defaults to "
+                "reset the landmark-model path to the bundled default."
+            )
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color: #c8862a; padding: 12px;")
+            layout.addWidget(msg)
             layout.addStretch()
             return w
 
@@ -1087,28 +1113,23 @@ class PipelineConfigDialog(QDialog):
         # -- Landmark model --
         gb = QGroupBox("Landmark points")
         lm_layout = QVBoxLayout(gb)
-        lm_layout.addWidget(QLabel("Checkpoint (.pt) or fold folder (best_fold*.pt):"))
+        lm_layout.addWidget(QLabel("Model folder (contains 5 folds and YAML):"))
         lm_row = QHBoxLayout()
         self._lm_model_edit = QLineEdit()
         self._lm_model_edit.setReadOnly(True)
-        self._lm_model_edit.setPlaceholderText("Select .pt checkpoint or fold folder...")
+        self._lm_model_edit.setPlaceholderText("Select fold folder...")
         self._lm_model_edit.setToolTip(
-            "Pick a single .pt checkpoint for fast single-fold inference, "
-            "or pick a model folder for 5-fold ensemble (~5× slower, more robust).\n\n"
-            "Flat-layout model folder: best_fold0.pt … best_fold4.pt sit directly inside, "
-            "alongside gate_config.yaml (per-model gate defaults) and training_chart.png."
+            "Pick a model folder containing best_fold*.pt directly (5-fold ensemble). "
+            "The folder also hosts the optional gate_config.yaml sidecar with "
+            "per-model gate defaults, alongside training_chart.png."
         )
-        btn_lm_file = QPushButton("File...")
-        btn_lm_file.setToolTip("Pick a single .pt checkpoint for fast single-fold landmark inference.")
-        btn_lm_file.clicked.connect(self._select_landmark_model_file)
-        btn_lm_folder = QPushButton("Folder...")
+        btn_lm_folder = QPushButton("Browse...")
         btn_lm_folder.setToolTip(
             "Pick a model folder containing best_fold*.pt directly (5-fold ensemble). "
             "The folder also hosts the optional gate_config.yaml sidecar."
         )
         btn_lm_folder.clicked.connect(self._select_landmark_model_folder)
         lm_row.addWidget(self._lm_model_edit, stretch=1)
-        lm_row.addWidget(btn_lm_file)
         lm_row.addWidget(btn_lm_folder)
         lm_layout.addLayout(lm_row)
         if self._calib_lm_path:
@@ -1305,7 +1326,6 @@ class PipelineConfigDialog(QDialog):
     def _autodetect_target_um_per_px(self, spin: QDoubleSpinBox, get_model_path_fn) -> None:
         """Open a folder picker, run autodetect, write the average into `spin`."""
         from PyQt5.QtWidgets import QFileDialog
-
         from TRACE.gui import _picker_initial_path
 
         seed_path = ""
@@ -1412,7 +1432,6 @@ class PipelineConfigDialog(QDialog):
         write the derived µm/px into the Scale spinbox."""
         from PyQt5.QtCore import Qt
         from PyQt5.QtWidgets import QApplication, QFileDialog
-
         from TRACE.gui import _picker_initial_path
 
         if not self._confirm_scale_estimator_caveats():
@@ -1655,25 +1674,10 @@ class PipelineConfigDialog(QDialog):
     def get_segmentation_model_path(self) -> str:
         return self._seg_model_edit.text().strip()
 
-    def _select_landmark_model_file(self):
-        from PyQt5.QtWidgets import QFileDialog
-
-        from TRACE.gui import _picker_initial_path
-
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Landmark Model Checkpoint",
-            _picker_initial_path(self._lm_model_edit.text()),
-            "PyTorch Checkpoint (*.pt);;All Files (*)",
-        )
-        if path:
-            self._lm_model_edit.setText(path)
-
     def _select_landmark_model_folder(self):
         from pathlib import Path as _P
 
         from PyQt5.QtWidgets import QFileDialog
-
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -1695,7 +1699,6 @@ class PipelineConfigDialog(QDialog):
 
     def _select_segmentation_model_folder(self):
         from PyQt5.QtWidgets import QFileDialog
-
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -2068,12 +2071,43 @@ class PipelineConfigDialog(QDialog):
         self._lm_model_edit.setText(_default_model_path("landmark"))
         self._seg_model_edit.setText(_default_model_path("segmentation"))
         self._wing_model_edit.setText(_default_model_path("wing_isolation"))
+        # Clear the persisted gate override BEFORE rebuilding the Landmarks
+        # tab so the rebuilt panel reads the bundled model's YAML cleanly.
+        # The force-clear flag also makes get_gate_override() return None on
+        # OK, so the host's persisted override is wiped on close.
+        self._initial_gate_override = None
+        self._gate_override_force_clear = True
+        # Rebuild the Landmarks tab so the GateConfigPanel reads the bundled
+        # model's gate_config.yaml. Without this, the tab keeps showing the
+        # prior model's state (or an error if it was missing a YAML).
+        self._rebuild_landmarks_tab()
         self._on_wing_isolation_toggled(False)
         for chk in self._intermediate_output_chks.values():
             chk.setChecked(False)
         parent = self.parent()
         if parent is not None and hasattr(parent, "reset_workers_warning"):
             parent.reset_workers_warning()
+
+    def _rebuild_landmarks_tab(self) -> None:
+        """Re-read gate_config.yaml from the currently-selected landmark folder
+        and rebuild the Landmarks tab in place.
+
+        Called whenever the landmark model path changes (textChanged) and from
+        _reset_defaults so the gate panel always reflects the model in the
+        Models tab — including when Reset to Model Defaults is clicked, since
+        the panel's _cfg comes from this build.
+        """
+        # Sync the dialog's stored landmark path with the line edit.
+        self._calib_lm_path = self._lm_model_edit.text().strip()
+        self._gate_panel = None
+        new_widget = self._wrap_scrollable(self._build_landmarks_tab())
+        old_widget = self._tabs.widget(self._landmarks_tab_index)
+        was_current = self._tabs.currentIndex() == self._landmarks_tab_index
+        self._tabs.removeTab(self._landmarks_tab_index)
+        old_widget.deleteLater()
+        self._tabs.insertTab(self._landmarks_tab_index, new_widget, "Landmarks")
+        if was_current:
+            self._tabs.setCurrentIndex(self._landmarks_tab_index)
 
     def _apply_selected_preset(self):
         name = self._preset_combo.currentText()
