@@ -37,7 +37,7 @@ OUTPUT_TYPES = OrderedDict(
         ("chopped_image", "Wing after hinge removal"),
         ("landmarks_overlay", "Landmark points overlay PNG"),
         ("segmentation_overlay", "Vein/intervein inference overlay PNG"),
-        ("geojson", "Named vein and intervein GeoJSON"),
+        ("geojson", "Named vein and/or intervein GeoJSON"),
         ("vein_overlay", "Vein overlay PNG"),
         ("intervein_overlay", "Intervein region overlay PNG"),
         ("ap_overlay", "AP compartment overlay PNG"),
@@ -86,7 +86,38 @@ from identify_features.views.csv_export import (  # noqa: E402
 # Outputs that require Step 6.1/6.2 (intervein polygon splitting + region naming).
 # Used to decide whether to set PipelineConfig.skip_intervein_regions = True
 # when nothing requested actually needs the intervein output.
+# Note: csv and geojson are content-gated (csv via csv_measurement_groups,
+# geojson via _geojson_content_wanted()) so they only contribute to the
+# intervein requirement when their respective content flags are on.
 _INTERVEIN_DEPENDENT_OUTPUTS = frozenset({"intervein_overlay", "geojson", "csv"})
+
+
+def _geojson_content_wanted(
+    outputs: set[str],
+    csv_measurement_groups: set[str],
+) -> tuple[bool, bool]:
+    """Decide which GeoJSON content to write to mirror the user's other choices.
+
+    The GeoJSON intermediate output should reflect whatever the user actually
+    asked for in the main Outputs panel:
+      - vein_overlay or csv-with-vein_lengths   → write veins
+      - intervein_overlay or csv-with-intervein_areas → write regions
+      - both flavors → write both
+      - neither (user picked nothing or only outputs that don't speak to
+        vein vs. intervein) → write both (the safe full-content default)
+
+    Returns ``(write_veins, write_regions)``.
+    """
+    wants_veins = "vein_overlay" in outputs or ("csv" in outputs and "vein_lengths" in csv_measurement_groups)
+    wants_intervein = "intervein_overlay" in outputs or (
+        "csv" in outputs and "intervein_areas" in csv_measurement_groups
+    )
+    if not (wants_veins or wants_intervein):
+        # Nothing explicit — default geojson to full content (and let the
+        # caller decide whether to run the full pipeline).
+        return True, True
+    return wants_veins, wants_intervein
+
 
 # Outputs that are upstream/intermediate artifacts (preprocessing or raw analysis files).
 # In the GUI these live in the Settings dialog → General tab. The remaining keys are
@@ -487,8 +518,13 @@ def trace_folder(
     # output depends on intervein region data. §6.3 vein tissue assignment
     # still runs because vein_overlay / overlay rendering needs tissue polygons.
     # CSV is intervein-dependent only when its "intervein_areas" group is on.
+    # GeoJSON is intervein-dependent only when its content (mirrored from the
+    # user's other choices) actually wants regions.
     csv_needs_intervein = "csv" in outputs and "intervein_areas" in csv_measurement_groups
-    if not ((outputs & (_INTERVEIN_DEPENDENT_OUTPUTS - {"csv"})) or csv_needs_intervein):
+    _, gj_writes_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
+    geojson_needs_intervein = "geojson" in outputs and gj_writes_regions
+    always_intervein = outputs & (_INTERVEIN_DEPENDENT_OUTPUTS - {"csv", "geojson"})
+    if not (always_intervein or csv_needs_intervein or geojson_needs_intervein):
         config.skip_intervein_regions = True
 
     if keep_intermediates:
@@ -737,7 +773,13 @@ def _run(
 
             if "geojson" in outputs and wing_result is not None:
                 gj_path = output_dir / f"{stem}_output.geojson"
-                export_geojson(wing_result.veins, wing_result.intervein_regions, gj_path, um_per_px=scale)
+                gj_write_veins, gj_write_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
+                export_geojson(
+                    wing_result.veins if gj_write_veins else [],
+                    wing_result.intervein_regions if gj_write_regions else [],
+                    gj_path,
+                    um_per_px=scale,
+                )
                 trace_result.output_geojson_path = gj_path
 
             needs_base = bool(
