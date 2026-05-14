@@ -45,10 +45,12 @@ class Node:
 
 NODES: list[Node] = [
     # --- External inputs ---
+    # Ordered so each input sits above its primary consumer column:
+    # IMG → P1, WING_MODEL → P2, LMK_MODEL → P3, SEG_MODEL → P5, CONFIG → ifeat (right).
     Node("IMG", "Wing image", "input", ["*.tif / *.bmp / *.png / *.jpg / *.psd"], "data"),
+    Node("WING_MODEL", "Wing isolation model dir", "input", ["weights + metadata.json (optional)"], "data"),
     Node("LMK_MODEL", "Landmark model", "input", ["ResNet18 U-Net checkpoint (.pt)"], "data"),
     Node("SEG_MODEL", "Segmentation model dir", "input", ["weights + metadata.json"], "data"),
-    Node("WING_MODEL", "Wing isolation model dir", "input", ["weights + metadata.json (optional)"], "data"),
     Node("CONFIG", "PipelineConfig", "input", ["JSON / GUI"], "data"),
     # --- Preprocessing stages (renumbered to start at 1) ---
     Node(
@@ -256,7 +258,7 @@ EDGES: list[tuple[str, str, str | None, dict[str, str] | None]] = [
     # Stage 4 → Stage 5 (segmentation)
     ("CHOPPED", "P5", None, None),
     ("SEG_MODEL", "P5", None, None),
-    ("WING_GJ", "P5", "ROI", {"style": "dashed"}),
+    ("WING_GJ", "P5", "ROI", {"style": "dashed", "constraint": "false"}),
     ("P5", "SEG_GJ", None, None),
     # Stage 6: rotation (optional) applies the same affine to image + every GeoJSON
     ("LMK_GJ", "P6", None, None),
@@ -268,9 +270,9 @@ EDGES: list[tuple[str, str, str | None, dict[str, str] | None]] = [
     ("WING_GJ", "I1", None, {"style": "dashed"}),
     # CONFIG is placed in its own cluster adjacent to ifeat so these edges
     # stay short and don't create long diagonal crossings.
-    ("CONFIG", "I2", None, None),
-    ("CONFIG", "I5", None, None),
-    ("CONFIG", "I6", None, None),
+    ("CONFIG", "I2", None, {"constraint": "false"}),
+    ("CONFIG", "I5", None, {"constraint": "false"}),
+    ("CONFIG", "I6", None, {"constraint": "false"}),
     # identifyFeatures internal
     ("I1", "I2", "vein_polys", None),
     ("I1", "I3", "landmarks", None),
@@ -289,15 +291,17 @@ EDGES: list[tuple[str, str, str | None, dict[str, str] | None]] = [
     ("WR", "OUT_AP_OV", None, None),
     ("WR", "OUT_CV_OV", None, None),
     ("WR", "OUT_CSV", None, None),
-    # Landmarks overlay derives from LMK_GJ (no WingResult needed)
-    ("LMK_GJ", "OUT_LMK_OV", None, None),
-    # Segmentation overlay derives from the raw SEG_GJ
-    ("SEG_GJ", "OUT_SEG_OV", None, None),
+    # Landmarks overlay derives from LMK_GJ. constraint=false so dot routes
+    # this as a short side reference instead of stretching the artifact row
+    # down toward outputs.
+    ("LMK_GJ", "OUT_LMK_OV", None, {"constraint": "false"}),
+    # Segmentation overlay derives from the raw SEG_GJ — same treatment.
+    ("SEG_GJ", "OUT_SEG_OV", None, {"constraint": "false"}),
     # measurementMaker: post-CSV augmentation with user-defined landmark distances.
     # Also handles the fast path where identifyFeatures is skipped entirely and
     # the CSV is built directly from landmarks.
     ("LMK_GJ", "MM", None, None),
-    ("CONFIG", "MM", None, {"style": "dashed"}),
+    ("CONFIG", "MM", None, {"style": "dashed", "constraint": "false"}),
     ("MM", "OUT_CSV", "custom distances", None),
 ]
 
@@ -316,6 +320,21 @@ def _escape_label(s: str) -> str:
     return s.replace('"', '\\"')
 
 
+# Pairs of node ids that should sit on the same rank inside their cluster, to
+# break tall single-file columns into 2-wide rows. Each pair is rendered as a
+# `{rank=same; A; B;}` subgroup.
+_RANK_PAIRS: dict[str, list[list[str]]] = {
+    "preproc": [["P1", "P2"], ["P3", "P4"], ["P5", "P6"]],
+    "ifeat": [["I1", "I2"], ["I3", "I4"], ["I5", "I6"], ["MM"]],
+    "artifact": [["WING_GJ", "LMK_GJ", "CHOPPED", "SEG_GJ"]],
+    "output": [
+        ["OUT_GJ", "OUT_OVERLAY", "OUT_LMK_OV", "OUT_SEG_OV"],
+        ["OUT_AP_OV", "OUT_CV_OV", "OUT_CSV"],
+    ],
+    "input": [["IMG", "CONFIG"], ["LMK_MODEL", "SEG_MODEL", "WING_MODEL"]],
+}
+
+
 def build_dot() -> str:
     # fontsize 13 + margin "0.30,0.18" on nodes leaves enough slack inside the
     # graphviz-sized box that vispy's text renderer (different font metrics)
@@ -323,8 +342,11 @@ def build_dot() -> str:
     lines: list[str] = [
         "digraph G {",
         "  rankdir=TB;",
-        "  nodesep=0.35;",
-        "  ranksep=0.6;",
+        "  nodesep=0.30;",
+        "  ranksep=0.50;",
+        "  newrank=true;",
+        "  compound=true;",
+        "  splines=ortho;",
         '  graph [fontname="Helvetica"];',
         '  node  [fontname="Helvetica", fontsize=13, shape=box, ' 'style="rounded,filled", margin="0.30,0.18"];',
         '  edge  [fontname="Helvetica", fontsize=10];',
@@ -360,6 +382,12 @@ def build_dot() -> str:
         lines.append(f"    fontsize=13;")
         for n in members:
             lines.append(_emit_node(n, meta, "    "))
+        # Pair adjacent stages into 2-wide rows to avoid tall single-file columns.
+        rank_pairs = _RANK_PAIRS.get(group_id, [])
+        for pair in rank_pairs:
+            ids_in = [nid for nid in pair if nid in {m.id for m in members}]
+            if len(ids_in) >= 2:
+                lines.append(f"    {{rank=same; {'; '.join(ids_in)};}}")
         lines.append("  }")
 
     for src, dst, lbl, attrs in EDGES:
