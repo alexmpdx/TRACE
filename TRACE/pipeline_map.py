@@ -48,11 +48,34 @@ NODES: list[Node] = [
     Node("IMG", "Wing image", "input", ["*.tif / *.bmp / *.png / *.jpg / *.psd"], "data"),
     Node("LMK_MODEL", "Landmark model", "input", ["ResNet18 U-Net checkpoint (.pt)"], "data"),
     Node("SEG_MODEL", "Segmentation model dir", "input", ["weights + metadata.json"], "data"),
-    Node("CONFIG", "PipelineConfig", "input", ["58 fields (JSON / GUI)"], "data"),
-    # --- Preprocessing stages ---
+    Node("WING_MODEL", "Wing isolation model dir", "input", ["weights + metadata.json (optional)"], "data"),
+    Node("CONFIG", "PipelineConfig", "input", ["JSON / GUI"], "data"),
+    # --- Preprocessing stages (renumbered to start at 1) ---
     Node(
         "P1",
-        "Stage 1: Landmark detection",
+        "Stage 1: Resolution adjust",
+        "preproc",
+        [
+            "Compare input µm/px to model's training µm/px",
+            "Skip if ratio is inside tolerance band",
+            "Otherwise rescale image toward target µm/px",
+            "Geometry is inverse-rescaled after Stage 2 (identifyFeatures)",
+        ],
+    ),
+    Node(
+        "P2",
+        "Stage 2: Wing isolation (optional)",
+        "preproc",
+        [
+            "Run wing-isolation model → wing polygon",
+            "Buffer polygon by wing_expand_fraction",
+            "Mask non-wing pixels to 0",
+            "Write isolated image + wing.geojson",
+        ],
+    ),
+    Node(
+        "P3",
+        "Stage 3: Landmark detection",
         "preproc",
         [
             "Load LandmarkPredictor (cached)",
@@ -63,48 +86,49 @@ NODES: list[Node] = [
         ],
     ),
     Node(
-        "P2",
-        "Stage 2: Hinge chop",
+        "P4",
+        "Stage 4: Hinge chop",
         "preproc",
         [
-            "Load landmarks from Stage 1",
-            "Build hinge polyline from 5 landmarks",
+            "Load landmarks from Stage 3",
+            "Build hinge polyline from distal-margin landmarks",
             "Build proximal mask",
-            "Black out hinge pixels",
+            "Black out hinge pixels (in place, no translation)",
             "Write chopped image (temp)",
         ],
     ),
     Node(
-        "P3",
-        "Stage 3: Segmentation",
+        "P5",
+        "Stage 5: Segmentation",
         "preproc",
         [
             "Load seg model + metadata (cached)",
             "Read RGB uint8",
             "Tiled inference w/ center-crop stitch",
+            "Optional ROI from wing.geojson (skips background tiles)",
             "Per-channel normalization",
             "Gaussian smooth probabilities",
             "Argmax → class mask",
             "Polygonize mask → features",
-            "Drop 'hinge junk' class",
             "Save detection.geojson",
         ],
     ),
     Node(
-        "P4",
-        "Stage 4: Wing annotation",
+        "P6",
+        "Stage 6: Wing rotation (optional)",
         "preproc",
         [
-            "Load detection.geojson",
-            "Union all polygons (shapely)",
-            "Insert 'wing' feature at index 0",
-            "Rewrite geojson",
+            "Fit affine from reliable landmarks",
+            "Rotate un-masked image to canonical orientation",
+            "Apply same affine to every produced GeoJSON",
+            "Optional mirror-correct for opposite-chirality wings",
         ],
     ),
     # --- Preprocessing artifacts ---
+    Node("WING_GJ", "wing.geojson", "artifact", ["single 'wing' feature (Stage 2)"], "data"),
     Node("LMK_GJ", "landmarks.geojson", "artifact", ["Point features"], "data"),
     Node("CHOPPED", "chopped image", "artifact", ["temp; deleted unless --keep-intermediates"], "data"),
-    Node("SEG_GJ", "detection.geojson", "artifact", ["vein + intervein polygons + wing"], "data"),
+    Node("SEG_GJ", "detection.geojson", "artifact", ["vein + intervein polygons"], "data"),
     # --- identifyFeatures steps ---
     Node(
         "I1",
@@ -201,19 +225,32 @@ NODES: list[Node] = [
 EDGES: list[tuple[str, str, str | None, dict[str, str] | None]] = [
     # Inputs → preprocessing
     ("IMG", "P1", None, None),
-    ("LMK_MODEL", "P1", None, None),
-    ("P1", "LMK_GJ", None, None),
-    ("IMG", "P2", None, None),
-    ("LMK_GJ", "P2", None, None),
-    ("P2", "CHOPPED", None, None),
-    ("CHOPPED", "P3", None, None),
-    ("SEG_MODEL", "P3", None, None),
-    ("P3", "SEG_GJ", None, None),
-    ("SEG_GJ", "P4", None, None),
-    ("P4", "SEG_GJ", "adds 'wing'", None),
+    # Stage 1 → Stage 2 (wing isolation reads the rescaled image)
+    ("P1", "P2", None, None),
+    ("WING_MODEL", "P2", None, None),
+    ("P2", "WING_GJ", None, None),
+    # Stage 2 (or Stage 1 when isolation off) → Stage 3 (landmarks)
+    ("P2", "P3", "isolated image", None),
+    ("P1", "P3", "(when isolation off)", {"style": "dashed"}),
+    ("LMK_MODEL", "P3", None, None),
+    ("P3", "LMK_GJ", None, None),
+    # Landmarks → Stage 4 (hinge chop)
+    ("LMK_GJ", "P4", None, None),
+    ("P2", "P4", None, None),
+    ("P4", "CHOPPED", None, None),
+    # Stage 4 → Stage 5 (segmentation)
+    ("CHOPPED", "P5", None, None),
+    ("SEG_MODEL", "P5", None, None),
+    ("WING_GJ", "P5", "ROI", {"style": "dashed"}),
+    ("P5", "SEG_GJ", None, None),
+    # Stage 6: rotation (optional) applies the same affine to image + every GeoJSON
+    ("LMK_GJ", "P6", None, None),
+    ("SEG_GJ", "P6", None, None),
+    ("WING_GJ", "P6", None, None),
     # Preprocessing → identifyFeatures
     ("SEG_GJ", "I1", None, None),
     ("LMK_GJ", "I1", None, None),
+    ("WING_GJ", "I1", None, {"style": "dashed"}),
     # CONFIG is placed in its own cluster adjacent to ifeat so these edges
     # stay short and don't create long diagonal crossings.
     ("CONFIG", "I2", None, None),

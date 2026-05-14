@@ -283,7 +283,7 @@ class PipelineConfigDialog(QDialog):
         # to re-browse each session.
         self._distance_sample_image = distance_sample_image
         self._distance_sample_landmarks = distance_sample_landmarks
-        # Stage -1 (resolutionAdjust) — per-model training-µm/px targets, which
+        # Stage 1 (resolutionAdjust) — per-model training-µm/px targets, which
         # model's target drives the global rescale, and the tolerance band. None
         # for any per-model target = "not configured; do not rescale on its
         # behalf". Captured here so `_build_models_tab` can seed its widgets.
@@ -736,7 +736,7 @@ class PipelineConfigDialog(QDialog):
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._workers_spin.setToolTip(
             "Number of wings to process in parallel.\n"
-            "Applies to both Stage 1 (hinge chop, segmentation) and Stage 2 (analysis).\n"
+            "Applies to both preprocessing (hinge chop, segmentation) and analysis (identifyFeatures).\n"
             "The landmark forward pass is GPU-batched once upfront."
         )
         self._workers_spin.valueChanged.connect(self._on_workers_changed)
@@ -933,10 +933,19 @@ class PipelineConfigDialog(QDialog):
             return w
 
         # Merge any persisted GUI override on top so the panel shows the user's last edits.
+        # NOTE: TRACE deliberately does not pass `sidecar_path` — gate edits here belong
+        # to the project's TRACE settings, not the model's defaults. The model-folder
+        # sidecar stays read-only from TRACE, serving as the safe fallback when the
+        # user resets / wipes their TRACE settings.
         if self._initial_gate_override:
             gate_config = _merge_gate_override(gate_config, self._initial_gate_override)
 
-        self._gate_panel = GateConfigPanel(gate_config, landmark_order, w, display_names=_LANDMARK_DISPLAY_NAMES)
+        self._gate_panel = GateConfigPanel(
+            gate_config,
+            landmark_order,
+            w,
+            display_names=_LANDMARK_DISPLAY_NAMES,
+        )
         layout.addWidget(self._gate_panel)
         layout.addStretch(1)
         return w
@@ -962,7 +971,7 @@ class PipelineConfigDialog(QDialog):
         spin.setValue(float(initial_value) if initial_value and initial_value > 0 else 0.0)
         spin.setToolTip(
             f"µm/px of the images this {model_label} model was trained on. "
-            "Stage -1 (resolutionAdjust) rescales each input toward this value when "
+            "Stage 1 (resolutionAdjust) rescales each input toward this value when "
             "its scale differs from the tolerance band. Leave at 0 to disable."
         )
         row.addWidget(spin, stretch=1)
@@ -980,7 +989,7 @@ class PipelineConfigDialog(QDialog):
         """Pipeline model paths: landmark, segmentation, and (optional) wing isolation.
 
         Each model section also carries a "Training µm/px" field + Auto-detect
-        button consumed by Stage -1 (resolutionAdjust). The bottom group picks
+        button consumed by Stage 1 (resolutionAdjust). The bottom group picks
         which model's target drives the actual rescale and sets the tolerance
         band that decides when a rescale is worth doing.
         """
@@ -1048,7 +1057,7 @@ class PipelineConfigDialog(QDialog):
         seg_layout.addLayout(seg_target_row)
         layout.addWidget(gb)
 
-        # -- Wing isolation model (Stage 0, optional) --
+        # -- Wing isolation model (Stage 2, optional) --
         # The enable/disable checkbox lives on the General tab; this group
         # holds the model path + buffer parameter only.
         gb = QGroupBox("Wing isolation (optional)")
@@ -1075,7 +1084,7 @@ class PipelineConfigDialog(QDialog):
         self._wing_expand_spin.setSingleStep(0.01)
         self._wing_expand_spin.setValue(0.05)
         self._wing_expand_spin.setToolTip(
-            "Stage 0 mask buffer, as a fraction of sqrt(wing area). "
+            "Stage 2 mask buffer, as a fraction of sqrt(wing area). "
             "0 = exact polygon (no buffer); 0.05 = ~5% expansion. "
             "Used only when wing isolation is enabled."
         )
@@ -1089,7 +1098,7 @@ class PipelineConfigDialog(QDialog):
         wig_layout.addLayout(wing_target_row)
         layout.addWidget(gb)
 
-        # -- Resolution adjustment (Stage -1) --
+        # -- Resolution adjustment (Stage 1) --
         ra_gb = QGroupBox("Resolution adjustment")
         ra_layout = QVBoxLayout(ra_gb)
         ra_layout.addWidget(
@@ -1199,7 +1208,7 @@ class PipelineConfigDialog(QDialog):
         self._ra_tol_high_label.setText(f"= {high:.4f} µm/px")
 
     # -----------------------------------------------------------------------
-    # Stage -1 (resolutionAdjust) helpers
+    # Stage 1 (resolutionAdjust) helpers
     # -----------------------------------------------------------------------
     def _autodetect_target_um_per_px(self, spin: QDoubleSpinBox, get_model_path_fn) -> None:
         """Open a folder picker, run autodetect, write the average into `spin`."""

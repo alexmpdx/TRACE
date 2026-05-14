@@ -226,7 +226,7 @@ class TraceWindow(QMainWindow):
         # working defaults; overridden by saved QSettings values when present.
         self._landmark_model_path = _default_model_path("landmark")
         self._segmentation_model_path = _default_model_path("segmentation")
-        # Stage -1 (resolutionAdjust) — per-model training-µm/px targets, the
+        # Stage 1 (resolutionAdjust) — per-model training-µm/px targets, the
         # active-model selector (default: wing features = segmentation), and the
         # ratio tolerance band. None means "not configured" for any target.
         # Wing features (segmentation) defaults to 0.483 µm/px — the resolution
@@ -1143,7 +1143,7 @@ class TraceWindow(QMainWindow):
 
         # Resolve the active per-model target. When the user hasn't entered one
         # for the active model, leave target_um_per_px None — preprocessing's
-        # Stage -1 then no-ops cleanly.
+        # Stage 1 then no-ops cleanly.
         target_um_per_px: Optional[float]
         if self._active_rescale_target == "landmark":
             target_um_per_px = self._landmark_target_um_per_px

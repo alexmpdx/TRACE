@@ -1,10 +1,14 @@
 """
-Preprocessing pipeline — orchestrates LandmarkLocator, HingeChopper, and modelTOjson.
+Preprocessing pipeline — orchestrates resolutionAdjust, wingIsolator,
+LandmarkLocator, HingeChopper, modelTOjson, and wingRotator.
 
-Processes a folder of wing images through three stages:
-  1. Landmark detection (LandmarkLocator)
-  2. Hinge removal (HingeChopper)
-  3. Segmentation to GeoJSON (modelTOjson)
+Processes a folder of wing images through six stages (Stages 2 and 6 optional):
+  1. Resolution adjust (resolutionAdjust)
+  2. Wing isolation (wingIsolator, optional)
+  3. Landmark detection (LandmarkLocator)
+  4. Hinge removal (HingeChopper)
+  5. Segmentation to GeoJSON (modelTOjson)
+  6. Wing rotation (wingRotator, optional)
 
 Each stage can be run independently or as part of the full pipeline.
 """
@@ -104,7 +108,7 @@ def discover_images(folder: Path, recursive: bool = False) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: Landmark detection
+# Stage 3: Landmark detection
 # ---------------------------------------------------------------------------
 def _predictor_from_cache(
     checkpoint_path: Path,
@@ -280,7 +284,7 @@ def save_landmarks_geojson(landmarks: dict, output_path: Path, metadata: Optiona
 
 
 # ---------------------------------------------------------------------------
-# Stage 3.5: Wing rotation (runs after segmentation as the last preprocessing step)
+# Stage 6: Wing rotation (runs after segmentation as the last preprocessing step)
 # ---------------------------------------------------------------------------
 def run_rotation(
     image_path: Path,
@@ -320,7 +324,7 @@ def run_rotation(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: Hinge chopping
+# Stage 4: Hinge chopping
 # ---------------------------------------------------------------------------
 def run_hinge_chop(image_path: Path, landmarks: dict, output_path: Path) -> Path:
     """Black out proximal hinge region. Returns path to chopped image."""
@@ -331,7 +335,7 @@ def run_hinge_chop(image_path: Path, landmarks: dict, output_path: Path) -> Path
 
 
 # ---------------------------------------------------------------------------
-# Stage 0: Wing isolation (optional)
+# Stage 2: Wing isolation (optional)
 # ---------------------------------------------------------------------------
 def run_wing_isolation(
     image_path: Path,
@@ -416,7 +420,7 @@ def run_wing_isolation(
         out_image_path = Path(write_masked_image(masked, output_dir / f"{stem}_isolated{ext}"))
 
     # Persist the isolated-wing polygon as a single-feature GeoJSON. Used downstream
-    # by Stage 3 to drive modelTOjson's roi_mask (skips background tiles).
+    # by Stage 5 to drive modelTOjson's roi_mask (skips background tiles).
     geojson_out_path = output_dir / f"{stem}_wing.geojson"
     wing_fc = {
         "type": "FeatureCollection",
@@ -463,7 +467,7 @@ def _load_or_cache_modeltojson(model_dir: Path, device, model_cache: dict) -> tu
 
 
 # ---------------------------------------------------------------------------
-# Stage 3: Segmentation
+# Stage 5: Segmentation
 # ---------------------------------------------------------------------------
 def run_segmentation(
     image_path: Path,
@@ -525,7 +529,7 @@ class PipelineResult:
     rotation_rms_residual: Optional[float] = None
     rotation_n_landmarks: Optional[int] = None
     rotation_mirror_detected: Optional[bool] = None
-    # Stage -1 (resolutionAdjust). When the input was rescaled, scale_factor is
+    # Stage 1 (resolutionAdjust). When the input was rescaled, scale_factor is
     # `rescaled_pixels / original_pixels` and original_shape is the pre-rescale
     # (h, w). Downstream consumers multiply geometry coords by 1/scale_factor to
     # bring them back to the original pixel grid. Both stay at their defaults
@@ -585,11 +589,11 @@ def process_single_image(
             current image_path has an entry, the landmark forward pass is skipped and the
             cached result is used directly. A non-None `error` re-raises so the caller
             handles it the same way it would handle a synchronous failure.
-        wing_model_dir: optional Stage 0. When provided, run modelTOjson with this wing
+        wing_model_dir: optional Stage 2. When provided, run modelTOjson with this wing
             -identification model, feed the result into wingIsolator, and rebind
             image_path to the masked image so all downstream stages see a single wing.
             None disables the stage entirely.
-        wing_expand_fraction: Stage 0 buffer (fraction of sqrt(polygon area)).
+        wing_expand_fraction: Stage 2 buffer (fraction of sqrt(polygon area)).
         keep_intermediates: when True, the wing GeoJSON intermediate is also written
             alongside the masked image as <stem>_wing.geojson.
         do_rotation: when True (default), run wingRotator as the last preprocessing step (after segmentation) to
@@ -667,11 +671,11 @@ def process_single_image(
             raise ValueError(f"Failed to read image: {dest_image}")
         image_path = imwrite_ome_tiff(output_dir / _clean_stem(image_path), img)
 
-    # Stage -1: resolutionAdjust. When the user has entered a Scale (input µm/px)
+    # Stage 1: resolutionAdjust. When the user has entered a Scale (input µm/px)
     # AND the selected model has a target µm/px set, rescale the image toward the
     # target if the ratio falls outside the tolerance band. The rescaled image
-    # becomes the input to every downstream stage (Stage 0 wing isolation, Stage
-    # 1 landmarks, Stage 2 hinge, Stage 3 segmentation, Stage 3.5 rotation).
+    # becomes the input to every downstream stage (Stage 2 wing isolation, Stage
+    # 3 landmarks, Stage 4 hinge, Stage 5 segmentation, Stage 6 rotation).
     # Skipped silently when either value is missing or the ratio is in-band.
     if input_um_per_px is not None and input_um_per_px > 0 and target_um_per_px is not None and target_um_per_px > 0:
         from resolutionAdjust import adjust_resolution as _adjust_resolution
@@ -707,7 +711,7 @@ def process_single_image(
                 result.processed_image_path = image_path
                 result.stages_completed.append("resolution_adjust")
 
-    # Stage 0: Wing isolation (optional). When wing_model_dir is set, mask out
+    # Stage 2: Wing isolation (optional). When wing_model_dir is set, mask out
     # non-main-wing pixels and rebind image_path so all downstream stages see
     # the single-wing image. result.image_path remains the original input.
     # Stash the un-masked image path so the final rotation step can produce a
@@ -739,7 +743,7 @@ def process_single_image(
     # input is PSD so we still keep multi-channel/metadata semantics on the way out.
     raster_ext = ".ome.tif" if ext.lower() in (".psd", ".psb") else ext
 
-    # Stage 1: Landmarks
+    # Stage 3: Landmarks
     landmarks = None
     landmark_metadata: Optional[dict] = None
     if do_landmarks:
@@ -772,7 +776,7 @@ def process_single_image(
         result.landmarks_geojson_path = lm_path
         result.stages_completed.append("landmarks")
 
-    # Stage 2: Hinge chop
+    # Stage 4: Hinge chop
     chopped_path = None
     if do_hinge:
         if landmarks is None:
@@ -797,11 +801,11 @@ def process_single_image(
         result.chopped_image_path = chopped_path
         result.stages_completed.append("hinge")
 
-    # Stage 3: Segmentation
+    # Stage 5: Segmentation
     if do_segment:
         # Use chopped image if available, otherwise original
         seg_input = chopped_path if chopped_path and chopped_path.exists() else image_path
-        # Wing isolation (Stage 0) and hinge chop both modify pixel values in place —
+        # Wing isolation (Stage 2) and hinge chop both modify pixel values in place —
         # neither crops nor translates — so the wing polygon coords are valid against
         # any combination of (isolated, chopped, neither). Always pass the ROI when
         # wing isolation produced a polygon so modelTOjson can skip background tiles.
@@ -820,7 +824,7 @@ def process_single_image(
         result.segmentation_geojson_path = seg_path
         result.stages_completed.append("segmentation")
 
-    # Stage 3.5: Rotation. Runs as the LAST preprocessing step so every model
+    # Stage 6: Rotation. Runs as the LAST preprocessing step so every model
     # inference (wing isolation, landmark detection, segmentation) sees the
     # original image. The image and every produced GeoJSON (landmarks, wing,
     # segmentation) get rotated to a canonical orientation in lockstep, so
@@ -920,11 +924,11 @@ def process_folder(
             stage stays batched (one forward pass) regardless. Each worker holds
             an image and a partial GeoJSON in memory; pick a value compatible
             with system RAM. Values <= 1 keep the original sequential loop.
-        wing_model_dir: optional Stage 0 — when set, every image is masked through
+        wing_model_dir: optional Stage 2 — when set, every image is masked through
             wingIsolator before landmarks/hinge/segmentation. Disables landmark
             batching (the prefetch is keyed by original paths and would be wrong
             for the masked images).
-        wing_expand_fraction: Stage 0 buffer (fraction of sqrt(polygon area)).
+        wing_expand_fraction: Stage 2 buffer (fraction of sqrt(polygon area)).
         keep_intermediates: when True, the wing GeoJSON intermediate is also
             written alongside the masked image as <stem>_wing.geojson.
     """

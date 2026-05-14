@@ -9,12 +9,6 @@ import sys
 import traceback
 from pathlib import Path
 
-from preprocessing.pipeline import (
-    PipelineResult,
-    _auto_device,
-    discover_images,
-    process_folder,
-)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -35,6 +29,13 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+)
+
+from preprocessing.pipeline import (
+    PipelineResult,
+    _auto_device,
+    discover_images,
+    process_folder,
 )
 
 
@@ -208,10 +209,10 @@ class PreprocessingWindow(QMainWindow):
         mdl_layout.addLayout(seg_row)
         left_layout.addWidget(model_group)
 
-        # Wing isolation (optional Stage 0)
+        # Wing isolation (optional Stage 2)
         wing_group = QGroupBox("Wing isolation (optional)")
         wig_layout = QVBoxLayout(wing_group)
-        self.chk_wing = QCheckBox("Enable wing isolation (Stage 0)")
+        self.chk_wing = QCheckBox("Enable wing isolation (Stage 2)")
         self.chk_wing.setToolTip(
             "When enabled, every input image is masked through wingIsolator before "
             "LandmarkLocator sees it. Useful when images contain multiple wings."

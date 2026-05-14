@@ -52,9 +52,9 @@ def parse_args(argv=None):
         type=Path,
         default=None,
         help=(
-            "Optional Stage 0 model directory. When set, every image is masked through "
+            "Optional Stage 2 model directory. When set, every image is masked through "
             "wingIsolator (using a wing/background segmentation from this model) before "
-            "LandmarkLocator sees it. Omit to disable Stage 0."
+            "LandmarkLocator sees it. Omit to disable Stage 2."
         ),
     )
     parser.add_argument(
@@ -62,7 +62,7 @@ def parse_args(argv=None):
         type=float,
         default=0.05,
         help=(
-            "Stage 0 mask buffer, as a fraction of sqrt(wing area). Default 0.05. "
+            "Stage 2 mask buffer, as a fraction of sqrt(wing area). Default 0.05. "
             "Ignored when --wing-isolation-model is not set."
         ),
     )
@@ -204,7 +204,7 @@ def parse_args(argv=None):
         type=float,
         default=None,
         help=(
-            "Stage -1 (resolutionAdjust): rescale each input image so the active DL model "
+            "Stage 1 (resolutionAdjust): rescale each input image so the active DL model "
             "sees this µm/px. Skipped when the input µm/px is inside the tolerance band, or "
             "when this is unset. Geometry outputs are mapped back to original-pixel space."
         ),

@@ -123,9 +123,9 @@ DEFAULT_MAX_WORKERS = 1
 
 # Per-output preprocessing requirements: (needs_landmarks, needs_hinge, needs_segmentation).
 # Used by _required_stages() to skip upstream work the requested outputs don't depend on.
-# Note: Stage 0 (wing isolation) is gated by the presence of a wing-isolation model dir,
+# Note: Stage 2 (wing isolation) is gated by the presence of a wing-isolation model dir,
 # not by this table. The "wing_isolated_image" output is produced as a side effect of
-# Stage 0 having run; selecting it without a wing-isolation model just yields nothing.
+# Stage 2 having run; selecting it without a wing-isolation model just yields nothing.
 _OUTPUT_STAGE_REQUIREMENTS = {
     "wing_isolated_image": (False, False, False),
     "chopped_image": (True, True, False),
@@ -278,7 +278,7 @@ def _render_segmentation_overlay(
     features.
 
     `inverse_scale` is applied to every coordinate before drawing — used when
-    the GeoJSON is in rescaled-pixel space (Stage -1 resolutionAdjust active)
+    the GeoJSON is in rescaled-pixel space (Stage 1 resolutionAdjust active)
     but the base image has already been resized back to original resolution.
     """
     import cv2
@@ -448,11 +448,11 @@ def trace_folder(
         gate_override: Optional confidence-gate override applied at predictor construction
             time. Same shape as the `confidence:` block in `configs/default.yaml` —
             populated by the GUI's Landmarks tab or by `--gate-override-yaml` on the CLI.
-        wing_isolation_model_dir: Optional Stage 0 — when set, a modelTOjson wing-id
+        wing_isolation_model_dir: Optional Stage 2 — when set, a modelTOjson wing-id
             model produces a wing/background segmentation, wingIsolator masks all but
             the main wing, and the masked image becomes the input to LandmarkLocator
-            and downstream stages. None disables Stage 0 entirely.
-        wing_expand_fraction: Stage 0 buffer (fraction of sqrt(wing area)). Default 0.05.
+            and downstream stages. None disables Stage 2 entirely.
+        wing_expand_fraction: Stage 2 buffer (fraction of sqrt(wing area)). Default 0.05.
 
     Returns:
         List of TraceResult, one per input image.
@@ -723,7 +723,7 @@ def _run(
                     specimen_id=stem,
                 )
 
-            # Stage -1 inverse: when preprocessing rescaled this image, identify_wing's
+            # Stage 1 inverse: when preprocessing rescaled this image, identify_wing's
             # outputs are in rescaled-pixel space. Map every geometry back to original
             # pixels and recompute cached length/area so CSV + GeoJSON exporters can use
             # the user's original µm/px (`scale`) directly.
@@ -762,7 +762,7 @@ def _run(
                 elif rescale_factor and rescale_factor != 1.0:
                     # Geometries above were mapped back to original-pixel space; the
                     # overlay base needs to follow so coordinates land on the right
-                    # pixels. Rotation (Stage 3.5) stays baked in — only resolution
+                    # pixels. Rotation (Stage 6) stays baked in — only resolution
                     # is undone, not orientation.
                     from resolutionAdjust import inverse_resize_image
 
@@ -797,7 +797,7 @@ def _run(
                 if render_cv_ratio_overlay_to_file(base, wing_result, cv_path, um_per_px=scale):
                     trace_result.cv_ratio_overlay_path = cv_path
 
-            # When Stage -1 rescaled, the saved GeoJSONs are in rescaled-pixel
+            # When Stage 1 rescaled, the saved GeoJSONs are in rescaled-pixel
             # space; pass `inverse_scale = 1/sf` so coords match the resized
             # original-resolution base.
             overlay_inverse_scale = (1.0 / rescale_factor) if rescale_factor and rescale_factor != 1.0 else 1.0
@@ -840,7 +840,7 @@ def _run(
                     except OSError as exc:
                         logger.warning("%s: failed to copy wing-isolated image: %s", stem, exc)
                 else:
-                    # Quietly skip — Stage 0 simply wasn't enabled for this run.
+                    # Quietly skip — Stage 2 simply wasn't enabled for this run.
                     pass
 
             stage2_slots[i] = trace_result

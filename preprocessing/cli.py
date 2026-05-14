@@ -45,22 +45,22 @@ def parse_args(argv=None):
         type=Path,
         default=None,
         help=(
-            "Optional Stage 0 — modelTOjson model directory for wing/background "
+            "Optional Stage 2 — modelTOjson model directory for wing/background "
             "segmentation. When set, every image is masked through wingIsolator before "
-            "LandmarkLocator sees it. Omit to disable Stage 0."
+            "LandmarkLocator sees it. Omit to disable Stage 2."
         ),
     )
     parser.add_argument(
         "--wing-expand-fraction",
         type=float,
         default=0.05,
-        help="Stage 0 mask buffer (fraction of sqrt(wing area)). Default 0.05.",
+        help="Stage 2 mask buffer (fraction of sqrt(wing area)). Default 0.05.",
     )
     parser.add_argument(
         "--keep-intermediates",
         action="store_true",
         help=(
-            "Keep intermediate Stage 0 outputs in the output folder "
+            "Keep intermediate Stage 2 outputs in the output folder "
             "(currently the wing GeoJSON written alongside the masked image)."
         ),
     )
