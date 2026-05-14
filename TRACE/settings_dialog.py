@@ -635,6 +635,10 @@ class PipelineConfigDialog(QDialog):
         except ImportError:
             DEFAULT_REFERENCE_DISTANCE_UM = 2200.0
             _scale_estimator_ok = False
+        # Mirrored onto self so the lazy "Wing length reference" popup can
+        # disable its own "Estimate from one wing…" button when the package
+        # isn't importable.
+        self._scale_estimator_available = _scale_estimator_ok
 
         # Reference-distance spinbox is kept alive (used by
         # _estimate_um_per_px_from_sample as `reference_um`) but not added to
@@ -655,12 +659,13 @@ class PipelineConfigDialog(QDialog):
         est_btn = QToolButton()
         est_btn.setText("Estimate")
         est_btn.setToolTip(
-            "Runs the landmark model on the first image in the selected input "
-            "folder (or directly on the input file). The L3-distal-end ↔ "
-            "L1-Rs-junction pixel distance is measured and µm/px = (reference "
-            "µm) / (measured px) is written into the field above. Requires an "
-            "input path on the main window and the landmark model set on the "
-            "Models tab."
+            "Runs the landmark model on up to 100 images from the selected "
+            "input folder (or on the input file if a single image is "
+            "selected). For each image, the L3-distal-end ↔ L1-Rs-junction "
+            "pixel distance is measured; the median µm/px across the batch "
+            "(= reference µm / measured px) is written into the field above. "
+            "Requires an input path on the main window and the landmark "
+            "model set on the Models tab."
         )
         est_btn.clicked.connect(self._estimate_um_per_px_from_sample)
         if not _scale_estimator_ok:
@@ -670,11 +675,22 @@ class PipelineConfigDialog(QDialog):
                 "scale_estimator is not importable. Add scaleEstimator/ to sys.path "
                 "(or install it with `pip install -e scaleEstimator`) and reopen the dialog."
             )
+        est_help_btn = QToolButton()
+        est_help_btn.setText("?")
+        est_help_btn.setToolTip("Configure the wing-length reference distance used by Estimate")
+        est_help_btn.setAutoRaise(True)
+        est_help_btn.clicked.connect(self._show_scale_reference_dialog)
+        if not _scale_estimator_ok:
+            est_help_btn.setEnabled(False)
         est_row = QHBoxLayout()
         est_row.setContentsMargins(0, 0, 0, 0)
         est_row.addWidget(est_btn)
+        est_row.addWidget(est_help_btn)
         est_row.addStretch(1)
-        form.addRow("", est_row)
+        # Single-arg addRow spans both form columns so the button sits flush
+        # against the groupbox's left edge instead of indented under the
+        # form's value column.
+        form.addRow(est_row)
         layout.addWidget(gb)
 
         gb = QGroupBox("Optional preprocessing steps")
@@ -1327,6 +1343,121 @@ class PipelineConfigDialog(QDialog):
             f"Set training µm/px to {avg:.4f} (averaged over {n_with_meta} of {n_total} "
             "TIFF file(s) with usable metadata).",
         )
+
+    def _show_scale_reference_dialog(self) -> None:
+        # Lazy-build a popup that hosts the reference-distance spinbox plus
+        # the "estimate from one wing" picker. The spinbox lives on `self`
+        # (not in the main Settings layout) so the Estimate button can keep
+        # reading its value without taking up real-estate on the General tab.
+        dlg = getattr(self, "_scale_ref_dialog", None)
+        if dlg is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Wing length reference")
+            dlg_form = QFormLayout(dlg)
+            # Explanatory text lives on the spinbox tooltip (set at
+            # construction); no inline info label here.
+            dlg_form.addRow("Wing length reference", self._scale_ref_um_spin)
+
+            pick_btn = QPushButton("Estimate from one wing…")
+            pick_btn.setToolTip(
+                "Pick a single wing image. The landmark model runs on that "
+                "one wing and µm/px = (reference µm) / (measured L3-distal-end "
+                "↔ L1-Rs-junction distance in px) is written into the µm/px "
+                "field on the General tab."
+            )
+            pick_btn.clicked.connect(lambda: self._estimate_um_per_px_from_picked_image(dlg))
+            # Disable the picker when scale_estimator isn't importable — same
+            # condition that disables the main Estimate button.
+            if not getattr(self, "_scale_estimator_available", True):
+                pick_btn.setEnabled(False)
+                pick_btn.setToolTip(
+                    "scale_estimator is not importable. Add scaleEstimator/ to sys.path "
+                    "(or install it with `pip install -e scaleEstimator`) and reopen the dialog."
+                )
+            dlg_form.addRow(pick_btn)
+
+            btns = QDialogButtonBox(QDialogButtonBox.Close)
+            btns.rejected.connect(dlg.accept)
+            dlg_form.addRow(btns)
+            self._scale_ref_dialog = dlg
+        dlg.exec_()
+
+    def _estimate_um_per_px_from_picked_image(self, host_dialog: QDialog | None = None) -> None:
+        """Open a file picker, run LandmarkLocator on the chosen wing, and
+        write the derived µm/px into the Scale spinbox."""
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import QApplication, QFileDialog
+
+        from TRACE.gui import _picker_initial_path
+
+        lm_path = ""
+        try:
+            lm_path = self._lm_model_edit.text().strip()
+        except AttributeError:
+            lm_path = self._calib_lm_path or ""
+        if not lm_path:
+            QMessageBox.warning(
+                self,
+                "No landmark model",
+                "Set the Landmark model on the Models tab first — the estimator "
+                "needs it to detect the L3 distal end and the L1-Rs junction.",
+            )
+            return
+
+        seed = self._calib_input_path or lm_path
+        image_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select a wing image",
+            _picker_initial_path(seed),
+            "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.ome.tif);;All Files (*)",
+        )
+        if not image_path:
+            return
+
+        reference_um = float(self._scale_ref_um_spin.value())
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from scale_estimator import ScaleEstimate, ScaleEstimationError, estimate_um_per_px
+
+            estimate: ScaleEstimate = estimate_um_per_px(
+                Path(image_path),
+                Path(lm_path),
+                reference_distance_um=reference_um,
+            )
+        except ScaleEstimationError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Estimate failed", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self,
+                "Estimate failed",
+                f"Could not run the landmark model on this image:\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        um_spin = self._widgets["um_per_px"][1]
+        um_spin.setValue(float(estimate.um_per_px))
+        flags = []
+        if not estimate.dtip_reliable:
+            flags.append("L3 distal end low confidence")
+        if not estimate.l1_rs_reliable:
+            flags.append("L1-Rs junction low confidence")
+        flag_line = ("\n\nWarning: " + "; ".join(flags) + ".") if flags else ""
+        QMessageBox.information(
+            self,
+            "Scale estimated",
+            f"Sample image:        {Path(image_path).name}\n"
+            f"L3 distal end ↔ L1-Rs junction:   {estimate.distance_px:.1f} px\n"
+            f"Reference distance:  {estimate.reference_distance_um:.1f} µm\n"
+            f"Estimated scale:     {estimate.um_per_px:.4f} µm/px"
+            f"{flag_line}",
+        )
+        if host_dialog is not None:
+            host_dialog.accept()
 
     # Cap on how many images the Estimate button feeds to the batch estimator.
     # The aggregated µm/px is the median across successful estimates; ~100
