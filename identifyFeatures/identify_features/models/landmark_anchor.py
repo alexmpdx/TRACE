@@ -13,8 +13,21 @@ from identify_features.utils.graph_utils import nearest_node
 
 logger = logging.getLogger(__name__)
 
-# Landmarks that represent junctions (should snap to high-degree nodes)
-_JUNCTION_LANDMARKS = {"L1-Rs", "L2-L3", "L4-L5"}
+# Landmarks at true triple junctions: three vein chains meet, so the skeleton
+# typically presents a degree-3 node here. Prefer degree-3 nodes within the
+# extended preference radius.
+_TRIPLE_JUNCTION_LANDMARKS = {"L2-L3", "ACV.a", "ACV.p", "PCV.a", "PCV.p"}
+
+# Landmarks at "normal" (two-edge) junctions where the skeleton typically
+# presents a degree-2 node — two collinear vein chains meeting end-to-end
+# (e.g. L1 meeting the costa at L1-Rs, or L4 and L5 fusing into a common
+# distal segment). Prefer degree-2 nodes within the extended preference radius.
+_DOUBLE_JUNCTION_LANDMARKS = {"L1-Rs", "L4-L5"}
+
+# All junction landmarks share the same "reject degree-1" guard: a degree-1
+# node is always an endpoint, never a junction, so falling through to edge
+# insertion is preferable to anchoring on an obvious mismatch.
+_JUNCTION_LANDMARKS = _TRIPLE_JUNCTION_LANDMARKS | _DOUBLE_JUNCTION_LANDMARKS
 
 # Landmarks that represent endpoints (prefer degree-1 nodes)
 _ENDPOINT_LANDMARKS = {"subcostal break", "DTip"}
@@ -63,15 +76,16 @@ def anchor_landmarks(
             continue
 
         if name in _JUNCTION_LANDMARKS:
+            preferred_degree = 3 if name in _TRIPLE_JUNCTION_LANDMARKS else 2
             node = nearest_node(
                 G,
                 lm.x,
                 lm.y,
                 max_dist=snap_radius,
-                prefer_degree=3,
+                prefer_degree=preferred_degree,
                 prefer_degree_radius=snap_radius,
             )
-            # Junction landmarks must snap to degree-3+ nodes.
+            # Junction landmarks must snap to ≥ degree-2 nodes.
             # If only a degree-1 node was found, reject it and fall
             # through to edge insertion (which creates a split point).
             if node is not None and G.degree(node) < 2:
