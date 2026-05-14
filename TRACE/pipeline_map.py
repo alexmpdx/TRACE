@@ -54,7 +54,19 @@ NODES: list[Node] = [
     # --- External inputs ---
     # Ordered so each input sits above its primary consumer column:
     # IMG → P1, WING_MODEL → P2, LMK_MODEL → P3, SEG_MODEL → P5, CONFIG → ifeat (right).
-    Node("IMG", "Wing image", "input", ["*.tif / *.bmp / *.png / *.jpg / *.psd"], "data"),
+    Node(
+        "IMG",
+        "Wing image",
+        "input",
+        [
+            "Standard: tif / tiff / bmp / png / jpg / jpeg",
+            "Adobe: psd / psb",
+            "Modern: heic / heif / svg",
+            "Camera RAW: dng / nef / cr2 / cr3 / arw / raf / orf / pef / rw2 / srw / raw",
+            "Microscopy: czi / nd2 / lif / lsm (→ OME-TIFF)",
+        ],
+        "data",
+    ),
     Node("WING_MODEL", "Wing isolation model dir", "input", ["weights + metadata.json (optional)"], "data"),
     Node("LMK_MODEL", "Landmark model", "input", ["ResNet18 U-Net checkpoint (.pt)"], "data"),
     Node("SEG_MODEL", "Segmentation model dir", "input", ["weights + metadata.json"], "data"),
