@@ -603,6 +603,56 @@ class PipelineConfigDialog(QDialog):
         # subclass (from _add_float) renders this via QLineEdit's native
         # placeholder mechanism, so clicking the field clears it automatically.
         self._widgets["um_per_px"][1].set_placeholder("conversion factor")
+
+        # "Estimate from sample image…" — runs LandmarkLocator on a single wing,
+        # measures the L3-distal-end ↔ L1-Rs-junction pixel distance, and
+        # divides the assumed real-world distance below to derive µm/px. Writes
+        # the result into the spinbox above. If scale_estimator isn't importable
+        # (sibling dir not on sys.path), fall back to a hardcoded default and
+        # disable the button.
+        try:
+            from scale_estimator import DEFAULT_REFERENCE_DISTANCE_UM
+
+            _scale_estimator_ok = True
+        except ImportError:
+            DEFAULT_REFERENCE_DISTANCE_UM = 2200.0
+            _scale_estimator_ok = False
+
+        est_row = QHBoxLayout()
+        est_row.setContentsMargins(0, 0, 0, 0)
+        self._scale_ref_um_spin = QDoubleSpinBox()
+        self._scale_ref_um_spin.setRange(1.0, 100000.0)
+        self._scale_ref_um_spin.setDecimals(1)
+        self._scale_ref_um_spin.setSingleStep(10.0)
+        self._scale_ref_um_spin.setValue(float(DEFAULT_REFERENCE_DISTANCE_UM))
+        self._scale_ref_um_spin.setSuffix(" µm")
+        self._scale_ref_um_spin.setToolTip(
+            "Assumed real-world distance between the L3 distal end and the "
+            "L1-Rs junction. The estimator divides this by the measured pixel "
+            "distance to derive µm/px. Default 2200 µm matches a typical "
+            "Drosophila wing."
+        )
+        est_btn = QPushButton("Estimate")
+        est_btn.setToolTip(
+            "Runs the landmark model on the first image in the selected input "
+            "folder (or directly on the input file). The L3-distal-end ↔ "
+            "L1-Rs-junction pixel distance is measured and µm/px = (reference "
+            "µm) / (measured px) is written into the field above. Requires an "
+            "input path on the main window and the landmark model set on the "
+            "Models tab."
+        )
+        est_btn.clicked.connect(self._estimate_um_per_px_from_sample)
+        if not _scale_estimator_ok:
+            est_btn.setEnabled(False)
+            self._scale_ref_um_spin.setEnabled(False)
+            est_btn.setToolTip(
+                "scale_estimator is not importable. Add scaleEstimator/ to sys.path "
+                "(or install it with `pip install -e scaleEstimator`) and reopen the dialog."
+            )
+        est_row.addWidget(QLabel("L3 distal end ↔ L1-Rs junction reference:"))
+        est_row.addWidget(self._scale_ref_um_spin)
+        est_row.addWidget(est_btn, stretch=1)
+        form.addRow("", est_row)
         layout.addWidget(gb)
 
         gb = QGroupBox("Optional preprocessing steps")
@@ -1006,14 +1056,18 @@ class PipelineConfigDialog(QDialog):
         self._lm_model_edit.setPlaceholderText("Select .pt checkpoint or fold folder...")
         self._lm_model_edit.setToolTip(
             "Pick a single .pt checkpoint for fast single-fold inference, "
-            "or pick a folder containing best_fold*.pt for 5-fold ensemble "
-            "(~5× slower, more robust)."
+            "or pick a model folder for 5-fold ensemble (~5× slower, more robust).\n\n"
+            "Flat-layout model folder: best_fold0.pt … best_fold4.pt sit directly inside, "
+            "alongside gate_config.yaml (per-model gate defaults) and training_chart.png."
         )
         btn_lm_file = QPushButton("File...")
         btn_lm_file.setToolTip("Pick a single .pt checkpoint for fast single-fold landmark inference.")
         btn_lm_file.clicked.connect(self._select_landmark_model_file)
         btn_lm_folder = QPushButton("Folder...")
-        btn_lm_folder.setToolTip("Pick a folder of best_fold*.pt checkpoints (5-fold ensemble).")
+        btn_lm_folder.setToolTip(
+            "Pick a model folder containing best_fold*.pt directly (5-fold ensemble). "
+            "The folder also hosts the optional gate_config.yaml sidecar."
+        )
         btn_lm_folder.clicked.connect(self._select_landmark_model_folder)
         lm_row.addWidget(self._lm_model_edit, stretch=1)
         lm_row.addWidget(btn_lm_file)
@@ -1252,6 +1306,140 @@ class PipelineConfigDialog(QDialog):
             "TIFF file(s) with usable metadata).",
         )
 
+    # Cap on how many images the Estimate button feeds to the batch estimator.
+    # The aggregated µm/px is the median across successful estimates; ~100
+    # images is plenty to settle the median while keeping inference under ~1
+    # minute on common hardware.
+    _SCALE_ESTIMATOR_MAX_IMAGES = 100
+
+    def _estimate_um_per_px_from_sample(self) -> None:
+        """Run LandmarkLocator on up to N images from the selected input folder
+        and write the median µm/px into the Scale spinbox."""
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import QApplication, QProgressDialog
+
+        # Landmark model lives on the Models tab, which is built after the
+        # General tab — but only after construction finishes, so this attribute
+        # is always set by the time the user clicks the button.
+        lm_path = ""
+        try:
+            lm_path = self._lm_model_edit.text().strip()
+        except AttributeError:
+            lm_path = self._calib_lm_path or ""
+        if not lm_path:
+            QMessageBox.warning(
+                self,
+                "No landmark model",
+                "Set the Landmark model on the Models tab first — the estimator "
+                "needs it to detect the L3 distal end and the L1-Rs junction.",
+            )
+            return
+
+        input_path_str = (self._calib_input_path or "").strip()
+        if not input_path_str:
+            QMessageBox.warning(
+                self,
+                "No input folder",
+                "Pick an input image or folder on the main window first — the "
+                "estimator runs on the images in that folder.",
+            )
+            return
+
+        input_path = Path(input_path_str)
+        if input_path.is_file():
+            image_paths = [input_path]
+        elif input_path.is_dir():
+            try:
+                from preprocessing.pipeline import discover_images
+            except ImportError as exc:
+                QMessageBox.critical(
+                    self,
+                    "Cannot list folder",
+                    f"preprocessing.discover_images is not importable:\n{exc}",
+                )
+                return
+            discovered = discover_images(input_path, recursive=False)
+            if not discovered:
+                QMessageBox.warning(
+                    self,
+                    "No images found",
+                    f"No supported image files in:\n{input_path}",
+                )
+                return
+            image_paths = discovered[: self._SCALE_ESTIMATOR_MAX_IMAGES]
+        else:
+            QMessageBox.warning(
+                self,
+                "Input not found",
+                f"Input path does not exist:\n{input_path_str}",
+            )
+            return
+
+        reference_um = float(self._scale_ref_um_spin.value())
+
+        progress = QProgressDialog(
+            f"Estimating scale on {len(image_paths)} image(s)…",
+            "Cancel",
+            0,
+            len(image_paths),
+            self,
+        )
+        progress.setWindowTitle("Estimating scale")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+
+        def _on_progress(done: int, total: int) -> bool:
+            progress.setMaximum(total)
+            progress.setValue(done)
+            QApplication.processEvents()
+            return progress.wasCanceled()
+
+        try:
+            from scale_estimator import FolderScaleEstimate, ScaleEstimationError, estimate_um_per_px_from_paths
+
+            result: FolderScaleEstimate = estimate_um_per_px_from_paths(
+                image_paths,
+                Path(lm_path),
+                reference_distance_um=reference_um,
+                progress_callback=_on_progress,
+            )
+        except ScaleEstimationError as exc:
+            progress.close()
+            QMessageBox.warning(self, "Estimate failed", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.critical(
+                self,
+                "Estimate failed",
+                f"Could not run the landmark model:\n{exc}",
+            )
+            return
+        finally:
+            progress.close()
+
+        um_spin = self._widgets["um_per_px"][1]
+        um_spin.setValue(float(result.um_per_px))
+        notes = []
+        if result.cancelled:
+            notes.append("Cancelled by user — median computed over the images processed so far.")
+        n_low_conf = sum(
+            1 for _, est, _ in result.per_image if est is not None and (not est.dtip_reliable or not est.l1_rs_reliable)
+        )
+        if n_low_conf:
+            notes.append(f"{n_low_conf} of {result.n_used} estimate(s) had a low-confidence landmark.")
+        note_line = ("\n\n" + "\n".join(notes)) if notes else ""
+        QMessageBox.information(
+            self,
+            "Scale estimated",
+            f"Images used:          {result.n_used} of {result.n_tried}\n"
+            f"Reference distance:   {result.reference_distance_um:.1f} µm\n"
+            f"Estimated scale:      {result.um_per_px:.4f} µm/px (median)"
+            f"{note_line}",
+        )
+
     def get_landmark_target_um_per_px(self) -> float | None:
         v = float(self._lm_target_spin.value())
         return v if v > 0 else None
@@ -1306,7 +1494,7 @@ class PipelineConfigDialog(QDialog):
 
         folder = QFileDialog.getExistingDirectory(
             self,
-            "Select Fold Checkpoint Folder (contains best_fold*.pt)",
+            "Select Model Folder (contains best_fold*.pt directly)",
             _picker_initial_path(self._lm_model_edit.text()),
         )
         if folder:
@@ -1314,7 +1502,9 @@ class PipelineConfigDialog(QDialog):
                 QMessageBox.warning(
                     self,
                     "No fold checkpoints",
-                    f"No best_fold*.pt files in {folder}. Pick a folder containing 5-fold CV checkpoints.",
+                    f"No best_fold*.pt files in {folder}.\n\n"
+                    "Pick the model folder itself — the one that contains best_fold0.pt … "
+                    "best_fold4.pt directly (and, optionally, gate_config.yaml + training_chart.png).",
                 )
                 return
             self._lm_model_edit.setText(folder)

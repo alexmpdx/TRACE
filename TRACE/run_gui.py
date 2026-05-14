@@ -29,6 +29,10 @@ _mm_dir = str(Path(__file__).resolve().parent.parent / "measurementMaker")
 if _mm_dir not in sys.path:
     sys.path.insert(0, _mm_dir)
 
+_se_dir = str(Path(__file__).resolve().parent.parent / "scaleEstimator")
+if _se_dir not in sys.path:
+    sys.path.insert(0, _se_dir)
+
 from TRACE.gui import main
 
 if __name__ == "__main__":
