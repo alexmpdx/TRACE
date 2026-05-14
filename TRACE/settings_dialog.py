@@ -43,6 +43,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -266,6 +267,10 @@ class PipelineConfigDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
+        # Let users shrink the window below its natural size hint — tab
+        # contents are wrapped in a QScrollArea in _build_ui so anything
+        # that doesn't fit becomes scrollable.
+        self.setMinimumSize(360, 240)
         self.resize(720, 640)
         self._original_config = config
         self._calib_input_path = input_path
@@ -542,6 +547,18 @@ class PipelineConfigDialog(QDialog):
     # -----------------------------------------------------------------------
     # UI construction
     # -----------------------------------------------------------------------
+    def _wrap_scrollable(self, content: QWidget) -> QScrollArea:
+        # Lets the dialog shrink below the tab's natural size hint; a
+        # vertical scroll bar appears whenever the tab content is taller
+        # than the available space.
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        area.setWidget(content)
+        return area
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
@@ -569,14 +586,14 @@ class PipelineConfigDialog(QDialog):
         self._tabs = QTabWidget()
         layout.addWidget(self._tabs, stretch=1)
 
-        self._tabs.addTab(self._build_general_tab(), "General")
-        self._tabs.addTab(self._build_custom_distances_tab(), "Custom Distances")
-        self._tabs.addTab(self._build_landmarks_tab(), "Landmarks")
-        self._tabs.addTab(self._build_models_tab(), "Models")
-        self._tabs.addTab(self._build_skel_pruning_tab(), "Skeletonization && Pruning")
-        self._tabs.addTab(self._build_bridging_tab(), "Bridging")
-        self._tabs.addTab(self._build_tracing_tab(), "Tracing")
-        self._tabs.addTab(self._build_intervein_tab(), "Intervein")
+        self._tabs.addTab(self._wrap_scrollable(self._build_general_tab()), "General")
+        self._tabs.addTab(self._wrap_scrollable(self._build_custom_distances_tab()), "Custom Distances")
+        self._tabs.addTab(self._wrap_scrollable(self._build_landmarks_tab()), "Landmarks")
+        self._tabs.addTab(self._wrap_scrollable(self._build_models_tab()), "Models")
+        self._tabs.addTab(self._wrap_scrollable(self._build_skel_pruning_tab()), "Skeletonization && Pruning")
+        self._tabs.addTab(self._wrap_scrollable(self._build_bridging_tab()), "Bridging")
+        self._tabs.addTab(self._wrap_scrollable(self._build_tracing_tab()), "Tracing")
+        self._tabs.addTab(self._wrap_scrollable(self._build_intervein_tab()), "Intervein")
 
         # Keep the General-tab mirror of "synthesize missing crossveins" in sync
         # with the canonical checkbox on the Tracing tab.
@@ -649,10 +666,9 @@ class PipelineConfigDialog(QDialog):
                 "scale_estimator is not importable. Add scaleEstimator/ to sys.path "
                 "(or install it with `pip install -e scaleEstimator`) and reopen the dialog."
             )
-        est_row.addWidget(QLabel("L3 distal end ↔ L1-Rs junction reference:"))
         est_row.addWidget(self._scale_ref_um_spin)
         est_row.addWidget(est_btn, stretch=1)
-        form.addRow("", est_row)
+        form.addRow("Wing length reference", est_row)
         layout.addWidget(gb)
 
         gb = QGroupBox("Optional preprocessing steps")
@@ -1875,9 +1891,15 @@ class PipelineConfigDialog(QDialog):
         self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._wing_expand_spin.setValue(0.05)
         self._wing_enable_chk.setChecked(False)
-        # Model paths (Landmark, Segmentation, Wing isolation) are intentionally
-        # preserved across Restore Defaults — the user has to "wipe my memories"
-        # on the main window to fall back to the bundled TRACE/models/* defaults.
+        # Reset model paths to the bundled defaults at TRACE/models/* so
+        # Restore Defaults gives the user a runnable configuration on first
+        # touch. Missing default folders fall back to "" (empty), which
+        # forces the user to pick one manually.
+        from TRACE.gui import _default_model_path
+
+        self._lm_model_edit.setText(_default_model_path("landmark"))
+        self._seg_model_edit.setText(_default_model_path("segmentation"))
+        self._wing_model_edit.setText(_default_model_path("wing_isolation"))
         self._on_wing_isolation_toggled(False)
         for chk in self._intermediate_output_chks.values():
             chk.setChecked(False)
