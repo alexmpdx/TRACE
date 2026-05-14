@@ -1382,6 +1382,31 @@ class PipelineConfigDialog(QDialog):
             self._scale_ref_dialog = dlg
         dlg.exec_()
 
+    def _confirm_scale_estimator_caveats(self) -> bool:
+        """Warn the user that the estimator is approximate before kicking it
+        off. Returns True if the user wants to proceed."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Estimated scale — read first")
+        box.setText(
+            "This tool <b>estimates</b> µm/px by assuming a fixed wing length "
+            "(default 2200 µm — the L3 distal end ↔ L1-Rs junction distance)."
+        )
+        box.setInformativeText(
+            "Real wing length varies with genotype, sex, rearing conditions, "
+            "and individual specimens, and the landmark predictions themselves "
+            "carry residual error. The output is only as accurate as those "
+            "assumptions allow.\n\n"
+            "For publication-quality data, calibrate µm/px directly — e.g. "
+            "from a stage-micrometer image taken under the same optics, or "
+            "from the microscope's TIFF / OME-XML metadata — rather than "
+            "relying on this estimate.\n\n"
+            "Continue with the estimate?"
+        )
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        return box.exec_() == QMessageBox.Ok
+
     def _estimate_um_per_px_from_picked_image(self, host_dialog: QDialog | None = None) -> None:
         """Open a file picker, run LandmarkLocator on the chosen wing, and
         write the derived µm/px into the Scale spinbox."""
@@ -1389,6 +1414,9 @@ class PipelineConfigDialog(QDialog):
         from PyQt5.QtWidgets import QApplication, QFileDialog
 
         from TRACE.gui import _picker_initial_path
+
+        if not self._confirm_scale_estimator_caveats():
+            return
 
         lm_path = ""
         try:
@@ -1470,6 +1498,9 @@ class PipelineConfigDialog(QDialog):
         and write the median µm/px into the Scale spinbox."""
         from PyQt5.QtCore import Qt
         from PyQt5.QtWidgets import QApplication, QProgressDialog
+
+        if not self._confirm_scale_estimator_caveats():
+            return
 
         # Landmark model lives on the Models tab, which is built after the
         # General tab — but only after construction finishes, so this attribute
