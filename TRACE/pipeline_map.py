@@ -210,11 +210,26 @@ NODES: list[Node] = [
             "veins: list[VeinIdentification]",
             "intervein_regions: list[InterveinRegion]",
             "landmarks, wing_outline, warnings",
+            "Inverse-rescale (Stage 1) back to original-pixel space",
         ],
         "data",
     ),
+    Node(
+        "MM",
+        "measurementMaker: custom distances",
+        "ifeat",
+        [
+            "User-defined landmark-pair distances",
+            "Augments batch CSV with custom_<label>_um columns",
+            "Fast path: emits CSV without running identifyFeatures",
+        ],
+    ),
     Node("OUT_GJ", "per-wing GeoJSON", "output", ["{stem}_output.geojson"], "data"),
-    Node("OUT_OVERLAY", "overlay PNG", "output", ["{stem}_overlay.png"], "data"),
+    Node("OUT_OVERLAY", "vein + intervein overlay", "output", ["{stem}_overlay.png"], "data"),
+    Node("OUT_LMK_OV", "landmarks overlay", "output", ["{stem}_landmarks_overlay.png"], "data"),
+    Node("OUT_SEG_OV", "segmentation overlay", "output", ["{stem}_segmentation_overlay.png"], "data"),
+    Node("OUT_AP_OV", "AP compartment overlay", "output", ["{stem}_ap_overlay.png"], "data"),
+    Node("OUT_CV_OV", "CV ratio overlay", "output", ["{stem}_cv_ratio_overlay.png"], "data"),
     Node("OUT_CSV", "batch CSV", "output", ["measurements.csv (wide, wing-level)"], "data"),
 ]
 
@@ -271,7 +286,19 @@ EDGES: list[tuple[str, str, str | None, dict[str, str] | None]] = [
     ("I6", "WR", "regions", None),
     ("WR", "OUT_GJ", None, None),
     ("WR", "OUT_OVERLAY", None, None),
+    ("WR", "OUT_AP_OV", None, None),
+    ("WR", "OUT_CV_OV", None, None),
     ("WR", "OUT_CSV", None, None),
+    # Landmarks overlay derives from LMK_GJ (no WingResult needed)
+    ("LMK_GJ", "OUT_LMK_OV", None, None),
+    # Segmentation overlay derives from the raw SEG_GJ
+    ("SEG_GJ", "OUT_SEG_OV", None, None),
+    # measurementMaker: post-CSV augmentation with user-defined landmark distances.
+    # Also handles the fast path where identifyFeatures is skipped entirely and
+    # the CSV is built directly from landmarks.
+    ("LMK_GJ", "MM", None, None),
+    ("CONFIG", "MM", None, {"style": "dashed"}),
+    ("MM", "OUT_CSV", "custom distances", None),
 ]
 
 
