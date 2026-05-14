@@ -6,7 +6,11 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
+import yaml
+
 from landmark_locator.models.unet import LandmarkUNet
+
+SIDECAR_GATE_FILENAME = "gate_config.yaml"
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -39,6 +43,61 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             out[key] = val
     return out
+
+
+def canonical_sidecar_gate_path(checkpoint_path: Path) -> Path:
+    """Where the sidecar gate YAML *should* live for a given checkpoint or model dir.
+
+    Returns a path regardless of whether the file exists yet — use this when writing
+    new sidecars from the GUI. Convention: model root (parent of the checkpoints dir).
+    """
+    p = Path(checkpoint_path).resolve()
+    if p.is_dir():
+        # If this dir contains best_fold*.pt files, it's a checkpoints dir → sidecar one up.
+        # Otherwise treat it as the model root.
+        if any(p.glob("best_fold*.pt")):
+            return p.parent / SIDECAR_GATE_FILENAME
+        return p / SIDECAR_GATE_FILENAME
+    return p.parent.parent / SIDECAR_GATE_FILENAME
+
+
+def find_sidecar_gate_path(checkpoint_path: Path) -> Optional[Path]:
+    """Locate the `gate_config.yaml` sidecar for a checkpoint, if present.
+
+    Convention: the sidecar lives at the model-root level — i.e. the parent of the
+    checkpoints folder. Both common layouts are checked:
+      <root>/<name>/checkpoints/best_fold0.pt           → <root>/<name>/gate_config.yaml
+      <root>/<name>/<name>_checkpoints/best_fold0.pt    → <root>/<name>/gate_config.yaml
+      <root>/<name>/                                    → <root>/<name>/gate_config.yaml (folder load)
+
+    Returns the first existing path, or None.
+    """
+    p = Path(checkpoint_path).resolve()
+    candidates: list[Path] = []
+    if p.is_dir():
+        # Caller passed a folder (e.g. checkpoints dir or model root). Try both.
+        candidates.append(p / SIDECAR_GATE_FILENAME)
+        candidates.append(p.parent / SIDECAR_GATE_FILENAME)
+    else:
+        candidates.append(p.parent / SIDECAR_GATE_FILENAME)
+        candidates.append(p.parent.parent / SIDECAR_GATE_FILENAME)
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _load_sidecar_gate(checkpoint_path: Path) -> tuple[Optional[Path], Optional[dict]]:
+    """Read the sidecar YAML (if present) and return (path, confidence-block)."""
+    sidecar_path = find_sidecar_gate_path(checkpoint_path)
+    if sidecar_path is None:
+        return None, None
+    try:
+        data = yaml.safe_load(sidecar_path.read_text()) or {}
+    except Exception:
+        return sidecar_path, None
+    # Accept both formats: a full doc with `confidence:` block, or just the block itself.
+    return sidecar_path, data.get("confidence", data)
 
 
 def extract_landmarks_from_heatmaps(heatmaps: np.ndarray) -> list[tuple[float, float]]:
@@ -182,6 +241,7 @@ class LandmarkPredictor:
             else "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
         )
 
+        self.checkpoint_path = Path(checkpoint_path)
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         cfg = checkpoint["config"]
         self.input_w = cfg["input"]["width"]
@@ -189,7 +249,12 @@ class LandmarkPredictor:
         self.landmark_order: list[str] = cfg["heatmap"]["landmark_order"]
         self.geojson_to_landmark: dict[str, str] = cfg["heatmap"].get("geojson_to_landmark", {})
 
+        # Gate-config precedence (lowest → highest):
+        #   DEFAULT_GATE_CONFIG  ←  checkpoint-embedded  ←  sidecar gate_config.yaml  ←  runtime override
         base_gate = _deep_merge(DEFAULT_GATE_CONFIG, cfg.get("confidence", {}) or {})
+        self.sidecar_gate_path, sidecar_gate = _load_sidecar_gate(checkpoint_path)
+        if sidecar_gate:
+            base_gate = _deep_merge(base_gate, sidecar_gate)
         self.gate_config = _deep_merge(base_gate, confidence_override or {})
 
         self.model = LandmarkUNet(
@@ -429,6 +494,7 @@ class EnsemblePredictor:
         self.landmark_order = first.landmark_order
         self.geojson_to_landmark = first.geojson_to_landmark
         self.gate_config = first.gate_config
+        self.sidecar_gate_path = first.sidecar_gate_path
         self.checkpoint_paths = list(checkpoint_paths)
         self.device = first.device
 

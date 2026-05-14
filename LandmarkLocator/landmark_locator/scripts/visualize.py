@@ -121,7 +121,7 @@ def draw_landmarks_on_image(
     ground_truth: dict[str, tuple[float, float]] | None = None,
     radius: int | None = None,
     landmark_order: list[str] | None = None,
-    show_labels: bool = False,
+    show_labels: bool = True,
     size_scale: float = 1.0,
 ) -> np.ndarray:
     """Draw predicted landmarks (circles) and ground truth (crosses) on image.

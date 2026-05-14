@@ -17,7 +17,7 @@ confidence:
   - l4_l5
   - dtip
 data:
-  annotation_dir: training_data
+  annotation_dir: trainingdata_new3
   image_dir: training_data_pics
   image_suffix: .tif
 input:

@@ -333,6 +333,7 @@ class LegendWidget(QWidget):
         # so this checkbox matches every other one in the app.
         self._labels_chk = QCheckBox(self)
         self._labels_chk.setToolTip("Draw landmark name labels next to each point on the overlay.")
+        self._labels_chk.setChecked(True)
         self._labels_chk.toggled.connect(self.labels_toggled.emit)
         self._labels_chk.adjustSize()
         self._labels_chk.raise_()
@@ -1118,6 +1119,7 @@ class GateConfigPanel(QWidget):
         parent=None,
         *,
         display_names: dict[str, str] | None = None,
+        sidecar_path: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self._landmark_order = list(landmark_order)
@@ -1127,6 +1129,9 @@ class GateConfigPanel(QWidget):
         # Deep-copy so the host can revert by discarding the panel.
         self._cfg = json.loads(json.dumps(gate_config))
         self._rows: dict[str, dict] = {}
+        # If provided, enables the "Save as Model Default" button which writes the
+        # current state to this path (the model-folder sidecar gate config).
+        self._sidecar_path = sidecar_path
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1220,6 +1225,21 @@ class GateConfigPanel(QWidget):
         btn_save.clicked.connect(self._on_export)
         buttons_row.addWidget(btn_load)
         buttons_row.addWidget(btn_save)
+
+        # The "Save as Model Default" button only renders when the host provides a
+        # sidecar path. LandmarkLocator GUI (the model-curation tool) passes it;
+        # TRACE (the per-project settings UI) does not, since gate edits there are
+        # persisted with the rest of the TRACE settings — the sidecar remains the
+        # safe fallback that "Restore Defaults" / settings wipe falls back to.
+        if self._sidecar_path is not None:
+            btn_save_default = QPushButton("Save as Model Default")
+            btn_save_default.setToolTip(
+                f"Write the current gate config to:\n{self._sidecar_path}\n\n"
+                "This file is auto-loaded whenever the model is loaded — by this GUI, "
+                "TRACE, or landmark-predict on the CLI."
+            )
+            btn_save_default.clicked.connect(self._on_save_as_model_default)
+            buttons_row.addWidget(btn_save_default)
         buttons_row.addStretch(1)
         root.addLayout(buttons_row)
 
@@ -1274,6 +1294,26 @@ class GateConfigPanel(QWidget):
         Path(path).write_text(yaml.safe_dump(doc, sort_keys=False))
         QMessageBox.information(self, "Exported", f"Wrote {path}")
 
+    def _on_save_as_model_default(self) -> None:
+        """Write the current gate to the model's sidecar YAML (auto-loaded on model load)."""
+        if self._sidecar_path is None:
+            QMessageBox.warning(self, "No model", "Load a model first.")
+            return
+        target = Path(self._sidecar_path)
+        doc = {"confidence": self.result_override()}
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(yaml.safe_dump(doc, sort_keys=False))
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", f"Could not write {target}:\n{e}")
+            return
+        QMessageBox.information(
+            self,
+            "Saved as model default",
+            f"Wrote {target}.\n\nThis gate will be loaded automatically whenever this "
+            "model is used — in this GUI, TRACE, or via landmark-predict.",
+        )
+
     def _on_import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import gate YAML", "", "YAML (*.yaml *.yml)")
         if not path:
@@ -1304,11 +1344,18 @@ def read_gate_config_from_checkpoint(path: Path) -> tuple[dict, list[str]]:
     """Inspect a checkpoint file (or fold folder) and return (gate_config, landmark_order).
 
     Used by callers that want to populate a `GateConfigPanel` without instantiating a
-    full predictor — e.g. the TRACE settings dialog.
+    full predictor — e.g. the TRACE settings dialog. The returned gate_config has any
+    sidecar `gate_config.yaml` (model-folder default) already merged on top of the
+    checkpoint-embedded gate, so callers see the same defaults the predictor would use.
     """
     import torch
 
-    from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge, _find_fold_checkpoints
+    from landmark_locator.inference.predict import (
+        DEFAULT_GATE_CONFIG,
+        _deep_merge,
+        _find_fold_checkpoints,
+        _load_sidecar_gate,
+    )
 
     p = Path(path)
     target = p
@@ -1320,6 +1367,9 @@ def read_gate_config_from_checkpoint(path: Path) -> tuple[dict, list[str]]:
     ckpt = torch.load(target, map_location="cpu", weights_only=False)
     cfg = ckpt.get("config", {}) or {}
     gate_config = _deep_merge(DEFAULT_GATE_CONFIG, cfg.get("confidence", {}) or {})
+    _, sidecar_gate = _load_sidecar_gate(target)
+    if sidecar_gate:
+        gate_config = _deep_merge(gate_config, sidecar_gate)
     landmark_order = list(cfg.get("heatmap", {}).get("landmark_order", []) or [])
     return gate_config, landmark_order
 
@@ -1327,13 +1377,19 @@ def read_gate_config_from_checkpoint(path: Path) -> tuple[dict, list[str]]:
 class GateConfigDialog(QDialog):
     """Modal wrapper around `GateConfigPanel` for the LandmarkLocator inspection GUI."""
 
-    def __init__(self, parent: "LandmarkGUI", gate_config: dict, landmark_order: list[str]) -> None:
+    def __init__(
+        self,
+        parent: "LandmarkGUI",
+        gate_config: dict,
+        landmark_order: list[str],
+        sidecar_path: Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Confidence Gate Configuration")
-        self.resize(780, 480)
+        self.resize(820, 500)
 
         root = QVBoxLayout(self)
-        self._panel = GateConfigPanel(gate_config, landmark_order, self)
+        self._panel = GateConfigPanel(gate_config, landmark_order, self, sidecar_path=sidecar_path)
         root.addWidget(self._panel)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -2110,7 +2166,20 @@ class LandmarkGUI(QMainWindow):
         if self._predictor is None:
             self.statusBar().showMessage("Load a model before editing gate config.")
             return
-        dlg = GateConfigDialog(self, self._predictor.gate_config, self._predictor.landmark_order)
+        from landmark_locator.inference.predict import canonical_sidecar_gate_path
+
+        # Sidecar may not exist yet — canonical_sidecar_gate_path always returns the path it would be.
+        sidecar_path = self._predictor.sidecar_gate_path or canonical_sidecar_gate_path(
+            self._predictor.checkpoint_paths[0]
+            if hasattr(self._predictor, "checkpoint_paths")
+            else self._predictor.checkpoint_path if hasattr(self._predictor, "checkpoint_path") else Path(".")
+        )
+        dlg = GateConfigDialog(
+            self,
+            self._predictor.gate_config,
+            self._predictor.landmark_order,
+            sidecar_path=sidecar_path,
+        )
         if dlg.exec_() != QDialog.Accepted:
             return
         override = dlg.result_override()
