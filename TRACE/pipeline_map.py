@@ -6,6 +6,13 @@ venv at ``.venv-pipeline-map/bin/python pipeline_map.py``.
 Flags:
     --png PATH   Render a static PNG to PATH and exit (no window).
     --dot PATH   Write the generated DOT source to PATH (for debugging).
+
+Before editing this file — especially before adding nodes, edges, or
+adjusting the layout — read `PIPELINE_MAP_GUIDE.md` (same directory). It
+records the layout constraints, techniques (rank pairs, ortho routing,
+side-reference `constraint=false`, …), and what's been tried and
+rejected. The diagram looks balanced today only because of those
+choices, and they're not obvious from the surrounding code alone.
 """
 
 from __future__ import annotations
