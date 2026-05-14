@@ -145,7 +145,9 @@ def train_fold(
     patience = train_cfg["early_stopping_patience"]
     best_metrics = {}
 
-    checkpoint_dir = output_dir / "checkpoints"
+    # Flat layout: checkpoints + chart + log + gate_config.yaml all live in output_dir
+    # (typically `trained_models/<name>/`). No extra `checkpoints/` subfolder.
+    checkpoint_dir = output_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(train_cfg["epochs"]):

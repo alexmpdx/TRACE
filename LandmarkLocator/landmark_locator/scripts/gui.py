@@ -703,7 +703,8 @@ class TrainingThread(QThread):
                     display_name=self._model_name,
                 )
 
-            self.finished_training.emit(str(run_dir / "checkpoints"))
+            # Flat layout: checkpoints live directly in run_dir.
+            self.finished_training.emit(str(run_dir))
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -1180,7 +1181,6 @@ class GateConfigPanel(QWidget):
             abort_chk = QCheckBox()
             abort_chk.setChecked(name in core)
 
-            has_override = name in peak_pl or name in sharp_pl or name in spr_pl
             cur_peak = peak_pl.get(name, self._cfg["peak"]["global"])
             cur_sharp = sharp_pl.get(name, self._cfg["sharpness"]["global"])
             cur_spr = spr_pl.get(name, self._cfg["second_peak_ratio"]["global"])
@@ -1188,17 +1188,20 @@ class GateConfigPanel(QWidget):
             sharp_spin.setValue(float(cur_sharp))
             spr_spin.setValue(float(cur_spr))
 
-            if has_override:
-                if (
-                    peak_pl.get(name) == _STRICT_DEFAULTS["peak"]
-                    and sharp_pl.get(name) == _STRICT_DEFAULTS["sharpness"]
-                    and spr_pl.get(name) == _STRICT_DEFAULTS["second_peak_ratio"]
-                ):
-                    combo.setCurrentText("Strict")
-                else:
-                    combo.setCurrentText("Custom")
-            else:
+            # Decide the initial tier by matching the active-gate value against the
+            # calibrated per-landmark presets. Permissive is the default ground state.
+            perm_peak, perm_sharp, perm_spr = self._tier_values("Permissive", name)
+            strict_peak, strict_sharp, strict_spr = self._tier_values("Strict", name)
+
+            def _close(a: float, b: float, tol: float = 1e-3) -> bool:
+                return abs(float(a) - float(b)) <= tol
+
+            if _close(cur_peak, strict_peak) and _close(cur_sharp, strict_sharp) and _close(cur_spr, strict_spr):
+                combo.setCurrentText("Strict")
+            elif _close(cur_peak, perm_peak) and _close(cur_sharp, perm_sharp) and _close(cur_spr, perm_spr):
                 combo.setCurrentText("Permissive")
+            else:
+                combo.setCurrentText("Custom")
 
             combo.currentTextChanged.connect(lambda tier, n=name: self._apply_tier_to_row(n, tier))
             grid.addWidget(combo, i, 1)
@@ -1219,6 +1222,16 @@ class GateConfigPanel(QWidget):
         root.addLayout(grid)
 
         buttons_row = QHBoxLayout()
+        btn_reset = QPushButton("Reset to Model Defaults")
+        btn_reset.setToolTip(
+            "Restore every landmark to its model-default (calibrated Permissive tier).\n\n"
+            "Useful when a stale saved override is masking the values you'd see fresh — "
+            "click this, then OK, to bring the active gate back in line with the model's "
+            "gate_config.yaml sidecar."
+        )
+        btn_reset.clicked.connect(self._on_reset_to_model_defaults)
+        buttons_row.addWidget(btn_reset)
+
         btn_load = QPushButton("Import YAML…")
         btn_load.clicked.connect(self._on_import)
         btn_save = QPushButton("Export YAML…")
@@ -1243,16 +1256,47 @@ class GateConfigPanel(QWidget):
         buttons_row.addStretch(1)
         root.addLayout(buttons_row)
 
+    def _tier_values(self, tier: str, name: str) -> tuple[float, float, float]:
+        """Return (peak, sharpness, second_peak_ratio) for `name` under the given tier.
+
+        Looks up calibrated per-landmark thresholds in the loaded config's
+        `tiers.{permissive|strict}` block when present. Falls back to the named
+        tier's globals, then to the active gate's globals, then to the hardcoded
+        `_PERMISSIVE_DEFAULTS` / `_STRICT_DEFAULTS` constants.
+        """
+        if tier == "Strict":
+            tier_block = (self._cfg.get("tiers") or {}).get("strict") or {}
+            fallback = _STRICT_DEFAULTS
+        else:  # "Permissive"
+            tier_block = (self._cfg.get("tiers") or {}).get("permissive") or {}
+            fallback = _PERMISSIVE_DEFAULTS
+
+        def _pick(metric_key: str, fallback_value: float) -> float:
+            metric = tier_block.get(metric_key) or {}
+            pl = metric.get("per_landmark") or {}
+            if name in pl:
+                return float(pl[name])
+            if "global" in metric:
+                return float(metric["global"])
+            # Active-gate globals are the last layer before the hardcoded defaults.
+            active = self._cfg.get(metric_key) or {}
+            if "global" in active:
+                return float(active["global"])
+            return float(fallback_value)
+
+        return (
+            _pick("peak", fallback["peak"]),
+            _pick("sharpness", fallback["sharpness"]),
+            _pick("second_peak_ratio", fallback["second_peak_ratio"]),
+        )
+
     def _apply_tier_to_row(self, name: str, tier: str) -> None:
         row = self._rows[name]
-        if tier == "Strict":
-            row["peak"].setValue(_STRICT_DEFAULTS["peak"])
-            row["sharpness"].setValue(_STRICT_DEFAULTS["sharpness"])
-            row["second_peak_ratio"].setValue(_STRICT_DEFAULTS["second_peak_ratio"])
-        elif tier == "Permissive":
-            row["peak"].setValue(self._cfg["peak"]["global"])
-            row["sharpness"].setValue(self._cfg["sharpness"]["global"])
-            row["second_peak_ratio"].setValue(self._cfg["second_peak_ratio"]["global"])
+        if tier in ("Strict", "Permissive"):
+            peak_v, sharp_v, spr_v = self._tier_values(tier, name)
+            row["peak"].setValue(peak_v)
+            row["sharpness"].setValue(sharp_v)
+            row["second_peak_ratio"].setValue(spr_v)
         self._sync_row_editability(name)
 
     def _sync_row_editability(self, name: str) -> None:
@@ -1262,17 +1306,22 @@ class GateConfigPanel(QWidget):
             row[key].setEnabled(editable)
 
     def result_override(self) -> dict:
-        """Build a confidence-override dict from the current widget state."""
+        """Build a confidence-override dict from the current widget state.
+
+        Every landmark gets an explicit per-landmark entry — whether its tier is
+        Permissive, Strict, or Custom — because the calibrated tier values are
+        per-landmark (Permissive ≠ "use global"; it means "use this landmark's
+        permissive-calibrated value"). The global stays as the safety fallback
+        for any landmark that's somehow missing from per_landmark.
+        """
         peak_pl: dict[str, float] = {}
         sharp_pl: dict[str, float] = {}
         spr_pl: dict[str, float] = {}
         core: list[str] = []
         for name, row in self._rows.items():
-            tier = row["combo"].currentText()
-            if tier != "Permissive":
-                peak_pl[name] = float(row["peak"].value())
-                sharp_pl[name] = float(row["sharpness"].value())
-                spr_pl[name] = float(row["second_peak_ratio"].value())
+            peak_pl[name] = float(row["peak"].value())
+            sharp_pl[name] = float(row["sharpness"].value())
+            spr_pl[name] = float(row["second_peak_ratio"].value())
             if row["abort"].isChecked():
                 core.append(name)
         return {
@@ -1294,16 +1343,48 @@ class GateConfigPanel(QWidget):
         Path(path).write_text(yaml.safe_dump(doc, sort_keys=False))
         QMessageBox.information(self, "Exported", f"Wrote {path}")
 
+    def _on_reset_to_model_defaults(self) -> None:
+        """Snap every landmark back to the Permissive tier (calibrated model defaults).
+
+        Useful when a host has merged a stale per-user override on top of the panel's
+        initial config — TRACE's `gate_override_json` from a previous session, for
+        instance. After this, clicking OK persists the calibrated values, replacing
+        the stale override.
+        """
+        for name in self._landmark_order:
+            self._rows[name]["combo"].setCurrentText("Permissive")
+            # If the combo was already on "Permissive", currentTextChanged didn't
+            # fire — force-apply so the spinboxes refresh regardless.
+            self._apply_tier_to_row(name, "Permissive")
+
     def _on_save_as_model_default(self) -> None:
-        """Write the current gate to the model's sidecar YAML (auto-loaded on model load)."""
+        """Write the current gate to the model's sidecar YAML (auto-loaded on model load).
+
+        Preserves the `tiers:` block (calibrated permissive/strict presets) from the
+        existing sidecar so a user's edit to the active gate doesn't wipe the named
+        tier definitions the GUI dropdown relies on.
+        """
         if self._sidecar_path is None:
             QMessageBox.warning(self, "No model", "Load a model first.")
             return
         target = Path(self._sidecar_path)
-        doc = {"confidence": self.result_override()}
+
+        # Read the existing sidecar (if any) so we can carry forward the tiers block.
+        existing_conf: dict = {}
+        if target.exists():
+            try:
+                data = yaml.safe_load(target.read_text()) or {}
+                existing_conf = data.get("confidence", {}) or {}
+            except Exception:
+                existing_conf = {}
+
+        new_conf = self.result_override()
+        if "tiers" in existing_conf:
+            new_conf["tiers"] = existing_conf["tiers"]
+
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(yaml.safe_dump(doc, sort_keys=False))
+            target.write_text(yaml.safe_dump({"confidence": new_conf}, sort_keys=False))
         except Exception as e:
             QMessageBox.critical(self, "Save failed", f"Could not write {target}:\n{e}")
             return
@@ -2561,10 +2642,10 @@ class LandmarkGUI(QMainWindow):
         self._train_dialog.exec_()
 
     def _on_training_finished(self, ckpt_dir: str) -> None:
-        """Handle successful training completion. ckpt_dir contains best_fold*.pt."""
+        """Handle successful training completion. ckpt_dir is the run dir with best_fold*.pt."""
         self._train_dialog.append_log(f"\nTraining complete! Fold checkpoints: {ckpt_dir}")
         self._train_dialog.enable_close()
-        run_dir = Path(ckpt_dir).parent  # trained_models/<name>/
+        run_dir = Path(ckpt_dir)  # flat layout: ckpt_dir is the run dir itself
         # Save the error chart into the run folder
         chart_path = run_dir / "training_chart.png"
         try:

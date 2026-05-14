@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from identify_features.config import PipelineConfig
+from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -37,8 +38,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
 from TRACE.pipeline import (
     DEFAULT_MAX_WORKERS,
@@ -102,6 +101,28 @@ def _default_model_path(key: str) -> str:
     if path is None:
         return ""
     return str(path) if path.is_dir() else ""
+
+
+def _migrate_legacy_model_path(saved: str) -> str:
+    """Auto-fall-back to a flat-layout model dir when a saved path is stale.
+
+    LandmarkLocator used to ship checkpoints inside a `<name>_checkpoints/` (or
+    `checkpoints/`) sub-folder. The flat layout puts `best_fold*.pt`,
+    `gate_config.yaml`, `training_chart.png`, and `training.log` all directly in
+    the model folder. If a user's saved path still points at the (now-deleted)
+    nested sub-folder, transparently substitute the parent when the parent is a
+    valid flat-layout model dir. Otherwise return the saved path unchanged so
+    the user gets an obvious "missing path" signal in Settings.
+    """
+    if not saved:
+        return saved
+    p = Path(saved)
+    if p.exists():
+        return saved
+    parent = p.parent
+    if parent.exists() and parent.is_dir() and any(parent.glob("best_fold*.pt")):
+        return str(parent)
+    return saved
 
 
 def _picker_initial_path(current: str) -> str:
@@ -605,7 +626,6 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
-
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)
@@ -906,12 +926,17 @@ class TraceWindow(QMainWindow):
         # Fall back to bundled defaults (TRACE/models/*) when no saved value
         # exists — first-time launch preloads the model paths so the user
         # only has to point them elsewhere if they want a different model.
+        # `_migrate_legacy_model_path` rescues saved paths that pointed into a
+        # now-deleted nested checkpoints folder by substituting the parent dir
+        # when it's a valid flat-layout model.
         val = s.value("landmark_model", "")
-        self._landmark_model_path = val if val else _default_model_path("landmark")
+        self._landmark_model_path = _migrate_legacy_model_path(val) if val else _default_model_path("landmark")
         val = s.value("segmentation_model", "")
-        self._segmentation_model_path = val if val else _default_model_path("segmentation")
+        self._segmentation_model_path = _migrate_legacy_model_path(val) if val else _default_model_path("segmentation")
         val = s.value("wing_isolation_model", "")
-        self._wing_isolation_model_path = val if val else _default_model_path("wing_isolation")
+        self._wing_isolation_model_path = (
+            _migrate_legacy_model_path(val) if val else _default_model_path("wing_isolation")
+        )
 
         def _parse_optional_float(raw) -> Optional[float]:
             if raw in (None, ""):

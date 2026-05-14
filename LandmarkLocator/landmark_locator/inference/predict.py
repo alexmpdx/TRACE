@@ -48,42 +48,26 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def canonical_sidecar_gate_path(checkpoint_path: Path) -> Path:
     """Where the sidecar gate YAML *should* live for a given checkpoint or model dir.
 
-    Returns a path regardless of whether the file exists yet — use this when writing
-    new sidecars from the GUI. Convention: model root (parent of the checkpoints dir).
+    Flat-layout convention: sidecar lives alongside the .pt files in the model folder.
+    Returns a path regardless of whether the file exists yet (use this for writing).
     """
     p = Path(checkpoint_path).resolve()
-    if p.is_dir():
-        # If this dir contains best_fold*.pt files, it's a checkpoints dir → sidecar one up.
-        # Otherwise treat it as the model root.
-        if any(p.glob("best_fold*.pt")):
-            return p.parent / SIDECAR_GATE_FILENAME
-        return p / SIDECAR_GATE_FILENAME
-    return p.parent.parent / SIDECAR_GATE_FILENAME
+    return (p if p.is_dir() else p.parent) / SIDECAR_GATE_FILENAME
 
 
 def find_sidecar_gate_path(checkpoint_path: Path) -> Optional[Path]:
-    """Locate the `gate_config.yaml` sidecar for a checkpoint, if present.
+    """Locate the existing `gate_config.yaml` sidecar for a checkpoint, or None.
 
-    Convention: the sidecar lives at the model-root level — i.e. the parent of the
-    checkpoints folder. Both common layouts are checked:
-      <root>/<name>/checkpoints/best_fold0.pt           → <root>/<name>/gate_config.yaml
-      <root>/<name>/<name>_checkpoints/best_fold0.pt    → <root>/<name>/gate_config.yaml
-      <root>/<name>/                                    → <root>/<name>/gate_config.yaml (folder load)
-
-    Returns the first existing path, or None.
+    Looks alongside the .pt file (flat layout). Also probes one directory up as a
+    back-compat for legacy nested layouts where checkpoints lived in a sub-folder
+    like `<model>/checkpoints/best_fold0.pt` and the sidecar at `<model>/gate_config.yaml`.
     """
-    p = Path(checkpoint_path).resolve()
-    candidates: list[Path] = []
-    if p.is_dir():
-        # Caller passed a folder (e.g. checkpoints dir or model root). Try both.
-        candidates.append(p / SIDECAR_GATE_FILENAME)
-        candidates.append(p.parent / SIDECAR_GATE_FILENAME)
-    else:
-        candidates.append(p.parent / SIDECAR_GATE_FILENAME)
-        candidates.append(p.parent.parent / SIDECAR_GATE_FILENAME)
-    for cand in candidates:
-        if cand.is_file():
-            return cand
+    canonical = canonical_sidecar_gate_path(checkpoint_path)
+    if canonical.is_file():
+        return canonical
+    legacy = canonical.parent.parent / SIDECAR_GATE_FILENAME
+    if legacy.is_file():
+        return legacy
     return None
 
 
