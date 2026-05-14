@@ -525,6 +525,13 @@ class PipelineResult:
     rotation_rms_residual: Optional[float] = None
     rotation_n_landmarks: Optional[int] = None
     rotation_mirror_detected: Optional[bool] = None
+    # Stage -1 (resolutionAdjust). When the input was rescaled, scale_factor is
+    # `rescaled_pixels / original_pixels` and original_shape is the pre-rescale
+    # (h, w). Downstream consumers multiply geometry coords by 1/scale_factor to
+    # bring them back to the original pixel grid. Both stay at their defaults
+    # (1.0, None) when no rescale happened.
+    rescale_factor: float = 1.0
+    original_shape: Optional[tuple[int, int]] = None
     error: Optional[str] = None
     error_stage: Optional[str] = None
     stages_completed: list[str] = field(default_factory=list)
@@ -561,6 +568,10 @@ def process_single_image(
     do_rotation: bool = True,
     rotation_mirror_correct: bool = False,
     gate_override: Optional[dict] = None,
+    input_um_per_px: Optional[float] = None,
+    target_um_per_px: Optional[float] = None,
+    rescale_tolerance_low: float = 0.85,
+    rescale_tolerance_high: float = 1.15,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
@@ -655,6 +666,46 @@ def process_single_image(
         if img is None:
             raise ValueError(f"Failed to read image: {dest_image}")
         image_path = imwrite_ome_tiff(output_dir / _clean_stem(image_path), img)
+
+    # Stage -1: resolutionAdjust. When the user has entered a Scale (input µm/px)
+    # AND the selected model has a target µm/px set, rescale the image toward the
+    # target if the ratio falls outside the tolerance band. The rescaled image
+    # becomes the input to every downstream stage (Stage 0 wing isolation, Stage
+    # 1 landmarks, Stage 2 hinge, Stage 3 segmentation, Stage 3.5 rotation).
+    # Skipped silently when either value is missing or the ratio is in-band.
+    if input_um_per_px is not None and input_um_per_px > 0 and target_um_per_px is not None and target_um_per_px > 0:
+        from resolutionAdjust import adjust_resolution as _adjust_resolution
+
+        if progress_callback:
+            progress_callback("resolution_adjust", f"Checking resolution for {image_path.name}")
+        try:
+            ra_result = _adjust_resolution(
+                image_path=image_path,
+                input_um_per_px=input_um_per_px,
+                target_um_per_px=target_um_per_px,
+                output_dir=output_dir,
+                tolerance_low=rescale_tolerance_low,
+                tolerance_high=rescale_tolerance_high,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Soft-fail: log and proceed with the original image so a bad
+            # rescale config never aborts a pipeline run.
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "resolutionAdjust failed for %s: %s — using original image",
+                image_path.name,
+                exc,
+            )
+            ra_result = None
+
+        if ra_result is not None:
+            result.rescale_factor = ra_result.scale_factor
+            result.original_shape = ra_result.original_shape
+            if ra_result.rescaled:
+                image_path = ra_result.image_path
+                result.processed_image_path = image_path
+                result.stages_completed.append("resolution_adjust")
 
     # Stage 0: Wing isolation (optional). When wing_model_dir is set, mask out
     # non-main-wing pixels and rebind image_path so all downstream stages see
@@ -852,6 +903,10 @@ def process_folder(
     recursive: bool = False,
     do_rotation: bool = True,
     rotation_mirror_correct: bool = False,
+    input_um_per_px: Optional[float] = None,
+    target_um_per_px: Optional[float] = None,
+    rescale_tolerance_low: float = 0.85,
+    rescale_tolerance_high: float = 1.15,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -902,8 +957,13 @@ def process_folder(
     # images. The per-image loop below picks results up via prefetched_landmarks.
     # Skipped when wing isolation is on — the prefetch is keyed by original paths
     # and would not match the rebound (masked) image_path inside process_single_image.
+    # Also skipped when resolutionAdjust may rescale — for the same reason, the
+    # rebound (rescaled) image_path won't match the prefetch key.
+    _resolution_adjust_active = (
+        input_um_per_px is not None and input_um_per_px > 0 and target_um_per_px is not None and target_um_per_px > 0
+    )
     prefetched: Optional[dict] = None
-    if stages[0] and landmark_checkpoint is not None and wing_model_dir is None:
+    if stages[0] and landmark_checkpoint is not None and wing_model_dir is None and not _resolution_adjust_active:
         if progress_callback:
             progress_callback(0, len(images), "(batch)", "landmarks: predicting in batches")
         try:
@@ -967,6 +1027,10 @@ def process_folder(
                 do_rotation=do_rotation,
                 rotation_mirror_correct=rotation_mirror_correct,
                 gate_override=gate_override,
+                input_um_per_px=input_um_per_px,
+                target_um_per_px=target_um_per_px,
+                rescale_tolerance_low=rescale_tolerance_low,
+                rescale_tolerance_high=rescale_tolerance_high,
             )
             _emit(i, img_path.name, "done")
             return result

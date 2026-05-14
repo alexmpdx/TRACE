@@ -22,14 +22,18 @@ from typing import Any
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 from PyQt5.QtCore import QEvent, Qt, QTimer
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -38,6 +42,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -252,6 +257,12 @@ class PipelineConfigDialog(QDialog):
         user_landmark_distances: list[dict] | None = None,
         distance_sample_image: str = "",
         distance_sample_landmarks: str = "",
+        landmark_target_um_per_px: float | None = None,
+        segmentation_target_um_per_px: float | None = None,
+        wing_isolation_target_um_per_px: float | None = None,
+        active_rescale_target: str = "segmentation",
+        rescale_tolerance_low: float = 0.85,
+        rescale_tolerance_high: float = 1.15,
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -272,6 +283,16 @@ class PipelineConfigDialog(QDialog):
         # to re-browse each session.
         self._distance_sample_image = distance_sample_image
         self._distance_sample_landmarks = distance_sample_landmarks
+        # Stage -1 (resolutionAdjust) — per-model training-µm/px targets, which
+        # model's target drives the global rescale, and the tolerance band. None
+        # for any per-model target = "not configured; do not rescale on its
+        # behalf". Captured here so `_build_models_tab` can seed its widgets.
+        self._initial_landmark_target_um_per_px = landmark_target_um_per_px
+        self._initial_segmentation_target_um_per_px = segmentation_target_um_per_px
+        self._initial_wing_isolation_target_um_per_px = wing_isolation_target_um_per_px
+        self._initial_active_rescale_target = active_rescale_target or "segmentation"
+        self._initial_rescale_tolerance_low = rescale_tolerance_low
+        self._initial_rescale_tolerance_high = rescale_tolerance_high
         # {disabled_child_chk: parent_chk_to_pulse}. Populated by build steps
         # (rotate→flip, wing-isolation→isolated-wing-image). The dialog-level
         # event filter pulses the parent when the user clicks a grayed child.
@@ -280,6 +301,20 @@ class PipelineConfigDialog(QDialog):
         # clicks it while the parent is off, hidden again when the parent
         # becomes checked.
         self._dependency_hints: dict[QCheckBox, QLabel] = {}
+        # User-editable overlay color overrides (vein_id / region_name -> [R,G,B]).
+        # Initialised from topology defaults; overwritten by _load_from_config when
+        # the loaded PipelineConfig has non-None vein_colors / region_colors. Only
+        # entries that DIFFER from the topology defaults are written back to the
+        # PipelineConfig (keeps presets/JSON round-trips minimal).
+        from identify_features.models.topology import REGION_COLORS, VEIN_COLORS
+
+        self._topology_vein_defaults: dict[str, list[int]] = {k: list(v) for k, v in VEIN_COLORS.items()}
+        self._topology_region_defaults: dict[str, list[int]] = {k: list(v) for k, v in REGION_COLORS.items()}
+        self._vein_color_state: dict[str, list[int]] = {k: list(v) for k, v in VEIN_COLORS.items()}
+        self._region_color_state: dict[str, list[int]] = {k: list(v) for k, v in REGION_COLORS.items()}
+        # Filled in by _build_general_tab when the color-picker rows are built.
+        self._vein_color_btns: dict[str, QPushButton] = {}
+        self._region_color_btns: dict[str, QPushButton] = {}
         self._build_ui()
         self._load_from_config(config)
         self._show_vein_tissue_chk.setChecked(show_vein_tissue)
@@ -366,6 +401,72 @@ class PipelineConfigDialog(QDialog):
         if hint is not None:
             hint.hide()
 
+    # -----------------------------------------------------------------------
+    # Overlay color pickers
+    # -----------------------------------------------------------------------
+    @staticmethod
+    def _swatch_style(rgb: list[int]) -> str:
+        r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+        return f"background-color: rgb({r},{g},{b}); border: 1px solid #444;"
+
+    # Display-name overrides for color picker labels. Internal keys (used as
+    # dict keys in VEIN_COLORS / REGION_COLORS and as override-dict keys) stay
+    # short; the GUI shows a friendlier label.
+    _COLOR_LABEL_OVERRIDES = {
+        "EV": "ectopic vein (EV)",
+    }
+
+    def _populate_color_grid(
+        self,
+        gb: QGroupBox,
+        state: dict[str, list[int]],
+        btn_map: dict[str, QPushButton],
+        *,
+        kind: str,
+    ) -> None:
+        """Fill ``gb`` with a 3-column grid of (swatch, label) pairs.
+
+        Swatch sits to the left of its label. Both widgets are explicitly
+        AlignVCenter so the fixed-height swatch and auto-sized QLabel line up
+        in the same row regardless of column widths.
+        Click a swatch → QColorDialog → write the new RGB triplet back into
+        ``state`` and restyle the button.
+        """
+        grid = QGridLayout(gb)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        cols = 3
+        for idx, (key, rgb) in enumerate(state.items()):
+            row, col_pair = divmod(idx, cols)
+            col = col_pair * 2  # each pair occupies two columns (swatch + label)
+            display = self._COLOR_LABEL_OVERRIDES.get(key, key)
+            btn = QPushButton()
+            btn.setFixedSize(48, 22)
+            btn.setStyleSheet(self._swatch_style(rgb))
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(f"Choose a color for {display}")
+            btn.clicked.connect(lambda _checked=False, k=key, b=btn, kd=kind: self._on_color_swatch_clicked(k, b, kd))
+            grid.addWidget(btn, row, col, Qt.AlignVCenter | Qt.AlignLeft)
+            label = QLabel(display)
+            label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            grid.addWidget(label, row, col + 1, Qt.AlignVCenter | Qt.AlignLeft)
+            btn_map[key] = btn
+        # Push (swatch, label) pairs to the left so trailing space absorbs
+        # any extra width rather than stretching the label columns.
+        grid.setColumnStretch(cols * 2, 1)
+
+    def _on_color_swatch_clicked(self, key: str, btn: QPushButton, kind: str) -> None:
+        state = self._vein_color_state if kind == "vein" else self._region_color_state
+        current = state.get(key, [128, 128, 128])
+        initial = QColor(int(current[0]), int(current[1]), int(current[2]))
+        display = self._COLOR_LABEL_OVERRIDES.get(key, key)
+        chosen = QColorDialog.getColor(initial, self, f"Pick color for {display}")
+        if not chosen.isValid():
+            return
+        rgb = [chosen.red(), chosen.green(), chosen.blue()]
+        state[key] = rgb
+        btn.setStyleSheet(self._swatch_style(rgb))
+
     def _wrap_with_hint(self, chk: QCheckBox, hint_text: str) -> tuple[QWidget, QLabel]:
         """Pair a checkbox with a 'requires X' label without altering its size.
 
@@ -427,6 +528,15 @@ class PipelineConfigDialog(QDialog):
                     kwargs[name] = [float(x.strip()) for x in text.split(",") if x.strip()]
             elif kind == self._KIND_BOOL:
                 kwargs[name] = widget.isChecked()
+        # Overlay color overrides: only emit entries that differ from the
+        # topology defaults so unchanged sessions round-trip with None (and
+        # presets/JSON stay minimal).
+        vein_diffs = {k: list(v) for k, v in self._vein_color_state.items() if v != self._topology_vein_defaults.get(k)}
+        region_diffs = {
+            k: list(v) for k, v in self._region_color_state.items() if v != self._topology_region_defaults.get(k)
+        }
+        kwargs["vein_colors"] = vein_diffs or None
+        kwargs["region_colors"] = region_diffs or None
         return PipelineConfig(**kwargs)
 
     # -----------------------------------------------------------------------
@@ -538,16 +648,6 @@ class PipelineConfigDialog(QDialog):
         form.addRow("", self._synthesize_missing_crossveins_mirror)
         layout.addWidget(gb)
 
-        gb = QGroupBox("Output options")
-        form = QFormLayout(gb)
-        self._show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
-        self._show_vein_tissue_chk.setToolTip(
-            "When off (default), the per-wing overlay only shows vein skeleton "
-            "centerlines. When on, it also fills the buffered vein tissue polygons."
-        )
-        form.addRow("", self._show_vein_tissue_chk)
-        layout.addWidget(gb)
-
         gb = QGroupBox("Intermediate outputs")
         gb.setToolTip(
             "Upstream/intermediate artifacts written before final overlays + CSV. "
@@ -588,6 +688,28 @@ class PipelineConfigDialog(QDialog):
             )
             self._pulse_dependencies[iso_chk] = self._wing_enable_chk
             self._wing_enable_chk.toggled.connect(lambda checked: self._hide_hint(iso_chk) if checked else None)
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Output options")
+        out_layout = QVBoxLayout(gb)
+        form = QFormLayout()
+        self._show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
+        self._show_vein_tissue_chk.setToolTip(
+            "When off (default), the per-wing overlay only shows vein skeleton "
+            "centerlines. When on, it also fills the buffered vein tissue polygons."
+        )
+        form.addRow("", self._show_vein_tissue_chk)
+        out_layout.addLayout(form)
+        # Vein and intervein region color pickers. Layout: 3-column grid of
+        # (label, swatch) pairs so the 10/8 rows stay compact in the dialog.
+        vein_gb = QGroupBox("Vein colors")
+        vein_gb.setToolTip("Click a swatch to choose a custom color for that vein in the overlay.")
+        self._populate_color_grid(vein_gb, self._vein_color_state, self._vein_color_btns, kind="vein")
+        out_layout.addWidget(vein_gb)
+        region_gb = QGroupBox("Intervein region colors")
+        region_gb.setToolTip("Click a swatch to choose a custom color for that intervein region in the overlay.")
+        self._populate_color_grid(region_gb, self._region_color_state, self._region_color_btns, kind="region")
+        out_layout.addWidget(region_gb)
         layout.addWidget(gb)
 
         gb = QGroupBox("Parallel processing")
@@ -811,8 +933,49 @@ class PipelineConfigDialog(QDialog):
         layout.addStretch(1)
         return w
 
+    def _make_target_row(
+        self,
+        initial_value: float | None,
+        model_label: str,
+        get_model_path_fn,
+    ) -> tuple[QHBoxLayout, QDoubleSpinBox, QPushButton]:
+        """Build a "Training µm/px: [____] [Auto-detect]" row for one model.
+
+        `get_model_path_fn` is a no-arg callable returning the currently-selected
+        model path — used by Auto-detect to seed the folder picker so the user
+        often doesn't have to navigate at all.
+        """
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Training µm/px:"))
+        spin = QDoubleSpinBox()
+        spin.setRange(0.0, 100.0)
+        spin.setDecimals(4)
+        spin.setSingleStep(0.001)
+        spin.setValue(float(initial_value) if initial_value and initial_value > 0 else 0.0)
+        spin.setToolTip(
+            f"µm/px of the images this {model_label} model was trained on. "
+            "Stage -1 (resolutionAdjust) rescales each input toward this value when "
+            "its scale differs from the tolerance band. Leave at 0 to disable."
+        )
+        row.addWidget(spin, stretch=1)
+        btn = QPushButton("Auto-detect")
+        btn.setToolTip(
+            "Pick a folder of training images. Their TIFF metadata (XResolution / OME-XML "
+            "PhysicalSizeX) is averaged into the field above. Images without metadata are "
+            "skipped; the dialog will report n/total."
+        )
+        btn.clicked.connect(lambda: self._autodetect_target_um_per_px(spin, get_model_path_fn))
+        row.addWidget(btn)
+        return row, spin, btn
+
     def _build_models_tab(self) -> QWidget:
-        """Pipeline model paths: landmark, segmentation, and (optional) wing isolation."""
+        """Pipeline model paths: landmark, segmentation, and (optional) wing isolation.
+
+        Each model section also carries a "Training µm/px" field + Auto-detect
+        button consumed by Stage -1 (resolutionAdjust). The bottom group picks
+        which model's target drives the actual rescale and sets the tolerance
+        band that decides when a rescale is worth doing.
+        """
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -841,6 +1004,12 @@ class PipelineConfigDialog(QDialog):
         lm_layout.addLayout(lm_row)
         if self._calib_lm_path:
             self._lm_model_edit.setText(self._calib_lm_path)
+        lm_target_row, self._lm_target_spin, self._lm_target_btn = self._make_target_row(
+            self._initial_landmark_target_um_per_px,
+            "landmark",
+            lambda: self._lm_model_edit.text(),
+        )
+        lm_layout.addLayout(lm_target_row)
         layout.addWidget(gb)
 
         # -- Segmentation model --
@@ -863,6 +1032,12 @@ class PipelineConfigDialog(QDialog):
         seg_layout.addLayout(seg_row)
         if self._calib_seg_path:
             self._seg_model_edit.setText(self._calib_seg_path)
+        seg_target_row, self._seg_target_spin, self._seg_target_btn = self._make_target_row(
+            self._initial_segmentation_target_um_per_px,
+            "wing-features",
+            lambda: self._seg_model_edit.text(),
+        )
+        seg_layout.addLayout(seg_target_row)
         layout.addWidget(gb)
 
         # -- Wing isolation model (Stage 0, optional) --
@@ -898,10 +1073,192 @@ class PipelineConfigDialog(QDialog):
         )
         wing_form.addRow("Buffer (× √area)", self._wing_expand_spin)
         wig_layout.addLayout(wing_form)
+        wing_target_row, self._wing_target_spin, self._wing_target_btn = self._make_target_row(
+            self._initial_wing_isolation_target_um_per_px,
+            "wing-isolation",
+            lambda: self._wing_model_edit.text(),
+        )
+        wig_layout.addLayout(wing_target_row)
         layout.addWidget(gb)
+
+        # -- Resolution adjustment (Stage -1) --
+        ra_gb = QGroupBox("Resolution adjustment")
+        ra_layout = QVBoxLayout(ra_gb)
+        ra_layout.addWidget(
+            QLabel(
+                "Rescale each input image so the active model's training resolution is matched. "
+                "Skipped when the input µm/px is inside the tolerance band."
+            )
+        )
+        ra_layout.addWidget(QLabel("Use this model's target µm/px for the rescale:"))
+        radio_row = QHBoxLayout()
+        self._ra_radio_landmark = QRadioButton("Landmark")
+        self._ra_radio_segmentation = QRadioButton("Wing features")
+        self._ra_radio_wing = QRadioButton("Wing isolation")
+        self._ra_radio_group = QButtonGroup(self)
+        self._ra_radio_group.addButton(self._ra_radio_landmark)
+        self._ra_radio_group.addButton(self._ra_radio_segmentation)
+        self._ra_radio_group.addButton(self._ra_radio_wing)
+        sel = (self._initial_active_rescale_target or "segmentation").lower()
+        if sel == "landmark":
+            self._ra_radio_landmark.setChecked(True)
+        elif sel in ("wing_isolation", "wing"):
+            self._ra_radio_wing.setChecked(True)
+        else:
+            self._ra_radio_segmentation.setChecked(True)
+        radio_row.addWidget(self._ra_radio_landmark)
+        radio_row.addWidget(self._ra_radio_segmentation)
+        radio_row.addWidget(self._ra_radio_wing)
+        radio_row.addStretch(1)
+        ra_layout.addLayout(radio_row)
+
+        tol_form = QFormLayout()
+        self._ra_tol_low_spin = QDoubleSpinBox()
+        self._ra_tol_low_spin.setRange(0.01, 10.0)
+        self._ra_tol_low_spin.setDecimals(3)
+        self._ra_tol_low_spin.setSingleStep(0.01)
+        self._ra_tol_low_spin.setValue(float(self._initial_rescale_tolerance_low))
+        self._ra_tol_low_spin.setToolTip(
+            "Lower edge of the pass-through ratio band (input_µm/px ÷ target_µm/px). "
+            "Inputs inside [low, high] are not rescaled. 0.85 ≈ 15% smaller-than-target "
+            "still acceptable."
+        )
+        self._ra_tol_high_spin = QDoubleSpinBox()
+        self._ra_tol_high_spin.setRange(0.01, 10.0)
+        self._ra_tol_high_spin.setDecimals(3)
+        self._ra_tol_high_spin.setSingleStep(0.01)
+        self._ra_tol_high_spin.setValue(float(self._initial_rescale_tolerance_high))
+        self._ra_tol_high_spin.setToolTip(
+            "Upper edge of the pass-through ratio band. 1.15 ≈ 15% larger-than-target " "still acceptable."
+        )
+        # Each row is `[spinbox]  = <ratio × active-target> µm/px`. The right-hand
+        # label updates live whenever the tolerance, the active-model radio, or
+        # the active model's Training µm/px changes.
+        low_row = QHBoxLayout()
+        low_row.addWidget(self._ra_tol_low_spin)
+        self._ra_tol_low_label = QLabel("")
+        self._ra_tol_low_label.setStyleSheet("color: #888;")
+        low_row.addWidget(self._ra_tol_low_label, stretch=1)
+        low_container = QWidget()
+        low_container.setLayout(low_row)
+        high_row = QHBoxLayout()
+        high_row.addWidget(self._ra_tol_high_spin)
+        self._ra_tol_high_label = QLabel("")
+        self._ra_tol_high_label.setStyleSheet("color: #888;")
+        high_row.addWidget(self._ra_tol_high_label, stretch=1)
+        high_container = QWidget()
+        high_container.setLayout(high_row)
+        tol_form.addRow("Tolerance low (ratio)", low_container)
+        tol_form.addRow("Tolerance high (ratio)", high_container)
+        ra_layout.addLayout(tol_form)
+        layout.addWidget(ra_gb)
+
+        for spin in (
+            self._lm_target_spin,
+            self._seg_target_spin,
+            self._wing_target_spin,
+            self._ra_tol_low_spin,
+            self._ra_tol_high_spin,
+        ):
+            spin.valueChanged.connect(self._update_tolerance_um_labels)
+        self._ra_radio_group.buttonClicked.connect(lambda *_: self._update_tolerance_um_labels())
+        self._update_tolerance_um_labels()
 
         layout.addStretch(1)
         return w
+
+    def _active_target_um_per_px(self) -> float | None:
+        """Training µm/px of the model the rescale radio currently points at."""
+        if self._ra_radio_landmark.isChecked():
+            v = float(self._lm_target_spin.value())
+        elif self._ra_radio_wing.isChecked():
+            v = float(self._wing_target_spin.value())
+        else:
+            v = float(self._seg_target_spin.value())
+        return v if v > 0 else None
+
+    def _update_tolerance_um_labels(self) -> None:
+        """Refresh the µm/px labels beside the tolerance ratio spinboxes."""
+        target = self._active_target_um_per_px()
+        if target is None:
+            placeholder = "(set Training µm/px)"
+            self._ra_tol_low_label.setText(placeholder)
+            self._ra_tol_high_label.setText(placeholder)
+            return
+        low = self._ra_tol_low_spin.value() * target
+        high = self._ra_tol_high_spin.value() * target
+        self._ra_tol_low_label.setText(f"= {low:.4f} µm/px")
+        self._ra_tol_high_label.setText(f"= {high:.4f} µm/px")
+
+    # -----------------------------------------------------------------------
+    # Stage -1 (resolutionAdjust) helpers
+    # -----------------------------------------------------------------------
+    def _autodetect_target_um_per_px(self, spin: QDoubleSpinBox, get_model_path_fn) -> None:
+        """Open a folder picker, run autodetect, write the average into `spin`."""
+        from PyQt5.QtWidgets import QFileDialog
+
+        from TRACE.gui import _picker_initial_path
+
+        seed_path = ""
+        try:
+            seed_path = get_model_path_fn() or ""
+        except Exception:
+            seed_path = ""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select training-image folder",
+            _picker_initial_path(seed_path),
+        )
+        if not folder:
+            return
+        try:
+            from resolutionAdjust import autodetect_um_per_px_from_folder
+
+            avg, n_with_meta, n_total = autodetect_um_per_px_from_folder(Path(folder))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Auto-detect failed", f"Could not scan folder:\n{exc}")
+            return
+        if avg is None:
+            QMessageBox.warning(
+                self,
+                "No metadata found",
+                f"None of the {n_total} TIFF file(s) in this folder had readable µm/px "
+                "metadata (XResolution / OME-XML PhysicalSizeX). The field was left "
+                "unchanged — enter a value manually.",
+            )
+            return
+        spin.setValue(float(avg))
+        QMessageBox.information(
+            self,
+            "Auto-detect complete",
+            f"Set training µm/px to {avg:.4f} (averaged over {n_with_meta} of {n_total} "
+            "TIFF file(s) with usable metadata).",
+        )
+
+    def get_landmark_target_um_per_px(self) -> float | None:
+        v = float(self._lm_target_spin.value())
+        return v if v > 0 else None
+
+    def get_segmentation_target_um_per_px(self) -> float | None:
+        v = float(self._seg_target_spin.value())
+        return v if v > 0 else None
+
+    def get_wing_isolation_target_um_per_px(self) -> float | None:
+        v = float(self._wing_target_spin.value())
+        return v if v > 0 else None
+
+    def get_active_rescale_target(self) -> str:
+        if self._ra_radio_landmark.isChecked():
+            return "landmark"
+        if self._ra_radio_wing.isChecked():
+            return "wing_isolation"
+        return "segmentation"
+
+    def get_rescale_tolerance_low(self) -> float:
+        return float(self._ra_tol_low_spin.value())
+
+    def get_rescale_tolerance_high(self) -> float:
+        return float(self._ra_tol_high_spin.value())
 
     def get_landmark_model_path(self) -> str:
         return self._lm_model_edit.text().strip()
@@ -1280,6 +1637,22 @@ class PipelineConfigDialog(QDialog):
                 widget.setText(", ".join(f"{x:g}" for x in val))
             elif kind == self._KIND_BOOL:
                 widget.setChecked(bool(val))
+        # Overlay color overrides: start from topology defaults, layer any
+        # overrides on top, restyle the swatch buttons.
+        for key, default_rgb in self._topology_vein_defaults.items():
+            override = (config.vein_colors or {}).get(key)
+            rgb = list(override) if override is not None else list(default_rgb)
+            self._vein_color_state[key] = rgb
+            btn = self._vein_color_btns.get(key)
+            if btn is not None:
+                btn.setStyleSheet(self._swatch_style(rgb))
+        for key, default_rgb in self._topology_region_defaults.items():
+            override = (config.region_colors or {}).get(key)
+            rgb = list(override) if override is not None else list(default_rgb)
+            self._region_color_state[key] = rgb
+            btn = self._region_color_btns.get(key)
+            if btn is not None:
+                btn.setStyleSheet(self._swatch_style(rgb))
 
     def _reset_defaults(self):
         self._load_from_config(PipelineConfig())

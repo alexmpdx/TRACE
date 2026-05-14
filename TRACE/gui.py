@@ -226,6 +226,17 @@ class TraceWindow(QMainWindow):
         # working defaults; overridden by saved QSettings values when present.
         self._landmark_model_path = _default_model_path("landmark")
         self._segmentation_model_path = _default_model_path("segmentation")
+        # Stage -1 (resolutionAdjust) — per-model training-µm/px targets, the
+        # active-model selector (default: wing features = segmentation), and the
+        # ratio tolerance band. None means "not configured" for any target.
+        # Wing features (segmentation) defaults to 0.483 µm/px — the resolution
+        # the bundled segmentation model was trained at.
+        self._landmark_target_um_per_px: Optional[float] = None
+        self._segmentation_target_um_per_px: Optional[float] = 0.483
+        self._wing_isolation_target_um_per_px: Optional[float] = None
+        self._active_rescale_target: str = "segmentation"
+        self._rescale_tolerance_low: float = 0.85
+        self._rescale_tolerance_high: float = 1.15
         # Intermediate outputs (toggled in Settings → General → Intermediate outputs).
         # Default-off so a fresh batch only writes the final overlays + CSV; users
         # opt in to intermediates per-key in the Settings dialog.
@@ -674,6 +685,12 @@ class TraceWindow(QMainWindow):
             user_landmark_distances=list(self._user_landmark_distances),
             distance_sample_image=self._distance_sample_image,
             distance_sample_landmarks=self._distance_sample_landmarks,
+            landmark_target_um_per_px=self._landmark_target_um_per_px,
+            segmentation_target_um_per_px=self._segmentation_target_um_per_px,
+            wing_isolation_target_um_per_px=self._wing_isolation_target_um_per_px,
+            active_rescale_target=self._active_rescale_target,
+            rescale_tolerance_low=self._rescale_tolerance_low,
+            rescale_tolerance_high=self._rescale_tolerance_high,
         )
         if initial_tab:
             dlg.select_tab(initial_tab)
@@ -689,6 +706,12 @@ class TraceWindow(QMainWindow):
             self._wing_isolation_model_path = dlg.get_wing_isolation_model_path()
             self._landmark_model_path = dlg.get_landmark_model_path()
             self._segmentation_model_path = dlg.get_segmentation_model_path()
+            self._landmark_target_um_per_px = dlg.get_landmark_target_um_per_px()
+            self._segmentation_target_um_per_px = dlg.get_segmentation_target_um_per_px()
+            self._wing_isolation_target_um_per_px = dlg.get_wing_isolation_target_um_per_px()
+            self._active_rescale_target = dlg.get_active_rescale_target()
+            self._rescale_tolerance_low = dlg.get_rescale_tolerance_low()
+            self._rescale_tolerance_high = dlg.get_rescale_tolerance_high()
             self._intermediate_outputs = dlg.get_intermediate_outputs()
             self._user_landmark_distances = dlg.get_user_landmark_distances()
             self._distance_sample_image = dlg.get_distance_sample_image()
@@ -770,6 +793,12 @@ class TraceWindow(QMainWindow):
         self._wing_isolation_model_path = _default_model_path("wing_isolation")
         self._landmark_model_path = _default_model_path("landmark")
         self._segmentation_model_path = _default_model_path("segmentation")
+        self._landmark_target_um_per_px = None
+        self._segmentation_target_um_per_px = 0.483
+        self._wing_isolation_target_um_per_px = None
+        self._active_rescale_target = "segmentation"
+        self._rescale_tolerance_low = 0.85
+        self._rescale_tolerance_high = 1.15
         self._intermediate_outputs = {key: False for key in INTERMEDIATE_OUTPUTS}
         self._user_landmark_distances = []
         self._distance_sample_image = ""
@@ -821,6 +850,21 @@ class TraceWindow(QMainWindow):
         s.setValue("wing_isolation_enabled", self._wing_isolation_enabled)
         s.setValue("wing_isolation_model", self._wing_isolation_model_path)
         s.setValue("wing_expand_fraction", self._wing_expand_fraction)
+        s.setValue(
+            "models/landmark_target_um_per_px",
+            "" if self._landmark_target_um_per_px is None else str(self._landmark_target_um_per_px),
+        )
+        s.setValue(
+            "models/segmentation_target_um_per_px",
+            "" if self._segmentation_target_um_per_px is None else str(self._segmentation_target_um_per_px),
+        )
+        s.setValue(
+            "models/wing_isolation_target_um_per_px",
+            "" if self._wing_isolation_target_um_per_px is None else str(self._wing_isolation_target_um_per_px),
+        )
+        s.setValue("models/active_rescale_target", self._active_rescale_target)
+        s.setValue("resolution/tolerance_low", str(self._rescale_tolerance_low))
+        s.setValue("resolution/tolerance_high", str(self._rescale_tolerance_high))
         s.setValue("pipeline_config_json", config_to_json(self.config))
         s.setValue("max_workers", self.workers_spin.value())
         s.setValue("show_vein_tissue", self._show_vein_tissue)
@@ -868,6 +912,44 @@ class TraceWindow(QMainWindow):
         self._segmentation_model_path = val if val else _default_model_path("segmentation")
         val = s.value("wing_isolation_model", "")
         self._wing_isolation_model_path = val if val else _default_model_path("wing_isolation")
+
+        def _parse_optional_float(raw) -> Optional[float]:
+            if raw in (None, ""):
+                return None
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return v if v > 0 else None
+
+        # `s.value(key, None)` returns None when the key was never written —
+        # we use that to distinguish "first launch / pristine settings" (apply
+        # the factory default) from "user deliberately cleared the field"
+        # (saved as "", parse to None).
+        raw_lm = s.value("models/landmark_target_um_per_px", None)
+        if raw_lm is not None:
+            self._landmark_target_um_per_px = _parse_optional_float(raw_lm)
+        raw_seg = s.value("models/segmentation_target_um_per_px", None)
+        if raw_seg is not None:
+            self._segmentation_target_um_per_px = _parse_optional_float(raw_seg)
+        raw_wing = s.value("models/wing_isolation_target_um_per_px", None)
+        if raw_wing is not None:
+            self._wing_isolation_target_um_per_px = _parse_optional_float(raw_wing)
+        saved_active = s.value("models/active_rescale_target", "")
+        if saved_active in ("landmark", "segmentation", "wing_isolation"):
+            self._active_rescale_target = saved_active
+        saved_tol_low = s.value("resolution/tolerance_low", "")
+        try:
+            if saved_tol_low not in (None, ""):
+                self._rescale_tolerance_low = float(saved_tol_low)
+        except (TypeError, ValueError):
+            pass
+        saved_tol_high = s.value("resolution/tolerance_high", "")
+        try:
+            if saved_tol_high not in (None, ""):
+                self._rescale_tolerance_high = float(saved_tol_high)
+        except (TypeError, ValueError):
+            pass
         saved_wing = s.value("wing_isolation_enabled", None)
         if saved_wing is not None:
             self._wing_isolation_enabled = saved_wing == "true" or saved_wing is True
@@ -1059,6 +1141,17 @@ class TraceWindow(QMainWindow):
         if self._wing_isolation_enabled and self._wing_isolation_model_path.strip():
             wing_model_dir = Path(self._wing_isolation_model_path)
 
+        # Resolve the active per-model target. When the user hasn't entered one
+        # for the active model, leave target_um_per_px None — preprocessing's
+        # Stage -1 then no-ops cleanly.
+        target_um_per_px: Optional[float]
+        if self._active_rescale_target == "landmark":
+            target_um_per_px = self._landmark_target_um_per_px
+        elif self._active_rescale_target == "wing_isolation":
+            target_um_per_px = self._wing_isolation_target_um_per_px
+        else:
+            target_um_per_px = self._segmentation_target_um_per_px
+
         self.worker = TraceWorker(
             kwargs=dict(
                 input_dir=Path(self.input_edit.text()),
@@ -1084,6 +1177,9 @@ class TraceWindow(QMainWindow):
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
                 landmark_batch_size=self.workers_spin.value(),
+                target_um_per_px=target_um_per_px,
+                rescale_tolerance_low=self._rescale_tolerance_low,
+                rescale_tolerance_high=self._rescale_tolerance_high,
             )
         )
         self.worker.progress.connect(self._on_progress)

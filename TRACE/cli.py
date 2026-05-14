@@ -199,6 +199,28 @@ def parse_args(argv=None):
             "construction time. Produced by the GUI's Landmarks tab Export button."
         ),
     )
+    parser.add_argument(
+        "--target-um-per-px",
+        type=float,
+        default=None,
+        help=(
+            "Stage -1 (resolutionAdjust): rescale each input image so the active DL model "
+            "sees this µm/px. Skipped when the input µm/px is inside the tolerance band, or "
+            "when this is unset. Geometry outputs are mapped back to original-pixel space."
+        ),
+    )
+    parser.add_argument(
+        "--rescale-tolerance-low",
+        type=float,
+        default=0.85,
+        help="Lower edge of the pass-through ratio band (input_µm/px ÷ target_µm/px). Default 0.85.",
+    )
+    parser.add_argument(
+        "--rescale-tolerance-high",
+        type=float,
+        default=1.15,
+        help="Upper edge of the pass-through ratio band. Default 1.15.",
+    )
     return parser.parse_args(argv)
 
 
@@ -389,6 +411,9 @@ def main(argv=None):
         do_rotation=args.do_rotation,
         rotation_mirror_correct=args.rotation_mirror_correct,
         csv_measurement_groups=csv_groups,
+        target_um_per_px=args.target_um_per_px,
+        rescale_tolerance_low=args.rescale_tolerance_low,
+        rescale_tolerance_high=args.rescale_tolerance_high,
     )
 
     # Summary

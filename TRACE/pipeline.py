@@ -265,11 +265,21 @@ def _iter_polygon_rings(geometry: dict):
             yield pts.astype(np.int32).reshape(-1, 1, 2)
 
 
-def _render_segmentation_overlay(base_bgr, seg_geojson_path: Path, out_path: Path, alpha: float = 0.45) -> bool:
+def _render_segmentation_overlay(
+    base_bgr,
+    seg_geojson_path: Path,
+    out_path: Path,
+    alpha: float = 0.45,
+    inverse_scale: float = 1.0,
+) -> bool:
     """Render vein/intervein polygons from a segmentation GeoJSON over the base image.
 
     Returns True on success, False if the GeoJSON is missing or has no drawable
     features.
+
+    `inverse_scale` is applied to every coordinate before drawing — used when
+    the GeoJSON is in rescaled-pixel space (Stage -1 resolutionAdjust active)
+    but the base image has already been resized back to original resolution.
     """
     import cv2
 
@@ -279,6 +289,13 @@ def _render_segmentation_overlay(base_bgr, seg_geojson_path: Path, out_path: Pat
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("segmentation_overlay: cannot read %s: %s", seg_geojson_path, exc)
         return False
+
+    if inverse_scale != 1.0:
+        from resolutionAdjust import inverse_transform_geojson
+
+        # `inverse_transform_geojson` takes scale_factor; pass 1/inverse_scale so
+        # coords get multiplied by inverse_scale.
+        data = inverse_transform_geojson(data, 1.0 / inverse_scale)
 
     features = data.get("features", []) if isinstance(data, dict) else []
     if not features:
@@ -325,8 +342,18 @@ def _render_segmentation_overlay(base_bgr, seg_geojson_path: Path, out_path: Pat
     return bool(cv2.imwrite(str(out_path), blended))
 
 
-def _render_landmarks_overlay(base_bgr, landmarks_geojson_path: Path, out_path: Path) -> bool:
-    """Render landmark points from a landmarks GeoJSON over the base image."""
+def _render_landmarks_overlay(
+    base_bgr,
+    landmarks_geojson_path: Path,
+    out_path: Path,
+    inverse_scale: float = 1.0,
+) -> bool:
+    """Render landmark points from a landmarks GeoJSON over the base image.
+
+    `inverse_scale` multiplies every point coordinate before drawing — used when
+    the GeoJSON is in rescaled-pixel space and the base image has already been
+    resized back to original resolution.
+    """
     import cv2
 
     try:
@@ -347,7 +374,7 @@ def _render_landmarks_overlay(base_bgr, landmarks_geojson_path: Path, out_path: 
         props = feat.get("properties", {}) or {}
         name = props.get("classification", {}).get("name") if isinstance(props.get("classification"), dict) else None
         name = name or props.get("name") or props.get("class") or f"lm_{len(predictions)}"
-        predictions[name] = (float(coords[0]), float(coords[1]))
+        predictions[name] = (float(coords[0]) * inverse_scale, float(coords[1]) * inverse_scale)
 
     if not predictions:
         return False
@@ -386,6 +413,9 @@ def trace_folder(
     rotation_mirror_correct: bool = False,
     user_landmark_distances: Optional[list[dict]] = None,
     csv_measurement_groups: Optional[set[str]] = None,
+    target_um_per_px: Optional[float] = None,
+    rescale_tolerance_low: float = 0.85,
+    rescale_tolerance_high: float = 1.15,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -497,6 +527,9 @@ def trace_folder(
             rotation_mirror_correct=rotation_mirror_correct,
             user_landmark_distances=user_landmark_distances,
             csv_measurement_groups=csv_measurement_groups,
+            target_um_per_px=target_um_per_px,
+            rescale_tolerance_low=rescale_tolerance_low,
+            rescale_tolerance_high=rescale_tolerance_high,
         )
     finally:
         if temp_dir_obj is not None:
@@ -526,6 +559,9 @@ def _run(
     rotation_mirror_correct: bool = False,
     user_landmark_distances: Optional[list[dict]] = None,
     csv_measurement_groups: Optional[set[str]] = None,
+    target_um_per_px: Optional[float] = None,
+    rescale_tolerance_low: float = 0.85,
+    rescale_tolerance_high: float = 1.15,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -580,6 +616,10 @@ def _run(
         recursive=recursive,
         do_rotation=do_rotation,
         rotation_mirror_correct=rotation_mirror_correct,
+        input_um_per_px=config.um_per_px,
+        target_um_per_px=target_um_per_px,
+        rescale_tolerance_low=rescale_tolerance_low,
+        rescale_tolerance_high=rescale_tolerance_high,
     )
 
     results: list[TraceResult] = []
@@ -683,6 +723,16 @@ def _run(
                     specimen_id=stem,
                 )
 
+            # Stage -1 inverse: when preprocessing rescaled this image, identify_wing's
+            # outputs are in rescaled-pixel space. Map every geometry back to original
+            # pixels and recompute cached length/area so CSV + GeoJSON exporters can use
+            # the user's original µm/px (`scale`) directly.
+            rescale_factor = getattr(preproc_result, "rescale_factor", 1.0)
+            if wing_result is not None and rescale_factor and rescale_factor != 1.0:
+                from resolutionAdjust import inverse_rescale_wing_result
+
+                inverse_rescale_wing_result(wing_result, rescale_factor, um_per_px=scale)
+
             trace_result = TraceResult(image_path=preproc_result.image_path)
 
             if "geojson" in outputs and wing_result is not None:
@@ -709,6 +759,14 @@ def _run(
                 base = imread_any(img_path)
                 if base is None:
                     logger.warning("%s: could not read image for overlays, skipping PNG outputs", stem)
+                elif rescale_factor and rescale_factor != 1.0:
+                    # Geometries above were mapped back to original-pixel space; the
+                    # overlay base needs to follow so coordinates land on the right
+                    # pixels. Rotation (Stage 3.5) stays baked in — only resolution
+                    # is undone, not orientation.
+                    from resolutionAdjust import inverse_resize_image
+
+                    base = inverse_resize_image(base, rescale_factor)
 
             want_vein = "vein_overlay" in outputs
             want_intervein = "intervein_overlay" in outputs
@@ -722,6 +780,8 @@ def _run(
                     show_vein_tissue=show_vein_tissue,
                     show_veins=want_vein,
                     show_regions=want_intervein,
+                    vein_color_overrides=config.vein_colors,
+                    region_color_overrides=config.region_colors,
                 )
                 trace_result.overlay_path = ov_path
 
@@ -735,18 +795,25 @@ def _run(
                 if render_cv_ratio_overlay_to_file(base, wing_result, cv_path, um_per_px=scale):
                     trace_result.cv_ratio_overlay_path = cv_path
 
+            # When Stage -1 rescaled, the saved GeoJSONs are in rescaled-pixel
+            # space; pass `inverse_scale = 1/sf` so coords match the resized
+            # original-resolution base.
+            overlay_inverse_scale = (1.0 / rescale_factor) if rescale_factor and rescale_factor != 1.0 else 1.0
+
             if "landmarks_overlay" in outputs and base is not None:
                 lm_gj = preproc_result.landmarks_geojson_path
                 if lm_gj and Path(lm_gj).exists():
                     lm_ov_path = output_dir / f"{stem}_landmarks_overlay.png"
-                    if _render_landmarks_overlay(base, Path(lm_gj), lm_ov_path):
+                    if _render_landmarks_overlay(base, Path(lm_gj), lm_ov_path, inverse_scale=overlay_inverse_scale):
                         trace_result.landmarks_overlay_path = lm_ov_path
 
             if "segmentation_overlay" in outputs and base is not None:
                 seg_gj = preproc_result.segmentation_geojson_path
                 if seg_gj and Path(seg_gj).exists():
                     seg_ov_path = output_dir / f"{stem}_segmentation_overlay.png"
-                    if _render_segmentation_overlay(base, Path(seg_gj), seg_ov_path):
+                    if _render_segmentation_overlay(
+                        base, Path(seg_gj), seg_ov_path, inverse_scale=overlay_inverse_scale
+                    ):
                         trace_result.segmentation_overlay_path = seg_ov_path
 
             if "chopped_image" in outputs:
