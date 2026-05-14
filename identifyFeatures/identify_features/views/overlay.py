@@ -24,18 +24,27 @@ _EV_COLOR_BGR = (255, 0, 255)
 _REGION_FILL_OPACITY = 0.2
 
 
-def _vein_bgr(vein_id: str) -> tuple[int, int, int]:
-    """Return BGR color for a vein."""
-    if vein_id.startswith("EV"):
-        return _EV_COLOR_BGR
-    rgb = VEIN_COLORS.get(vein_id, list(_DEFAULT_COLOR_BGR))
+def _vein_bgr(vein_id: str, overrides: Optional[dict[str, list[int]]] = None) -> tuple[int, int, int]:
+    """Return BGR color for a vein. ``overrides`` (RGB) wins over topology defaults.
+
+    All ectopic ids (EV1, EV2, ...) share a single bucket keyed as ``EV`` so the
+    user only has to pick one color for "ectopic veins".
+    """
+    lookup_key = "EV" if vein_id.startswith("EV") else vein_id
+    if overrides is not None and lookup_key in overrides:
+        rgb = overrides[lookup_key]
+    else:
+        rgb = VEIN_COLORS.get(lookup_key, list(_DEFAULT_COLOR_BGR))
     return (rgb[2], rgb[1], rgb[0])
 
 
-def _region_bgr(name: str) -> tuple[int, int, int]:
-    """Return BGR color for a region (uses first name if merged)."""
+def _region_bgr(name: str, overrides: Optional[dict[str, list[int]]] = None) -> tuple[int, int, int]:
+    """Return BGR color for a region (uses first name if merged). ``overrides`` (RGB) wins."""
     color_key = name.split(" + ")[0]
-    rgb = REGION_COLORS.get(color_key, list(_DEFAULT_COLOR_BGR))
+    if overrides is not None and color_key in overrides:
+        rgb = overrides[color_key]
+    else:
+        rgb = REGION_COLORS.get(color_key, list(_DEFAULT_COLOR_BGR))
     return (rgb[2], rgb[1], rgb[0])
 
 
@@ -52,20 +61,24 @@ def _polygon_rings(polygon) -> list[np.ndarray]:
     return rings
 
 
-def _draw_color_key(img: np.ndarray, veins: list[VeinIdentification]) -> None:
+def _draw_color_key(
+    img: np.ndarray,
+    veins: list[VeinIdentification],
+    vein_color_overrides: Optional[dict[str, list[int]]] = None,
+) -> None:
     """Draw a vein color legend in the upper-left corner of the image (in place)."""
     present: list[tuple[str, tuple[int, int, int]]] = []
     seen: set[str] = set()
     for vid in VEIN_AP_ORDER:
         for v in veins:
             if v.vein_id == vid and v.centerline is not None and vid not in seen:
-                present.append((vid, _vein_bgr(vid)))
+                present.append((vid, _vein_bgr(vid, vein_color_overrides)))
                 seen.add(vid)
                 break
     # Append ectopic veins after canonicals
     for v in veins:
         if v.vein_id.startswith("EV") and v.centerline is not None and v.vein_id not in seen:
-            present.append((v.vein_id, _vein_bgr(v.vein_id)))
+            present.append((v.vein_id, _vein_bgr(v.vein_id, vein_color_overrides)))
             seen.add(v.vein_id)
     if not present:
         return
@@ -116,6 +129,10 @@ def render_overlay(
     show_vein_tissue: bool = False,
     show_veins: bool = True,
     show_regions: bool = True,
+    vein_color_overrides: Optional[dict[str, list[int]]] = None,
+    region_color_overrides: Optional[dict[str, list[int]]] = None,
+    vein_opacity: float = 1.0,
+    intervein_opacity: float = _REGION_FILL_OPACITY,
 ) -> np.ndarray:
     """Render veins and regions as a color overlay on the wing image.
 
@@ -142,44 +159,63 @@ def render_overlay(
     """
     img = base_image.copy()
 
-    # Layer 1: low-opacity colored region fills
-    if show_regions:
+    # Clamp opacities to [0, 1] so a stray out-of-range config doesn't break cv2.addWeighted.
+    intervein_opacity = max(0.0, min(1.0, float(intervein_opacity)))
+    vein_opacity = max(0.0, min(1.0, float(vein_opacity)))
+
+    # Layer 1: colored region fills (intervein_opacity controls how strongly
+    # the colored layer washes the base image; 0 = invisible, 1 = fully painted).
+    if show_regions and intervein_opacity > 0:
         region_layer = img.copy()
         for r in regions:
-            color = _region_bgr(r.name)
+            color = _region_bgr(r.name, region_color_overrides)
             for ring in _polygon_rings(r.polygon):
                 cv2.fillPoly(region_layer, [ring], color)
-        img = cv2.addWeighted(region_layer, _REGION_FILL_OPACITY, img, 1.0 - _REGION_FILL_OPACITY, 0)
+        img = cv2.addWeighted(region_layer, intervein_opacity, img, 1.0 - intervein_opacity, 0)
 
-    # Layer 2: optional vein tissue fills
-    if show_veins and show_vein_tissue:
+    # Layer 2: optional vein tissue fills — share vein_opacity with centerlines
+    # so "veins" reads as a single channel from the user's perspective. Tissue
+    # fills historically used 0.5; keep that as the upper bound by scaling
+    # vein_opacity by 0.5 so vein_opacity=1.0 yields the previous look.
+    if show_veins and show_vein_tissue and vein_opacity > 0:
         vein_layer = img.copy()
         for v in veins:
             if v.tissue_polygon is None:
                 continue
             for ring in _polygon_rings(v.tissue_polygon):
-                cv2.fillPoly(vein_layer, [ring], _vein_bgr(v.vein_id))
-        img = cv2.addWeighted(vein_layer, 0.5, img, 0.5, 0)
+                cv2.fillPoly(vein_layer, [ring], _vein_bgr(v.vein_id, vein_color_overrides))
+        tissue_alpha = 0.5 * vein_opacity
+        img = cv2.addWeighted(vein_layer, tissue_alpha, img, 1.0 - tissue_alpha, 0)
 
-    # Layer 3: vein centerlines — thickness scales with image size
-    if show_veins:
+    # Layer 3: vein centerlines — thickness scales with image size. When
+    # vein_opacity < 1, draw on a copy and blend so only the painted strokes
+    # become semi-transparent (untouched pixels stay identical).
+    if show_veins and vein_opacity > 0:
         h, w = img.shape[:2]
         stroke_scale = max(1.0, min(h, w) / 1800.0)
         vein_thickness = max(3, int(round(5 * stroke_scale)))
+        stroke_target = img.copy() if vein_opacity < 1.0 else img
         for v in veins:
             if v.centerline is None:
                 continue
             pts = np.array(v.centerline.coords, dtype=np.int32)
-            cv2.polylines(img, [pts], False, _vein_bgr(v.vein_id), vein_thickness)
+            cv2.polylines(stroke_target, [pts], False, _vein_bgr(v.vein_id, vein_color_overrides), vein_thickness)
+        if vein_opacity < 1.0:
+            img = cv2.addWeighted(stroke_target, vein_opacity, img, 1.0 - vein_opacity, 0)
 
-    # Layer 4: ectopic vein labels
-    if show_veins:
+    # Layer 4: ectopic vein labels — also gated by vein_opacity so a fully
+    # transparent "vein" channel leaves no EV text either.
+    if show_veins and vein_opacity > 0:
+        ev_text_color = _vein_bgr("EV", vein_color_overrides)
+        text_target = img.copy() if vein_opacity < 1.0 else img
         for v in veins:
             if v.centerline is None or not v.vein_id.startswith("EV"):
                 continue
             mx, my = int(v.centerline.centroid.x), int(v.centerline.centroid.y)
-            cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 12)
-            cv2.putText(img, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, _EV_COLOR_BGR, 5)
+            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 12)
+            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, ev_text_color, 5)
+        if vein_opacity < 1.0:
+            img = cv2.addWeighted(text_target, vein_opacity, img, 1.0 - vein_opacity, 0)
 
     # Layer 5: region labels
     if show_regions:
@@ -203,7 +239,7 @@ def render_overlay(
 
     # Layer 6: color key (vein swatches; only meaningful when veins are drawn)
     if show_veins:
-        _draw_color_key(img, veins)
+        _draw_color_key(img, veins, vein_color_overrides)
 
     return img
 
@@ -216,6 +252,10 @@ def render_overlay_to_file(
     show_vein_tissue: bool = False,
     show_veins: bool = True,
     show_regions: bool = True,
+    vein_color_overrides: Optional[dict[str, list[int]]] = None,
+    region_color_overrides: Optional[dict[str, list[int]]] = None,
+    vein_opacity: float = 1.0,
+    intervein_opacity: float = _REGION_FILL_OPACITY,
 ) -> None:
     """Render overlay and write to a PNG file."""
     img_out = render_overlay(
@@ -225,6 +265,10 @@ def render_overlay_to_file(
         show_vein_tissue=show_vein_tissue,
         show_veins=show_veins,
         show_regions=show_regions,
+        vein_color_overrides=vein_color_overrides,
+        region_color_overrides=region_color_overrides,
+        vein_opacity=vein_opacity,
+        intervein_opacity=intervein_opacity,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), img_out)

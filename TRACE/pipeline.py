@@ -782,6 +782,8 @@ def _run(
                     show_regions=want_intervein,
                     vein_color_overrides=config.vein_colors,
                     region_color_overrides=config.region_colors,
+                    vein_opacity=config.vein_opacity,
+                    intervein_opacity=config.intervein_opacity,
                 )
                 trace_result.overlay_path = ov_path
 

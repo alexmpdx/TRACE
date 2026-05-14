@@ -150,7 +150,6 @@ VEIN_BOUNDARIES: dict[str, list[tuple[str, str]]] = {
 # ---------------------------------------------------------------------------
 
 REGION_COLORS: dict[str, list[int]] = {
-    "costal": [255, 255, 255],
     "marginal": [255, 0, 0],
     "submarginal": [255, 94, 0],
     "1st basal": [255, 201, 0],
@@ -158,6 +157,9 @@ REGION_COLORS: dict[str, list[int]] = {
     "discal": [0, 187, 255],
     "2nd posterior": [0, 0, 255],
     "3rd posterior": [128, 0, 255],
+    # NB: "costal" is intentionally omitted — the pipeline never produces a
+    # costal-cell intervein region (costa is extracted separately as the
+    # anterior margin of the marginal_cell polygon).
 }
 
 VEIN_COLORS: dict[str, list[int]] = {
@@ -171,4 +173,7 @@ VEIN_COLORS: dict[str, list[int]] = {
     "PCV": [150, 50, 255],
     "L5": [200, 0, 200],
     "L6": [128, 128, 128],
+    # Single bucket for all ectopic veins — every EV* id resolves to this key
+    # via `_vein_bgr`. RGB form of the legacy _EV_COLOR_BGR magenta default.
+    "EV": [255, 0, 255],
 }

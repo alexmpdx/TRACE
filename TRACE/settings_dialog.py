@@ -641,7 +641,7 @@ class PipelineConfigDialog(QDialog):
         self._dependency_hints[self._rotation_mirror_correct_chk] = flip_hint
         layout.addWidget(gb)
 
-        gb = QGroupBox("Vein detection")
+        gb = QGroupBox("Crossvein detection")
         form = QFormLayout(gb)
         self._synthesize_missing_crossveins_mirror = QCheckBox("Synthesize ACV/PCV from landmarks when not detected")
         self._synthesize_missing_crossveins_mirror.setToolTip(_FIELD_TOOLTIPS["synthesize_missing_crossveins"])
@@ -692,13 +692,21 @@ class PipelineConfigDialog(QDialog):
 
         gb = QGroupBox("Output options")
         out_layout = QVBoxLayout(gb)
-        form = QFormLayout()
+        # The checkbox sits directly in the QVBox so it's left-aligned with
+        # the rest of the dialog's checkboxes — adding it via QFormLayout
+        # would indent it under the (empty) label column.
         self._show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
         self._show_vein_tissue_chk.setToolTip(
             "When off (default), the per-wing overlay only shows vein skeleton "
             "centerlines. When on, it also fills the buffered vein tissue polygons."
         )
-        form.addRow("", self._show_vein_tissue_chk)
+        out_layout.addWidget(self._show_vein_tissue_chk)
+        form = QFormLayout()
+        # Opacity controls for the vein and intervein layers. 0 = invisible,
+        # 1 = fully opaque. Registered via the standard _add_float dispatch
+        # path so to_config / _load_from_config round-trip them automatically.
+        self._add_float(form, "vein_opacity", "Vein opacity", 0.0, 1.0, 2, 0.05)
+        self._add_float(form, "intervein_opacity", "Intervein opacity", 0.0, 1.0, 2, 0.05)
         out_layout.addLayout(form)
         # Vein and intervein region color pickers. Layout: 3-column grid of
         # (label, swatch) pairs so the 10/8 rows stay compact in the dialog.

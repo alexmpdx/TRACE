@@ -139,6 +139,23 @@ class PipelineConfig:
     ectopic_min_length_um: float = 25.0  # Primary: absolute anatomical scale
     ectopic_min_length_vw: float = 1.0  # Fallback: × median vein width (when um_per_px is None)
 
+    # -- Overlay colors --
+    # User-configurable color overrides for vein/intervein overlays. Keys are
+    # vein IDs (costa, L1, L2, ...) and region names (costal, marginal, ...);
+    # values are RGB triplets stored as lists of ints. None means "use the
+    # built-in defaults from topology.VEIN_COLORS / REGION_COLORS"; a partial
+    # dict overrides only the named entries, the rest fall through to defaults.
+    vein_colors: dict[str, list[int]] | None = None
+    region_colors: dict[str, list[int]] | None = None
+
+    # -- Overlay opacity --
+    # 0.0 = fully transparent (invisible), 1.0 = fully opaque. Defaults match
+    # the historical hardcoded values: vein centerlines/tissue fully opaque,
+    # intervein region fills lightly washed (0.2) so the wing image shows
+    # through.
+    vein_opacity: float = 1.0
+    intervein_opacity: float = 0.2
+
     def to_px(self, um: float) -> float:
         """Convert µm to pixels using um_per_px."""
         if self.um_per_px is not None and self.um_per_px > 0:
