@@ -32,7 +32,10 @@ import numpy as np
 
 # Groups drive fill colors and cluster backgrounds.
 GROUPS = {
-    "input": {"label": "External inputs", "fill": "#e8eef7", "stroke": "#4a6fa5", "cluster": True},
+    # User-provided input (the only thing the user must supply).
+    "user_input": {"label": "User input", "fill": "#fde6c4", "stroke": "#c8862a", "cluster": True},
+    # Inputs that ship with TRACE — DL models + pipeline configuration.
+    "input": {"label": "Bundled with TRACE", "fill": "#e8eef7", "stroke": "#4a6fa5", "cluster": True},
     "preproc": {"label": "TRACE Stage 1 — preprocessing", "fill": "#e6f4ea", "stroke": "#3c8c4f", "cluster": True},
     "artifact": {"label": "Intermediate artifacts", "fill": "#fff7e0", "stroke": "#b38a1b", "cluster": True},
     "ifeat": {"label": "TRACE Stage 2 — identifyFeatures", "fill": "#f4e6f4", "stroke": "#8c3c8c", "cluster": True},
@@ -51,13 +54,11 @@ class Node:
 
 
 NODES: list[Node] = [
-    # --- External inputs ---
-    # Ordered so each input sits above its primary consumer column:
-    # IMG → P1, WING_MODEL → P2, LMK_MODEL → P3, SEG_MODEL → P5, CONFIG → ifeat (right).
+    # --- User input (the only thing the user must provide) ---
     Node(
         "IMG",
         "Wing image",
-        "input",
+        "user_input",
         [
             "Standard: tif / tiff / bmp / png / jpg / jpeg",
             "Adobe: psd / psb",
@@ -67,6 +68,9 @@ NODES: list[Node] = [
         ],
         "data",
     ),
+    # --- Bundled with TRACE (ship with the project) ---
+    # Ordered so each model sits above its primary consumer column:
+    # WING_MODEL → P2, LMK_MODEL → P3, SEG_MODEL → P5, CONFIG → ifeat (right).
     Node("WING_MODEL", "Wing isolation model dir", "input", ["weights + metadata.json (optional)"], "data"),
     Node("LMK_MODEL", "Landmark model", "input", ["ResNet18 U-Net checkpoint (.pt)"], "data"),
     Node("SEG_MODEL", "Segmentation model dir", "input", ["weights + metadata.json"], "data"),
@@ -350,7 +354,9 @@ _RANK_PAIRS: dict[str, list[list[str]]] = {
         ["OUT_GJ", "OUT_OVERLAY", "OUT_LMK_OV", "OUT_SEG_OV"],
         ["OUT_AP_OV", "OUT_CV_OV", "OUT_CSV"],
     ],
-    "input": [["IMG", "CONFIG"], ["LMK_MODEL", "SEG_MODEL", "WING_MODEL"]],
+    # Bundled inputs (no IMG — that lives in user_input now). Pack into one
+    # 4-wide row so the cluster reads as a single horizontal strip.
+    "input": [["WING_MODEL", "LMK_MODEL", "SEG_MODEL", "CONFIG"]],
 }
 
 
