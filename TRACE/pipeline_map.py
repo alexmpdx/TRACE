@@ -201,7 +201,7 @@ NODES: list[Node] = [
     ),
     Node(
         "I5",
-        "Step 5: Trace + assign + split",
+        "Step 5: Call veins",
         "ifeat",
         [
             "Merge through crossvein junctions",
@@ -217,7 +217,7 @@ NODES: list[Node] = [
     ),
     Node(
         "I6",
-        "Step 6: Name intervein regions",
+        "Step 6: Call intervein regions",
         "ifeat",
         [
             "Buffer vein centerlines",
@@ -255,7 +255,17 @@ NODES: list[Node] = [
     Node("OUT_SEG_OV", "segmentation overlay", "output", ["{stem}_segmentation_overlay.png"], "data"),
     Node("OUT_AP_OV", "AP compartment overlay", "output", ["{stem}_ap_overlay.png"], "data"),
     Node("OUT_CV_OV", "CV ratio overlay", "output", ["{stem}_cv_ratio_overlay.png"], "data"),
-    Node("OUT_CSV", "batch CSV", "output", ["measurements.csv (wide, wing-level)"], "data"),
+    Node(
+        "OUT_CSV",
+        "measurements csv",
+        "output",
+        [
+            "area (wing, intervein regions, A/P compartments)",
+            "length (wing, veins)",
+            "custom measurements (from measurementMaker)",
+        ],
+        "data",
+    ),
 ]
 
 # edges: (src, dst, optional edge label, optional attrs dict)
@@ -360,6 +370,16 @@ _RANK_PAIRS: dict[str, list[list[str]]] = {
 }
 
 
+# Per-node minimum width (inches) for boxes whose bold vispy title is wider
+# than graphviz's substep-based sizing would compute. Forces graphviz to
+# reserve a wider box.
+_NODE_MIN_WIDTH: dict[str, float] = {
+    "P3": 4.6,  # Stage 3: Landmark detection
+    "I4": 3.5,  # Step 4: Compute wing axis
+    "I6": 4.6,  # Step 6: Call intervein regions
+}
+
+
 def build_dot() -> str:
     # fontsize 13 + margin "0.30,0.18" on nodes leaves enough slack inside the
     # graphviz-sized box that vispy's text renderer (different font metrics)
@@ -373,7 +393,11 @@ def build_dot() -> str:
         "  compound=true;",
         "  splines=ortho;",
         '  graph [fontname="Helvetica"];',
-        '  node  [fontname="Helvetica", fontsize=13, shape=box, ' 'style="rounded,filled", margin="0.30,0.18"];',
+        # fontsize is intentionally inflated (vs the 10/7.5pt vispy uses for
+        # title/substeps) so graphviz computes box widths with extra slack —
+        # vispy's text rendering (especially the bold title) is wider per
+        # character than graphviz's font metrics anticipate.
+        '  node  [fontname="Helvetica", fontsize=30, shape=box, ' 'style="rounded,filled", margin="0.30,0.18"];',
         '  edge  [fontname="Helvetica", fontsize=10];',
     ]
 
@@ -385,9 +409,11 @@ def build_dot() -> str:
         label_lines = [n.title] + ([""] + [f"• {s}" for s in n.substeps] if n.substeps else [])
         label = "\\l".join(label_lines) + "\\l"
         shape = "ellipse" if n.kind == "data" else "box"
+        min_width = _NODE_MIN_WIDTH.get(n.id)
+        width_attr = f", width={min_width}" if min_width else ""
         return (
             f'{indent}{n.id} [label="{_escape_label(label)}", '
-            f'shape={shape}, fillcolor="{meta["fill"]}", color="{meta["stroke"]}"];'
+            f'shape={shape}, fillcolor="{meta["fill"]}", color="{meta["stroke"]}"{width_attr}];'
         )
 
     for group_id, members in by_group.items():
@@ -405,6 +431,9 @@ def build_dot() -> str:
         lines.append(f'    color="{meta["stroke"]}";')
         lines.append(f'    fillcolor="#ffffff00";')
         lines.append(f"    fontsize=13;")
+        # Cluster margin pads inside the cluster border so adjacent clusters
+        # (e.g. user_input vs input) don't collide.
+        lines.append(f"    margin=20;")
         for n in members:
             lines.append(_emit_node(n, meta, "    "))
         # Pair adjacent stages into 2-wide rows to avoid tall single-file columns.
@@ -735,15 +764,20 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
     #   ascent  ≈ 0.80 * font_size   (top of capital letters above baseline)
     #   descent ≈ 0.20 * font_size   (descenders below baseline)
     #   line_height = 1.1 * font_size (vispy default for multi-line Text)
-    TITLE_FONT = 12.0
-    SUB_FONT = 9.0
+    # Reduced from 12/9 so the initial-framing render (whole diagram in
+    # the window) doesn't overflow box borders. vispy's Text font_size is
+    # pixel-based and doesn't scale with the camera, so the values here
+    # set the *floor* — zooming in only makes the boxes bigger, not the
+    # text. Pick sizes that fit comfortably at the default frame-all view.
+    TITLE_FONT = 10.0
+    SUB_FONT = 7.5
     ASCENT_TITLE = TITLE_FONT * 0.80
     LINE_H_TITLE = TITLE_FONT * 1.10
     LINE_H_SUB = SUB_FONT * 1.10
     ASCENT_SUB = SUB_FONT * 0.80
-    PAD_TOP = 6.0  # distance from box top edge to title baseline-minus-ascent
+    PAD_TOP = 30.0  # distance from box top edge to title cap-top — shifts title and bullets down
     PAD_LEFT = 10.0  # left inset for substeps
-    GAP_TITLE_SUB = 6.0
+    GAP_TITLE_SUB = 22.0  # vertical gap between title baseline-descent and first bullet ascent
 
     for ln in layout.nodes.values():
         meta = nodes_meta[ln.id]
