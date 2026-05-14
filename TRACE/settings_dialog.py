@@ -46,6 +46,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -635,8 +636,10 @@ class PipelineConfigDialog(QDialog):
             DEFAULT_REFERENCE_DISTANCE_UM = 2200.0
             _scale_estimator_ok = False
 
-        est_row = QHBoxLayout()
-        est_row.setContentsMargins(0, 0, 0, 0)
+        # Reference-distance spinbox is kept alive (used by
+        # _estimate_um_per_px_from_sample as `reference_um`) but not added to
+        # the layout — the UI is simplified down to a single compact button
+        # for now. Re-add to a layout to expose it again.
         self._scale_ref_um_spin = QDoubleSpinBox()
         self._scale_ref_um_spin.setRange(1.0, 100000.0)
         self._scale_ref_um_spin.setDecimals(1)
@@ -649,7 +652,8 @@ class PipelineConfigDialog(QDialog):
             "distance to derive µm/px. Default 2200 µm matches a typical "
             "Drosophila wing."
         )
-        est_btn = QPushButton("Estimate")
+        est_btn = QToolButton()
+        est_btn.setText("Estimate")
         est_btn.setToolTip(
             "Runs the landmark model on the first image in the selected input "
             "folder (or directly on the input file). The L3-distal-end ↔ "
@@ -666,9 +670,11 @@ class PipelineConfigDialog(QDialog):
                 "scale_estimator is not importable. Add scaleEstimator/ to sys.path "
                 "(or install it with `pip install -e scaleEstimator`) and reopen the dialog."
             )
-        est_row.addWidget(self._scale_ref_um_spin)
-        est_row.addWidget(est_btn, stretch=1)
-        form.addRow("Wing length reference", est_row)
+        est_row = QHBoxLayout()
+        est_row.setContentsMargins(0, 0, 0, 0)
+        est_row.addWidget(est_btn)
+        est_row.addStretch(1)
+        form.addRow("", est_row)
         layout.addWidget(gb)
 
         gb = QGroupBox("Optional preprocessing steps")

@@ -1,16 +1,23 @@
 """Interactive pipeline map for the TRACE + identifyFeatures workflow.
 
-Graphviz computes the layout; vispy renders it with pan/zoom. Run with the
-venv at ``.venv-pipeline-map/bin/python pipeline_map.py``.
+The layout (node positions, sizes, edge splines) is precomputed by
+graphviz **once** and cached in ``pipeline_layout.plain``. At runtime the
+script reads that file and renders with vispy — no `dot` invocation
+needed. To regenerate after a NODES/EDGES change, run with
+``--regenerate-layout`` (requires the graphviz binary).
+
+Run with the venv at ``.venv-pipeline-map/bin/python pipeline_map.py``.
 
 Flags:
-    --png PATH   Render a static PNG to PATH and exit (no window).
-    --dot PATH   Write the generated DOT source to PATH (for debugging).
+    --png PATH               Render a static PNG to PATH and exit (no window).
+    --dot PATH               Write the generated DOT source to PATH.
+    --regenerate-layout      Recompute the cached layout via `dot -Tplain`.
+    --dry-run                Print a layout summary and exit.
 
 Before editing this file — especially before adding nodes, edges, or
-adjusting the layout — read `PIPELINE_MAP_GUIDE.md` (same directory). It
+adjusting the layout — read ``PIPELINE_MAP_GUIDE.md`` (same directory). It
 records the layout constraints, techniques (rank pairs, ortho routing,
-side-reference `constraint=false`, …), and what's been tried and
+side-reference ``constraint=false``, …), and what's been tried and
 rejected. The diagram looks balanced today only because of those
 choices, and they're not obvious from the surrounding code alone.
 """
@@ -867,10 +874,21 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
 # ---------------------------------------------------------------------------
 
 
+_CACHED_LAYOUT_PATH = Path(__file__).resolve().parent / "pipeline_layout.plain"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--png", type=Path, default=None, help="Render to PNG and exit.")
     parser.add_argument("--dot", type=Path, default=None, help="Write DOT source to file.")
+    parser.add_argument(
+        "--regenerate-layout",
+        action="store_true",
+        help=(
+            "Invoke graphviz `dot -Tplain` to recompute the cached layout and "
+            "save to pipeline_layout.plain. Run this after NODES/EDGES changes."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -878,19 +896,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    dot_src = build_dot()
-    if args.dot:
-        args.dot.write_text(dot_src)
-        print(f"Wrote {args.dot}")
-
-    try:
-        plain = run_dot_plain(dot_src)
-    except FileNotFoundError:
-        print("Error: 'dot' not found. Install graphviz (brew install graphviz).", file=sys.stderr)
-        return 1
-    except subprocess.CalledProcessError as e:
-        print(f"dot failed: {e.stderr}", file=sys.stderr)
-        return 1
+    # Layout is read from a static cached file by default — no graphviz at
+    # runtime. Use --regenerate-layout (requires `dot`) when NODES/EDGES change.
+    if args.regenerate_layout or not _CACHED_LAYOUT_PATH.exists():
+        dot_src = build_dot()
+        if args.dot:
+            args.dot.write_text(dot_src)
+            print(f"Wrote {args.dot}")
+        try:
+            plain = run_dot_plain(dot_src)
+        except FileNotFoundError:
+            print("Error: 'dot' not found. Install graphviz (brew install graphviz).", file=sys.stderr)
+            return 1
+        except subprocess.CalledProcessError as e:
+            print(f"dot failed: {e.stderr}", file=sys.stderr)
+            return 1
+        _CACHED_LAYOUT_PATH.write_text(plain)
+        print(f"Wrote {_CACHED_LAYOUT_PATH}")
+    else:
+        plain = _CACHED_LAYOUT_PATH.read_text()
+        if args.dot:
+            args.dot.write_text(build_dot())
+            print(f"Wrote {args.dot}")
 
     layout = parse_plain(plain)
     nodes_meta = {n.id: n for n in NODES}
