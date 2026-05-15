@@ -779,6 +779,7 @@ def _run(
                     wing_result.intervein_regions if gj_write_regions else [],
                     gj_path,
                     um_per_px=scale,
+                    show_vein_tissue=show_vein_tissue,
                 )
                 trace_result.output_geojson_path = gj_path
 

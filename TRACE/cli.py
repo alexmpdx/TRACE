@@ -355,14 +355,15 @@ def main(argv=None):
     # Build PipelineConfig: load from file if given, then apply --scale override.
     from identify_features.config import PipelineConfig
 
-    from TRACE.config_io import load_config
+    from TRACE.config_io import load_settings
 
+    config_gate_override: dict | None = None
     if args.config is not None:
         if not args.config.exists():
             print(f"Error: config file not found: {args.config}", file=sys.stderr)
             sys.exit(1)
         try:
-            config = load_config(args.config)
+            config, config_gate_override = load_settings(args.config)
         except Exception as e:
             print(f"Error: failed to load config: {e}", file=sys.stderr)
             sys.exit(1)
@@ -376,7 +377,9 @@ def main(argv=None):
         print(f"Error: --workers must be >= 1, got {args.workers}", file=sys.stderr)
         sys.exit(1)
 
-    gate_override = None
+    # Gate override resolution: --gate-override-yaml wins over whatever was
+    # embedded in --config, which in turn wins over no override at all.
+    gate_override = config_gate_override
     if args.gate_override_yaml is not None:
         if not args.gate_override_yaml.exists():
             print(f"Error: --gate-override-yaml not found: {args.gate_override_yaml}", file=sys.stderr)

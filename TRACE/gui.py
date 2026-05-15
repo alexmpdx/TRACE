@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Optional
 
 from identify_features.config import PipelineConfig
-from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -38,7 +37,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from TRACE.config_io import config_from_json, config_to_json, load_config, save_config
+
+from preprocessing.pipeline import discover_images
+from TRACE.config_io import config_from_json, config_to_json, load_settings, save_settings
 from TRACE.pipeline import (
     DEFAULT_MAX_WORKERS,
     INTERMEDIATE_OUTPUTS,
@@ -626,6 +627,7 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
+
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)
@@ -752,10 +754,14 @@ class TraceWindow(QMainWindow):
         if not path:
             return
         try:
-            self.config = load_config(Path(path))
+            self.config, gate_override = load_settings(Path(path))
         except Exception as e:
             QMessageBox.critical(self, "Import failed", f"Could not load config:\n{e}")
             return
+        # gate_override is None when the file predates this field — leave the
+        # current in-session override untouched in that case.
+        if gate_override is not None:
+            self._gate_override = gate_override
         val = self.config.um_per_px if self.config.um_per_px else self.scale_spin.minimum()
         self.scale_spin.blockSignals(True)
         self.scale_spin.setValue(val)
@@ -769,7 +775,7 @@ class TraceWindow(QMainWindow):
         if not path:
             return
         try:
-            save_config(self.config, Path(path))
+            save_settings(self.config, self._gate_override, Path(path))
         except Exception as e:
             QMessageBox.critical(self, "Export failed", f"Could not save config:\n{e}")
             return

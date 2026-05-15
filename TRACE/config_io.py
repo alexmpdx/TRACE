@@ -65,6 +65,34 @@ def save_config(config: PipelineConfig, path: Path) -> None:
         json.dump(config_to_dict(config), fh, indent=2)
 
 
+def save_settings(config: PipelineConfig, gate_override: dict | None, path: Path) -> None:
+    """Write a PipelineConfig plus a landmark gate override to a JSON file.
+
+    The file is the PipelineConfig dict with an extra top-level
+    ``gate_override`` key (omitted when ``gate_override`` is None or empty).
+    Old loaders that only know about PipelineConfig fields silently ignore
+    the extra key (see ``config_from_dict``).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = config_to_dict(config)
+    if gate_override:
+        data["gate_override"] = gate_override
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+
+
+def load_settings(path: Path) -> tuple[PipelineConfig, dict | None]:
+    """Read a PipelineConfig + optional landmark gate override from a JSON file.
+
+    Returns ``(config, gate_override)``. ``gate_override`` is ``None`` when the
+    file predates this format (no ``gate_override`` key) or the key is empty.
+    """
+    with open(path) as fh:
+        data = json.load(fh)
+    gate_override = data.get("gate_override") or None
+    return config_from_dict(data), gate_override
+
+
 def config_to_json(config: PipelineConfig) -> str:
     """Serialize a PipelineConfig to a compact JSON string (for QSettings)."""
     return json.dumps(config_to_dict(config))
