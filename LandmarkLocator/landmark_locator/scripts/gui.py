@@ -1102,8 +1102,14 @@ def _draw_gate_overlay(
 # ---------------------------------------------------------------------------
 # Confidence gate editor dialog
 # ---------------------------------------------------------------------------
-_STRICT_DEFAULTS = {"peak": 0.20, "sharpness": 1.25, "second_peak_ratio": 0.65}
-_PERMISSIVE_DEFAULTS = {"peak": 0.10, "sharpness": 1.15, "second_peak_ratio": 0.80}
+# Tier names as they appear in the GUI dropdown. The order is the display order
+# and "Standard" is the default ground-state when no override matches a named
+# tier. All concrete threshold values come from the loaded gate_config.yaml's
+# `tiers:` block — there are no hardcoded fallbacks. A model whose sidecar lacks
+# a named tier block will leave the corresponding dropdown option dimmed-but-
+# selectable, falling back to the active-gate globals so the editor still works.
+_TIER_NAMES = ("Standard", "Permissive", "Strict")
+_DEFAULT_TIER = "Standard"
 
 
 class GateConfigPanel(QWidget):
@@ -1137,24 +1143,25 @@ class GateConfigPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
-        hint = QLabel(
-            "Per-landmark confidence gate. 'Permissive' uses the global defaults; "
-            "'Strict' clamps tighter thresholds (crossvein presets); 'Custom' lets you "
-            "set each metric. Check 'Abort' to fail the whole image when this landmark misses."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #aaa; padding: 0; margin: 0;")
-        hint.setSizePolicy(hint.sizePolicy().horizontalPolicy(), hint.sizePolicy().Maximum)
-        root.addWidget(hint)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setVerticalSpacing(2)
         grid.setHorizontalSpacing(8)
         headers = ["Landmark", "Tier", "peak ≥", "sharp ≥", "sp_ratio ≤", "Abort"]
+        header_tooltips = {
+            "Tier": (
+                "Per-landmark confidence gate. 'Standard' is the calibrated default; "
+                "'Permissive' admits weaker peaks; 'Strict' clamps tighter thresholds; "
+                "'Custom' lets you set each metric."
+            ),
+            "Abort": "Check to fail the whole image when this landmark misses.",
+        }
         for col, h in enumerate(headers):
             lbl = QLabel(h)
             lbl.setStyleSheet("font-weight: bold;")
+            if h in header_tooltips:
+                lbl.setToolTip(header_tooltips[h])
             grid.addWidget(lbl, 0, col)
 
         core = set(self._cfg.get("core_landmarks", []) or [])
@@ -1165,7 +1172,7 @@ class GateConfigPanel(QWidget):
             grid.addWidget(QLabel(self._display_names.get(name, name)), i, 0)
 
             combo = QComboBox()
-            combo.addItems(["Permissive", "Strict", "Custom"])
+            combo.addItems([*_TIER_NAMES, "Custom"])
             peak_spin = QDoubleSpinBox()
             peak_spin.setRange(0.0, 1.0)
             peak_spin.setSingleStep(0.05)
@@ -1189,19 +1196,18 @@ class GateConfigPanel(QWidget):
             spr_spin.setValue(float(cur_spr))
 
             # Decide the initial tier by matching the active-gate value against the
-            # calibrated per-landmark presets. Permissive is the default ground state.
-            perm_peak, perm_sharp, perm_spr = self._tier_values("Permissive", name)
-            strict_peak, strict_sharp, strict_spr = self._tier_values("Strict", name)
+            # calibrated per-landmark presets. Standard is the default ground state.
 
             def _close(a: float, b: float, tol: float = 1e-3) -> bool:
                 return abs(float(a) - float(b)) <= tol
 
-            if _close(cur_peak, strict_peak) and _close(cur_sharp, strict_sharp) and _close(cur_spr, strict_spr):
-                combo.setCurrentText("Strict")
-            elif _close(cur_peak, perm_peak) and _close(cur_sharp, perm_sharp) and _close(cur_spr, perm_spr):
-                combo.setCurrentText("Permissive")
-            else:
-                combo.setCurrentText("Custom")
+            matched = "Custom"
+            for tier_name in _TIER_NAMES:
+                t_peak, t_sharp, t_spr = self._tier_values(tier_name, name)
+                if _close(cur_peak, t_peak) and _close(cur_sharp, t_sharp) and _close(cur_spr, t_spr):
+                    matched = tier_name
+                    break
+            combo.setCurrentText(matched)
 
             combo.currentTextChanged.connect(lambda tier, n=name: self._apply_tier_to_row(n, tier))
             grid.addWidget(combo, i, 1)
@@ -1224,7 +1230,7 @@ class GateConfigPanel(QWidget):
         buttons_row = QHBoxLayout()
         btn_reset = QPushButton("Reset to Model Defaults")
         btn_reset.setToolTip(
-            "Restore every landmark to its model-default (calibrated Permissive tier).\n\n"
+            "Restore every landmark to its model-default (calibrated Standard tier).\n\n"
             "Useful when a stale saved override is masking the values you'd see fresh — "
             "click this, then OK, to bring the active gate back in line with the model's "
             "gate_config.yaml sidecar."
@@ -1260,39 +1266,31 @@ class GateConfigPanel(QWidget):
         """Return (peak, sharpness, second_peak_ratio) for `name` under the given tier.
 
         Looks up calibrated per-landmark thresholds in the loaded config's
-        `tiers.{permissive|strict}` block when present. Falls back to the named
-        tier's globals, then to the active gate's globals, then to the hardcoded
-        `_PERMISSIVE_DEFAULTS` / `_STRICT_DEFAULTS` constants.
+        `tiers.{standard|permissive|strict}` block. Falls back to that tier's
+        own globals, then to the active gate's globals when a tier block is
+        absent. There are no hardcoded constants — a model with no `tiers:`
+        block at all will just echo the active gate's values for every tier.
         """
-        if tier == "Strict":
-            tier_block = (self._cfg.get("tiers") or {}).get("strict") or {}
-            fallback = _STRICT_DEFAULTS
-        else:  # "Permissive"
-            tier_block = (self._cfg.get("tiers") or {}).get("permissive") or {}
-            fallback = _PERMISSIVE_DEFAULTS
+        tier_block = (self._cfg.get("tiers") or {}).get(tier.lower()) or {}
 
-        def _pick(metric_key: str, fallback_value: float) -> float:
+        def _pick(metric_key: str) -> float:
             metric = tier_block.get(metric_key) or {}
             pl = metric.get("per_landmark") or {}
             if name in pl:
                 return float(pl[name])
             if "global" in metric:
                 return float(metric["global"])
-            # Active-gate globals are the last layer before the hardcoded defaults.
+            # Active-gate globals are the last layer.
             active = self._cfg.get(metric_key) or {}
             if "global" in active:
                 return float(active["global"])
-            return float(fallback_value)
+            return 0.0
 
-        return (
-            _pick("peak", fallback["peak"]),
-            _pick("sharpness", fallback["sharpness"]),
-            _pick("second_peak_ratio", fallback["second_peak_ratio"]),
-        )
+        return (_pick("peak"), _pick("sharpness"), _pick("second_peak_ratio"))
 
     def _apply_tier_to_row(self, name: str, tier: str) -> None:
         row = self._rows[name]
-        if tier in ("Strict", "Permissive"):
+        if tier in _TIER_NAMES:
             peak_v, sharp_v, spr_v = self._tier_values(tier, name)
             row["peak"].setValue(peak_v)
             row["sharpness"].setValue(sharp_v)
@@ -1309,10 +1307,10 @@ class GateConfigPanel(QWidget):
         """Build a confidence-override dict from the current widget state.
 
         Every landmark gets an explicit per-landmark entry — whether its tier is
-        Permissive, Strict, or Custom — because the calibrated tier values are
-        per-landmark (Permissive ≠ "use global"; it means "use this landmark's
-        permissive-calibrated value"). The global stays as the safety fallback
-        for any landmark that's somehow missing from per_landmark.
+        Standard, Permissive, Strict, or Custom — because the calibrated tier
+        values are per-landmark (e.g. "Standard" ≠ "use global"; it means "use
+        this landmark's standard-calibrated value"). The global stays as the
+        safety fallback for any landmark missing from per_landmark.
         """
         peak_pl: dict[str, float] = {}
         sharp_pl: dict[str, float] = {}
@@ -1344,7 +1342,7 @@ class GateConfigPanel(QWidget):
         QMessageBox.information(self, "Exported", f"Wrote {path}")
 
     def _on_reset_to_model_defaults(self) -> None:
-        """Snap every landmark back to the Permissive tier (calibrated model defaults).
+        """Snap every landmark back to the Standard tier (calibrated model defaults).
 
         Useful when a host has merged a stale per-user override on top of the panel's
         initial config — TRACE's `gate_override_json` from a previous session, for
@@ -1352,10 +1350,10 @@ class GateConfigPanel(QWidget):
         the stale override.
         """
         for name in self._landmark_order:
-            self._rows[name]["combo"].setCurrentText("Permissive")
-            # If the combo was already on "Permissive", currentTextChanged didn't
+            self._rows[name]["combo"].setCurrentText(_DEFAULT_TIER)
+            # If the combo was already on the default tier, currentTextChanged didn't
             # fire — force-apply so the spinboxes refresh regardless.
-            self._apply_tier_to_row(name, "Permissive")
+            self._apply_tier_to_row(name, _DEFAULT_TIER)
 
     def _on_save_as_model_default(self) -> None:
         """Write the current gate to the model's sidecar YAML (auto-loaded on model load).
@@ -1416,7 +1414,7 @@ class GateConfigPanel(QWidget):
                 row["sharpness"].setValue(float(sharp_pl.get(name, row["sharpness"].value())))
                 row["second_peak_ratio"].setValue(float(spr_pl.get(name, row["second_peak_ratio"].value())))
             else:
-                row["combo"].setCurrentText("Permissive")
+                row["combo"].setCurrentText(_DEFAULT_TIER)
             row["abort"].setChecked(name in core)
             self._sync_row_editability(name)
 
