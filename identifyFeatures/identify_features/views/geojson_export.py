@@ -22,6 +22,7 @@ def export_geojson(
     regions: list[InterveinRegion],
     out_path: Path,
     um_per_px: Optional[float] = None,
+    show_vein_tissue: bool = True,
 ) -> None:
     """Write veins and regions to a GeoJSON file in GT_naming format.
 
@@ -30,37 +31,50 @@ def export_geojson(
         regions: Named intervein regions with polygon populated.
         out_path: Output file path.
         um_per_px: If provided, include area measurements in um^2.
+        show_vein_tissue: If True (default), write each vein as its buffered
+            tissue Polygon. If False, write each vein as its centerline
+            LineString (skeleton only). Mirrors the overlay PNG's
+            "fill buffered vein tissue" toggle so GeoJSON content matches
+            what the user sees in the overlay.
     """
     features: list[dict] = []
 
-    # Vein features (tissue polygons)
+    # Vein features (tissue polygons or centerline LineStrings)
     for v in veins:
-        if v.tissue_polygon is None:
-            continue
-        poly = v.tissue_polygon
-        if isinstance(poly, MultiPolygon):
-            poly = max(poly.geoms, key=lambda g: g.area)
         color = VEIN_COLORS.get(v.vein_id, [128, 128, 128])
+        if show_vein_tissue:
+            if v.tissue_polygon is None:
+                continue
+            geom = v.tissue_polygon
+            if isinstance(geom, MultiPolygon):
+                geom = max(geom.geoms, key=lambda g: g.area)
+            measurements: dict = {"Area (pixels)": geom.area}
+            if um_per_px is not None and um_per_px > 0:
+                measurements["Area (um^2)"] = geom.area * um_per_px**2
+            if v.centerline is not None:
+                measurements["Length (pixels)"] = v.centerline.length
+                if um_per_px is not None and um_per_px > 0:
+                    measurements["Length (um)"] = v.centerline.length * um_per_px
+        else:
+            if v.centerline is None:
+                continue
+            geom = v.centerline
+            measurements = {"Length (pixels)": geom.length}
+            if um_per_px is not None and um_per_px > 0:
+                measurements["Length (um)"] = geom.length * um_per_px
         props: dict = {
             "objectType": "annotation",
             "classification": {
                 "name": v.vein_id,
                 "color": color,
             },
+            "measurements": measurements,
         }
-        measurements: dict = {"Area (pixels)": poly.area}
-        if um_per_px is not None and um_per_px > 0:
-            measurements["Area (um^2)"] = poly.area * um_per_px**2
-        if v.centerline is not None:
-            measurements["Length (pixels)"] = v.centerline.length
-            if um_per_px is not None and um_per_px > 0:
-                measurements["Length (um)"] = v.centerline.length * um_per_px
-        props["measurements"] = measurements
         features.append(
             {
                 "type": "Feature",
                 "id": str(uuid.uuid4()),
-                "geometry": mapping(poly),
+                "geometry": mapping(geom),
                 "properties": props,
             }
         )
