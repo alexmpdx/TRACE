@@ -1649,7 +1649,11 @@ def _apply_dark_palette(app: QApplication):
 
 
 def main():
-    app = QApplication(sys.argv)
+    # Reuse an existing QApplication if one was created by the launcher
+    # (run_gui.py creates one early for the bootstrap progress dialog when
+    # models aren't yet installed). Constructing a second QApplication in
+    # the same process is undefined behavior in PyQt5.
+    app = QApplication.instance() or QApplication(sys.argv)
     _apply_dark_palette(app)
     window = TraceWindow()
     window.show()
