@@ -520,12 +520,16 @@ def trace_folder(
     # CSV is intervein-dependent only when its "intervein_areas" group is on.
     # GeoJSON is intervein-dependent only when its content (mirrored from the
     # user's other choices) actually wants regions.
+    #
+    # The output-driven decision is authoritative: we always write True or False
+    # here (rather than only writing True when nothing needs intervein) so that
+    # a config passed in with skip_intervein_regions=True from a preset or
+    # saved-settings JSON can't silently kill intervein_overlay output.
     csv_needs_intervein = "csv" in outputs and "intervein_areas" in csv_measurement_groups
     _, gj_writes_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
     geojson_needs_intervein = "geojson" in outputs and gj_writes_regions
     always_intervein = outputs & (_INTERVEIN_DEPENDENT_OUTPUTS - {"csv", "geojson"})
-    if not (always_intervein or csv_needs_intervein or geojson_needs_intervein):
-        config.skip_intervein_regions = True
+    config.skip_intervein_regions = not (always_intervein or csv_needs_intervein or geojson_needs_intervein)
 
     if keep_intermediates:
         preproc_dir = output_dir / "intermediates"
