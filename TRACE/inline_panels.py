@@ -1085,7 +1085,7 @@ class InlineCustomDistancesPanel(QWidget):
     # Bundled fallback wing for the picker — shows by default when the user
     # hasn't picked their own sample image yet. Resolved relative to this
     # module so it works regardless of CWD or install layout.
-    _CARTOON_DIR = Path(__file__).resolve().parent / "cartoon"
+    _CARTOON_DIR = Path(__file__).resolve().parent / "GUI_images" / "cartoon"
     _CARTOON_IMAGE = _CARTOON_DIR / "wing_cartoon.png"
     _CARTOON_LANDMARKS = _CARTOON_DIR / "wing_cartoon_landmarks.geojson"
 
