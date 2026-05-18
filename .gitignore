@@ -6,3 +6,8 @@ Chat_files/
 LandmarkLocator/training_data_pics/
 LandmarkLocator/output/
 LandmarkLocator/save_gui/
+
+# TRACE bundled DL models — downloaded on first GUI launch via
+# TRACE/fetch_assets.py from a GitHub Release. Too large for git
+# (~1.6 GB of .pt checkpoints, multiple files >100 MB).
+TRACE/models/

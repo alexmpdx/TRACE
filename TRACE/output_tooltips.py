@@ -31,8 +31,8 @@ _OUTPUT_IMAGES: dict[str, str] = {
     "cv_ratio_overlay": "cv_ratio_overlay.png",
     "landmarks_overlay": "landmarks_overlay.png",
     "segmentation_overlay": "segmentation_overlay.png",
-    "chopped_image": "chopped.tif",
-    "wing_isolated_image": "isolated.ome.tif",
+    "chopped_image": "chopped.png",
+    "wing_isolated_image": "isolated.png",
 }
 
 # Width (px) for the rendered <img> in the tooltip. Qt scales the image to

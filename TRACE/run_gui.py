@@ -33,7 +33,14 @@ _se_dir = str(Path(__file__).resolve().parent.parent / "scaleEstimator")
 if _se_dir not in sys.path:
     sys.path.insert(0, _se_dir)
 
-from TRACE.gui import main
+# Download bundled DL model weights on first launch (no-op once installed).
+# Runs BEFORE importing TRACE.gui so any model-path defaults that resolve
+# at import time see a fully-populated TRACE/models/.
+from TRACE.fetch_assets import ensure_assets  # noqa: E402
+
+ensure_assets()
+
+from TRACE.gui import main  # noqa: E402
 
 if __name__ == "__main__":
     main()
