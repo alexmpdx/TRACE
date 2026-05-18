@@ -40,6 +40,7 @@ from PyQt5.QtWidgets import (
 from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json
 from TRACE.inline_panels import InlineCustomDistancesPanel, InlineGeneralPanel, InlineHelpPanel
+from TRACE.output_tooltips import output_tooltip_html
 from TRACE.pipeline import (
     DEFAULT_MAX_WORKERS,
     INTERMEDIATE_OUTPUTS,
@@ -424,9 +425,11 @@ class TraceWindow(QMainWindow):
                 continue
             chk = QCheckBox(label)
             chk.setChecked(True)
-            tip = OUTPUT_TOOLTIPS.get(key)
-            if tip:
-                chk.setToolTip(tip)
+            # output_tooltip_html returns <img> markup when a bundled example
+            # exists for this key, or falls back to the text tooltip otherwise.
+            tooltip = output_tooltip_html(key, OUTPUT_TOOLTIPS.get(key, ""))
+            if tooltip:
+                chk.setToolTip(tooltip)
             self.output_checks[key] = chk
             ol.addWidget(chk)
             # Nest the measurement-group checkboxes directly under "csv".

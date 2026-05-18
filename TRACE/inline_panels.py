@@ -469,9 +469,13 @@ class InlineGeneralPanel(QWidget):
                 continue
             chk = QCheckBox(label)
             chk.setChecked(False)
-            tip = _INTERMEDIATE_TOOLTIPS.get(key)
-            if tip:
-                chk.setToolTip(tip)
+            # Prefer an example-image tooltip when one is bundled for this
+            # key; fall back to the text tooltip otherwise.
+            from TRACE.output_tooltips import output_tooltip_html
+
+            tooltip = output_tooltip_html(key, _INTERMEDIATE_TOOLTIPS.get(key, ""))
+            if tooltip:
+                chk.setToolTip(tooltip)
             chk.toggled.connect(lambda checked, k=key: self._on_intermediate_toggled(k, checked))
             self.intermediate_output_chks[key] = chk
             if key == "wing_isolated_image":
