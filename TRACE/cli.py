@@ -363,7 +363,9 @@ def main(argv=None):
             print(f"Error: config file not found: {args.config}", file=sys.stderr)
             sys.exit(1)
         try:
-            config, config_gate_override = load_settings(args.config)
+            # CLI ignores the `gui_state` slot of the saved file; only the
+            # PipelineConfig + gate_override are pipeline-relevant.
+            config, config_gate_override, _ = load_settings(args.config)
         except Exception as e:
             print(f"Error: failed to load config: {e}", file=sys.stderr)
             sys.exit(1)

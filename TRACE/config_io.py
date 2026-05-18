@@ -65,32 +65,46 @@ def save_config(config: PipelineConfig, path: Path) -> None:
         json.dump(config_to_dict(config), fh, indent=2)
 
 
-def save_settings(config: PipelineConfig, gate_override: dict | None, path: Path) -> None:
-    """Write a PipelineConfig plus a landmark gate override to a JSON file.
+def save_settings(
+    config: PipelineConfig,
+    gate_override: dict | None,
+    path: Path,
+    gui_state: dict[str, Any] | None = None,
+) -> None:
+    """Write a PipelineConfig, landmark gate override, and full GUI state to JSON.
 
-    The file is the PipelineConfig dict with an extra top-level
-    ``gate_override`` key (omitted when ``gate_override`` is None or empty).
+    The file is the PipelineConfig dict with extra top-level keys:
+      - ``gate_override`` — the landmark gate-config override (omitted when None/empty)
+      - ``gui_state`` — every GUI-only flag the main window exposes
+        (Settings-tab toggles, model paths, custom distance pairs, etc.)
+        so a saved preset round-trips the user's full configuration, not
+        just the PipelineConfig portion.
+
     Old loaders that only know about PipelineConfig fields silently ignore
-    the extra key (see ``config_from_dict``).
+    the extra keys (see ``config_from_dict``).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = config_to_dict(config)
     if gate_override:
         data["gate_override"] = gate_override
+    if gui_state:
+        data["gui_state"] = gui_state
     with open(path, "w") as fh:
         json.dump(data, fh, indent=2)
 
 
-def load_settings(path: Path) -> tuple[PipelineConfig, dict | None]:
-    """Read a PipelineConfig + optional landmark gate override from a JSON file.
+def load_settings(path: Path) -> tuple[PipelineConfig, dict | None, dict | None]:
+    """Read a PipelineConfig + gate override + GUI state from a JSON file.
 
-    Returns ``(config, gate_override)``. ``gate_override`` is ``None`` when the
-    file predates this format (no ``gate_override`` key) or the key is empty.
+    Returns ``(config, gate_override, gui_state)``. ``gate_override`` and
+    ``gui_state`` are ``None`` when the file predates those fields or the
+    keys are empty.
     """
     with open(path) as fh:
         data = json.load(fh)
     gate_override = data.get("gate_override") or None
-    return config_from_dict(data), gate_override
+    gui_state = data.get("gui_state") or None
+    return config_from_dict(data), gate_override, gui_state
 
 
 def config_to_json(config: PipelineConfig) -> str:

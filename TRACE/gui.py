@@ -30,16 +30,16 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QSplitter,
+    QTabWidget,
     QTextEdit,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from preprocessing.pipeline import discover_images
-from TRACE.config_io import config_from_json, config_to_json, load_settings, save_settings
+from TRACE.config_io import config_from_json, config_to_json
+from TRACE.inline_panels import InlineCustomDistancesPanel, InlineGeneralPanel, InlineHelpPanel
 from TRACE.pipeline import (
     DEFAULT_MAX_WORKERS,
     INTERMEDIATE_OUTPUTS,
@@ -50,6 +50,7 @@ from TRACE.pipeline import (
     trace_folder,
 )
 from TRACE.settings_dialog import PipelineConfigDialog
+from TRACE.walkthrough import WalkthroughOverlay, WalkthroughStep
 
 # ---------------------------------------------------------------------------
 # Worker thread
@@ -300,13 +301,27 @@ class TraceWindow(QMainWindow):
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(250)
         self._progress_timer.timeout.connect(self._refresh_progress)
+        # Active walkthrough overlay (None when no walkthrough is showing).
+        # Tracked so resizeEvent / splitterMoved can forward to it.
+        self._walkthrough: Optional[WalkthroughOverlay] = None
         self._build_ui()
         self._restore_settings()
+        # First-launch auto-show. Deferred until after the event loop starts
+        # so the window has been shown and every widget has a valid geometry.
+        if not self.settings.value("walkthrough_completed", False, type=bool):
+            QTimer.singleShot(0, self._show_walkthrough)
 
     # -----------------------------------------------------------------------
     # UI construction
     # -----------------------------------------------------------------------
     def _build_ui(self):
+        # Menu bar — currently just Help → Show Walkthrough so users can
+        # re-trigger the first-launch tutorial after dismissing it.
+        menubar = self.menuBar()
+        help_menu = menubar.addMenu("Help")
+        walkthrough_act = help_menu.addAction("Show Walkthrough")
+        walkthrough_act.triggered.connect(self._show_walkthrough)
+
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
@@ -322,7 +337,12 @@ class TraceWindow(QMainWindow):
         fg = QVBoxLayout(folder_group)
 
         fg.addWidget(QLabel("Images to analyze:"))
-        row = QHBoxLayout()
+        # Wrapped in self.input_row so the walkthrough can highlight the edit
+        # field AND its Browse button together (otherwise the popup lands on
+        # top of Browse when targeting just self.input_edit).
+        self.input_row = QWidget()
+        row = QHBoxLayout(self.input_row)
+        row.setContentsMargins(0, 0, 0, 0)
         self.input_edit = QLineEdit()
         self.input_edit.setReadOnly(True)
         self.input_edit.setPlaceholderText("select folder")
@@ -332,7 +352,7 @@ class TraceWindow(QMainWindow):
         btn.clicked.connect(self._select_input)
         row.addWidget(self.input_edit, stretch=1)
         row.addWidget(btn)
-        fg.addLayout(row)
+        fg.addWidget(self.input_row)
 
         self.recursive_chk = QCheckBox("Include subfolders")
         self.recursive_chk.setToolTip("When checked, also discover images inside subdirectories of the input folder.")
@@ -340,7 +360,9 @@ class TraceWindow(QMainWindow):
         fg.addWidget(self.recursive_chk)
 
         fg.addWidget(QLabel("Save results to:"))
-        row = QHBoxLayout()
+        self.output_row = QWidget()
+        row = QHBoxLayout(self.output_row)
+        row.setContentsMargins(0, 0, 0, 0)
         self.output_edit = QLineEdit()
         self.output_edit.setReadOnly(True)
         self.output_edit.setPlaceholderText("select folder")
@@ -352,64 +374,46 @@ class TraceWindow(QMainWindow):
         btn.clicked.connect(self._select_output)
         row.addWidget(self.output_edit, stretch=1)
         row.addWidget(btn)
-        fg.addLayout(row)
+        fg.addWidget(self.output_row)
 
         left_layout.addWidget(folder_group)
 
         # Model paths live as plain instance state — configured in
         # Settings → Models (no widgets in the main window).
 
-        # -- Scale --
+        # -- Scale (left-panel mirror of the inline General-tab spinbox) --
+        # Kept on the left panel because µm/px is a per-batch setting users
+        # change often; the mirror in the General tab is the authoritative
+        # source for the value (both spinboxes write to self.config.um_per_px
+        # via _set_scale, which keeps them in sync).
         scale_group = QGroupBox("Scale")
         sg = QHBoxLayout(scale_group)
-        sg.addWidget(QLabel("\u00b5m/px:"))
+        sg.addWidget(QLabel("µm/px:"))
         self.scale_spin = _PlaceholderSpinBox()
         self.scale_spin.setDecimals(4)
         self.scale_spin.setRange(0.0001, 100.0)
         self.scale_spin.setSingleStep(0.001)
-        # QLineEdit-native placeholder (auto-dimmed, clears on click) — shown when
-        # the spinbox is at its minimum. Treated as "no scale entered" — Run
-        # Pipeline refuses to start.
         self.scale_spin.setValue(self.config.um_per_px if self.config.um_per_px else self.scale_spin.minimum())
         self.scale_spin.set_placeholder("conversion factor")
-        self.scale_spin.setToolTip("Microns per pixel — used to convert every measurement to physical units (µm, µm²).")
-        self.scale_spin.valueChanged.connect(self._on_scale_changed)
+        self.scale_spin.setToolTip(
+            "Microns per pixel — used to convert every measurement to physical units (µm, µm²). "
+            "Mirrored in the General tab on the right."
+        )
+        self.scale_spin.valueChanged.connect(lambda v: self._set_scale(v, source="left"))
         sg.addWidget(self.scale_spin, stretch=1)
         left_layout.addWidget(scale_group)
 
-        # -- Pipeline settings --
-        settings_group = QGroupBox("Pipeline settings")
-        stg = QVBoxLayout(settings_group)
-        self.btn_settings = QPushButton("Edit settings...")
-        self.btn_settings.setToolTip(
-            "Open the full settings dialog: tabs for General, Custom Distances, "
-            "Landmarks, Models, Skeletonization & Pruning, Bridging, Tracing, Intervein."
-        )
-        self.btn_settings.clicked.connect(self._open_settings_dialog)
-        stg.addWidget(self.btn_settings)
-        io_row = QHBoxLayout()
-        btn_import = QPushButton("Import...")
-        btn_import.setToolTip("Load a previously-exported pipeline-config JSON file. Replaces the current settings.")
-        btn_import.clicked.connect(self._import_config)
-        btn_export = QPushButton("Save...")
-        btn_export.setToolTip("Save the current pipeline-config to a JSON file for reuse (CLI --config or GUI Import).")
-        btn_export.clicked.connect(self._export_config)
-        io_row.addWidget(btn_import)
-        io_row.addWidget(btn_export)
-        stg.addLayout(io_row)
-        self.btn_reset_gui = QPushButton("wipe my memories")
-        self.btn_reset_gui.setToolTip(
-            "Clear every persisted setting — input/output folders, model paths, scale, "
-            "pipeline config, custom distance pairs, workers warning suppression — and "
-            "snap every widget back to the state a first-time user would see."
-        )
-        self.btn_reset_gui.clicked.connect(self._reset_gui_to_defaults)
-        stg.addWidget(self.btn_reset_gui)
-        # settings_group is appended to left_layout at the bottom of this method
-        # so it sits below the Outputs and Parallel processing sections.
+        # Parallel processing lives in the right-panel General tab
+        # (InlineGeneralPanel.workers_spin); no left-panel widget for it.
+
+        # Pipeline settings entry points all live on the right-panel Settings
+        # tab now: Restore Defaults, Advanced Settings…, wipe my memories.
+        # Import/Save are inside the advanced dialog.
 
         # -- Output selection (final outputs only; intermediates live in Settings → General) --
-        out_group = QGroupBox("Outputs")
+        # Assigned to self so the first-launch walkthrough can target it.
+        self.out_group = QGroupBox("Outputs")
+        out_group = self.out_group
         ol = QVBoxLayout(out_group)
         self.output_checks: OrderedDict[str, QCheckBox] = OrderedDict()
         # Nested measurement-group checkboxes for the CSV output.
@@ -441,21 +445,20 @@ class TraceWindow(QMainWindow):
                 # tracks the parent CSV checkbox's enabled state.
                 cd_row = QHBoxLayout()
                 cd_row.setContentsMargins(0, 0, 0, 0)
-                self.include_custom_measurements_chk = QCheckBox("Custom distances")
+                self.include_custom_measurements_chk = QCheckBox("Custom measurements")
                 self.include_custom_measurements_chk.setChecked(True)
                 self.include_custom_measurements_chk.setToolTip(
-                    "Adds the pairs configured in Settings → Custom Distances to the batch CSV "
+                    "Adds the pairs configured in the Custom Measurements tab to the batch CSV "
                     "as custom_<label>_px (and _um when scale is set) columns.\n\n"
                     "No effect when no pairs are configured."
                 )
                 cd_row.addWidget(self.include_custom_measurements_chk)
                 self.btn_edit_custom_distances = QPushButton("Edit...")
                 self.btn_edit_custom_distances.setToolTip(
-                    "Open the Settings dialog at the Custom Distances tab to add/edit/remove "
-                    "landmark distance pairs."
+                    "Jump to the Custom Measurements tab on the right to add/edit/remove " "landmark measurement pairs."
                 )
                 self.btn_edit_custom_distances.clicked.connect(
-                    lambda: self._open_settings_dialog(initial_tab="Custom Distances")
+                    lambda: self.right_tabs.setCurrentWidget(self.inline_custom_distances_panel)
                 )
                 cd_row.addWidget(self.btn_edit_custom_distances)
                 cd_row.addStretch()
@@ -466,36 +469,6 @@ class TraceWindow(QMainWindow):
                 self._csv_group_container.setEnabled(chk.isChecked())
 
         left_layout.addWidget(out_group)
-
-        # -- Parallel processing --
-        workers_group = QGroupBox("Parallel processing")
-        wg = QVBoxLayout(workers_group)
-        workers_row = QHBoxLayout()
-        workers_row.addWidget(QLabel("Workers:"))
-        self.workers_spin = QSpinBox()
-        self.workers_spin.setRange(1, 32)
-        self.workers_spin.setValue(DEFAULT_MAX_WORKERS)
-        self.workers_spin.setToolTip(
-            "Number of wings to process in parallel through every stage of the pipeline:\n"
-            "  • Stage 1 — hinge chop and segmentation (per image)\n"
-            "  • Stage 2 — identifyFeatures analysis (per image)\n"
-            "Also sets the GPU batch size for the upfront landmark forward pass.\n"
-            "Higher = more memory + more throughput."
-        )
-        self.workers_spin.valueChanged.connect(self._on_workers_changed)
-        workers_row.addWidget(self.workers_spin, stretch=1)
-        self.workers_help_btn = QToolButton()
-        self.workers_help_btn.setText("?")
-        self.workers_help_btn.setToolTip("Show parallel-workers warning")
-        self.workers_help_btn.setAutoRaise(True)
-        self.workers_help_btn.clicked.connect(self._show_workers_warning_info)
-        workers_row.addWidget(self.workers_help_btn)
-        wg.addLayout(workers_row)
-        left_layout.addWidget(workers_group)
-
-        # Pipeline settings sits at the bottom so the section the user touches
-        # most often (Outputs + Parallel processing) is closer to eye-level.
-        left_layout.addWidget(settings_group)
 
         # -- Run / Cancel --
         btn_layout = QHBoxLayout()
@@ -512,20 +485,44 @@ class TraceWindow(QMainWindow):
 
         left_layout.addStretch()
 
-        # --- Right panel ---
+        # --- Right panel: tab bar (Main / General / Custom Distances / Help)
+        # with the progress bar + ETA always-visible below the tabs.
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(4, 4, 4, 4)
 
-        right_layout.addWidget(QLabel("Images:"))
-        self.image_list = QListWidget()
-        right_layout.addWidget(self.image_list, stretch=1)
+        self.right_tabs = QTabWidget()
+        right_layout.addWidget(self.right_tabs, stretch=1)
 
-        right_layout.addWidget(QLabel("Log:"))
+        # Tab 0 — Main (image list + log)
+        main_tab = QWidget()
+        main_tab_layout = QVBoxLayout(main_tab)
+        main_tab_layout.setContentsMargins(4, 4, 4, 4)
+        main_tab_layout.addWidget(QLabel("Images:"))
+        self.image_list = QListWidget()
+        main_tab_layout.addWidget(self.image_list, stretch=1)
+        main_tab_layout.addWidget(QLabel("Log:"))
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        right_layout.addWidget(self.log_text, stretch=1)
+        main_tab_layout.addWidget(self.log_text, stretch=1)
+        self.right_tabs.addTab(main_tab, "Main")
 
+        # Tab 1 — General (auto-apply controls; replaces dialog's General tab)
+        self.inline_general_panel = InlineGeneralPanel(self)
+        from TRACE.inline_panels import _wrap_scrollable as _wrap_scroll
+
+        self.right_tabs.addTab(_wrap_scroll(self.inline_general_panel), "Settings")
+
+        # Tab 2 — Custom Distances (LandmarkPickerWidget)
+        self.inline_custom_distances_panel = InlineCustomDistancesPanel(self)
+        self.right_tabs.addTab(self.inline_custom_distances_panel, "Custom Measurements")
+
+        # Tab 3 — Help
+        self.inline_help_panel = InlineHelpPanel(self)
+        self.right_tabs.addTab(self.inline_help_panel, "Help")
+
+        # Progress bar + ETA stay outside the tab widget so they're visible
+        # regardless of which tab the user is viewing during a run.
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         # Snapshot the default Highlight color so we can revert after a green
@@ -538,11 +535,14 @@ class TraceWindow(QMainWindow):
         right_layout.addWidget(self.eta_label)
 
         # --- Assemble ---
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(1, 1)
-        main_layout.addWidget(splitter)
+        # Assigned to self so the walkthrough can listen to splitterMoved and
+        # reposition its highlight when the user drags the divider.
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.addWidget(left)
+        self._splitter.addWidget(right)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.splitterMoved.connect(self._on_splitter_moved)
+        main_layout.addWidget(self._splitter)
 
         self.statusBar().showMessage("Ready")
 
@@ -588,10 +588,24 @@ class TraceWindow(QMainWindow):
     # -----------------------------------------------------------------------
     # Pipeline settings (PipelineConfig)
     # -----------------------------------------------------------------------
-    def _on_scale_changed(self, val: float):
-        # The spinbox minimum doubles as the "[conversion factor]" placeholder
-        # state — treat it as no scale entered.
+    def _set_scale(self, val: float, *, source: str) -> None:
+        """Write um_per_px to the config and mirror the value to whichever
+        scale spinbox didn't originate the change.
+
+        Two spinboxes show µm/px — one on the left panel, one inside the
+        General tab. They stay in lock-step; editing either drives the other.
+        `source` is "left" or "inline" identifying the originating widget so
+        we don't echo back into it (and re-fire its signal).
+        """
         self.config.um_per_px = val if val > self.scale_spin.minimum() else None
+        if source != "left":
+            self.scale_spin.blockSignals(True)
+            self.scale_spin.setValue(val)
+            self.scale_spin.blockSignals(False)
+        if source != "inline" and hasattr(self, "inline_general_panel"):
+            self.inline_general_panel.scale_spin.blockSignals(True)
+            self.inline_general_panel.scale_spin.setValue(val)
+            self.inline_general_panel.scale_spin.blockSignals(False)
 
     def reset_workers_warning(self):
         """Re-arm the spinner-change parallel-workers warning so it fires again on the next bump above 1.
@@ -647,7 +661,7 @@ class TraceWindow(QMainWindow):
 
         calib = CalibrateWidget(dlg)
         calib.set_paths(self.input_edit.text(), self._landmark_model_path, self._segmentation_model_path)
-        calib.applied.connect(lambda v: self.workers_spin.setValue(int(v)))
+        calib.applied.connect(lambda v: self.inline_general_panel.workers_spin.setValue(int(v)))
         layout.addWidget(calib)
 
         close_row = QHBoxLayout()
@@ -667,7 +681,7 @@ class TraceWindow(QMainWindow):
         user has previously checked "do not warn me again". Returns True if the
         run should proceed, False if the user cancelled.
         """
-        if self.workers_spin.value() <= DEFAULT_MAX_WORKERS:
+        if self.inline_general_panel.workers_spin.value() <= DEFAULT_MAX_WORKERS:
             return True
         if self.settings.value("workers_warning_suppressed", False, type=bool):
             return True
@@ -687,26 +701,148 @@ class TraceWindow(QMainWindow):
             self.settings.setValue("workers_warning_suppressed", True)
         return True
 
-    def _open_settings_dialog(self, initial_tab: str | None = None):
+    # -----------------------------------------------------------------------
+    # GUI-only state snapshot for Save / Import (preset round-trip)
+    # -----------------------------------------------------------------------
+    # Field names that get serialized alongside the PipelineConfig + gate_override
+    # so a saved preset captures every user-visible setting, not just the dataclass.
+    _GUI_STATE_FIELDS = (
+        "show_vein_tissue",
+        "include_unreliable_landmarks",
+        "do_rotation",
+        "rotation_mirror_correct",
+        "wing_isolation_enabled",
+        "wing_expand_fraction",
+        "wing_isolation_model_path",
+        "landmark_model_path",
+        "segmentation_model_path",
+        "landmark_target_um_per_px",
+        "segmentation_target_um_per_px",
+        "wing_isolation_target_um_per_px",
+        "active_rescale_target",
+        "rescale_tolerance_low",
+        "rescale_tolerance_high",
+        "intermediate_outputs",
+        "max_workers",
+        "user_landmark_distances",
+        "distance_sample_image",
+        "distance_sample_landmarks",
+    )
+
+    def get_gui_state(self) -> dict:
+        """Snapshot every GUI-only flag (everything not in PipelineConfig)."""
+        return {
+            "show_vein_tissue": bool(self._show_vein_tissue),
+            "include_unreliable_landmarks": bool(self._include_unreliable_landmarks),
+            "do_rotation": bool(self._do_rotation),
+            "rotation_mirror_correct": bool(self._rotation_mirror_correct),
+            "wing_isolation_enabled": bool(self._wing_isolation_enabled),
+            "wing_expand_fraction": float(self._wing_expand_fraction),
+            "wing_isolation_model_path": str(self._wing_isolation_model_path or ""),
+            "landmark_model_path": str(self._landmark_model_path or ""),
+            "segmentation_model_path": str(self._segmentation_model_path or ""),
+            "landmark_target_um_per_px": self._landmark_target_um_per_px,
+            "segmentation_target_um_per_px": self._segmentation_target_um_per_px,
+            "wing_isolation_target_um_per_px": self._wing_isolation_target_um_per_px,
+            "active_rescale_target": str(self._active_rescale_target),
+            "rescale_tolerance_low": float(self._rescale_tolerance_low),
+            "rescale_tolerance_high": float(self._rescale_tolerance_high),
+            "intermediate_outputs": dict(self._intermediate_outputs),
+            "max_workers": int(self.inline_general_panel.workers_spin.value()),
+            "user_landmark_distances": list(self._user_landmark_distances),
+            "distance_sample_image": str(self._distance_sample_image or ""),
+            "distance_sample_landmarks": str(self._distance_sample_landmarks or ""),
+        }
+
+    def apply_gui_state(self, state: dict) -> None:
+        """Apply a snapshot from get_gui_state(). Unknown keys are ignored.
+
+        After applying, refreshes the inline panels so their widgets reflect
+        the new window state.
+        """
+        if "show_vein_tissue" in state:
+            self._show_vein_tissue = bool(state["show_vein_tissue"])
+        if "include_unreliable_landmarks" in state:
+            self._include_unreliable_landmarks = bool(state["include_unreliable_landmarks"])
+        if "do_rotation" in state:
+            self._do_rotation = bool(state["do_rotation"])
+        if "rotation_mirror_correct" in state:
+            self._rotation_mirror_correct = bool(state["rotation_mirror_correct"])
+        if "wing_isolation_enabled" in state:
+            self._wing_isolation_enabled = bool(state["wing_isolation_enabled"])
+        if "wing_expand_fraction" in state:
+            try:
+                self._wing_expand_fraction = float(state["wing_expand_fraction"])
+            except (TypeError, ValueError):
+                pass
+        if "wing_isolation_model_path" in state:
+            self._wing_isolation_model_path = str(state["wing_isolation_model_path"] or "")
+        if "landmark_model_path" in state:
+            self._landmark_model_path = str(state["landmark_model_path"] or "")
+        if "segmentation_model_path" in state:
+            self._segmentation_model_path = str(state["segmentation_model_path"] or "")
+        for key in ("landmark_target_um_per_px", "segmentation_target_um_per_px", "wing_isolation_target_um_per_px"):
+            if key in state:
+                val = state[key]
+                try:
+                    setattr(self, f"_{key}", float(val) if val is not None else None)
+                except (TypeError, ValueError):
+                    pass
+        if "active_rescale_target" in state and state["active_rescale_target"] in (
+            "landmark",
+            "segmentation",
+            "wing_isolation",
+        ):
+            self._active_rescale_target = str(state["active_rescale_target"])
+        for key in ("rescale_tolerance_low", "rescale_tolerance_high"):
+            if key in state:
+                try:
+                    setattr(self, f"_{key}", float(state[key]))
+                except (TypeError, ValueError):
+                    pass
+        if "intermediate_outputs" in state and isinstance(state["intermediate_outputs"], dict):
+            # Preserve the original key universe; only update keys present in both.
+            for k, v in state["intermediate_outputs"].items():
+                if k in self._intermediate_outputs:
+                    self._intermediate_outputs[k] = bool(v)
+        if "max_workers" in state:
+            try:
+                workers_val = int(state["max_workers"])
+            except (TypeError, ValueError):
+                workers_val = None
+            if workers_val is not None:
+                # Persist to QSettings first since refresh_from_state() reads
+                # max_workers from there — without this, the spinbox would
+                # snap back to the persisted (pre-import) value.
+                self.settings.setValue("max_workers", workers_val)
+        if "user_landmark_distances" in state and isinstance(state["user_landmark_distances"], list):
+            self._user_landmark_distances = [p for p in state["user_landmark_distances"] if isinstance(p, dict)]
+        if "distance_sample_image" in state:
+            self._distance_sample_image = str(state["distance_sample_image"] or "")
+        if "distance_sample_landmarks" in state:
+            self._distance_sample_landmarks = str(state["distance_sample_landmarks"] or "")
+        # Push window state into both inline panels so their widgets reflect
+        # the imported snapshot.
+        self.inline_general_panel.refresh_from_state()
+        self.inline_custom_distances_panel.refresh_from_state()
+
+    def _open_settings_dialog(self):
+        """Open the advanced settings dialog (6 tabs: Landmarks, Models,
+        Skeletonization & Pruning, Bridging, Tracing, Intervein).
+
+        General and Custom Distances live as right-panel tabs on the main
+        window; they don't pass through the dialog anymore.
+        """
         dlg = PipelineConfigDialog(
             self.config,
             self,
-            show_vein_tissue=self._show_vein_tissue,
             include_unreliable_landmarks=self._include_unreliable_landmarks,
-            workers=self.workers_spin.value(),
             input_path=self.input_edit.text(),
             landmark_model_path=self._landmark_model_path,
             segmentation_model_path=self._segmentation_model_path,
             gate_override=self._gate_override,
             wing_expand_fraction=self._wing_expand_fraction,
-            wing_isolation_enabled=self._wing_isolation_enabled,
             wing_isolation_model_path=self._wing_isolation_model_path,
-            intermediate_outputs=dict(self._intermediate_outputs),
-            do_rotation=self._do_rotation,
-            rotation_mirror_correct=self._rotation_mirror_correct,
-            user_landmark_distances=list(self._user_landmark_distances),
-            distance_sample_image=self._distance_sample_image,
-            distance_sample_landmarks=self._distance_sample_landmarks,
             landmark_target_um_per_px=self._landmark_target_um_per_px,
             segmentation_target_um_per_px=self._segmentation_target_um_per_px,
             wing_isolation_target_um_per_px=self._wing_isolation_target_um_per_px,
@@ -714,17 +850,11 @@ class TraceWindow(QMainWindow):
             rescale_tolerance_low=self._rescale_tolerance_low,
             rescale_tolerance_high=self._rescale_tolerance_high,
         )
-        if initial_tab:
-            dlg.select_tab(initial_tab)
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.get_config()
-            self._show_vein_tissue = dlg.get_show_vein_tissue()
             self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
-            self._do_rotation = dlg.get_do_rotation()
-            self._rotation_mirror_correct = dlg.get_rotation_mirror_correct()
             self._gate_override = dlg.get_gate_override()
             self._wing_expand_fraction = dlg.get_wing_expand_fraction()
-            self._wing_isolation_enabled = dlg.get_wing_isolation_enabled()
             self._wing_isolation_model_path = dlg.get_wing_isolation_model_path()
             self._landmark_model_path = dlg.get_landmark_model_path()
             self._segmentation_model_path = dlg.get_segmentation_model_path()
@@ -734,52 +864,14 @@ class TraceWindow(QMainWindow):
             self._active_rescale_target = dlg.get_active_rescale_target()
             self._rescale_tolerance_low = dlg.get_rescale_tolerance_low()
             self._rescale_tolerance_high = dlg.get_rescale_tolerance_high()
-            self._intermediate_outputs = dlg.get_intermediate_outputs()
-            self._user_landmark_distances = dlg.get_user_landmark_distances()
-            self._distance_sample_image = dlg.get_distance_sample_image()
-            self._distance_sample_landmarks = dlg.get_distance_sample_landmarks()
-            # Keep main-window scale spinner in sync.
-            val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
-            self.scale_spin.blockSignals(True)
-            self.scale_spin.setValue(val)
-            self.scale_spin.blockSignals(False)
-            # Keep main-window workers spinner in sync (block signals to avoid
-            # re-firing the spinner-change warning).
-            self.workers_spin.blockSignals(True)
-            self.workers_spin.setValue(dlg.get_workers())
-            self.workers_spin.blockSignals(False)
+            # Dialog may have edited fields the inline General panel mirrors
+            # (e.g. synthesize_missing_crossveins on the Tracing tab) — pull
+            # current state into the panel widgets so they stay in sync.
+            self.inline_general_panel.refresh_from_state()
 
-    def _import_config(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import Pipeline Config", "", "JSON (*.json);;All Files (*)")
-        if not path:
-            return
-        try:
-            self.config, gate_override = load_settings(Path(path))
-        except Exception as e:
-            QMessageBox.critical(self, "Import failed", f"Could not load config:\n{e}")
-            return
-        # gate_override is None when the file predates this field — leave the
-        # current in-session override untouched in that case.
-        if gate_override is not None:
-            self._gate_override = gate_override
-        val = self.config.um_per_px if self.config.um_per_px else self.scale_spin.minimum()
-        self.scale_spin.blockSignals(True)
-        self.scale_spin.setValue(val)
-        self.scale_spin.blockSignals(False)
-        self._log(f"Imported config from {path}")
-
-    def _export_config(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Pipeline Config", "pipeline_config.json", "JSON (*.json);;All Files (*)"
-        )
-        if not path:
-            return
-        try:
-            save_settings(self.config, self._gate_override, Path(path))
-        except Exception as e:
-            QMessageBox.critical(self, "Export failed", f"Could not save config:\n{e}")
-            return
-        self._log(f"Exported config to {path}")
+    # Import/Save pipeline-config JSON lives on PipelineConfigDialog (next to
+    # Restore Defaults) — it's only useful in the context of editing the full
+    # config and keeps the main window leaner.
 
     def _reset_gui_to_defaults(self):
         """Wipe all persisted QSettings and snap every widget back to factory defaults.
@@ -841,19 +933,17 @@ class TraceWindow(QMainWindow):
         self.recursive_chk.blockSignals(False)
         self.image_list.clear()
 
-        self.scale_spin.blockSignals(True)
-        self.scale_spin.setValue(self.scale_spin.minimum())
-        self.scale_spin.blockSignals(False)
-
-        self.workers_spin.blockSignals(True)
-        self.workers_spin.setValue(DEFAULT_MAX_WORKERS)
-        self.workers_spin.blockSignals(False)
-
         for chk in self.output_checks.values():
             chk.setChecked(True)
         for gchk in self.csv_group_checks.values():
             gchk.setChecked(True)
         self.include_custom_measurements_chk.setChecked(True)
+
+        # Snap inline-panel widgets (scale, workers, intermediate outputs,
+        # opacities, color pickers, custom distance pairs) back to the
+        # freshly-reset window state.
+        self.inline_general_panel.refresh_from_state()
+        self.inline_custom_distances_panel.refresh_from_state()
 
         self.log_text.clear()
         self.statusBar().showMessage("GUI reset to defaults")
@@ -892,7 +982,7 @@ class TraceWindow(QMainWindow):
         s.setValue("resolution/tolerance_low", str(self._rescale_tolerance_low))
         s.setValue("resolution/tolerance_high", str(self._rescale_tolerance_high))
         s.setValue("pipeline_config_json", config_to_json(self.config))
-        s.setValue("max_workers", self.workers_spin.value())
+        s.setValue("max_workers", self.inline_general_panel.workers_spin.value())
         s.setValue("show_vein_tissue", self._show_vein_tissue)
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
         s.setValue("do_rotation", self._do_rotation)
@@ -996,10 +1086,9 @@ class TraceWindow(QMainWindow):
                 self.config = config_from_json(cfg_json)
             except Exception:
                 self.config = PipelineConfig()
-        scale_val = self.config.um_per_px if self.config.um_per_px is not None else 0.0
-        self.scale_spin.blockSignals(True)
-        self.scale_spin.setValue(scale_val)
-        self.scale_spin.blockSignals(False)
+        # Scale is owned by the inline General panel — its refresh_from_state()
+        # (called at the end of _restore_settings) reads self.config.um_per_px
+        # into its spinbox.
         # Migrate legacy "output/overlay" setting → both new keys (vein + intervein).
         legacy_overlay = s.value("output/overlay", None)
         if legacy_overlay is not None:
@@ -1072,15 +1161,14 @@ class TraceWindow(QMainWindow):
         saved_dsl = s.value("distance_sample_landmarks", "")
         if saved_dsl:
             self._distance_sample_landmarks = saved_dsl
-        workers_val = s.value("max_workers", None)
-        if workers_val is not None:
-            try:
-                self.workers_spin.blockSignals(True)
-                self.workers_spin.setValue(int(workers_val))
-            except (TypeError, ValueError):
-                pass
-            finally:
-                self.workers_spin.blockSignals(False)
+        # Workers is owned by the inline General panel — its refresh_from_state()
+        # reads the persisted max_workers value out of QSettings directly.
+
+        # Inline panels mirror window state into widgets. Called last so every
+        # earlier restore (config, intermediates, distance pairs, etc.) is
+        # visible to the panels by the time they sync.
+        self.inline_general_panel.refresh_from_state()
+        self.inline_custom_distances_panel.refresh_from_state()
 
     # -----------------------------------------------------------------------
     # Pipeline execution
@@ -1192,7 +1280,7 @@ class TraceWindow(QMainWindow):
                 config=self.config,
                 keep_intermediates=False,
                 outputs=self._selected_outputs(),
-                max_workers=self.workers_spin.value(),
+                max_workers=self.inline_general_panel.workers_spin.value(),
                 show_vein_tissue=self._show_vein_tissue,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
                 gate_override=self._gate_override,
@@ -1207,7 +1295,7 @@ class TraceWindow(QMainWindow):
                 csv_measurement_groups={gkey for gkey, gchk in self.csv_group_checks.items() if gchk.isChecked()},
                 # Tie landmark batch size to the Workers spinbox so a single setting
                 # controls Stage 1 batching and Stage 2 parallelism together.
-                landmark_batch_size=self.workers_spin.value(),
+                landmark_batch_size=self.inline_general_panel.workers_spin.value(),
                 target_um_per_px=target_um_per_px,
                 rescale_tolerance_low=self._rescale_tolerance_low,
                 rescale_tolerance_high=self._rescale_tolerance_high,
@@ -1434,6 +1522,88 @@ class TraceWindow(QMainWindow):
         self.eta_label.setText("")
         self._log(f"\nFatal error: {msg}")
         QMessageBox.critical(self, "Pipeline Error", msg)
+
+    # -----------------------------------------------------------------------
+    # First-launch walkthrough
+    # -----------------------------------------------------------------------
+    def _walkthrough_steps(self) -> list[WalkthroughStep]:
+        """Six-step tour of the main window's key controls."""
+        return [
+            WalkthroughStep(
+                target_resolver=lambda w: w.input_row,
+                title="Pick an input folder",
+                body=(
+                    "Click Browse to choose a folder of wing images (TIFF, BMP, RAW). "
+                    "TRACE will discover every supported image inside and queue them."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.output_row,
+                title="Pick an output folder",
+                body=(
+                    "Click Browse to choose where selected outputs are written. "
+                    "TRACE opens this folder automatically when done."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.scale_spin,
+                title="Set µm/px",
+                body=(
+                    "Enter the microns-per-pixel calibration for your microscope — every "
+                    "measurement gets converted to physical units."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.out_group,
+                title="Choose your outputs",
+                body=("Pick what to save: various feature overlays and measurements."),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.right_tabs.tabBar(),
+                title="Right-panel tabs",
+                body=(
+                    "Four tabs:  Main (image list + live log during a run),  Settings "
+                    "(preprocessing toggles, opacities, colors, advanced dialog),  "
+                    "Custom Measurements (landmark-pair measurements),  Help (README link)."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.btn_run,
+                title="Run the pipeline",
+                body=(
+                    "Click here when everything's set. Progress and ETA appear below the "
+                    "tabs; the log streams on the Main tab. The output folder opens when done."
+                ),
+            ),
+        ]
+
+    def _show_walkthrough(self) -> None:
+        """Build a fresh overlay and start it. Called on first launch and
+        from Help → Show Walkthrough."""
+        # Tear down any existing walkthrough first — happens if the user
+        # clicks Help → Show Walkthrough while one is already running.
+        if self._walkthrough is not None:
+            try:
+                self._walkthrough.finish()
+            except Exception:
+                pass
+            self._walkthrough = None
+        steps = self._walkthrough_steps()
+        self._walkthrough = WalkthroughOverlay(self, steps, settings=self.settings)
+        self._walkthrough.finished.connect(self._on_walkthrough_finished)
+        self._walkthrough.start()
+
+    def _on_walkthrough_finished(self) -> None:
+        self._walkthrough = None
+
+    def _on_splitter_moved(self, *_args) -> None:
+        if self._walkthrough is not None:
+            self._walkthrough.reposition()
+
+    def resizeEvent(self, event):  # noqa: N802 — Qt API
+        super().resizeEvent(event)
+        if self._walkthrough is not None:
+            self._walkthrough.reposition()
 
 
 # ---------------------------------------------------------------------------

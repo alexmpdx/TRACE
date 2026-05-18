@@ -1,0 +1,265 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          1964.2239328315297,
+          1356.328412065229
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "ACV.a"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9797646403312683,
+        "sharpness": 1.4096445737159717,
+        "second_peak_ratio": 0.017512249111388482
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          1933.1178967162468,
+          1501.536236990371
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "ACV.p"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9024511575698853,
+        "sharpness": 1.3527947339298074,
+        "second_peak_ratio": 0.03496569624833015
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          743.6412943750281,
+          1690.6120483140483
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "alula notch"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.8365488052368164,
+        "sharpness": 1.3302471385387864,
+        "second_peak_ratio": 0.039397275624583186
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          5278.527581459191,
+          1543.391424890099
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "DTip"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9641052484512329,
+        "sharpness": 1.3701318079342268,
+        "second_peak_ratio": 0.025586306728122815
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          807.4760011817558,
+          1203.4831759215717
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L1-Rs"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9450643658638,
+        "sharpness": 1.384189273362896,
+        "second_peak_ratio": 0.03154898641478766
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4485.209704985036,
+          767.7944008336052
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L2.d"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9090339541435242,
+        "sharpness": 1.3183997968162813,
+        "second_peak_ratio": 0.01572257826489295
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          1210.6970176948744,
+          1264.394317086853
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L2-L3"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9197591543197632,
+        "sharpness": 1.319876481921,
+        "second_peak_ratio": 0.02448749993357526
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          5089.922220371562,
+          2022.2723843427164
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L4.d"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9518650770187378,
+        "sharpness": 1.35959159925741,
+        "second_peak_ratio": 0.018623170325754248
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          616.4832285752323,
+          1408.0655778018734
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L4-L5"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.8036165237426758,
+        "sharpness": 1.3446182301714047,
+        "second_peak_ratio": 0.021122327896239614
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          3231.1829579329174,
+          2737.53697349042
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "L5.d"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.6743804812431335,
+        "sharpness": 1.3394063946671055,
+        "second_peak_ratio": 0.01933196999450338
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          2827.202408999514,
+          1761.0453434684798
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "PCV.a"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9462714195251465,
+        "sharpness": 1.394471005643568,
+        "second_peak_ratio": 0.04306578644855692
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          2709.201073260973,
+          2144.8832935483633
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "PCV.p"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.9589382410049438,
+        "sharpness": 1.3758056874874933,
+        "second_peak_ratio": 0.014236168757335294
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          1509.1100116904145,
+          901.5369586767321
+        ]
+      },
+      "properties": {
+        "classification": {
+          "name": "subcostal break"
+        },
+        "reliable": true,
+        "gate_reason": "",
+        "confidence": 0.913042426109314,
+        "sharpness": 1.339771417826086,
+        "second_peak_ratio": 0.025025080279743653
+      }
+    }
+  ]
+}

@@ -128,6 +128,20 @@ class LandmarkPickerWidget(QWidget):
         """Currently entered landmarks-GeoJSON path (may be empty)."""
         return self._lm_edit.text().strip()
 
+    def load_initial(self) -> bool:
+        """Load the current image_path + landmarks_path into the viewer.
+
+        Hosts (e.g. the TRACE Settings tab) call this after construction so a
+        default sample shows up without requiring the user to click Load.
+        Returns True if a load was attempted (both paths set), False otherwise.
+        Errors during the load surface in the same QMessageBox as the manual
+        Load button.
+        """
+        if self._image_edit.text().strip() and self._lm_edit.text().strip():
+            self._load_clicked()
+            return True
+        return False
+
     # --- UI construction ---------------------------------------------------
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -269,7 +283,7 @@ class LandmarkPickerWidget(QWidget):
             self,
             "Select sample wing image",
             self._default_image_dir,
-            "Wing images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd);;All files (*)",
+            "Wing images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.pdf);;All files (*)",
             options=self._FILE_DIALOG_OPTS,
         )
         if path:

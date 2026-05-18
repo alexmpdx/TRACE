@@ -28,6 +28,7 @@ import numpy as np
 _PSD_EXTS = {".psd", ".psb"}
 _HEIC_EXTS = {".heic", ".heif"}
 _SVG_EXTS = {".svg"}
+_PDF_EXTS = {".pdf"}
 _RAW_EXTS = {
     ".raw",
     ".dng",
@@ -53,6 +54,8 @@ def imread_any(path: Union[str, Path], flag: int = cv2.IMREAD_COLOR) -> Optional
         return _imread_heic(p, flag)
     if ext in _SVG_EXTS:
         return _imread_svg(p, flag)
+    if ext in _PDF_EXTS:
+        return _imread_pdf(p, flag)
     if ext in _RAW_EXTS:
         return _imread_raw(p, flag)
     if ext in _MICROSCOPY_EXTS:
@@ -131,6 +134,63 @@ def _imread_svg(path: str, flag: int) -> Optional[np.ndarray]:
         return None
     pil = Image.open(BytesIO(png_bytes))
     return _pil_to_cv(pil, flag)
+
+
+# Render DPI for PDF → image conversion. 200 is a sweet spot: high enough to
+# preserve fine vein detail for the landmark picker, low enough that a typical
+# A4/letter page fits comfortably in memory (~2000×2600 px).
+_PDF_RENDER_DPI = 200
+# Hard ceiling on the rendered pixel count. If the page at _PDF_RENDER_DPI
+# would exceed this, the DPI is scaled down proportionally. Prevents
+# pathologically-sized pages (custom MediaBox, scanned 600+ DPI bitmap PDFs)
+# from triggering a multi-gigabyte allocation.
+_PDF_MAX_RENDER_PIXELS = 50_000_000  # ≈ 7100 × 7100 px
+
+
+def _imread_pdf(path: str, flag: int) -> Optional[np.ndarray]:
+    """Render the first page of a PDF as a cv2-shaped ndarray via PyMuPDF.
+
+    Multi-page PDFs are reduced to the first page — the picker only needs
+    one sample image and wing micrograph PDFs are typically single-page.
+
+    The render goes through PNG bytes (``Pixmap.tobytes("png")``) and
+    ``cv2.imdecode`` rather than manual ``np.frombuffer`` + ``reshape`` on
+    the raw pixel buffer; pymupdf's Pixmap layout varies subtly with
+    colorspace + alpha and the manual path is easy to misread (which
+    triggers garbage allocations downstream in cv2 / napari).
+    """
+    try:
+        import pymupdf  # PyMuPDF — module renamed from 'fitz' in 1.24+
+    except ImportError:
+        try:
+            import fitz as pymupdf  # legacy module name
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError("Reading .pdf files requires PyMuPDF. Install with: pip install pymupdf") from exc
+
+    try:
+        doc = pymupdf.open(path)
+    except Exception:
+        return None
+    if doc.page_count < 1:
+        doc.close()
+        return None
+    try:
+        page = doc.load_page(0)
+        # Compute the zoom needed for the target DPI, then dial it back if
+        # the resulting pixel count would exceed _PDF_MAX_RENDER_PIXELS.
+        zoom = _PDF_RENDER_DPI / 72.0
+        rect = page.rect
+        projected_pixels = (rect.width * zoom) * (rect.height * zoom)
+        if projected_pixels > _PDF_MAX_RENDER_PIXELS:
+            zoom *= (_PDF_MAX_RENDER_PIXELS / projected_pixels) ** 0.5
+        matrix = pymupdf.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        png_bytes = pix.tobytes("png")
+    finally:
+        doc.close()
+
+    decoded = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), flag)
+    return decoded
 
 
 def _imread_raw(path: str, flag: int) -> Optional[np.ndarray]:

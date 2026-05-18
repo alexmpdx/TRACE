@@ -1,9 +1,10 @@
 """Modal dialog for editing an identifyFeatures PipelineConfig.
 
-All PipelineConfig fields are grouped into 5 tabs (General,
-Skeletonization & Pruning, Bridging, Tracing, Intervein). The dialog
-takes a config as input, works on a copy, and returns the updated
-config on accept.
+Hosts the advanced-only tabs: Landmarks, Models, Skeletonization & Pruning,
+Bridging, Tracing, Intervein. The user-facing General + Custom Distances
+panels live on the main window's right-panel tab bar (InlineGeneralPanel /
+InlineCustomDistancesPanel) and auto-apply edits — they never pass through
+this dialog.
 
 The dialog is dispatch-based: each field is registered via a small helper
 (`_add_float`, `_add_opt_float`, `_add_int`, `_add_opt_int`,
@@ -21,19 +22,15 @@ from typing import Any
 
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
-from PyQt5.QtCore import QEvent, Qt, QTimer
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QApplication,
     QButtonGroup,
     QCheckBox,
-    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -46,11 +43,10 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QTabWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
-from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
+
 from TRACE.presets_loader import load_presets
 
 # Friendly display names for the GateConfigPanel landmark labels. The shorthand
@@ -242,22 +238,13 @@ class PipelineConfigDialog(QDialog):
         self,
         config: PipelineConfig,
         parent=None,
-        show_vein_tissue: bool = False,
         include_unreliable_landmarks: bool = False,
-        workers: int = DEFAULT_MAX_WORKERS,
         input_path: str = "",
         landmark_model_path: str = "",
         segmentation_model_path: str = "",
         gate_override: dict | None = None,
         wing_expand_fraction: float = 0.05,
-        wing_isolation_enabled: bool = False,
         wing_isolation_model_path: str = "",
-        intermediate_outputs: dict[str, bool] | None = None,
-        do_rotation: bool = False,
-        rotation_mirror_correct: bool = False,
-        user_landmark_distances: list[dict] | None = None,
-        distance_sample_image: str = "",
-        distance_sample_landmarks: str = "",
         landmark_target_um_per_px: float | None = None,
         segmentation_target_um_per_px: float | None = None,
         wing_isolation_target_um_per_px: float | None = None,
@@ -280,14 +267,6 @@ class PipelineConfigDialog(QDialog):
         self._initial_gate_override = gate_override
         # (kind, widget, extra) tuples indexed by PipelineConfig field name.
         self._widgets: dict[str, tuple[str, Any, Any]] = {}
-        # User-defined landmark distance pairs (TRACE-only post-CSV augmentation).
-        # List of {name_a, name_b, label} dicts so QSettings/JSON round-trips cleanly.
-        self._user_landmark_distances: list[dict] = list(user_landmark_distances or [])
-        # Last-used sample image + landmarks GeoJSON for the picker — pre-fills
-        # the file pickers on the Custom Distances tab so the user doesn't have
-        # to re-browse each session.
-        self._distance_sample_image = distance_sample_image
-        self._distance_sample_landmarks = distance_sample_landmarks
         # Stage 1 (resolutionAdjust) — per-model training-µm/px targets, which
         # model's target drives the global rescale, and the tolerance band. None
         # for any per-model target = "not configured; do not rescale on its
@@ -298,198 +277,12 @@ class PipelineConfigDialog(QDialog):
         self._initial_active_rescale_target = active_rescale_target or "segmentation"
         self._initial_rescale_tolerance_low = rescale_tolerance_low
         self._initial_rescale_tolerance_high = rescale_tolerance_high
-        # {disabled_child_chk: parent_chk_to_pulse}. Populated by build steps
-        # (rotate→flip, wing-isolation→isolated-wing-image). The dialog-level
-        # event filter pulses the parent when the user clicks a grayed child.
-        self._pulse_dependencies: dict[QCheckBox, QCheckBox] = {}
-        # {child_chk: hint_label}. Shown alongside the child when the user
-        # clicks it while the parent is off, hidden again when the parent
-        # becomes checked.
-        self._dependency_hints: dict[QCheckBox, QLabel] = {}
-        # User-editable overlay color overrides (vein_id / region_name -> [R,G,B]).
-        # Initialised from topology defaults; overwritten by _load_from_config when
-        # the loaded PipelineConfig has non-None vein_colors / region_colors. Only
-        # entries that DIFFER from the topology defaults are written back to the
-        # PipelineConfig (keeps presets/JSON round-trips minimal).
-        from identify_features.models.topology import REGION_COLORS, VEIN_COLORS
-
-        self._topology_vein_defaults: dict[str, list[int]] = {k: list(v) for k, v in VEIN_COLORS.items()}
-        self._topology_region_defaults: dict[str, list[int]] = {k: list(v) for k, v in REGION_COLORS.items()}
-        self._vein_color_state: dict[str, list[int]] = {k: list(v) for k, v in VEIN_COLORS.items()}
-        self._region_color_state: dict[str, list[int]] = {k: list(v) for k, v in REGION_COLORS.items()}
-        # Filled in by _build_general_tab when the color-picker rows are built.
-        self._vein_color_btns: dict[str, QPushButton] = {}
-        self._region_color_btns: dict[str, QPushButton] = {}
         self._build_ui()
         self._load_from_config(config)
-        self._show_vein_tissue_chk.setChecked(show_vein_tissue)
         self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
-        self._do_rotation_chk.setChecked(bool(do_rotation))
-        self._rotation_mirror_correct_chk.setChecked(bool(rotation_mirror_correct))
-        # Mirror-correct only meaningful when rotation is enabled. Auto-enable
-        # rotation if the user (or a config import) checks flip while rotate
-        # is off, so they can't end up requesting an output that won't run.
-        self._rotation_mirror_correct_chk.setEnabled(self._do_rotation_chk.isChecked())
-        self._do_rotation_chk.toggled.connect(self._rotation_mirror_correct_chk.setEnabled)
-        self._rotation_mirror_correct_chk.toggled.connect(
-            lambda checked: (
-                self._do_rotation_chk.setChecked(True) if checked and not self._do_rotation_chk.isChecked() else None
-            )
-        )
-        self._pulse_dependencies[self._rotation_mirror_correct_chk] = self._do_rotation_chk
-        self._do_rotation_chk.toggled.connect(
-            lambda checked: self._hide_hint(self._rotation_mirror_correct_chk) if checked else None
-        )
-        # Block signals so the initial-sync setValue doesn't re-trigger the
-        # parallel-workers warning every time the Settings dialog opens.
-        self._workers_spin.blockSignals(True)
-        self._workers_spin.setValue(int(workers))
-        self._workers_spin.blockSignals(False)
         self._wing_expand_spin.setValue(float(wing_expand_fraction))
-        self._wing_enable_chk.setChecked(bool(wing_isolation_enabled))
         if wing_isolation_model_path:
             self._wing_model_edit.setText(wing_isolation_model_path)
-        # Sync enabled state of model-picker widgets to the checkbox.
-        self._on_wing_isolation_toggled(bool(wing_isolation_enabled))
-        # Apply current intermediate-output state to the checkboxes.
-        if intermediate_outputs:
-            for key, chk in self._intermediate_output_chks.items():
-                chk.setChecked(bool(intermediate_outputs.get(key, False)))
-        # Catch mouse-press events on disabled dependent checkboxes so we can
-        # pulse the parent. Disabled widgets don't receive events themselves
-        # (and the event propagates only to the nearest enabled ancestor, not
-        # the dialog), so the filter must sit on the application and route by
-        # global position.
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
-
-    # -----------------------------------------------------------------------
-    # Dependent-checkbox pulse
-    # -----------------------------------------------------------------------
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.MouseButtonPress and self._pulse_dependencies:
-            global_pos = event.globalPos()
-            for child, parent_chk in self._pulse_dependencies.items():
-                if not child.isEnabled() and child.isVisible():
-                    local = child.mapFromGlobal(global_pos)
-                    if child.rect().contains(local):
-                        self._pulse_parent_text(parent_chk)
-                        hint = self._dependency_hints.get(child)
-                        if hint is not None:
-                            hint.show()
-                        break
-        return super().eventFilter(obj, event)
-
-    def closeEvent(self, event):
-        app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
-        super().closeEvent(event)
-
-    def _pulse_parent_text(self, chk: QCheckBox) -> None:
-        """Single brief text-color flash on a QCheckBox. Indicator untouched."""
-        if chk.property("_pulse_active"):
-            return
-        saved = chk.styleSheet()
-        chk.setProperty("_pulse_active", True)
-        chk.setStyleSheet("QCheckBox { color: #4aa3ff; }")
-
-        def _restore():
-            chk.setStyleSheet(saved)
-            chk.setProperty("_pulse_active", False)
-
-        QTimer.singleShot(350, _restore)
-
-    def _hide_hint(self, child: QCheckBox) -> None:
-        hint = self._dependency_hints.get(child)
-        if hint is not None:
-            hint.hide()
-
-    # -----------------------------------------------------------------------
-    # Overlay color pickers
-    # -----------------------------------------------------------------------
-    @staticmethod
-    def _swatch_style(rgb: list[int]) -> str:
-        r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
-        return f"background-color: rgb({r},{g},{b}); border: 1px solid #444;"
-
-    # Display-name overrides for color picker labels. Internal keys (used as
-    # dict keys in VEIN_COLORS / REGION_COLORS and as override-dict keys) stay
-    # short; the GUI shows a friendlier label.
-    _COLOR_LABEL_OVERRIDES = {
-        "EV": "ectopic vein (EV)",
-    }
-
-    def _populate_color_grid(
-        self,
-        gb: QGroupBox,
-        state: dict[str, list[int]],
-        btn_map: dict[str, QPushButton],
-        *,
-        kind: str,
-    ) -> None:
-        """Fill ``gb`` with a 3-column grid of (swatch, label) pairs.
-
-        Swatch sits to the left of its label. Both widgets are explicitly
-        AlignVCenter so the fixed-height swatch and auto-sized QLabel line up
-        in the same row regardless of column widths.
-        Click a swatch → QColorDialog → write the new RGB triplet back into
-        ``state`` and restyle the button.
-        """
-        grid = QGridLayout(gb)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        cols = 3
-        for idx, (key, rgb) in enumerate(state.items()):
-            row, col_pair = divmod(idx, cols)
-            col = col_pair * 2  # each pair occupies two columns (swatch + label)
-            display = self._COLOR_LABEL_OVERRIDES.get(key, key)
-            btn = QPushButton()
-            btn.setFixedSize(48, 22)
-            btn.setStyleSheet(self._swatch_style(rgb))
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip(f"Choose a color for {display}")
-            btn.clicked.connect(lambda _checked=False, k=key, b=btn, kd=kind: self._on_color_swatch_clicked(k, b, kd))
-            grid.addWidget(btn, row, col, Qt.AlignVCenter | Qt.AlignLeft)
-            label = QLabel(display)
-            label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-            grid.addWidget(label, row, col + 1, Qt.AlignVCenter | Qt.AlignLeft)
-            btn_map[key] = btn
-        # Push (swatch, label) pairs to the left so trailing space absorbs
-        # any extra width rather than stretching the label columns.
-        grid.setColumnStretch(cols * 2, 1)
-
-    def _on_color_swatch_clicked(self, key: str, btn: QPushButton, kind: str) -> None:
-        state = self._vein_color_state if kind == "vein" else self._region_color_state
-        current = state.get(key, [128, 128, 128])
-        initial = QColor(int(current[0]), int(current[1]), int(current[2]))
-        display = self._COLOR_LABEL_OVERRIDES.get(key, key)
-        chosen = QColorDialog.getColor(initial, self, f"Pick color for {display}")
-        if not chosen.isValid():
-            return
-        rgb = [chosen.red(), chosen.green(), chosen.blue()]
-        state[key] = rgb
-        btn.setStyleSheet(self._swatch_style(rgb))
-
-    def _wrap_with_hint(self, chk: QCheckBox, hint_text: str) -> tuple[QWidget, QLabel]:
-        """Pair a checkbox with a 'requires X' label without altering its size.
-
-        Returns (row_widget, hint_label). The HBox uses zero margins and a
-        trailing stretch so the checkbox keeps its natural sizeHint — the
-        stretch absorbs any extra horizontal space.
-        """
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(8)
-        row_layout.addWidget(chk)
-        hint = QLabel(hint_text)
-        hint.setStyleSheet("color: #4aa3ff;")
-        hint.hide()
-        row_layout.addWidget(hint)
-        row_layout.addStretch(1)
-        return row, hint
 
     # -----------------------------------------------------------------------
     # Public API
@@ -533,15 +326,11 @@ class PipelineConfigDialog(QDialog):
                     kwargs[name] = [float(x.strip()) for x in text.split(",") if x.strip()]
             elif kind == self._KIND_BOOL:
                 kwargs[name] = widget.isChecked()
-        # Overlay color overrides: only emit entries that differ from the
-        # topology defaults so unchanged sessions round-trip with None (and
-        # presets/JSON stay minimal).
-        vein_diffs = {k: list(v) for k, v in self._vein_color_state.items() if v != self._topology_vein_defaults.get(k)}
-        region_diffs = {
-            k: list(v) for k, v in self._region_color_state.items() if v != self._topology_region_defaults.get(k)
-        }
-        kwargs["vein_colors"] = vein_diffs or None
-        kwargs["region_colors"] = region_diffs or None
+        # The main window's InlineGeneralPanel owns several PipelineConfig
+        # fields that the dialog no longer renders (Scale + Output options).
+        # Preserve them from the input config so OK doesn't wipe them.
+        for field in ("um_per_px", "vein_opacity", "intervein_opacity", "vein_colors", "region_colors"):
+            kwargs[field] = getattr(self._original_config, field)
         return PipelineConfig(**kwargs)
 
     # -----------------------------------------------------------------------
@@ -568,7 +357,7 @@ class PipelineConfigDialog(QDialog):
         # JSON file in that folder — no code change needed.
         self._presets = load_presets()
         preset_row = QHBoxLayout()
-        preset_row.addWidget(QLabel("Pipeline preset:"))
+        preset_row.addWidget(QLabel("Settings preset:"))
         self._preset_combo = QComboBox()
         self._preset_combo.setToolTip(
             "Named bundles of pipeline-config settings stored as JSON in TRACE/presets/. "
@@ -586,8 +375,6 @@ class PipelineConfigDialog(QDialog):
         self._tabs = QTabWidget()
         layout.addWidget(self._tabs, stretch=1)
 
-        self._tabs.addTab(self._wrap_scrollable(self._build_general_tab()), "General")
-        self._tabs.addTab(self._wrap_scrollable(self._build_custom_distances_tab()), "Custom Distances")
         # Remembered so _reset_defaults can rebuild this tab in-place after
         # the model path changes — otherwise the gate panel keeps showing
         # the prior model's state (or its error message).
@@ -599,13 +386,6 @@ class PipelineConfigDialog(QDialog):
         self._tabs.addTab(self._wrap_scrollable(self._build_tracing_tab()), "Tracing")
         self._tabs.addTab(self._wrap_scrollable(self._build_intervein_tab()), "Intervein")
 
-        # Keep the General-tab mirror of "synthesize missing crossveins" in sync
-        # with the canonical checkbox on the Tracing tab.
-        canonical = self._widgets["synthesize_missing_crossveins"][1]
-        mirror = self._synthesize_missing_crossveins_mirror
-        canonical.toggled.connect(lambda v: mirror.setChecked(v) if mirror.isChecked() != v else None)
-        mirror.toggled.connect(lambda v: canonical.setChecked(v) if canonical.isChecked() != v else None)
-
         # Rebuild the Landmarks tab whenever the landmark model path changes
         # so the gate panel re-reads gate_config.yaml from the new folder.
         # Connected here (not in _build_models_tab) because _lm_model_edit
@@ -614,289 +394,134 @@ class PipelineConfigDialog(QDialog):
         self._lm_model_edit.textChanged.connect(self._rebuild_landmarks_tab)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
+        # Import/Save sit alongside Restore Defaults — they edit the same
+        # working buffer the dialog operates on. Import overwrites the
+        # dialog's live state; Save serializes the current widget state to
+        # JSON. OK commits both to the host window; Cancel discards them.
+        import_btn = btns.addButton("Import…", QDialogButtonBox.ActionRole)
+        import_btn.setToolTip(
+            "Load a previously-exported pipeline-config JSON file. Replaces the "
+            "settings shown in this dialog (commit with OK, discard with Cancel)."
+        )
+        import_btn.clicked.connect(self._import_config)
+        save_btn = btns.addButton("Save…", QDialogButtonBox.ActionRole)
+        save_btn.setToolTip(
+            "Save the current pipeline-config (as edited in this dialog) to a JSON file "
+            "for reuse (CLI --config or this dialog's Import)."
+        )
+        save_btn.clicked.connect(self._export_config)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         btns.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._reset_defaults)
         layout.addWidget(btns)
 
-    def _build_general_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+    # -----------------------------------------------------------------------
+    # Import / Save pipeline-config JSON
+    # -----------------------------------------------------------------------
+    def _import_config(self) -> None:
+        from PyQt5.QtWidgets import QFileDialog
 
-        gb = QGroupBox("Scale")
-        form = QFormLayout(gb)
-        self._add_float(form, "um_per_px", "Microns per pixel", 0.0001, 100.0, 4, 0.001)
-        # Show the same "[conversion factor]" placeholder as the main-window scale
-        # spinner when the user hasn't entered a value. The _PlaceholderSpinBox
-        # subclass (from _add_float) renders this via QLineEdit's native
-        # placeholder mechanism, so clicking the field clears it automatically.
-        self._widgets["um_per_px"][1].set_placeholder("conversion factor")
+        from TRACE.config_io import load_settings
 
-        # "Estimate from sample image…" — runs LandmarkLocator on a single wing,
-        # measures the L3-distal-end ↔ L1-Rs-junction pixel distance, and
-        # divides the assumed real-world distance below to derive µm/px. Writes
-        # the result into the spinbox above. If scale_estimator isn't importable
-        # (sibling dir not on sys.path), fall back to a hardcoded default and
-        # disable the button.
+        # Open in the bundled TRACE/presets/ folder so users land in the
+        # right place by default. Falls back to CWD if the folder is missing.
+        presets_dir = Path(__file__).resolve().parent / "presets"
+        initial_dir = str(presets_dir) if presets_dir.is_dir() else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Pipeline Config", initial_dir, "JSON (*.json);;All Files (*)"
+        )
+        if not path:
+            return
         try:
-            from scale_estimator import DEFAULT_REFERENCE_DISTANCE_UM
+            new_config, gate_override, gui_state = load_settings(Path(path))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Import failed", f"Could not load config:\n{e}")
+            return
+        # Refresh every dispatch-table widget from the imported config.
+        self._load_from_config(new_config)
+        # Replace the snapshot so get_config() preserves the new inline-panel
+        # fields (um_per_px, opacities, colors) when OK is clicked.
+        self._original_config = new_config
+        # gate_override is None when the file predates the field — leave the
+        # current override untouched in that case.
+        if gate_override is not None:
+            self._initial_gate_override = gate_override
+            # Rebuild the Landmarks tab so the gate panel reflects the imported
+            # override against the (possibly changed) landmark-model path.
+            self._rebuild_landmarks_tab()
+        # Apply GUI-only state (Settings-tab toggles, model paths, custom
+        # distances, etc.) directly to the host window. This is an immediate,
+        # non-revertible operation — Cancel'ing the dialog does NOT undo
+        # imported GUI flags. The PipelineConfig portion DOES still revert
+        # on Cancel because it lives in the dialog's working buffer.
+        host = self.parent()
+        if gui_state and host is not None and hasattr(host, "apply_gui_state"):
+            host.apply_gui_state(gui_state)
+            # Re-seed dialog widgets that mirror host state we just updated.
+            if hasattr(host, "_wing_expand_fraction"):
+                self._wing_expand_spin.setValue(float(host._wing_expand_fraction))
+            if hasattr(host, "_wing_isolation_model_path"):
+                self._wing_model_edit.setText(str(host._wing_isolation_model_path or ""))
+            if hasattr(host, "_landmark_model_path"):
+                self._lm_model_edit.setText(str(host._landmark_model_path or ""))
+            if hasattr(host, "_segmentation_model_path"):
+                self._seg_model_edit.setText(str(host._segmentation_model_path or ""))
+            if hasattr(host, "_include_unreliable_landmarks"):
+                self._include_unreliable_landmarks_chk.setChecked(bool(host._include_unreliable_landmarks))
+        QMessageBox.information(self, "Import complete", f"Imported pipeline-config from:\n{path}")
 
-            _scale_estimator_ok = True
-        except ImportError:
-            DEFAULT_REFERENCE_DISTANCE_UM = 2200.0
-            _scale_estimator_ok = False
-        # Mirrored onto self so the lazy "Wing length reference" popup can
-        # disable its own "Estimate from one wing…" button when the package
-        # isn't importable.
-        self._scale_estimator_available = _scale_estimator_ok
+    def _export_config(self) -> None:
+        from PyQt5.QtWidgets import QFileDialog
 
-        # Reference-distance spinbox is kept alive (used by
-        # _estimate_um_per_px_from_sample as `reference_um`) but not added to
-        # the layout — the UI is simplified down to a single compact button
-        # for now. Re-add to a layout to expose it again.
-        self._scale_ref_um_spin = QDoubleSpinBox()
-        self._scale_ref_um_spin.setRange(1.0, 100000.0)
-        self._scale_ref_um_spin.setDecimals(1)
-        self._scale_ref_um_spin.setSingleStep(10.0)
-        self._scale_ref_um_spin.setValue(float(DEFAULT_REFERENCE_DISTANCE_UM))
-        self._scale_ref_um_spin.setSuffix(" µm")
-        self._scale_ref_um_spin.setToolTip(
-            "Assumed real-world distance between the L3 distal end and the "
-            "L1-Rs junction. The estimator divides this by the measured pixel "
-            "distance to derive µm/px. Default 2200 µm matches a typical "
-            "Drosophila wing."
+        from TRACE.config_io import save_settings
+
+        # Default save location is TRACE/presets/ so saved presets appear in
+        # the same place the preset combo at the top of the dialog reads from.
+        presets_dir = Path(__file__).resolve().parent / "presets"
+        if presets_dir.is_dir():
+            default_path = str(presets_dir / "pipeline_config.json")
+        else:
+            default_path = "pipeline_config.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Pipeline Config", default_path, "JSON (*.json);;All Files (*)"
         )
-        est_btn = QToolButton()
-        est_btn.setText("Estimate")
-        est_btn.setToolTip(
-            "Runs the landmark model on up to 100 images from the selected "
-            "input folder (or on the input file if a single image is "
-            "selected). For each image, the L3-distal-end ↔ L1-Rs-junction "
-            "pixel distance is measured; the median µm/px across the batch "
-            "(= reference µm / measured px) is written into the field above. "
-            "Requires an input path on the main window and the landmark "
-            "model set on the Models tab."
-        )
-        est_btn.clicked.connect(self._estimate_um_per_px_from_sample)
-        if not _scale_estimator_ok:
-            est_btn.setEnabled(False)
-            self._scale_ref_um_spin.setEnabled(False)
-            est_btn.setToolTip(
-                "scale_estimator is not importable. Add scaleEstimator/ to sys.path "
-                "(or install it with `pip install -e scaleEstimator`) and reopen the dialog."
-            )
-        est_help_btn = QToolButton()
-        est_help_btn.setText("?")
-        est_help_btn.setToolTip("Configure the wing-length reference distance used by Estimate")
-        est_help_btn.setAutoRaise(True)
-        est_help_btn.clicked.connect(self._show_scale_reference_dialog)
-        if not _scale_estimator_ok:
-            est_help_btn.setEnabled(False)
-        est_row = QHBoxLayout()
-        est_row.setContentsMargins(0, 0, 0, 0)
-        est_row.addWidget(est_btn)
-        est_row.addWidget(est_help_btn)
-        est_row.addStretch(1)
-        # Single-arg addRow spans both form columns so the button sits flush
-        # against the groupbox's left edge instead of indented under the
-        # form's value column.
-        form.addRow(est_row)
-        layout.addWidget(gb)
-
-        gb = QGroupBox("Optional preprocessing steps")
-        opt_layout = QVBoxLayout(gb)
-        self._wing_enable_chk = QCheckBox("Wing isolation")
-        self._wing_enable_chk.setToolTip(
-            "Isolates the main (image-centered) wing and masks out everything else "
-            "before the rest of the pipeline sees the image. Useful when the frame "
-            "contains multiple wings or stray tissue around the wing of interest. "
-            "Requires a wing-isolation model — pick it in the Models tab."
-        )
-        self._wing_enable_chk.toggled.connect(self._on_wing_isolation_toggled)
-        opt_layout.addWidget(self._wing_enable_chk)
-        self._do_rotation_chk = QCheckBox("Rotate wing")
-        self._do_rotation_chk.setToolTip(
-            "When checked, each wing is rotated so it sits right-side-up rather than at "
-            "a skewed angle (rotation only — no mirroring or flipping). Runs as the LAST "
-            "preprocessing step: every model inference (wing isolation, landmark "
-            "detection, segmentation) still happens on the original un-rotated image, "
-            "and the image + every produced GeoJSON (landmarks, wing, segmentation) are "
-            "rotated together so identifyFeatures sees a self-consistent set. Skipped "
-            "automatically when fewer than 2 reliable landmarks are available."
-        )
-        opt_layout.addWidget(self._do_rotation_chk)
-        self._rotation_mirror_correct_chk = QCheckBox("Flip wing to canonical orientation")
-        self._rotation_mirror_correct_chk.setToolTip(
-            "When checked AND wingRotator detects a wing of opposite chirality from the "
-            "canonical (right-wing) template, apply a vertical reflection on top of the "
-            "rotation so the wing ends up distal-right AND anterior-up. Useful for visual "
-            "consistency across mixed left+right wing batches, but flips biological "
-            "chirality (a left wing is mirrored to look like a right wing). Default off: "
-            "rotation only, opposite-chirality wings end up distal-left, anterior-up."
-        )
-        flip_row, flip_hint = self._wrap_with_hint(self._rotation_mirror_correct_chk, "requires Rotate wing")
-        opt_layout.addWidget(flip_row)
-        self._dependency_hints[self._rotation_mirror_correct_chk] = flip_hint
-        layout.addWidget(gb)
-
-        gb = QGroupBox("Crossvein detection")
-        form = QFormLayout(gb)
-        self._synthesize_missing_crossveins_mirror = QCheckBox("Synthesize ACV/PCV from landmarks when not detected")
-        self._synthesize_missing_crossveins_mirror.setToolTip(_FIELD_TOOLTIPS["synthesize_missing_crossveins"])
-        form.addRow("", self._synthesize_missing_crossveins_mirror)
-        layout.addWidget(gb)
-
-        gb = QGroupBox("Intermediate outputs")
-        gb.setToolTip(
-            "Upstream/intermediate artifacts written before final overlays + CSV. "
-            "Toggle which ones to keep alongside the final outputs."
-        )
-        im_layout = QVBoxLayout(gb)
-        self._intermediate_output_chks: dict[str, QCheckBox] = {}
-        for key, label in OUTPUT_TYPES.items():
-            if key not in INTERMEDIATE_OUTPUTS:
-                continue
-            chk = QCheckBox(label)
-            chk.setChecked(False)
-            tip = _INTERMEDIATE_TOOLTIPS.get(key)
-            if tip:
-                chk.setToolTip(tip)
-            self._intermediate_output_chks[key] = chk
-            if key == "wing_isolated_image":
-                iso_row, iso_hint = self._wrap_with_hint(chk, "requires Wing isolation")
-                im_layout.addWidget(iso_row)
-                self._dependency_hints[chk] = iso_hint
-            else:
-                im_layout.addWidget(chk)
-        # The "Isolated wing image" intermediate output is only meaningful when
-        # the Wing isolation preprocessing step runs. Mirror the same UX as
-        # the Rotate-wing → Flip-wing pair: the dependent checkbox grays out
-        # when the parent is off, and toggling the dependent on auto-enables
-        # the parent so the user doesn't end up with an output they can't get.
-        iso_chk = self._intermediate_output_chks.get("wing_isolated_image")
-        if iso_chk is not None:
-            iso_chk.setEnabled(self._wing_enable_chk.isChecked())
-            self._wing_enable_chk.toggled.connect(iso_chk.setEnabled)
-            iso_chk.toggled.connect(
-                lambda checked: (
-                    self._wing_enable_chk.setChecked(True)
-                    if checked and not self._wing_enable_chk.isChecked()
-                    else None
-                )
-            )
-            self._pulse_dependencies[iso_chk] = self._wing_enable_chk
-            self._wing_enable_chk.toggled.connect(lambda checked: self._hide_hint(iso_chk) if checked else None)
-        layout.addWidget(gb)
-
-        gb = QGroupBox("Output options")
-        out_layout = QVBoxLayout(gb)
-        # The checkbox sits directly in the QVBox so it's left-aligned with
-        # the rest of the dialog's checkboxes — adding it via QFormLayout
-        # would indent it under the (empty) label column.
-        self._show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
-        self._show_vein_tissue_chk.setToolTip(
-            "When off (default), the per-wing overlay only shows vein skeleton "
-            "centerlines. When on, it also fills the buffered vein tissue polygons."
-        )
-        out_layout.addWidget(self._show_vein_tissue_chk)
-        form = QFormLayout()
-        # Opacity controls for the vein and intervein layers. 0 = invisible,
-        # 1 = fully opaque. Registered via the standard _add_float dispatch
-        # path so to_config / _load_from_config round-trip them automatically.
-        self._add_float(form, "vein_opacity", "Vein opacity", 0.0, 1.0, 2, 0.05)
-        self._add_float(form, "intervein_opacity", "Intervein opacity", 0.0, 1.0, 2, 0.05)
-        out_layout.addLayout(form)
-        # Vein and intervein region color pickers. Layout: 3-column grid of
-        # (label, swatch) pairs so the 10/8 rows stay compact in the dialog.
-        vein_gb = QGroupBox("Vein colors")
-        vein_gb.setToolTip("Click a swatch to choose a custom color for that vein in the overlay.")
-        self._populate_color_grid(vein_gb, self._vein_color_state, self._vein_color_btns, kind="vein")
-        out_layout.addWidget(vein_gb)
-        region_gb = QGroupBox("Intervein region colors")
-        region_gb.setToolTip("Click a swatch to choose a custom color for that intervein region in the overlay.")
-        self._populate_color_grid(region_gb, self._region_color_state, self._region_color_btns, kind="region")
-        out_layout.addWidget(region_gb)
-        layout.addWidget(gb)
-
-        gb = QGroupBox("Parallel processing")
-        gb_layout = QVBoxLayout(gb)
-
-        from TRACE.calibrate_widget import CalibrateWidget
-
-        self._calibrate_widget = CalibrateWidget(self)
-        self._calibrate_widget.set_paths(self._calib_input_path, self._calib_lm_path, self._calib_seg_path)
-        self._calibrate_widget.applied.connect(lambda v: self._workers_spin.setValue(int(v)))
-        gb_layout.addWidget(self._calibrate_widget)
-
-        form = QFormLayout()
-        self._workers_spin = QSpinBox()
-        self._workers_spin.setRange(1, 32)
-        self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
-        self._workers_spin.setToolTip(
-            "Number of wings to process in parallel.\n"
-            "Applies to both preprocessing (hinge chop, segmentation) and analysis (identifyFeatures).\n"
-            "The landmark forward pass is GPU-batched once upfront."
-        )
-        self._workers_spin.valueChanged.connect(self._on_workers_changed)
-        form.addRow("Workers", self._workers_spin)
-        gb_layout.addLayout(form)
-
-        layout.addWidget(gb)
-
-        layout.addStretch()
-        return w
-
-    def get_workers(self) -> int:
-        return int(self._workers_spin.value())
-
-    def select_tab(self, name: str) -> None:
-        """Switch the active tab by visible label. No-op when `name` doesn't match."""
-        for i in range(self._tabs.count()):
-            if self._tabs.tabText(i) == name:
-                self._tabs.setCurrentIndex(i)
-                return
-
-    def _on_workers_changed(self, val: int) -> None:
-        """Forward worker-count bumps to the parent window's shared warning logic."""
-        parent = self.parent()
-        if parent is not None and hasattr(parent, "maybe_show_workers_warning"):
-            parent.maybe_show_workers_warning(val)
+        if not path:
+            return
+        # Pull GUI-only state from the host window so the saved file
+        # round-trips every user-visible setting, not just PipelineConfig.
+        host = self.parent()
+        gui_state = host.get_gui_state() if host is not None and hasattr(host, "get_gui_state") else None
+        # Dialog-side widgets that mirror host state (wing_expand, model paths,
+        # include-unreliable-landmarks) override the host snapshot since the
+        # user may have edited them in this dialog session without Apply.
+        if gui_state is not None:
+            gui_state["wing_expand_fraction"] = self.get_wing_expand_fraction()
+            gui_state["wing_isolation_model_path"] = self.get_wing_isolation_model_path()
+            gui_state["landmark_model_path"] = self.get_landmark_model_path()
+            gui_state["segmentation_model_path"] = self.get_segmentation_model_path()
+            gui_state["landmark_target_um_per_px"] = self.get_landmark_target_um_per_px()
+            gui_state["segmentation_target_um_per_px"] = self.get_segmentation_target_um_per_px()
+            gui_state["wing_isolation_target_um_per_px"] = self.get_wing_isolation_target_um_per_px()
+            gui_state["active_rescale_target"] = self.get_active_rescale_target()
+            gui_state["rescale_tolerance_low"] = self.get_rescale_tolerance_low()
+            gui_state["rescale_tolerance_high"] = self.get_rescale_tolerance_high()
+            gui_state["include_unreliable_landmarks"] = self.get_include_unreliable_landmarks()
+        try:
+            save_settings(self.get_config(), self.get_gate_override(), Path(path), gui_state=gui_state)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", f"Could not save config:\n{e}")
+            return
+        QMessageBox.information(self, "Save complete", f"Saved pipeline-config to:\n{path}")
 
     def get_wing_expand_fraction(self) -> float:
         return float(self._wing_expand_spin.value())
 
-    def get_wing_isolation_enabled(self) -> bool:
-        return bool(self._wing_enable_chk.isChecked())
-
     def get_wing_isolation_model_path(self) -> str:
         return self._wing_model_edit.text().strip()
 
-    def get_intermediate_outputs(self) -> dict[str, bool]:
-        return {key: chk.isChecked() for key, chk in self._intermediate_output_chks.items()}
-
-    def get_distance_sample_image(self) -> str:
-        """Last-entered sample-image path in the Custom Distances picker."""
-        if self._distance_picker is None:
-            return self._distance_sample_image
-        return self._distance_picker.image_path()
-
-    def get_distance_sample_landmarks(self) -> str:
-        """Last-entered landmarks-GeoJSON path in the Custom Distances picker."""
-        if self._distance_picker is None:
-            return self._distance_sample_landmarks
-        return self._distance_picker.landmarks_path()
-
-    def get_user_landmark_distances(self) -> list[dict]:
-        """Return the configured custom landmark-distance pairs (list of dicts)."""
-        return list(self._user_landmark_distances)
-
-    def _on_wing_isolation_toggled(self, checked: bool):
-        self._wing_model_edit.setEnabled(checked)
-        self._wing_model_browse.setEnabled(checked)
-        self._wing_expand_spin.setEnabled(checked)
-
     def _select_wing_model_folder(self):
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -910,80 +535,14 @@ class PipelineConfigDialog(QDialog):
     # -----------------------------------------------------------------------
     # GUI-only flag accessors (not part of PipelineConfig)
     # -----------------------------------------------------------------------
-    def get_show_vein_tissue(self) -> bool:
-        return self._show_vein_tissue_chk.isChecked()
-
     def get_include_unreliable_landmarks(self) -> bool:
         return self._include_unreliable_landmarks_chk.isChecked()
-
-    def get_do_rotation(self) -> bool:
-        return self._do_rotation_chk.isChecked()
-
-    def get_rotation_mirror_correct(self) -> bool:
-        return self._rotation_mirror_correct_chk.isChecked()
 
     def get_gate_override(self) -> dict | None:
         """Confidence-gate override built from the Landmarks tab, or None if untouched."""
         if self._gate_panel is None:
             return self._initial_gate_override
         return self._gate_panel.result_override()
-
-    def _build_custom_distances_tab(self) -> QWidget:
-        """Tab embedding the napari-based landmark-distance picker.
-
-        The whole tab body is a `LandmarkPickerWidget`: file pickers for a
-        sample image + landmarks GeoJSON, an embedded napari canvas, and a
-        side panel for managing the configured pairs.
-        """
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        info = QLabel(
-            "Configure straight-line distances between any two landmarks. Each pair adds "
-            "custom_<label>_px (and _um when scale is set) columns to the batch CSV. "
-            "Pairs are stored by landmark name and applied to every wing in the batch."
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet("color: #aaa;")
-        layout.addWidget(info)
-
-        try:
-            from measurement_maker import LandmarkPair, LandmarkPickerWidget, pairs_from_dicts
-        except ImportError as exc:
-            err = QLabel(
-                "measurement_maker is not importable. Install with:\n\n"
-                "    pip install -e measurementMaker\n\n"
-                f"Import error: {exc}"
-            )
-            err.setWordWrap(True)
-            err.setStyleSheet("color: #f88; padding: 12px;")
-            layout.addWidget(err)
-            layout.addStretch()
-            self._distance_picker = None
-            return w
-
-        initial: list[LandmarkPair] = pairs_from_dicts(self._user_landmark_distances)
-        self._distance_picker = LandmarkPickerWidget(
-            parent=w,
-            initial_pairs=initial,
-            default_image_dir=self._calib_input_path or "",
-            initial_image_path=self._distance_sample_image,
-            initial_landmarks_path=self._distance_sample_landmarks,
-        )
-        self._distance_picker.pairs_changed.connect(self._on_distance_pairs_changed)
-        layout.addWidget(self._distance_picker, stretch=1)
-        return w
-
-    def _on_distance_pairs_changed(self, pairs):
-        """Mirror the embedded picker's pair list onto the dialog's serialized state.
-
-        Stored as plain dicts for QSettings/JSON round-trip compatibility.
-        """
-        from dataclasses import asdict
-
-        self._user_landmark_distances = [asdict(p) for p in pairs]
 
     def _build_landmarks_tab(self) -> QWidget:
         """Confidence-gate editor tab. Requires a landmark model path; otherwise placeholder."""
@@ -1326,6 +885,7 @@ class PipelineConfigDialog(QDialog):
     def _autodetect_target_um_per_px(self, spin: QDoubleSpinBox, get_model_path_fn) -> None:
         """Open a folder picker, run autodetect, write the average into `spin`."""
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         seed_path = ""
@@ -1364,285 +924,6 @@ class PipelineConfigDialog(QDialog):
             "TIFF file(s) with usable metadata).",
         )
 
-    def _show_scale_reference_dialog(self) -> None:
-        # Lazy-build a popup that hosts the reference-distance spinbox plus
-        # the "estimate from one wing" picker. The spinbox lives on `self`
-        # (not in the main Settings layout) so the Estimate button can keep
-        # reading its value without taking up real-estate on the General tab.
-        dlg = getattr(self, "_scale_ref_dialog", None)
-        if dlg is None:
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Wing length reference")
-            dlg_form = QFormLayout(dlg)
-            # Explanatory text lives on the spinbox tooltip (set at
-            # construction); no inline info label here.
-            dlg_form.addRow("Wing length reference", self._scale_ref_um_spin)
-
-            pick_btn = QPushButton("Estimate from one wing…")
-            pick_btn.setToolTip(
-                "Pick a single wing image. The landmark model runs on that "
-                "one wing and µm/px = (reference µm) / (measured L3-distal-end "
-                "↔ L1-Rs-junction distance in px) is written into the µm/px "
-                "field on the General tab."
-            )
-            pick_btn.clicked.connect(lambda: self._estimate_um_per_px_from_picked_image(dlg))
-            # Disable the picker when scale_estimator isn't importable — same
-            # condition that disables the main Estimate button.
-            if not getattr(self, "_scale_estimator_available", True):
-                pick_btn.setEnabled(False)
-                pick_btn.setToolTip(
-                    "scale_estimator is not importable. Add scaleEstimator/ to sys.path "
-                    "(or install it with `pip install -e scaleEstimator`) and reopen the dialog."
-                )
-            dlg_form.addRow(pick_btn)
-
-            btns = QDialogButtonBox(QDialogButtonBox.Close)
-            btns.rejected.connect(dlg.accept)
-            dlg_form.addRow(btns)
-            self._scale_ref_dialog = dlg
-        dlg.exec_()
-
-    def _confirm_scale_estimator_caveats(self) -> bool:
-        """Warn the user that the estimator is approximate before kicking it
-        off. Returns True if the user wants to proceed."""
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("Estimated scale — read first")
-        box.setText(
-            "This tool <b>estimates</b> µm/px by assuming a fixed wing length "
-            "(default 2200 µm — the L3 distal end ↔ L1-Rs junction distance)."
-        )
-        box.setInformativeText(
-            "Real wing length varies with genotype, sex, rearing conditions, "
-            "and individual specimens, and the landmark predictions themselves "
-            "carry residual error. The output is only as accurate as those "
-            "assumptions allow.\n\n"
-            "For publication-quality data, calibrate µm/px directly — e.g. "
-            "from a stage-micrometer image taken under the same optics, or "
-            "from the microscope's TIFF / OME-XML metadata — rather than "
-            "relying on this estimate.\n\n"
-            "Continue with the estimate?"
-        )
-        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        box.setDefaultButton(QMessageBox.Cancel)
-        return box.exec_() == QMessageBox.Ok
-
-    def _estimate_um_per_px_from_picked_image(self, host_dialog: QDialog | None = None) -> None:
-        """Open a file picker, run LandmarkLocator on the chosen wing, and
-        write the derived µm/px into the Scale spinbox."""
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtWidgets import QApplication, QFileDialog
-        from TRACE.gui import _picker_initial_path
-
-        if not self._confirm_scale_estimator_caveats():
-            return
-
-        lm_path = ""
-        try:
-            lm_path = self._lm_model_edit.text().strip()
-        except AttributeError:
-            lm_path = self._calib_lm_path or ""
-        if not lm_path:
-            QMessageBox.warning(
-                self,
-                "No landmark model",
-                "Set the Landmark model on the Models tab first — the estimator "
-                "needs it to detect the L3 distal end and the L1-Rs junction.",
-            )
-            return
-
-        seed = self._calib_input_path or lm_path
-        image_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select a wing image",
-            _picker_initial_path(seed),
-            "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.ome.tif);;All Files (*)",
-        )
-        if not image_path:
-            return
-
-        reference_um = float(self._scale_ref_um_spin.value())
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            from scale_estimator import ScaleEstimate, ScaleEstimationError, estimate_um_per_px
-
-            estimate: ScaleEstimate = estimate_um_per_px(
-                Path(image_path),
-                Path(lm_path),
-                reference_distance_um=reference_um,
-            )
-        except ScaleEstimationError as exc:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "Estimate failed", str(exc))
-            return
-        except Exception as exc:  # noqa: BLE001
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(
-                self,
-                "Estimate failed",
-                f"Could not run the landmark model on this image:\n{exc}",
-            )
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        um_spin = self._widgets["um_per_px"][1]
-        um_spin.setValue(float(estimate.um_per_px))
-        flags = []
-        if not estimate.dtip_reliable:
-            flags.append("L3 distal end low confidence")
-        if not estimate.l1_rs_reliable:
-            flags.append("L1-Rs junction low confidence")
-        flag_line = ("\n\nWarning: " + "; ".join(flags) + ".") if flags else ""
-        QMessageBox.information(
-            self,
-            "Scale estimated",
-            f"Sample image:        {Path(image_path).name}\n"
-            f"L3 distal end ↔ L1-Rs junction:   {estimate.distance_px:.1f} px\n"
-            f"Reference distance:  {estimate.reference_distance_um:.1f} µm\n"
-            f"Estimated scale:     {estimate.um_per_px:.4f} µm/px"
-            f"{flag_line}",
-        )
-        if host_dialog is not None:
-            host_dialog.accept()
-
-    # Cap on how many images the Estimate button feeds to the batch estimator.
-    # The aggregated µm/px is the median across successful estimates; ~100
-    # images is plenty to settle the median while keeping inference under ~1
-    # minute on common hardware.
-    _SCALE_ESTIMATOR_MAX_IMAGES = 100
-
-    def _estimate_um_per_px_from_sample(self) -> None:
-        """Run LandmarkLocator on up to N images from the selected input folder
-        and write the median µm/px into the Scale spinbox."""
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtWidgets import QApplication, QProgressDialog
-
-        if not self._confirm_scale_estimator_caveats():
-            return
-
-        # Landmark model lives on the Models tab, which is built after the
-        # General tab — but only after construction finishes, so this attribute
-        # is always set by the time the user clicks the button.
-        lm_path = ""
-        try:
-            lm_path = self._lm_model_edit.text().strip()
-        except AttributeError:
-            lm_path = self._calib_lm_path or ""
-        if not lm_path:
-            QMessageBox.warning(
-                self,
-                "No landmark model",
-                "Set the Landmark model on the Models tab first — the estimator "
-                "needs it to detect the L3 distal end and the L1-Rs junction.",
-            )
-            return
-
-        input_path_str = (self._calib_input_path or "").strip()
-        if not input_path_str:
-            QMessageBox.warning(
-                self,
-                "No input folder",
-                "Pick an input image or folder on the main window first — the "
-                "estimator runs on the images in that folder.",
-            )
-            return
-
-        input_path = Path(input_path_str)
-        if input_path.is_file():
-            image_paths = [input_path]
-        elif input_path.is_dir():
-            try:
-                from preprocessing.pipeline import discover_images
-            except ImportError as exc:
-                QMessageBox.critical(
-                    self,
-                    "Cannot list folder",
-                    f"preprocessing.discover_images is not importable:\n{exc}",
-                )
-                return
-            discovered = discover_images(input_path, recursive=False)
-            if not discovered:
-                QMessageBox.warning(
-                    self,
-                    "No images found",
-                    f"No supported image files in:\n{input_path}",
-                )
-                return
-            image_paths = discovered[: self._SCALE_ESTIMATOR_MAX_IMAGES]
-        else:
-            QMessageBox.warning(
-                self,
-                "Input not found",
-                f"Input path does not exist:\n{input_path_str}",
-            )
-            return
-
-        reference_um = float(self._scale_ref_um_spin.value())
-
-        progress = QProgressDialog(
-            f"Estimating scale on {len(image_paths)} image(s)…",
-            "Cancel",
-            0,
-            len(image_paths),
-            self,
-        )
-        progress.setWindowTitle("Estimating scale")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        QApplication.processEvents()
-
-        def _on_progress(done: int, total: int) -> bool:
-            progress.setMaximum(total)
-            progress.setValue(done)
-            QApplication.processEvents()
-            return progress.wasCanceled()
-
-        try:
-            from scale_estimator import FolderScaleEstimate, ScaleEstimationError, estimate_um_per_px_from_paths
-
-            result: FolderScaleEstimate = estimate_um_per_px_from_paths(
-                image_paths,
-                Path(lm_path),
-                reference_distance_um=reference_um,
-                progress_callback=_on_progress,
-            )
-        except ScaleEstimationError as exc:
-            progress.close()
-            QMessageBox.warning(self, "Estimate failed", str(exc))
-            return
-        except Exception as exc:  # noqa: BLE001
-            progress.close()
-            QMessageBox.critical(
-                self,
-                "Estimate failed",
-                f"Could not run the landmark model:\n{exc}",
-            )
-            return
-        finally:
-            progress.close()
-
-        um_spin = self._widgets["um_per_px"][1]
-        um_spin.setValue(float(result.um_per_px))
-        notes = []
-        if result.cancelled:
-            notes.append("Cancelled by user — median computed over the images processed so far.")
-        n_low_conf = sum(
-            1 for _, est, _ in result.per_image if est is not None and (not est.dtip_reliable or not est.l1_rs_reliable)
-        )
-        if n_low_conf:
-            notes.append(f"{n_low_conf} of {result.n_used} estimate(s) had a low-confidence landmark.")
-        note_line = ("\n\n" + "\n".join(notes)) if notes else ""
-        QMessageBox.information(
-            self,
-            "Scale estimated",
-            f"Images used:          {result.n_used} of {result.n_tried}\n"
-            f"Reference distance:   {result.reference_distance_um:.1f} µm\n"
-            f"Estimated scale:      {result.um_per_px:.4f} µm/px (median)"
-            f"{note_line}",
-        )
-
     def get_landmark_target_um_per_px(self) -> float | None:
         v = float(self._lm_target_spin.value())
         return v if v > 0 else None
@@ -1678,6 +959,7 @@ class PipelineConfigDialog(QDialog):
         from pathlib import Path as _P
 
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -1699,6 +981,7 @@ class PipelineConfigDialog(QDialog):
 
     def _select_segmentation_model_folder(self):
         from PyQt5.QtWidgets import QFileDialog
+
         from TRACE.gui import _picker_initial_path
 
         folder = QFileDialog.getExistingDirectory(
@@ -2031,37 +1314,17 @@ class PipelineConfigDialog(QDialog):
                 widget.setText(", ".join(f"{x:g}" for x in val))
             elif kind == self._KIND_BOOL:
                 widget.setChecked(bool(val))
-        # Overlay color overrides: start from topology defaults, layer any
-        # overrides on top, restyle the swatch buttons.
-        for key, default_rgb in self._topology_vein_defaults.items():
-            override = (config.vein_colors or {}).get(key)
-            rgb = list(override) if override is not None else list(default_rgb)
-            self._vein_color_state[key] = rgb
-            btn = self._vein_color_btns.get(key)
-            if btn is not None:
-                btn.setStyleSheet(self._swatch_style(rgb))
-        for key, default_rgb in self._topology_region_defaults.items():
-            override = (config.region_colors or {}).get(key)
-            rgb = list(override) if override is not None else list(default_rgb)
-            self._region_color_state[key] = rgb
-            btn = self._region_color_btns.get(key)
-            if btn is not None:
-                btn.setStyleSheet(self._swatch_style(rgb))
+        # Overlay color overrides (vein_colors / region_colors) are owned by
+        # the main window's InlineGeneralPanel — the dialog no longer renders
+        # color pickers, so nothing to restore here.
 
     def _reset_defaults(self):
         self._load_from_config(PipelineConfig())
-        # Scale: PipelineConfig.um_per_px defaults to None; _load_from_config skips
-        # None floats, so explicitly snap the spinbox to its minimum (which shows
-        # the "[conversion factor]" placeholder).
-        um_spin = self._widgets["um_per_px"][1]
-        um_spin.setValue(um_spin.minimum())
-        self._show_vein_tissue_chk.setChecked(False)
+        # Scale (um_per_px) lives in the main window's InlineGeneralPanel and
+        # is preserved across this reset — only the advanced/dialog-owned
+        # PipelineConfig fields are wiped.
         self._include_unreliable_landmarks_chk.setChecked(False)
-        self._do_rotation_chk.setChecked(False)
-        self._rotation_mirror_correct_chk.setChecked(False)
-        self._workers_spin.setValue(DEFAULT_MAX_WORKERS)
         self._wing_expand_spin.setValue(0.05)
-        self._wing_enable_chk.setChecked(False)
         # Reset model paths to the bundled defaults at TRACE/models/* so
         # Restore Defaults gives the user a runnable configuration on first
         # touch. Missing default folders fall back to "" (empty), which
@@ -2081,12 +1344,6 @@ class PipelineConfigDialog(QDialog):
         # model's gate_config.yaml. Without this, the tab keeps showing the
         # prior model's state (or an error if it was missing a YAML).
         self._rebuild_landmarks_tab()
-        self._on_wing_isolation_toggled(False)
-        for chk in self._intermediate_output_chks.values():
-            chk.setChecked(False)
-        parent = self.parent()
-        if parent is not None and hasattr(parent, "reset_workers_warning"):
-            parent.reset_workers_warning()
 
     def _rebuild_landmarks_tab(self) -> None:
         """Re-read gate_config.yaml from the currently-selected landmark folder
@@ -2110,10 +1367,45 @@ class PipelineConfigDialog(QDialog):
             self._tabs.setCurrentIndex(self._landmarks_tab_index)
 
     def _apply_selected_preset(self):
+        from dataclasses import fields as _dc_fields
+
         name = self._preset_combo.currentText()
         if not name or name not in self._presets:
             return
-        # Apply the preset's overrides on top of the user's current widget
-        # state — fields not listed in the preset are preserved.
-        new_config = dataclass_replace(self.get_config(), **self._presets[name])
+        preset = self._presets[name]
+        # Presets are JSON dicts that may carry non-PipelineConfig keys
+        # (e.g. `gate_override`, `gui_state`). Split so dataclass_replace
+        # only sees PipelineConfig fields.
+        valid_field_names = {f.name for f in _dc_fields(PipelineConfig)}
+        config_overrides = {k: v for k, v in preset.items() if k in valid_field_names}
+        new_config = dataclass_replace(self.get_config(), **config_overrides)
         self._load_from_config(new_config)
+        # Replace the snapshot so get_config() preserves the preset's
+        # um_per_px / vein_opacity / intervein_opacity / colors when OK is
+        # clicked (those fields are no longer in the dispatch table).
+        self._original_config = new_config
+        # Apply the preset's gate_override (if any) and rebuild the Landmarks
+        # tab so the gate panel reflects the new thresholds.
+        gate_override = preset.get("gate_override")
+        if gate_override is not None:
+            self._initial_gate_override = gate_override
+            self._rebuild_landmarks_tab()
+        # If the preset includes a saved gui_state block (new format), apply
+        # it to the host window immediately so all the GUI-only flags (model
+        # paths, intermediate outputs, workers, etc.) update too.
+        gui_state = preset.get("gui_state")
+        host = self.parent()
+        if gui_state and host is not None and hasattr(host, "apply_gui_state"):
+            host.apply_gui_state(gui_state)
+            # Re-seed dialog widgets that mirror host state we just updated
+            # (same handling as Import).
+            if hasattr(host, "_wing_expand_fraction"):
+                self._wing_expand_spin.setValue(float(host._wing_expand_fraction))
+            if hasattr(host, "_wing_isolation_model_path"):
+                self._wing_model_edit.setText(str(host._wing_isolation_model_path or ""))
+            if hasattr(host, "_landmark_model_path"):
+                self._lm_model_edit.setText(str(host._landmark_model_path or ""))
+            if hasattr(host, "_segmentation_model_path"):
+                self._seg_model_edit.setText(str(host._segmentation_model_path or ""))
+            if hasattr(host, "_include_unreliable_landmarks"):
+                self._include_unreliable_landmarks_chk.setChecked(bool(host._include_unreliable_landmarks))
