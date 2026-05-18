@@ -14,6 +14,11 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 90  # PyInstaller + Inno Setup on a cold runner
+    # The default GITHUB_TOKEN is read-only; softprops/action-gh-release
+    # needs `contents: write` to create or update the Release that the
+    # installer gets attached to.
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repo (with submodules sibling layout)
