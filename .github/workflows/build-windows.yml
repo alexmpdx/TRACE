@@ -54,15 +54,19 @@ jobs:
         shell: pwsh
 
       - name: Install Inno Setup
-        # Pre-installed on windows-latest runners but the path varies;
-        # the official action handles version pinning + PATH setup.
-        uses: ConfigureAwait/inno-setup-action@v1
-        with:
-          inno-setup-version: "6.2.2"
+        # Chocolatey is pre-installed on windows-latest. innosetup is the
+        # official package; --no-progress quiets the install log.
+        run: |
+          choco install innosetup --no-progress -y
+        shell: pwsh
 
       - name: Build installer
+        # Chocolatey installs Inno Setup to C:\Program Files (x86)\Inno Setup 6.
+        # Call iscc by full path so we don't depend on the post-install PATH
+        # refresh taking effect in this shell.
         run: |
-          iscc /DSourceDir=..\..\dist\TRACE TRACE\build\installer.iss
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & "$iscc" /DSourceDir=..\..\dist\TRACE TRACE\build\installer.iss
         shell: pwsh
 
       - name: Upload installer artifact
