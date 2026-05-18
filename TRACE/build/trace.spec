@@ -1,0 +1,141 @@
+# PyInstaller spec for the TRACE Windows build.
+#
+# Build with:  pyinstaller TRACE/build/trace.spec --noconfirm
+# Produces:    dist/TRACE/  (onedir bundle with TRACE.exe at its root)
+#
+# Onedir (not onefile) because:
+#   - Faster startup (no per-launch extraction to a temp folder)
+#   - Easier to debug missing files
+#   - Inno Setup wraps the whole folder cleanly
+#
+# Hidden imports cover the sibling packages that TRACE.gui adds to sys.path
+# at runtime — PyInstaller's static analysis misses dynamic sys.path
+# additions, so it would otherwise skip bundling those packages' modules.
+
+import sys
+from pathlib import Path
+
+# Repo root: TRACE/build/trace.spec → TRACE/build → TRACE → mapThemVeins
+ROOT = Path(SPECPATH).parent.parent
+TRACE = ROOT / "TRACE"
+
+block_cipher = None
+
+# --- Sibling packages bundled alongside TRACE -----------------------------
+# Each sibling exports a top-level module that TRACE.gui (or its imports)
+# needs at runtime. PyInstaller pulls them in via the `pathex` search path
+# plus explicit hiddenimports.
+_SIBLINGS = [
+    "HingeChopper",
+    "modelTOjson",
+    "identifyFeatures",
+    "wingRotator",
+    "measurementMaker",
+    "scaleEstimator",
+    "wingIsolator",
+    "resolutionAdjust",
+    "LandmarkLocator",
+    "preprocessing",
+]
+_pathex = [str(ROOT / s) for s in _SIBLINGS]
+
+# Modules whose imports are too dynamic for PyInstaller's static analysis.
+# Add to this list if a fresh Windows launch raises ImportError.
+hiddenimports = [
+    # Sibling top-level packages
+    "hinge_chopper",
+    "modeltojson",
+    "identify_features",
+    "wingrotator",
+    "measurement_maker",
+    "scale_estimator",
+    "wingIsolator",
+    "resolutionAdjust",
+    "landmark_locator",
+    "preprocessing",
+    # Heavy native deps with sub-modules PyInstaller misses
+    "torch",
+    "torchvision",
+    "cv2",
+    "scipy.special.cython_special",
+    "skimage.io._plugins",
+    "sklearn.utils._cython_blas",
+    "pymupdf",
+    "rawpy",
+    "tifffile",
+    "psd_tools",
+    "napari",
+    # PyQt5 plugins
+    "PyQt5.sip",
+]
+
+# --- Data files (kept relative to TRACE.exe at runtime) -------------------
+# Format: (source_glob, target_dir_inside_bundle)
+datas = [
+    (str(TRACE / "GUI_images"), "TRACE/GUI_images"),
+    (str(TRACE / "presets"), "TRACE/presets"),
+    (str(TRACE / "README.md"), "TRACE"),
+]
+
+# napari + matplotlib ship their own data + Qt plugins; PyInstaller hooks
+# usually catch them, but the explicit collect helps on Windows where the
+# Qt plugin search path defaults can miss.
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+datas += collect_data_files("napari")
+datas += collect_data_files("napari_console", include_py_files=False)
+datas += collect_data_files("vispy")
+hiddenimports += collect_submodules("napari")
+hiddenimports += collect_submodules("vispy")
+hiddenimports += collect_submodules("magicgui")
+
+
+a = Analysis(
+    [str(TRACE / "run_gui.py")],
+    pathex=[str(ROOT)] + _pathex,
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[
+        # Test suites — bloat without value for end users.
+        "pytest",
+        "tornado",
+        # CUDA libs — we ship CPU torch.
+        "torch.cuda",
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="TRACE",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,  # GUI app — no console window
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    # icon=str(TRACE / "GUI_images" / "trace_icon.ico"),  # add when we have one
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="TRACE",
+)

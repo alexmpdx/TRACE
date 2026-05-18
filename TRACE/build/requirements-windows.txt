@@ -1,0 +1,52 @@
+# Consolidated Python deps for the Windows PyInstaller build.
+# Mirrors the union of requirements across LandmarkLocator, wingIsolator,
+# modelTOjson, identifyFeatures, measurementMaker, and TRACE itself.
+#
+# torch is pinned to CPU wheels (no CUDA) — smaller download (~200 MB vs
+# ~2 GB for GPU) and works on every Windows machine without a GPU.
+# To switch to a CUDA build, replace the --index-url line with the
+# appropriate one from https://pytorch.org/get-started/locally/.
+
+# --- PyTorch CPU build -----------------------------------------------------
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+
+# --- Core scientific stack -------------------------------------------------
+numpy
+scipy
+pandas
+scikit-image
+scikit-learn
+shapely
+networkx
+geojson
+matplotlib
+tqdm
+pyyaml
+
+# --- Imaging --------------------------------------------------------------
+opencv-python
+Pillow
+pillow-heif
+tifffile
+rawpy
+psd-tools
+pymupdf
+czifile
+nd2
+readlif
+cairosvg
+rasterio
+
+# --- ML --------------------------------------------------------------------
+albumentations
+onnxruntime
+segmentation-models-pytorch
+
+# --- GUI -------------------------------------------------------------------
+PyQt5
+napari[pyqt5]
+
+# --- Build tools (PyInstaller itself) --------------------------------------
+pyinstaller>=6.0

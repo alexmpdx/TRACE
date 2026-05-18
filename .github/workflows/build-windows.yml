@@ -1,0 +1,86 @@
+name: Build Windows installer
+
+# Triggers:
+#   - Manual: Actions tab → "Build Windows installer" → Run workflow
+#   - Tag: push a tag matching windows-v*  (e.g. windows-v0.1) →
+#     installer is uploaded as a Release asset on that tag automatically.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "windows-v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90  # PyInstaller + Inno Setup on a cold runner
+
+    steps:
+      - name: Checkout repo (with submodules sibling layout)
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          # Cache key includes the consolidated requirements file so a
+          # change to deps invalidates the cache automatically.
+          cache-dependency-path: TRACE/build/requirements-windows.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          # The consolidated requirements file pulls torch from the
+          # PyTorch CPU index. -e installs the sibling packages in
+          # editable mode so their modules resolve like they do in dev.
+          python -m pip install -r TRACE/build/requirements-windows.txt
+          python -m pip install -e identifyFeatures
+          python -m pip install -e measurementMaker
+          python -m pip install -e LandmarkLocator
+
+      - name: Run PyInstaller
+        run: |
+          pyinstaller TRACE/build/trace.spec --noconfirm
+        shell: pwsh
+
+      - name: Verify dist contents
+        run: |
+          dir dist\TRACE
+          if (-not (Test-Path dist\TRACE\TRACE.exe)) {
+            Write-Error "TRACE.exe missing from dist/"
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Install Inno Setup
+        # Pre-installed on windows-latest runners but the path varies;
+        # the official action handles version pinning + PATH setup.
+        uses: ConfigureAwait/inno-setup-action@v1
+        with:
+          inno-setup-version: "6.2.2"
+
+      - name: Build installer
+        run: |
+          iscc /DSourceDir=..\..\dist\TRACE TRACE\build\installer.iss
+        shell: pwsh
+
+      - name: Upload installer artifact
+        # Artifacts are downloadable from the Actions run page even for
+        # workflow_dispatch builds (handy for testing before tagging).
+        uses: actions/upload-artifact@v4
+        with:
+          name: TRACE-Setup
+          path: TRACE/build/Output/TRACE-Setup.exe
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        # Only when triggered by a windows-v* tag — uploads the installer
+        # as a release asset so end users can download it from the
+        # Releases page without digging through Actions artifacts.
+        if: startsWith(github.ref, 'refs/tags/windows-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TRACE/build/Output/TRACE-Setup.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true
