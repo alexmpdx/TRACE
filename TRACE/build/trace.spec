@@ -100,8 +100,9 @@ from PyInstaller.utils.hooks import (
 
 _METADATA_PACKAGES = [
     "napari",
-    "napari_svg",
+    "napari-svg",
     "napari-console",
+    "napari-builtins",
     "qtpy",
     "magicgui",
     "superqt",
@@ -114,6 +115,20 @@ _METADATA_PACKAGES = [
     "pydantic",
     "numpydoc",
     "freetype-py",
+    # imageio — the actual root cause from the last failed launch.
+    # napari_builtins.io.__init__ imports imageio, which at module-init
+    # time calls importlib.metadata.version("imageio") to set __version__.
+    # Without the .dist-info that call raises PackageNotFoundError, and
+    # napari catches it and surfaces the misleading "Cannot show napari
+    # window" message. imageio_ffmpeg is the codec plugin imageio probes.
+    "imageio",
+    "imageio-ffmpeg",
+    # ome_types ships a napari.yaml manifest that the napari plugin
+    # discovery hits during viewer creation.
+    "ome-types",
+    # tifffile / dask occasionally get probed by napari io
+    "tifffile",
+    "dask",
 ]
 for pkg in _METADATA_PACKAGES:
     try:
@@ -124,7 +139,21 @@ for pkg in _METADATA_PACKAGES:
         # failing the whole build on a name that wasn't there.
         pass
 
-_COLLECT_ALL_PACKAGES = ["napari", "vispy", "magicgui", "superqt", "qtpy"]
+# collect_all pulls in submodules, data files, AND binaries. Add the
+# napari plugin packages here so their plugin manifest YAMLs land in the
+# bundle — they're not Python imports so collect_submodules misses them.
+_COLLECT_ALL_PACKAGES = [
+    "napari",
+    "napari_builtins",
+    "napari_console",
+    "napari_svg",
+    "vispy",
+    "magicgui",
+    "superqt",
+    "qtpy",
+    "imageio",
+    "ome_types",
+]
 for pkg in _COLLECT_ALL_PACKAGES:
     try:
         _data, _bin, _hidden = collect_all(pkg)
@@ -140,6 +169,7 @@ for pkg in _COLLECT_ALL_PACKAGES:
 hiddenimports += collect_submodules("napari")
 hiddenimports += collect_submodules("vispy")
 hiddenimports += collect_submodules("magicgui")
+hiddenimports += collect_submodules("imageio")
 
 
 a = Analysis(

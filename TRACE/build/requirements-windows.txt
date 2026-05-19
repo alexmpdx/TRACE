@@ -47,6 +47,13 @@ segmentation-models-pytorch
 # --- GUI -------------------------------------------------------------------
 PyQt5
 napari[pyqt5]
+# imageio is a transitive dep of napari_builtins.io. Pin it explicitly so
+# the .dist-info that napari probes via importlib.metadata is definitely
+# present at build time.
+imageio
+imageio-ffmpeg
+napari-svg
+ome-types
 
 # --- Build tools (PyInstaller itself) --------------------------------------
 pyinstaller>=6.0
