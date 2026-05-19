@@ -38,6 +38,7 @@ if _se_dir not in sys.path:
 # below (imports, Qt setup, napari plugin load, etc.) leaves a trace.
 from TRACE.startup_log import (  # noqa: E402
     install_global_excepthook,
+    install_logging_bridge,
     install_qt_message_handler,
     log,
     log_exception,
@@ -51,6 +52,11 @@ install_global_excepthook()
 # napari uses Qt logging before its "Cannot show napari window" dialog
 # fires, so the real underlying error lands here.
 install_qt_message_handler()
+# Python logging bridge — measurement_maker.embedded_picker calls
+# logger.exception("Failed to load wing into picker") and then shows a
+# user-facing QMessageBox. The traceback that exception emits is the
+# real cause of the napari "Cannot show napari window" message.
+install_logging_bridge()
 
 log("run_gui.py: launcher entry")
 log(f"sys.path[:8] = {sys.path[:8]}")

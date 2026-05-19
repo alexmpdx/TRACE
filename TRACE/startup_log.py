@@ -143,3 +143,50 @@ def install_qt_message_handler() -> None:
 
     qInstallMessageHandler(_handler)
     install_qt_message_handler._done = True  # type: ignore[attr-defined]
+
+
+def install_logging_bridge() -> None:
+    """Bridge Python's logging module into the startup log file.
+
+    Libraries call ``logger.exception(...)`` to record a traceback before
+    showing the user a sanitised error dialog. In a PyInstaller windowed
+    build, those records normally vanish because no logging handler is
+    attached and stderr is None. This handler captures every WARNING+
+    record (and anything with exc_info, which covers logger.exception
+    even at INFO level) and writes it through the startup log.
+    Idempotent.
+    """
+    if getattr(install_logging_bridge, "_done", False):
+        return
+    import logging
+
+    class _StartupLogHandler(logging.Handler):
+        def emit(self, record):
+            # Only capture warnings+ or anything with attached exc_info.
+            # Otherwise the file fills up with INFO-level chatter from
+            # urllib, torch, etc.
+            if record.levelno < logging.WARNING and not record.exc_info:
+                return
+            try:
+                msg = self.format(record)
+                log(f"PYLOG[{record.levelname}] {record.name}: {msg}")
+                if record.exc_info:
+                    import traceback
+
+                    tb = "".join(traceback.format_exception(*record.exc_info))
+                    for line in tb.rstrip().splitlines():
+                        log(f"    {line}")
+            except Exception:
+                pass
+
+    handler = _StartupLogHandler()
+    handler.setLevel(logging.DEBUG)  # filtering happens in emit() by level+exc_info
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    # If the root logger's level is still WARNING (Python's default),
+    # logger.exception(...) on a non-root logger may still get filtered.
+    # Lower to INFO so logger.info() with exc_info=True propagates.
+    if root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+    install_logging_bridge._done = True  # type: ignore[attr-defined]
