@@ -76,15 +76,67 @@ datas = [
     (str(TRACE / "presets"), "TRACE/presets"),
     (str(TRACE / "README.md"), "TRACE"),
 ]
+# Initialized empty so the collect_all loop below can append to it before
+# the Analysis call. The Analysis() invocation receives this list directly.
+binaries = []
 
-# napari + matplotlib ship their own data + Qt plugins; PyInstaller hooks
-# usually catch them, but the explicit collect helps on Windows where the
-# Qt plugin search path defaults can miss.
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+# napari + its Qt ecosystem rely heavily on .dist-info metadata at runtime
+# (importlib.metadata.distribution(...) lookups for entry points, version,
+# plugin discovery). PyInstaller's static analysis often skips those
+# folders, which produces napari's "No package metadata was found for An
+# error occurred when importing Qt dependencies. Cannot show napari
+# window" error on first launch — the metadata lookup that should reveal
+# the real underlying ImportError fails first.
+#
+# Use copy_metadata for everything napari touches at import time, and
+# collect_all (data + binaries + hidden submodules) for the major
+# packages so we don't have to chase down individual misses.
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_data_files,
+    collect_submodules,
+    copy_metadata,
+)
 
-datas += collect_data_files("napari")
-datas += collect_data_files("napari_console", include_py_files=False)
-datas += collect_data_files("vispy")
+_METADATA_PACKAGES = [
+    "napari",
+    "napari_svg",
+    "napari-console",
+    "qtpy",
+    "magicgui",
+    "superqt",
+    "psygnal",
+    "vispy",
+    "PyQt5",
+    "pint",
+    "app_model",
+    "in_n_out",
+    "pydantic",
+    "numpydoc",
+    "freetype-py",
+]
+for pkg in _METADATA_PACKAGES:
+    try:
+        datas += copy_metadata(pkg)
+    except Exception:
+        # Some packages may not be installed (e.g. napari_console pulls in
+        # qtconsole which we may not have); skip silently rather than
+        # failing the whole build on a name that wasn't there.
+        pass
+
+_COLLECT_ALL_PACKAGES = ["napari", "vispy", "magicgui", "superqt", "qtpy"]
+for pkg in _COLLECT_ALL_PACKAGES:
+    try:
+        _data, _bin, _hidden = collect_all(pkg)
+        datas += _data
+        binaries += _bin
+        hiddenimports += _hidden
+    except Exception:
+        pass
+
+# Belt-and-suspenders: explicit submodule lists for the ones that
+# matter most. collect_all should cover these but a duplicate entry is
+# cheaper than a missed one.
 hiddenimports += collect_submodules("napari")
 hiddenimports += collect_submodules("vispy")
 hiddenimports += collect_submodules("magicgui")
@@ -93,7 +145,7 @@ hiddenimports += collect_submodules("magicgui")
 a = Analysis(
     [str(TRACE / "run_gui.py")],
     pathex=[str(ROOT)] + _pathex,
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
