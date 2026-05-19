@@ -33,6 +33,16 @@ _se_dir = str(Path(__file__).resolve().parent.parent / "scaleEstimator")
 if _se_dir not in sys.path:
     sys.path.insert(0, _se_dir)
 
+# --- Startup logging ------------------------------------------------------
+# Initialise the file logger as early as possible so anything that fails
+# below (imports, Qt setup, napari plugin load, etc.) leaves a trace.
+from TRACE.startup_log import log, log_exception, log_path_str  # noqa: E402
+
+log("run_gui.py: launcher entry")
+log(f"sys.path[:8] = {sys.path[:8]}")
+
+
+# --- Model bootstrap ------------------------------------------------------
 # Download bundled DL model weights on first launch (no-op once installed).
 # Runs BEFORE importing TRACE.gui so any model-path defaults that resolve
 # at import time see a fully-populated TRACE/models/.
@@ -41,19 +51,21 @@ if _se_dir not in sys.path:
 # Qt QProgressDialog so end users see progress instead of a frozen window
 # during the 1.6 GB first-launch fetch. The QApplication created here is
 # reused by gui.main().
-from TRACE.fetch_assets import DownloadCancelled, _has_models, ensure_assets  # noqa: E402
-
-
 def _bootstrap_models() -> None:
+    log("bootstrap: importing fetch_assets")
+    from TRACE.fetch_assets import DownloadCancelled, _has_models, ensure_assets  # noqa: E402
+
     if _has_models():
+        log("bootstrap: models already present, skipping download")
         return  # Fast path — no UI needed.
 
+    log("bootstrap: models not found, starting download")
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
     app = QApplication.instance() or QApplication(sys.argv)
     dlg = QProgressDialog(
-        "Downloading TRACE models (~1.6 GB).\n" "This only happens on first launch.",
+        "Downloading TRACE models (~1.6 GB).\nThis only happens on first launch.",
         "Cancel",
         0,
         100,
@@ -80,6 +92,7 @@ def _bootstrap_models() -> None:
     try:
         ensure_assets(progress_callback=progress)
     except DownloadCancelled:
+        log("bootstrap: download cancelled by user")
         dlg.close()
         QMessageBox.information(
             None,
@@ -88,19 +101,61 @@ def _bootstrap_models() -> None:
         )
         sys.exit(0)
     except Exception as e:  # noqa: BLE001
+        log_exception("bootstrap: model download failed", e)
         dlg.close()
         QMessageBox.critical(
             None,
             "TRACE setup failed",
-            f"Could not download model weights:\n\n{e}\n\n" "Check your internet connection and re-launch TRACE.",
+            f"Could not download model weights:\n\n{e}\n\n"
+            f"Check your internet connection and re-launch TRACE.\n"
+            f"Log: {log_path_str()}",
         )
         sys.exit(1)
+    log("bootstrap: download complete")
     dlg.close()
 
 
-_bootstrap_models()
+# --- Main ------------------------------------------------------------------
+def _show_fatal_error(title: str, body: str) -> None:
+    """Best-effort error dialog. Falls back silently if Qt isn't available."""
+    try:
+        from PyQt5.QtWidgets import QApplication, QMessageBox
 
-from TRACE.gui import main  # noqa: E402
+        app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(None, title, body)
+        del app
+    except Exception:
+        pass
+
+
+try:
+    _bootstrap_models()
+
+    log("import: TRACE.gui")
+    from TRACE.gui import main  # noqa: E402
+
+    log("import: TRACE.gui OK")
+except BaseException as exc:  # noqa: BLE001
+    log_exception("import-time fatal error", exc)
+    _show_fatal_error(
+        "TRACE failed to start",
+        f"An error occurred during startup:\n\n{type(exc).__name__}: {exc}\n\n"
+        f"A full traceback has been written to:\n{log_path_str()}\n\n"
+        "Please send that file when reporting the problem.",
+    )
+    sys.exit(1)
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        log("calling gui.main()")
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001
+        log_exception("runtime fatal error in gui.main()", exc)
+        _show_fatal_error(
+            "TRACE crashed",
+            f"An error occurred while running:\n\n{type(exc).__name__}: {exc}\n\n" f"Log: {log_path_str()}",
+        )
+        sys.exit(1)

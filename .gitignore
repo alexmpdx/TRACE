@@ -11,3 +11,7 @@ LandmarkLocator/save_gui/
 # TRACE/fetch_assets.py from a GitHub Release. Too large for git
 # (~1.6 GB of .pt checkpoints, multiple files >100 MB).
 TRACE/models/
+
+# Per-run startup diagnostic log written by TRACE/startup_log.py.
+trace_startup.log
+TRACE/trace_startup.log
