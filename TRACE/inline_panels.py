@@ -1145,13 +1145,37 @@ class InlineCustomDistancesPanel(QWidget):
         self._import_error = False
         initial = pairs_from_dicts(list(self._window._user_landmark_distances))
         img_path, lm_path = self._resolve_paths()
-        self._picker = LandmarkPickerWidget(
-            parent=self,
-            initial_pairs=initial,
-            default_image_dir=self._window.input_edit.text() if hasattr(self._window, "input_edit") else "",
-            initial_image_path=img_path,
-            initial_landmarks_path=lm_path,
-        )
+        # LandmarkPickerWidget constructs a napari viewer internally —
+        # this is the most likely failure point on a fresh PyInstaller
+        # bundle (missing OpenGL drivers, vispy backend, qt plugin, etc.).
+        # Catch + log so the GUI as a whole still opens and we get a
+        # readable traceback in trace_startup.log.
+        try:
+            from TRACE.startup_log import log, log_exception
+
+            log("InlineCustomDistancesPanel: constructing LandmarkPickerWidget")
+            self._picker = LandmarkPickerWidget(
+                parent=self,
+                initial_pairs=initial,
+                default_image_dir=self._window.input_edit.text() if hasattr(self._window, "input_edit") else "",
+                initial_image_path=img_path,
+                initial_landmarks_path=lm_path,
+            )
+            log("InlineCustomDistancesPanel: LandmarkPickerWidget OK")
+        except BaseException as exc:  # noqa: BLE001
+            log_exception("LandmarkPickerWidget construction failed", exc)
+            err = QLabel(
+                f"Custom Measurements unavailable — failed to start the napari viewer:\n\n"
+                f"{type(exc).__name__}: {exc}\n\n"
+                "See trace_startup.log next to TRACE.exe for the full traceback."
+            )
+            err.setWordWrap(True)
+            err.setStyleSheet("color: #f88; padding: 12px;")
+            layout.addWidget(err)
+            layout.addStretch()
+            self._picker = None
+            self._import_error = True
+            return
         self._picker.pairs_changed.connect(self._on_pairs_changed)
         layout.addWidget(self._picker, stretch=1)
         # Auto-load when both paths point at real files — covers the bundled-

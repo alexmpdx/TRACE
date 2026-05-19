@@ -85,3 +85,61 @@ def log_exception(prefix: str, exc: Optional[BaseException] = None) -> None:
 def log_path_str() -> str:
     """Return the log path as a string for error-dialog messages."""
     return str(LOG_PATH)
+
+
+def install_global_excepthook() -> None:
+    """Route any uncaught Python exception into the startup log.
+
+    PyInstaller windowed builds have no console, so a stray uncaught
+    exception inside the Qt event loop (e.g. inside a signal handler)
+    crashes the app silently with no traceback. This hook captures it.
+    Idempotent.
+    """
+    if getattr(install_global_excepthook, "_done", False):
+        return
+    prev_hook = sys.excepthook
+
+    def _hook(exc_type, exc_value, exc_tb) -> None:
+        try:
+            log_exception(f"UNCAUGHT EXCEPTION ({exc_type.__name__})", exc_value)
+        except Exception:
+            pass
+        try:
+            prev_hook(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+
+    sys.excepthook = _hook
+    install_global_excepthook._done = True  # type: ignore[attr-defined]
+
+
+def install_qt_message_handler() -> None:
+    """Route Qt log messages (qDebug/qWarning/qCritical/qFatal) into the
+    startup log. Napari emits its "Cannot show napari window" error via
+    Qt's logging before raising/dialoging, so capturing this stream
+    surfaces the real cause. Safe to call before QApplication exists.
+    """
+    if getattr(install_qt_message_handler, "_done", False):
+        return
+    try:
+        from PyQt5.QtCore import QtCriticalMsg, QtDebugMsg, QtFatalMsg, QtInfoMsg, QtWarningMsg, qInstallMessageHandler
+    except Exception:
+        return
+
+    _level_names = {
+        QtDebugMsg: "DEBUG",
+        QtInfoMsg: "INFO",
+        QtWarningMsg: "WARNING",
+        QtCriticalMsg: "CRITICAL",
+        QtFatalMsg: "FATAL",
+    }
+
+    def _handler(mode, context, message: str) -> None:
+        try:
+            level = _level_names.get(mode, str(mode))
+            log(f"QT[{level}] {message}")
+        except Exception:
+            pass
+
+    qInstallMessageHandler(_handler)
+    install_qt_message_handler._done = True  # type: ignore[attr-defined]

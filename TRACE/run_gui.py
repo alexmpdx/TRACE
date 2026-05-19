@@ -36,7 +36,21 @@ if _se_dir not in sys.path:
 # --- Startup logging ------------------------------------------------------
 # Initialise the file logger as early as possible so anything that fails
 # below (imports, Qt setup, napari plugin load, etc.) leaves a trace.
-from TRACE.startup_log import log, log_exception, log_path_str  # noqa: E402
+from TRACE.startup_log import (  # noqa: E402
+    install_global_excepthook,
+    install_qt_message_handler,
+    log,
+    log_exception,
+    log_path_str,
+)
+
+# Install the global Python excepthook first so any uncaught exception
+# from this point on (including inside Qt slots) gets logged.
+install_global_excepthook()
+# Qt message handler captures qWarning / qCritical / qFatal emissions —
+# napari uses Qt logging before its "Cannot show napari window" dialog
+# fires, so the real underlying error lands here.
+install_qt_message_handler()
 
 log("run_gui.py: launcher entry")
 log(f"sys.path[:8] = {sys.path[:8]}")
