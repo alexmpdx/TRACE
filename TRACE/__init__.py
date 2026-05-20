@@ -13,9 +13,16 @@ Usage::
     )
 """
 
+# Bumped when shipping a new Windows installer; the Help-tab update check
+# compares this against the latest GitHub Release tag (strip the
+# "windows-v" prefix when comparing) to tell the user whether they're
+# behind. Bump in lockstep with the build tag you push.
+__version__ = "0.1.0"
+
 from TRACE.pipeline import TraceResult, trace_folder
 
 __all__ = [
     "trace_folder",
     "TraceResult",
+    "__version__",
 ]

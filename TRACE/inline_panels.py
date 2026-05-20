@@ -1287,12 +1287,68 @@ class InlineHelpPanel(QWidget):
         replay_row = QHBoxLayout()
         self.btn_replay_walkthrough = QPushButton("Replay walkthrough")
         self.btn_replay_walkthrough.setToolTip(
-            "Restart the first-launch walkthrough. Step through with Next / Previous, " "or skip with Esc."
+            "Restart the first-launch walkthrough. Step through with Next / Previous, or skip with Esc."
         )
         self.btn_replay_walkthrough.clicked.connect(self._window._show_walkthrough)
         replay_row.addWidget(self.btn_replay_walkthrough)
         replay_row.addStretch(1)
         layout.addLayout(replay_row)
+
+        # Update section — current installed version + button that opens the
+        # GitHub Releases page so the user can grab the latest installer.
+        # Installing over an existing TRACE upgrades it in place (Inno Setup
+        # detects the AppId match) — no need to uninstall first.
+        layout.addSpacing(12)
+        update_title = QLabel("Update")
+        update_title_font = QFont(update_title.font())
+        update_title_font.setPointSize(update_title_font.pointSize() + 2)
+        update_title_font.setBold(True)
+        update_title.setFont(update_title_font)
+        layout.addWidget(update_title)
+
+        try:
+            from TRACE import __version__ as _trace_version
+        except Exception:
+            _trace_version = "unknown"
+        self._version_label = QLabel(
+            f"<span style='color: #aaa;'>Installed version:</span> "
+            f"<span style='color: #d0d0d0;'>{_trace_version}</span>"
+        )
+        layout.addWidget(self._version_label)
+
+        update_blurb = QLabel(
+            "Get the latest TRACE installer from the project's Releases page. "
+            "Running the new installer upgrades your existing TRACE in place — "
+            "no need to uninstall first. Your settings and downloaded models "
+            "are preserved."
+        )
+        update_blurb.setWordWrap(True)
+        update_blurb.setStyleSheet("color: #aaa;")
+        layout.addWidget(update_blurb)
+
+        self._update_status_label = QLabel("")
+        self._update_status_label.setWordWrap(True)
+        self._update_status_label.setOpenExternalLinks(True)
+        self._update_status_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        layout.addWidget(self._update_status_label)
+
+        update_row = QHBoxLayout()
+        self.btn_check_updates = QPushButton("Check for updates")
+        self.btn_check_updates.setToolTip(
+            "Query the GitHub Releases page for the latest TRACE installer " "and report whether you're up to date."
+        )
+        self.btn_check_updates.clicked.connect(self._check_for_updates)
+        update_row.addWidget(self.btn_check_updates)
+
+        self.btn_open_releases = QPushButton("View all releases…")
+        self.btn_open_releases.setToolTip(
+            "Open the Releases page in your default browser. Download the "
+            "latest TRACE-Setup.exe from there and run it to upgrade."
+        )
+        self.btn_open_releases.clicked.connect(self._open_releases_page)
+        update_row.addWidget(self.btn_open_releases)
+        update_row.addStretch(1)
+        layout.addLayout(update_row)
 
         layout.addStretch(1)
 
@@ -1302,3 +1358,90 @@ class InlineHelpPanel(QWidget):
         )
         footer.setWordWrap(True)
         layout.addWidget(footer)
+
+    # -----------------------------------------------------------------------
+    # Update check
+    # -----------------------------------------------------------------------
+    _RELEASES_PAGE_URL = "https://github.com/alexmpdx/TRACE/releases"
+    _LATEST_RELEASE_API = "https://api.github.com/repos/alexmpdx/TRACE/releases/latest"
+
+    def _open_releases_page(self) -> None:
+        QDesktopServices_open = None
+        try:
+            from PyQt5.QtCore import QUrl as _QUrl
+            from PyQt5.QtGui import QDesktopServices
+
+            QDesktopServices_open = QDesktopServices.openUrl
+            QDesktopServices_open(_QUrl(self._RELEASES_PAGE_URL))
+        except Exception:
+            # Fall back to webbrowser stdlib if Qt's URL opener trips.
+            import webbrowser
+
+            webbrowser.open(self._RELEASES_PAGE_URL)
+
+    def _check_for_updates(self) -> None:
+        """Query GitHub's REST API for the latest release tag and compare.
+
+        Runs synchronously — the request is small (a few KB of JSON) and
+        completes in well under a second on a normal connection. Network
+        failures show a friendly message instead of crashing.
+        """
+        try:
+            from TRACE import __version__ as installed_version
+        except Exception:
+            installed_version = "unknown"
+
+        self._update_status_label.setText("<span style='color: #888;'>Checking for updates…</span>")
+        # Force a repaint before the blocking HTTP request so the user
+        # sees the "checking" message right away.
+        self._update_status_label.repaint()
+
+        import json
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                self._LATEST_RELEASE_API,
+                headers={"User-Agent": "TRACE-update-check"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.load(resp)
+            latest_tag = str(data.get("tag_name") or "")
+            html_url = str(data.get("html_url") or self._RELEASES_PAGE_URL)
+        except Exception as e:
+            self._update_status_label.setText(
+                f"<span style='color: #f88;'>Could not check for updates: {e}</span><br>"
+                f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>Open the Releases page manually</a>"
+            )
+            return
+
+        # Strip a "windows-v" / "v" prefix from the tag for comparison.
+        latest_version = latest_tag
+        for prefix in ("windows-v", "v"):
+            if latest_version.startswith(prefix):
+                latest_version = latest_version[len(prefix) :]
+                break
+
+        if not latest_version:
+            self._update_status_label.setText(
+                f"<span style='color: #aaa;'>No releases found on GitHub yet. "
+                f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>"
+                f"Check the Releases page</a>.</span>"
+            )
+            return
+
+        if latest_version == installed_version:
+            self._update_status_label.setText(
+                f"<span style='color: #6c6;'>✓ You're up to date " f"(installed: {installed_version}).</span>"
+            )
+            return
+
+        # The latest tag differs from the installed version. Without
+        # full semver parsing it's safer to say "different" rather than
+        # claim it's newer — but in practice tags only go up.
+        self._update_status_label.setText(
+            f"<span style='color: #ffb05a;'>A different version is available: "
+            f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
+            f"<a href='{html_url}' style='color: #4aa3ff;'>"
+            f"Open the release page and download TRACE-Setup.exe</a>"
+        )

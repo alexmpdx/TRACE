@@ -115,12 +115,10 @@ _METADATA_PACKAGES = [
     "pydantic",
     "numpydoc",
     "freetype-py",
-    # imageio — the actual root cause from the last failed launch.
+    # imageio — root cause from an earlier failed launch.
     # napari_builtins.io.__init__ imports imageio, which at module-init
     # time calls importlib.metadata.version("imageio") to set __version__.
-    # Without the .dist-info that call raises PackageNotFoundError, and
-    # napari catches it and surfaces the misleading "Cannot show napari
-    # window" message. imageio_ffmpeg is the codec plugin imageio probes.
+    # Without the .dist-info that call raises PackageNotFoundError.
     "imageio",
     "imageio-ffmpeg",
     # ome_types ships a napari.yaml manifest that the napari plugin
@@ -129,6 +127,12 @@ _METADATA_PACKAGES = [
     # tifffile / dask occasionally get probed by napari io
     "tifffile",
     "dask",
+    # torch's c10.dll fails to load on Windows when its sibling DLLs
+    # (caffe2, fbgemm, etc.) and dist-info aren't fully bundled — surfaces
+    # as "WinError 1114: A dynamic link library (DLL) initialization
+    # routine failed" on first PyTorch import (e.g. landmark model load).
+    "torch",
+    "torchvision",
 ]
 for pkg in _METADATA_PACKAGES:
     try:
@@ -142,6 +146,10 @@ for pkg in _METADATA_PACKAGES:
 # collect_all pulls in submodules, data files, AND binaries. Add the
 # napari plugin packages here so their plugin manifest YAMLs land in the
 # bundle — they're not Python imports so collect_submodules misses them.
+# torch + torchvision are listed so all their bundled DLLs (caffe2,
+# fbgemm, cudnn stubs, etc.) end up in the dist folder; without
+# collect_all the static-analysis path can miss some of c10.dll's
+# transitive native deps.
 _COLLECT_ALL_PACKAGES = [
     "napari",
     "napari_builtins",
@@ -153,6 +161,8 @@ _COLLECT_ALL_PACKAGES = [
     "qtpy",
     "imageio",
     "ome_types",
+    "torch",
+    "torchvision",
 ]
 for pkg in _COLLECT_ALL_PACKAGES:
     try:
