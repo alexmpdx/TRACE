@@ -376,16 +376,20 @@ class WalkthroughOverlay(QWidget):
     # -----------------------------------------------------------------------
     # Qt events
     # -----------------------------------------------------------------------
-    # Width of the accent ring around the highlight, in pixels. The ring
-    # is drawn entirely outside the hole edges so the overlay's mask
-    # doesn't clip any of the stroke (which is why a thinner ring drawn
-    # AT the hole edge previously showed up half-clipped on only two
-    # sides).
-    _ACCENT_RING_WIDTH = 3
-    _ACCENT_RING_OFFSET = 4  # px from hole edge to ring centerline
+    # Visual parameters tuned to match the instruction popup's border
+    # (`#WalkthroughPopup { border: 2px solid #4aa3ff; border-radius: 6px; }`)
+    # so the highlight ring and the popup look like a matched pair.
+    _ACCENT_RING_WIDTH = 2
+    _ACCENT_RING_RADIUS = 6  # corner radius in px, matches popup
+    # px from hole edge to the ring path; the 2 px pen centered on the
+    # path then paints in [hole_edge+1, hole_edge+3] — fully outside the
+    # hole, so the overlay's mask doesn't clip the stroke.
+    _ACCENT_RING_OFFSET = 2
 
     def paintEvent(self, event):  # noqa: N802 — Qt API
         painter = QPainter(self)
+        # Anti-alias the rounded corners so they read smooth, not jaggy.
+        painter.setRenderHint(QPainter.Antialiasing, True)
         # Semi-transparent dark fill across the masked region (everything
         # except the hole).
         painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
@@ -402,7 +406,7 @@ class WalkthroughOverlay(QWidget):
             # central widget's bounds when the highlighted target is at
             # the edge of the window.
             ring = ring.intersected(self.rect())
-            painter.drawRect(ring)
+            painter.drawRoundedRect(ring, self._ACCENT_RING_RADIUS, self._ACCENT_RING_RADIUS)
 
     def keyPressEvent(self, event):  # noqa: N802 — Qt API
         if event.key() == Qt.Key_Escape:
