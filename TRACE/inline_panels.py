@@ -1265,6 +1265,14 @@ class InlineHelpPanel(QWidget):
             missing.setWordWrap(True)
             layout.addWidget(missing)
 
+        # GitHub repo link — for source, issues, and contributions.
+        github_link = QLabel(
+            '<a href="https://github.com/alexmpdx/TRACE" style="color: #4aa3ff;">' "View TRACE on GitHub</a>"
+        )
+        github_link.setOpenExternalLinks(True)
+        github_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        layout.addWidget(github_link)
+
         # Walkthrough replay — re-runs the same first-launch tour the user
         # saw on initial startup. Sits in its own labeled section so it's
         # obviously distinct from the README link above.
