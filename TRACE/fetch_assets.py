@@ -79,11 +79,32 @@ def _asset_url() -> str:
     return os.environ.get("TRACE_ASSETS_URL") or _DEFAULT_ASSET_URL
 
 
+# Marker file written next to the extracted models. Contains the SHA-256
+# of the bundle that produced them. On every launch we compare against
+# `_EXPECTED_SHA256` — mismatch (or missing marker, as on installs that
+# predate this scheme) triggers a re-download so model-bundle updates
+# reach existing users without a manual TRACE/models/ wipe.
+_MARKER_FILENAME = ".trace_models_sha256"
+
+
 def _has_models() -> bool:
-    """True when models/ exists and contains at least one .pt checkpoint."""
+    """True when models/ is populated AND its marker matches _EXPECTED_SHA256.
+
+    A missing or mismatched marker counts as "not present" and forces
+    ensure_assets to re-download the bundle. That's how we propagate
+    model updates across an existing install.
+    """
     if not _MODELS_DIR.is_dir():
         return False
-    return any(_MODELS_DIR.rglob("*.pt"))
+    if not any(_MODELS_DIR.rglob("*.pt")):
+        return False
+    marker = _MODELS_DIR / _MARKER_FILENAME
+    if not marker.is_file():
+        return False
+    try:
+        return marker.read_text(encoding="utf-8").strip() == _EXPECTED_SHA256
+    except Exception:
+        return False
 
 
 def _sha256(path: Path, chunk: int = 1 << 20) -> str:
@@ -188,6 +209,12 @@ def ensure_assets(
             if target.exists():
                 shutil.rmtree(target) if target.is_dir() else target.unlink()
             shutil.move(str(child), str(target))
+        # Stamp the bundle SHA on disk so _has_models() can detect when a
+        # future _EXPECTED_SHA256 bump invalidates these files.
+        try:
+            (_MODELS_DIR / _MARKER_FILENAME).write_text(_EXPECTED_SHA256, encoding="utf-8")
+        except Exception:
+            pass
         _safe_write(f"Models installed under {_MODELS_DIR}\n")
 
 
