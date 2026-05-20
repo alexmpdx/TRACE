@@ -246,13 +246,27 @@ class InlineGeneralPanel(QWidget):
         self._build_parallel_processing_group(layout)
         layout.addStretch(1)
 
-        # Bottom row: Restore Defaults + Advanced Settings. Restore Defaults
-        # wipes only what this Settings tab owns (scale, opacities, colors,
-        # preprocessing toggles, intermediates, workers, synth-crossveins) —
-        # leaves model paths, input/output folders, and advanced PipelineConfig
-        # fields alone. Advanced Settings opens the modal PipelineConfigDialog.
+        # Bottom row: Advanced Settings, then the Restore Defaults + wipe my
+        # memories pair. Restore Defaults wipes only what this Settings tab owns
+        # (scale, opacities, colors, preprocessing toggles, intermediates,
+        # workers, synth-crossveins) — leaves model paths, input/output folders,
+        # and advanced PipelineConfig fields alone. Advanced Settings opens the
+        # modal PipelineConfigDialog.
         adv_row = QHBoxLayout()
         adv_row.addStretch(1)
+        self.btn_advanced = QPushButton("Advanced Settings…")
+        self.btn_advanced.setToolTip(
+            "Open the advanced pipeline-settings dialog: per-model gate thresholds, "
+            "skeletonization, bridging, tracing, intervein region detection."
+        )
+        self.btn_advanced.clicked.connect(self._window._open_settings_dialog)
+        adv_row.addWidget(self.btn_advanced)
+
+        # The two reset buttons sit together in one container so the TRACE
+        # walkthrough can highlight them as a pair.
+        self._reset_buttons_widget = QWidget()
+        reset_row = QHBoxLayout(self._reset_buttons_widget)
+        reset_row.setContentsMargins(0, 0, 0, 0)
         self.btn_restore_defaults = QPushButton("Restore Defaults")
         self.btn_restore_defaults.setToolTip(
             "Reset every control on this Settings tab to its factory default: scale, "
@@ -261,14 +275,7 @@ class InlineGeneralPanel(QWidget):
             "advanced PipelineConfig fields (those have their own reset)."
         )
         self.btn_restore_defaults.clicked.connect(self.restore_defaults)
-        adv_row.addWidget(self.btn_restore_defaults)
-        self.btn_advanced = QPushButton("Advanced Settings…")
-        self.btn_advanced.setToolTip(
-            "Open the advanced pipeline-settings dialog: per-model gate thresholds, "
-            "skeletonization, bridging, tracing, intervein region detection."
-        )
-        self.btn_advanced.clicked.connect(self._window._open_settings_dialog)
-        adv_row.addWidget(self.btn_advanced)
+        reset_row.addWidget(self.btn_restore_defaults)
         self.btn_wipe_memories = QPushButton("wipe my memories")
         self.btn_wipe_memories.setToolTip(
             "Clear every persisted setting — input/output folders, model paths, scale, "
@@ -276,7 +283,8 @@ class InlineGeneralPanel(QWidget):
             "snap every widget back to the state a first-time user would see."
         )
         self.btn_wipe_memories.clicked.connect(self._window._reset_gui_to_defaults)
-        adv_row.addWidget(self.btn_wipe_memories)
+        reset_row.addWidget(self.btn_wipe_memories)
+        adv_row.addWidget(self._reset_buttons_widget)
         adv_row.addStretch(1)
         layout.addLayout(adv_row)
 
@@ -340,6 +348,7 @@ class InlineGeneralPanel(QWidget):
         from TRACE.gui import _PlaceholderSpinBox
 
         gb = QGroupBox("Scale")
+        self._scale_group = gb
         form = QFormLayout(gb)
         self.scale_spin = _PlaceholderSpinBox()
         self.scale_spin.setDecimals(4)
@@ -401,6 +410,7 @@ class InlineGeneralPanel(QWidget):
 
     def _build_optional_preprocessing_group(self, parent_layout: QVBoxLayout) -> None:
         gb = QGroupBox("Optional preprocessing steps")
+        self._optional_preprocessing_group = gb
         v = QVBoxLayout(gb)
 
         self.wing_enable_chk = QCheckBox("Wing isolation")
@@ -506,6 +516,7 @@ class InlineGeneralPanel(QWidget):
 
     def _build_output_options_group(self, parent_layout: QVBoxLayout) -> None:
         gb = QGroupBox("Output options")
+        self._output_options_group = gb
         v = QVBoxLayout(gb)
 
         self.show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
@@ -548,6 +559,7 @@ class InlineGeneralPanel(QWidget):
 
     def _build_parallel_processing_group(self, parent_layout: QVBoxLayout) -> None:
         gb = QGroupBox("Parallel processing")
+        self._parallel_processing_group = gb
         v = QVBoxLayout(gb)
 
         from TRACE.calibrate_widget import CalibrateWidget
@@ -1125,6 +1137,7 @@ class InlineCustomDistancesPanel(QWidget):
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa;")
+        self._info_label = info
         layout.addWidget(info)
 
         try:

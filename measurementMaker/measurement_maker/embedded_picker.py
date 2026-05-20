@@ -148,6 +148,14 @@ class LandmarkPickerWidget(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
 
+        # Rows 1-3 (image picker, landmarks picker, load) live in one
+        # container widget so the TRACE walkthrough can highlight the
+        # source-file section as a single unit.
+        self._source_widget = QWidget()
+        source_layout = QVBoxLayout(self._source_widget)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.setSpacing(6)
+
         # Row 1: image picker
         row = QHBoxLayout()
         row.addWidget(QLabel("Sample image:"))
@@ -158,7 +166,7 @@ class LandmarkPickerWidget(QWidget):
         btn_image.clicked.connect(self._select_image)
         row.addWidget(self._image_edit, stretch=1)
         row.addWidget(btn_image)
-        outer.addLayout(row)
+        source_layout.addLayout(row)
 
         # Row 2: landmarks picker
         row = QHBoxLayout()
@@ -170,7 +178,7 @@ class LandmarkPickerWidget(QWidget):
         btn_lm.clicked.connect(self._select_landmarks)
         row.addWidget(self._lm_edit, stretch=1)
         row.addWidget(btn_lm)
-        outer.addLayout(row)
+        source_layout.addLayout(row)
 
         # Row 3: viewer options + load button
         row = QHBoxLayout()
@@ -183,7 +191,9 @@ class LandmarkPickerWidget(QWidget):
         self._load_btn = QPushButton("Load wing into viewer")
         self._load_btn.clicked.connect(self._load_clicked)
         row.addWidget(self._load_btn)
-        outer.addLayout(row)
+        source_layout.addLayout(row)
+
+        outer.addWidget(self._source_widget)
 
         # Vertical splitter: pair controls on top, viewer below.
         # Wings are much wider than tall, so giving the canvas the full row
@@ -201,13 +211,12 @@ class LandmarkPickerWidget(QWidget):
         # Left column: instructions + selection state + label entry + Add.
         left_col = QVBoxLayout()
         left_col.setSpacing(4)
-        left_col.addWidget(
-            QLabel(
-                "1. Click a landmark to select it (turns orange).\n"
-                "2. SHIFT-click a second landmark.\n"
-                "3. Type a label, click 'Add pair'."
-            )
+        self._instructions_label = QLabel(
+            "1. Click a landmark to select it (turns orange).\n"
+            "2. SHIFT-click a second landmark.\n"
+            "3. Type a label, click 'Add pair'."
         )
+        left_col.addWidget(self._instructions_label)
         self._sel_label = QLabel("Selected: (none)")
         self._sel_label.setWordWrap(True)
         left_col.addWidget(self._sel_label)

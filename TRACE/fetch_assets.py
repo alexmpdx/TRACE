@@ -28,11 +28,14 @@ from typing import Callable, Optional
 
 # GitHub Release asset URL. Bound to a specific tag so the SHA-256 lock
 # below remains meaningful — re-publishing requires a new tag + URL + SHA.
-_DEFAULT_ASSET_URL = "https://github.com/alexmpdx/TRACE/releases/download/v1.0-assets/trace_models.zip"
+# Renamed from v1.0-assets → v0.1.0-assets to match TRACE's x.x.x version
+# scheme; ships an updated vein-intervein model + retuned landmark
+# gate_config.yaml.
+_DEFAULT_ASSET_URL = "https://github.com/alexmpdx/TRACE/releases/download/v0.1.0-assets/trace_models.zip"
 # SHA-256 of the zip. Computed at release time; download is rejected if
 # the actual file hashes to anything else (guards against truncated /
 # corrupted downloads and against silent re-publish of the asset).
-_EXPECTED_SHA256 = "0d05ebc0ef566fe5d83362f6b38ae874525b18c41b5bb7d75708a9265cb19070"
+_EXPECTED_SHA256 = "a80e5d5d276eac73edc628acf6eddef0a505598a1f47e274bb24f4180f542d2a"
 
 _TRACE_DIR = Path(__file__).resolve().parent
 # Inside a PyInstaller onedir bundle, __file__ resolves into a temp Python

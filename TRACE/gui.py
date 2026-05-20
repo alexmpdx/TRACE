@@ -1615,7 +1615,30 @@ class TraceWindow(QMainWindow):
     # First-launch walkthrough
     # -----------------------------------------------------------------------
     def _walkthrough_steps(self) -> list[WalkthroughStep]:
-        """Six-step tour of the main window's key controls."""
+        """Step-by-step tour of the main window's key controls."""
+
+        def _settings_step(group_attr: str, title: str, body: str) -> WalkthroughStep:
+            """Build a step targeting a group box on the (scrollable) Settings tab.
+
+            The pre-action switches to the Settings tab and scrolls the target
+            group box into view so the highlight ring lands on it even when the
+            group sits below the fold.
+            """
+
+            def _pre(w: QWidget) -> None:
+                w.right_tabs.setCurrentIndex(1)
+                scroll = w.right_tabs.widget(1)
+                group = getattr(w.inline_general_panel, group_attr, None)
+                if group is not None and hasattr(scroll, "ensureWidgetVisible"):
+                    scroll.ensureWidgetVisible(group, 0, 40)
+
+            return WalkthroughStep(
+                target_resolver=lambda w: getattr(w.inline_general_panel, group_attr),
+                pre_action=_pre,
+                title=title,
+                body=body,
+            )
+
         return [
             WalkthroughStep(
                 target_resolver=lambda w: w.input_row,
@@ -1648,16 +1671,101 @@ class TraceWindow(QMainWindow):
                 body=("Pick what to save: various feature overlays and measurements."),
             ),
             WalkthroughStep(
-                target_resolver=lambda w: w.right_tabs.tabBar(),
-                title="Right-panel tabs",
+                target_resolver=lambda w: w.image_list,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(0),
+                title="Main tab — image queue",
                 body=(
-                    "Four tabs:  Main (image list + live log during a run),  Settings "
-                    "(preprocessing toggles, opacities, colors, advanced dialog),  "
-                    "Custom Measurements (landmark-pair measurements),  Help (README link)."
+                    "The Images list shows every wing TRACE discovered in your input "
+                    "folder. Each row updates with its status as the run proceeds."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.log_text,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(0),
+                title="Main tab — run log",
+                body=(
+                    "The Log streams progress, per-image messages, and warnings while the "
+                    "pipeline runs. Check here first if a result looks off."
+                ),
+            ),
+            _settings_step(
+                "_scale_group",
+                "Settings — Scale",
+                "Set µm/px here, or click Estimate to derive it from the landmark model. "
+                "This field stays in sync with the µm/px box on the left panel.",
+            ),
+            _settings_step(
+                "_optional_preprocessing_group",
+                "Settings — Optional preprocessing",
+                "Toggle wing isolation and wing rotation. These extra steps run before "
+                "the rest of the pipeline and are off by default. Use wing isolation "
+                "when neighboring wings are visible in your images, and wing rotation "
+                "when your wings are not right-side up.",
+            ),
+            _settings_step(
+                "_output_options_group",
+                "Settings — Output options",
+                "Control overlay appearance: vein and intervein opacity, per-vein and "
+                "per-region colors, and whether to fill buffered vein tissue.",
+            ),
+            _settings_step(
+                "_parallel_processing_group",
+                "Settings — Parallel processing",
+                "Set how many wings process at once, or use Calibrate to benchmark a "
+                "safe worker count for your machine.",
+            ),
+            _settings_step(
+                "btn_advanced",
+                "Settings — Advanced Settings",
+                "Opens a dialog of fine-grained pipeline controls: per-model gate "
+                "thresholds, skeletonization, bridging, tracing, and intervein region "
+                "detection. Most runs never need these.",
+            ),
+            _settings_step(
+                "_reset_buttons_widget",
+                "Settings — Reset options",
+                "Restore Defaults resets this tab to its factory values. wipe my "
+                "memories goes further — it clears every persisted setting (folders, "
+                "model paths, custom pairs) and returns TRACE to a first-launch state.",
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.inline_custom_distances_panel._picker._source_widget,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(2),
+                title="Custom Measurements — sample wing",
+                body=(
+                    "Pick a sample wing image and its landmarks GeoJSON, then load them "
+                    "into the viewer. A cartoon wing is loaded by default so you can "
+                    "start straight away."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.inline_custom_distances_panel._picker._instructions_label,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(2),
+                title="Custom Measurements — how it works",
+                body=(
+                    "Select two landmarks in the viewer to define a straight-line "
+                    "measurement. Each pair adds custom_<label> columns to the batch CSV "
+                    "for every wing."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.inline_help_panel.btn_replay_walkthrough,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(3),
+                title="Help — replay this walkthrough",
+                body=("Re-run this guided tour anytime from here. Step with Next / " "Previous, or press Esc to skip."),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda w: w.inline_help_panel.btn_check_updates,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(3),
+                title="Help — check for updates",
+                body=(
+                    "Check the GitHub Releases page for a newer TRACE installer. When an "
+                    "update is available, an Install Update button appears alongside."
                 ),
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.btn_run,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(0),
                 title="Run the pipeline",
                 body=(
                     "Click here when everything's set. Progress and ETA appear below the "

@@ -10,7 +10,7 @@
 ; Output lands in TRACE/build/Output/TRACE-Setup.exe by default.
 
 #define MyAppName "TRACE"
-#define MyAppVersion "0.1.1"
+#define MyAppVersion "0.1.2"
 #define MyAppPublisher "Blair Lab"
 #define MyAppURL "https://github.com/alexmpdx/TRACE"
 #define MyAppExeName "TRACE.exe"
