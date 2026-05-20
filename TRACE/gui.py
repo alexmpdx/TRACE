@@ -87,7 +87,17 @@ class _PlaceholderSpinBox(QDoubleSpinBox):
 # user doesn't have to browse for them. Each entry is checked for existence
 # at runtime — missing folders fall back to "" (empty), forcing the user to
 # pick one in Settings → Models.
-_DEFAULT_MODELS_DIR = Path(__file__).resolve().parent / "models"
+#
+# Resolution: in a PyInstaller onedir bundle, __file__ for this module
+# lives inside the per-launch temp _internal/TRACE/ folder which is
+# wiped between sessions. The actual writable models/ folder is next to
+# TRACE.exe (this is where TRACE/fetch_assets.py puts the downloaded
+# weights). Mirror that resolution here so the Models tab picks them up
+# automatically on first launch instead of leaving the picker empty.
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _DEFAULT_MODELS_DIR = Path(sys.executable).resolve().parent / "TRACE" / "models"
+else:
+    _DEFAULT_MODELS_DIR = Path(__file__).resolve().parent / "models"
 _DEFAULT_MODEL_PATHS = {
     "landmark": _DEFAULT_MODELS_DIR / "landmarks",
     "segmentation": _DEFAULT_MODELS_DIR / "vein-intervein",
