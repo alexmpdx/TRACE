@@ -8,9 +8,13 @@
 # appropriate one from https://pytorch.org/get-started/locally/.
 
 # --- PyTorch CPU build -----------------------------------------------------
+# Pinned to 2.4.1 because the latest torch wheels (2.5+) on Windows have
+# had c10.dll DllMain init failures (WinError 1114) on otherwise-modern
+# CPUs. 2.4.1 is the last known-stable release for PyInstaller bundling
+# on plain Win11 client machines without CUDA.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
+torch==2.4.1
+torchvision==0.19.1
 
 # --- Core scientific stack -------------------------------------------------
 numpy

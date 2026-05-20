@@ -95,48 +95,82 @@ def _probe_cpu_features() -> None:
 
 
 def _probe_c10_direct_load() -> None:
-    """Try to load c10.dll directly via ctypes.WinDLL.
+    """Try to load c10.dll directly via kernel32.LoadLibraryW.
 
-    This bypasses Python's import machinery so the Windows loader error
-    surfaces cleanly (with a GetLastError code we can map). Useful when
-    the higher-level `import torch` traceback is opaque about which
-    specific DLL is failing.
+    We bypass `ctypes.WinDLL` because PyInstaller wraps it to add its
+    own DLL search paths AND substitutes its own error message ("Most
+    likely this dynlib/dll was not found when the application was
+    frozen") — which swallows the real Windows GetLastError code.
+
+    Calling LoadLibraryW directly returns NULL on failure, and we can
+    pull the real Windows error number out via GetLastError + format it
+    via FormatMessageW.
     """
     if not getattr(sys, "frozen", False):
         return  # only meaningful in the bundled layout
     try:
         import ctypes
+        from ctypes import wintypes
 
         torch_lib_dir = Path(sys.executable).resolve().parent / "_internal" / "torch" / "lib"
         if not torch_lib_dir.is_dir():
             log(f"probe: c10.dll direct load skipped (no {torch_lib_dir})")
             return
-        # add_dll_directory ensures torch_global_deps.dll etc. resolve
-        # without polluting PATH.
+        # add_dll_directory ensures sibling DLLs (torch_global_deps.dll
+        # etc.) resolve without polluting PATH. Required on Python 3.8+.
         import os
 
+        added_dirs = []
         if hasattr(os, "add_dll_directory"):
             try:
-                os.add_dll_directory(str(torch_lib_dir))
+                added_dirs.append(os.add_dll_directory(str(torch_lib_dir)))
             except Exception:
                 pass
-        c10 = torch_lib_dir / "c10.dll"
-        try:
-            handle = ctypes.WinDLL(str(c10))
-            log(f"probe: c10.dll direct load OK (handle={handle._handle:#x})")
-        except OSError as e:
-            log(f"probe: c10.dll direct load FAILED")
-            log(f"    OSError.winerror = {e.winerror}")
-            log(f"    OSError.strerror = {e.strerror}")
-            log(f"    OSError.args     = {e.args}")
-            # winerror 1114 = ERROR_DLL_INIT_FAILED
-            # winerror 126  = ERROR_MOD_NOT_FOUND (missing dep)
-            # winerror 127  = ERROR_PROC_NOT_FOUND (missing export)
-            # winerror 193  = ERROR_BAD_EXE_FORMAT (arch mismatch)
-            if e.winerror == 1114:
-                log("    -> c10.dll's DllMain returned FALSE. Most common")
-                log("       cause on modern PyTorch CPU wheels: CPU lacks")
-                log("       AVX2. Check the CPU.AVX2 line above.")
+
+        # LoadLibraryW signature
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.LoadLibraryW.argtypes = [wintypes.LPCWSTR]
+        kernel32.LoadLibraryW.restype = wintypes.HMODULE
+        kernel32.GetLastError.restype = wintypes.DWORD
+        # LoadLibraryExW lets us use LOAD_WITH_ALTERED_SEARCH_PATH so
+        # dependent DLL resolution searches torch/lib alongside c10.dll.
+        LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
+        kernel32.LoadLibraryExW.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
+        kernel32.LoadLibraryExW.restype = wintypes.HMODULE
+
+        c10 = str(torch_lib_dir / "c10.dll")
+        handle = kernel32.LoadLibraryExW(c10, None, LOAD_WITH_ALTERED_SEARCH_PATH)
+        if handle:
+            log(f"probe: c10.dll LoadLibraryExW OK (handle={handle:#x})")
+            return
+        err = kernel32.GetLastError()
+        # FormatMessageW for the human-readable string.
+        FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000
+        FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200
+        buf = ctypes.create_unicode_buffer(2048)
+        kernel32.FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            None,
+            err,
+            0,
+            buf,
+            len(buf),
+            None,
+        )
+        log(f"probe: c10.dll LoadLibraryExW FAILED")
+        log(f"    GetLastError = {err} (0x{err:08x})")
+        log(f"    message      = {buf.value.strip()!r}")
+        if err == 1114:
+            log("    -> ERROR_DLL_INIT_FAILED: c10.dll's DllMain returned FALSE.")
+            log("       AVX2 was confirmed available, so this is most likely")
+            log("       a missing transitive DLL or a torch-internal CPU init")
+            log("       failure. Try pinning torch to a known-good version.")
+        elif err == 126:
+            log("    -> ERROR_MOD_NOT_FOUND: a dependency DLL is missing.")
+        elif err == 127:
+            log("    -> ERROR_PROC_NOT_FOUND: a dependency exports a missing symbol.")
+        elif err == 193:
+            log("    -> ERROR_BAD_EXE_FORMAT: 32/64-bit architecture mismatch.")
     except Exception as e:  # noqa: BLE001
         log(f"probe: c10.dll direct-load probe failed: {e}")
 
