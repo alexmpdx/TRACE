@@ -579,8 +579,19 @@ class PipelineConfigDialog(QDialog):
         try:
             from landmark_locator.scripts.gui import GateConfigPanel, read_gate_config
 
+            try:
+                from TRACE.startup_log import log, log_exception
+
+                log(f"Landmarks tab: reading gate config from {self._calib_lm_path}")
+            except Exception:
+                log = None
+                log_exception = None
             gate_config, landmark_order = read_gate_config(Path(self._calib_lm_path))
+            if log is not None:
+                log("Landmarks tab: read_gate_config OK")
         except Exception as exc:
+            if log_exception is not None:
+                log_exception("Landmarks tab: read_gate_config failed", exc)
             err = QLabel(f"Could not read gate config from {self._calib_lm_path}: {exc}")
             err.setWordWrap(True)
             err.setStyleSheet("color: #f88; padding: 12px;")

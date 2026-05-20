@@ -62,6 +62,84 @@ log("run_gui.py: launcher entry")
 log(f"sys.path[:8] = {sys.path[:8]}")
 
 
+def _probe_torch_environment() -> None:
+    """Eagerly import torch and dump its bundled-DLL inventory.
+
+    Torch's c10.dll fails to load on some Windows installs with
+    'WinError 1114: A dynamic link library (DLL) initialization routine
+    failed' — usually because a sibling DLL or a Visual C++ runtime
+    isn't where it should be. Dumping the file list lets us tell from
+    the log whether PyInstaller bundled what we expect, before the user
+    even opens the dialog that surfaces the error.
+    """
+    log("probe: importing torch")
+    try:
+        import torch  # type: ignore[import-untyped]  # noqa: F401
+
+        log(f"probe: torch import OK (version={getattr(torch, '__version__', '?')})")
+    except BaseException as exc:  # noqa: BLE001
+        log_exception("probe: torch import FAILED", exc)
+    # Inventory the torch/lib directory regardless of import success — even
+    # if import fails for another reason, this tells us what's actually on
+    # disk vs. what the error claims is missing.
+    try:
+        import torch as _torch  # noqa: F811
+
+        torch_lib_dir = Path(_torch.__file__).resolve().parent / "lib"
+    except Exception:
+        # If we can't import torch, fall back to the bundled-frozen path
+        # (run_gui.py lives at <exe-dir>/TRACE/run_gui.py for the source,
+        # but at runtime _internal/TRACE for the frozen layout). Try a
+        # few likely locations.
+        candidates = []
+        if getattr(sys, "frozen", False):
+            base = Path(sys.executable).resolve().parent
+            candidates += [
+                base / "_internal" / "torch" / "lib",
+                base / "torch" / "lib",
+            ]
+        for p in candidates:
+            if p.is_dir():
+                torch_lib_dir = p
+                break
+        else:
+            torch_lib_dir = None
+    if torch_lib_dir and torch_lib_dir.is_dir():
+        try:
+            dll_files = sorted(p.name for p in torch_lib_dir.iterdir() if p.suffix.lower() == ".dll")
+            log(f"probe: torch/lib at {torch_lib_dir} contains {len(dll_files)} DLLs:")
+            for name in dll_files:
+                log(f"    {name}")
+        except Exception as e:  # noqa: BLE001
+            log(f"probe: could not list torch/lib: {e}")
+    else:
+        log(f"probe: torch/lib directory not found (looked at {torch_lib_dir})")
+    # Microsoft Visual C++ runtime probe — c10.dll's DllMain depends on
+    # vcruntime140.dll + msvcp140.dll. If PyInstaller bundled them they
+    # land in the dist root; if not, c10.dll falls back to the system
+    # Windows\System32 copy (or errors if absent there too).
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        for runtime in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll"):
+            for candidate in (exe_dir / runtime, exe_dir / "_internal" / runtime):
+                if candidate.is_file():
+                    log(f"probe: {runtime} -> bundled at {candidate}")
+                    break
+            else:
+                # Check the system copy via ctypes — that's what Windows
+                # loader will actually fall back to.
+                try:
+                    import ctypes
+
+                    h = ctypes.WinDLL(runtime)
+                    log(f"probe: {runtime} -> NOT bundled, system load OK (handle={h._handle:#x})")
+                except OSError as e:
+                    log(f"probe: {runtime} -> NOT bundled AND system load FAILED: {e}")
+
+
+_probe_torch_environment()
+
+
 # --- Model bootstrap ------------------------------------------------------
 # Download bundled DL model weights on first launch (no-op once installed).
 # Runs BEFORE importing TRACE.gui so any model-path defaults that resolve
