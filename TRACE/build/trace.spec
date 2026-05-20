@@ -36,6 +36,9 @@ _SIBLINGS = [
     "resolutionAdjust",
     "LandmarkLocator",
     "preprocessing",
+    # CPU_RAM_tester hosts recommend_workers.py — the Calibrate Workers
+    # button on the Settings tab adds this dir to sys.path at runtime.
+    "CPU_RAM_tester",
 ]
 _pathex = [str(ROOT / s) for s in _SIBLINGS]
 
@@ -44,13 +47,13 @@ _pathex = [str(ROOT / s) for s in _SIBLINGS]
 hiddenimports = [
     # Sibling top-level packages
     "hinge_chopper",
-    # Sibling top-level scripts (not packages). HingeChopper/ has both
-    # hinge_chopper.py and hinge_psd_loader.py at its root; the latter
-    # is imported dynamically as `from hinge_psd_loader import ...` once
-    # HingeChopper/ is on sys.path. PyInstaller's static analysis sees
-    # the import but resolves it against the host's installed packages
-    # rather than the sibling-dir; pin it here so it's bundled.
-    "hinge_psd_loader",
+    # Sibling top-level scripts (not packages). PyInstaller's static
+    # analysis resolves these against the host's installed packages
+    # rather than the sibling-dir that gets added to sys.path at runtime,
+    # so they need to be pinned explicitly.
+    "hinge_psd_loader",   # HingeChopper/hinge_psd_loader.py
+    "recommend_workers",  # CPU_RAM_tester/recommend_workers.py (Calibrate Workers)
+    "wing_rotator",       # wingRotator/wing_rotator.py (Rotate-wing preprocessing)
     "modeltojson",
     "identify_features",
     "wingrotator",
