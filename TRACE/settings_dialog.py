@@ -576,22 +576,27 @@ class PipelineConfigDialog(QDialog):
             layout.addStretch()
             return w
 
+        # Bind the logger names BEFORE the outer try so they're defined in
+        # the except clause regardless of whether the try ever reached the
+        # inner import (the previous version crashed with UnboundLocalError
+        # when read_gate_config raised before the inner try ran).
+        try:
+            from TRACE.startup_log import log as _log
+            from TRACE.startup_log import log_exception as _log_exc
+        except Exception:
+            _log = None
+            _log_exc = None
         try:
             from landmark_locator.scripts.gui import GateConfigPanel, read_gate_config
 
-            try:
-                from TRACE.startup_log import log, log_exception
-
-                log(f"Landmarks tab: reading gate config from {self._calib_lm_path}")
-            except Exception:
-                log = None
-                log_exception = None
+            if _log is not None:
+                _log(f"Landmarks tab: reading gate config from {self._calib_lm_path}")
             gate_config, landmark_order = read_gate_config(Path(self._calib_lm_path))
-            if log is not None:
-                log("Landmarks tab: read_gate_config OK")
+            if _log is not None:
+                _log("Landmarks tab: read_gate_config OK")
         except Exception as exc:
-            if log_exception is not None:
-                log_exception("Landmarks tab: read_gate_config failed", exc)
+            if _log_exc is not None:
+                _log_exc("Landmarks tab: read_gate_config failed", exc)
             err = QLabel(f"Could not read gate config from {self._calib_lm_path}: {exc}")
             err.setWordWrap(True)
             err.setStyleSheet("color: #f88; padding: 12px;")

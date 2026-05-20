@@ -62,16 +62,96 @@ log("run_gui.py: launcher entry")
 log(f"sys.path[:8] = {sys.path[:8]}")
 
 
+def _probe_cpu_features() -> None:
+    """Log Windows IsProcessorFeaturePresent flags for AVX/AVX2/SSE4.2.
+
+    PyTorch 2.x CPU wheels for Windows are built requiring AVX2 — if the
+    user's CPU lacks it, c10.dll's DllMain returns FALSE and the loader
+    surfaces 'WinError 1114: DLL initialization routine failed'. This
+    probe tells us up front whether the CPU is the problem.
+    """
+    try:
+        import ctypes
+        import platform
+
+        log(f"probe: platform.processor() = {platform.processor()!r}")
+        log(f"probe: platform.machine()   = {platform.machine()!r}")
+        # IsProcessorFeaturePresent flag constants from winnt.h.
+        _PF = {
+            "SSE2": 10,
+            "SSE3": 13,
+            "SSE4_1": 37,
+            "SSE4_2": 38,
+            "AVX": 39,
+            "AVX2": 40,
+            "AVX512F": 41,
+        }
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        for name, flag in _PF.items():
+            present = bool(kernel32.IsProcessorFeaturePresent(flag))
+            log(f"probe: CPU.{name} = {present}")
+    except Exception as e:  # noqa: BLE001
+        log(f"probe: CPU feature probe failed: {e}")
+
+
+def _probe_c10_direct_load() -> None:
+    """Try to load c10.dll directly via ctypes.WinDLL.
+
+    This bypasses Python's import machinery so the Windows loader error
+    surfaces cleanly (with a GetLastError code we can map). Useful when
+    the higher-level `import torch` traceback is opaque about which
+    specific DLL is failing.
+    """
+    if not getattr(sys, "frozen", False):
+        return  # only meaningful in the bundled layout
+    try:
+        import ctypes
+
+        torch_lib_dir = Path(sys.executable).resolve().parent / "_internal" / "torch" / "lib"
+        if not torch_lib_dir.is_dir():
+            log(f"probe: c10.dll direct load skipped (no {torch_lib_dir})")
+            return
+        # add_dll_directory ensures torch_global_deps.dll etc. resolve
+        # without polluting PATH.
+        import os
+
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(str(torch_lib_dir))
+            except Exception:
+                pass
+        c10 = torch_lib_dir / "c10.dll"
+        try:
+            handle = ctypes.WinDLL(str(c10))
+            log(f"probe: c10.dll direct load OK (handle={handle._handle:#x})")
+        except OSError as e:
+            log(f"probe: c10.dll direct load FAILED")
+            log(f"    OSError.winerror = {e.winerror}")
+            log(f"    OSError.strerror = {e.strerror}")
+            log(f"    OSError.args     = {e.args}")
+            # winerror 1114 = ERROR_DLL_INIT_FAILED
+            # winerror 126  = ERROR_MOD_NOT_FOUND (missing dep)
+            # winerror 127  = ERROR_PROC_NOT_FOUND (missing export)
+            # winerror 193  = ERROR_BAD_EXE_FORMAT (arch mismatch)
+            if e.winerror == 1114:
+                log("    -> c10.dll's DllMain returned FALSE. Most common")
+                log("       cause on modern PyTorch CPU wheels: CPU lacks")
+                log("       AVX2. Check the CPU.AVX2 line above.")
+    except Exception as e:  # noqa: BLE001
+        log(f"probe: c10.dll direct-load probe failed: {e}")
+
+
 def _probe_torch_environment() -> None:
     """Eagerly import torch and dump its bundled-DLL inventory.
 
     Torch's c10.dll fails to load on some Windows installs with
     'WinError 1114: A dynamic link library (DLL) initialization routine
-    failed' — usually because a sibling DLL or a Visual C++ runtime
-    isn't where it should be. Dumping the file list lets us tell from
-    the log whether PyInstaller bundled what we expect, before the user
-    even opens the dialog that surfaces the error.
+    failed' — usually because the CPU lacks AVX2. Dumping the file list
+    + CPU features lets us tell from the log whether PyInstaller bundled
+    what we expect AND whether the host CPU can run it.
     """
+    _probe_cpu_features()
+    _probe_c10_direct_load()
     log("probe: importing torch")
     try:
         import torch  # type: ignore[import-untyped]  # noqa: F401
