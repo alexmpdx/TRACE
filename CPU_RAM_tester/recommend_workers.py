@@ -149,13 +149,16 @@ def calibrate(spec: tuple[str, Path, Path, Path | None], cli_extra: list[str]) -
     stem, det, lm, img = spec
     with tempfile.TemporaryDirectory(prefix="cpu_ram_tester_") as out_str:
         out_dir = Path(out_str)
-        cmd = [
-            sys.executable,
-            "-m",
-            "identify_features.cli",
-            str(det),
-            str(lm),
-        ]
+        # In a PyInstaller-frozen build, sys.executable is the bundled
+        # TRACE.exe (not a Python interpreter), so `-m identify_features.cli`
+        # isn't a valid invocation — running TRACE.exe with those args
+        # just opens a fresh GUI window. Use the launcher's
+        # `__identify_features_cli__` sentinel to dispatch to the CLI
+        # entry point in-process inside the subprocess instead.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "__identify_features_cli__", str(det), str(lm)]
+        else:
+            cmd = [sys.executable, "-m", "identify_features.cli", str(det), str(lm)]
         if img is not None:
             cmd.append(str(img))
         cmd += ["--output-dir", str(out_dir), *cli_extra]

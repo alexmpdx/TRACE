@@ -1,8 +1,37 @@
 #!/usr/bin/env python3
 """Entry point for the TRACE combined pipeline GUI."""
 
+# multiprocessing.freeze_support() must be called BEFORE any code that
+# can spawn child processes. On Windows the default start method is
+# "spawn", which re-executes the frozen entry point in a child process
+# — without freeze_support the child re-runs the GUI launcher path
+# instead of doing whatever the parent told it to do. Calling it
+# unconditionally is safe in dev mode (it's a no-op when not frozen).
+import multiprocessing
 import sys
 from pathlib import Path
+
+multiprocessing.freeze_support()
+
+# CLI dispatch sentinel. When TRACE.exe is invoked with this sentinel
+# as argv[1], skip the GUI and run identify_features.cli on the
+# remaining argv. recommend_workers (the Calibrate Workers backend)
+# uses this to spawn a clean inference subprocess without re-opening
+# the full TRACE main window — sys.executable inside the bundled exe
+# is TRACE.exe, not python.exe, so `python -m identify_features.cli`
+# isn't a valid invocation pattern there.
+if len(sys.argv) > 1 and sys.argv[1] == "__identify_features_cli__":
+    # Add sibling dirs to sys.path before the import — identify_features
+    # lives in identifyFeatures/, alongside TRACE/, in the bundled layout.
+    _bundle_root = Path(sys.executable).resolve().parent
+    for _sub in ("identifyFeatures", "HingeChopper", "modelTOjson", "wingRotator", "preprocessing"):
+        _p = str(_bundle_root / _sub)
+        if (_bundle_root / _sub).is_dir() and _p not in sys.path:
+            sys.path.insert(0, _p)
+    sys.argv = sys.argv[:1] + sys.argv[2:]  # drop the sentinel before forwarding
+    from identify_features.cli import main as _if_main
+
+    sys.exit(_if_main())
 
 # Add sibling package directories to sys.path
 _project_root = str(Path(__file__).resolve().parent.parent)

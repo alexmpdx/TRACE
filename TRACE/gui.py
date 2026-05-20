@@ -1563,7 +1563,8 @@ class TraceWindow(QMainWindow):
                 title="Set µm/px",
                 body=(
                     "Enter the microns-per-pixel calibration for your microscope — every "
-                    "measurement gets converted to physical units."
+                    "measurement gets converted to physical units. "
+                    "All images in the input folder must be captured at the same scale."
                 ),
             ),
             WalkthroughStep(

@@ -27,7 +27,7 @@ Usage::
 # Tags like `windows-v0.2` strip to `0.2` and won't match `__version__`
 # of `0.2.0`, which is why the update check shows the user as "out of
 # date" forever.
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from TRACE.pipeline import TraceResult, trace_folder
 
