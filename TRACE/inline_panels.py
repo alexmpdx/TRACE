@@ -20,6 +20,7 @@ itself.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -1343,10 +1344,24 @@ class InlineHelpPanel(QWidget):
         update_row = QHBoxLayout()
         self.btn_check_updates = QPushButton("Check for updates")
         self.btn_check_updates.setToolTip(
-            "Query the GitHub Releases page for the latest TRACE installer " "and report whether you're up to date."
+            "Query the GitHub Releases page for the latest TRACE installer and report whether you're up to date."
         )
         self.btn_check_updates.clicked.connect(self._check_for_updates)
         update_row.addWidget(self.btn_check_updates)
+
+        # "Install Update" only appears (a) on the frozen build, and
+        # (b) after a check that found a newer release. _check_for_updates
+        # stores the asset URL + size in self._latest_update_* before
+        # making this button visible.
+        self.btn_install_update = QPushButton("Install Update")
+        self.btn_install_update.setToolTip(
+            "Download the latest TRACE installer and launch it. The new "
+            "installer upgrades over the current install — your settings "
+            "and downloaded models are preserved."
+        )
+        self.btn_install_update.setVisible(False)
+        self.btn_install_update.clicked.connect(self._install_update)
+        update_row.addWidget(self.btn_install_update)
 
         self.btn_open_releases = QPushButton("View all releases…")
         self.btn_open_releases.setToolTip(
@@ -1357,6 +1372,11 @@ class InlineHelpPanel(QWidget):
         update_row.addWidget(self.btn_open_releases)
         update_row.addStretch(1)
         layout.addLayout(update_row)
+
+        # Populated by _check_for_updates when a newer release is found.
+        self._latest_update_url: Optional[str] = None
+        self._latest_update_size: Optional[int] = None
+        self._latest_update_version: Optional[str] = None
 
         layout.addStretch(1)
 
@@ -1416,6 +1436,18 @@ class InlineHelpPanel(QWidget):
                 data = json.load(resp)
             latest_tag = str(data.get("tag_name") or "")
             html_url = str(data.get("html_url") or self._RELEASES_PAGE_URL)
+            # Find the TRACE-Setup.exe asset on this release so the
+            # "Install Update" button can download it directly.
+            asset_url: Optional[str] = None
+            asset_size: Optional[int] = None
+            for asset in data.get("assets") or []:
+                if asset.get("name") == "TRACE-Setup.exe":
+                    asset_url = asset.get("browser_download_url") or asset.get("url")
+                    try:
+                        asset_size = int(asset.get("size") or 0) or None
+                    except Exception:
+                        asset_size = None
+                    break
         except Exception as e:
             self._update_status_label.setText(
                 f"<span style='color: #f88;'>Could not check for updates: {e}</span><br>"
@@ -1440,16 +1472,174 @@ class InlineHelpPanel(QWidget):
 
         if latest_version == installed_version:
             self._update_status_label.setText(
-                f"<span style='color: #6c6;'>✓ You're up to date " f"(installed: {installed_version}).</span>"
+                f"<span style='color: #6c6;'>✓ You're up to date (installed: {installed_version}).</span>"
+            )
+            self.btn_install_update.setVisible(False)
+            self._latest_update_url = None
+            self._latest_update_size = None
+            self._latest_update_version = None
+            return
+
+        # Newer (or just different) version available. Stash the asset
+        # URL + size for the Install Update button. If we couldn't find
+        # a TRACE-Setup.exe asset, or we're running from source rather
+        # than a frozen bundle (where launching an installer makes no
+        # sense), fall back to the release-page link.
+        self._latest_update_url = asset_url
+        self._latest_update_size = asset_size
+        self._latest_update_version = latest_version
+
+        can_install_in_place = bool(asset_url) and getattr(sys, "frozen", False) and sys.platform == "win32"
+        if can_install_in_place:
+            self.btn_install_update.setText(f"Install update {latest_version}")
+            self.btn_install_update.setVisible(True)
+            size_mb = (asset_size or 0) // (1024 * 1024)
+            size_blurb = f" ({size_mb} MB)" if size_mb else ""
+            self._update_status_label.setText(
+                f"<span style='color: #ffb05a;'>Update available: "
+                f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
+                f"<span style='color: #aaa;'>Click <b>Install update {latest_version}</b> "
+                f"to download{size_blurb} and launch the new installer.</span>"
+            )
+        else:
+            self.btn_install_update.setVisible(False)
+            self._update_status_label.setText(
+                f"<span style='color: #ffb05a;'>A different version is available: "
+                f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
+                f"<a href='{html_url}' style='color: #4aa3ff;'>"
+                f"Open the release page and download TRACE-Setup.exe</a>"
+            )
+
+    def _install_update(self) -> None:
+        """Download the latest TRACE-Setup.exe and launch it.
+
+        Called from the Install Update button after _check_for_updates
+        has populated self._latest_update_url. Shows a QProgressDialog
+        for the download; on success, runs the installer in a detached
+        process and exits the current TRACE app so the installer can
+        overwrite the .exe.
+        """
+        url = self._latest_update_url
+        version = self._latest_update_version or "?"
+        if not url:
+            self._update_status_label.setText(
+                "<span style='color: #f88;'>No installer URL — run Check for updates first.</span>"
             )
             return
 
-        # The latest tag differs from the installed version. Without
-        # full semver parsing it's safer to say "different" rather than
-        # claim it's newer — but in practice tags only go up.
-        self._update_status_label.setText(
-            f"<span style='color: #ffb05a;'>A different version is available: "
-            f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
-            f"<a href='{html_url}' style='color: #4aa3ff;'>"
-            f"Open the release page and download TRACE-Setup.exe</a>"
+        import tempfile
+
+        dst = Path(tempfile.gettempdir()) / "TRACE-Setup.exe"
+
+        dlg = QProgressDialog(
+            f"Downloading TRACE {version}…",
+            "Cancel",
+            0,
+            100,
+            self,
         )
+        dlg.setWindowTitle("TRACE update")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        dlg.show()
+        QApplication.processEvents()
+
+        cancelled = False
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(url, headers={"User-Agent": "TRACE-update"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0) or (self._latest_update_size or 0)
+                downloaded = 0
+                chunk = 1 << 20  # 1 MB
+                last_pct = -1
+                with open(dst, "wb") as out:
+                    while True:
+                        if dlg.wasCanceled():
+                            cancelled = True
+                            break
+                        buf = resp.read(chunk)
+                        if not buf:
+                            break
+                        out.write(buf)
+                        downloaded += len(buf)
+                        if total:
+                            pct = int(downloaded * 100 / total)
+                            if pct != last_pct:
+                                last_pct = pct
+                                mb_done = downloaded // (1024 * 1024)
+                                mb_total = total // (1024 * 1024)
+                                dlg.setLabelText(f"Downloading TRACE {version}…\n{mb_done} / {mb_total} MB ({pct}%)")
+                                dlg.setValue(pct)
+                        QApplication.processEvents()
+        except Exception as e:  # noqa: BLE001
+            dlg.close()
+            try:
+                dst.unlink(missing_ok=True)
+            except Exception:
+                pass
+            QMessageBox.critical(
+                self,
+                "Update download failed",
+                f"Could not download TRACE {version}:\n\n{e}\n\n"
+                f"Check your internet connection and try again, or use "
+                f"'View all releases…' to download manually.",
+            )
+            return
+        dlg.close()
+        if cancelled:
+            try:
+                dst.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._update_status_label.setText("<span style='color: #aaa;'>Update download cancelled.</span>")
+            return
+
+        # Sanity check on file size — guards against a truncated download
+        # that didn't trigger an exception above.
+        if self._latest_update_size and dst.stat().st_size != self._latest_update_size:
+            QMessageBox.critical(
+                self,
+                "Update download incomplete",
+                f"Downloaded file size ({dst.stat().st_size} bytes) does not "
+                f"match the expected size ({self._latest_update_size} bytes). "
+                f"Please try Check for updates again, or download manually.",
+            )
+            try:
+                dst.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return
+
+        # Hand off to the installer and exit the current app so it can
+        # overwrite TRACE.exe without a "file in use" error. The
+        # installer (Inno Setup) handles the rest from here.
+        try:
+            import os
+            import subprocess
+
+            if sys.platform == "win32":
+                # DETACHED_PROCESS so the child isn't killed when we exit.
+                DETACHED_PROCESS = 0x00000008
+                subprocess.Popen([str(dst)], creationflags=DETACHED_PROCESS, close_fds=True)
+            else:
+                # Dev convenience — just open the file with the system
+                # default handler. (Not the expected path; the Install
+                # Update button is gated to sys.platform == 'win32'.)
+                os.startfile(str(dst))  # noqa: SIM117
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Could not launch installer",
+                f"Downloaded the installer to:\n\n{dst}\n\n"
+                f"But couldn't launch it automatically:\n{e}\n\n"
+                f"Run TRACE-Setup.exe manually from the location above.",
+            )
+            return
+
+        # Exit TRACE so the installer can replace files.
+        QApplication.quit()
