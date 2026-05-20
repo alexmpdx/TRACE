@@ -1244,6 +1244,12 @@ class TraceWindow(QMainWindow):
         pal.setColor(QPalette.Highlight, self._progress_default_highlight)
         self.progress.setPalette(pal)
         self._run_start_time = time.monotonic()
+        # Wall-clock start so the per-run metadata folder gets a
+        # human-readable name. Captured here (not in __init__) because
+        # we only need it for the duration of a run.
+        from datetime import datetime as _dt
+
+        self._run_start_wall = _dt.now()
         self._eta_smoothed_seconds = None
         self._current_stage = None
         self._stage_first_event_time = None
@@ -1484,6 +1490,66 @@ class TraceWindow(QMainWindow):
             self._eta_smoothed_seconds = alpha * eta_raw + (1 - alpha) * self._eta_smoothed_seconds
         self.eta_label.setText(self._format_eta(self._eta_smoothed_seconds))
 
+    def _write_run_metadata(self, status: str) -> Optional[Path]:
+        """Drop a per-run folder beside the per-image outputs with the
+        settings snapshot and log text.
+
+        Folder name: ``run_<YYYYMMDD-HHMMSS>/`` — timestamped from the
+        run's wall-clock start so multiple runs into the same output
+        directory each get their own record.
+
+        Contents:
+          - ``settings.yaml`` — full settings snapshot: PipelineConfig,
+            gate_override, GUI-only flags (model paths, intermediate
+            outputs, workers, custom distances), plus run metadata
+            (started_at, finished_at, status, TRACE version,
+            input/output folders).
+          - ``run.log`` — verbatim contents of the Log panel.
+
+        Returns the folder path, or None if the output dir is missing
+        or the write failed.
+        """
+        out_dir = self.output_edit.text().strip()
+        if not out_dir:
+            return None
+        try:
+            from datetime import datetime as _dt
+
+            from TRACE import __version__ as _trace_version
+            from TRACE.config_io import config_to_dict
+
+            stamp_dt = getattr(self, "_run_start_wall", _dt.now())
+            stamp = stamp_dt.strftime("%Y%m%d-%H%M%S")
+            meta_dir = Path(out_dir) / f"run_{stamp}"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+
+            settings_payload = {
+                "run_metadata": {
+                    "trace_version": _trace_version,
+                    "status": status,
+                    "started_at": stamp_dt.isoformat(timespec="seconds"),
+                    "finished_at": _dt.now().isoformat(timespec="seconds"),
+                    "input_folder": self.input_edit.text(),
+                    "output_folder": out_dir,
+                    "recursive": bool(self.recursive_chk.isChecked()),
+                },
+                "pipeline_config": config_to_dict(self.config),
+                "gate_override": self._gate_override or None,
+                "gui_state": self.get_gui_state(),
+            }
+            import yaml
+
+            (meta_dir / "settings.yaml").write_text(
+                yaml.safe_dump(settings_payload, sort_keys=False, default_flow_style=False),
+                encoding="utf-8",
+            )
+            (meta_dir / "run.log").write_text(self.log_text.toPlainText(), encoding="utf-8")
+            return meta_dir
+        except Exception as e:  # noqa: BLE001
+            # Don't let a metadata-write failure mask the actual run result.
+            self._log(f"Warning: could not write run metadata: {e}")
+            return None
+
     def _on_all_done(self, results):
         self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
@@ -1493,6 +1559,7 @@ class TraceWindow(QMainWindow):
             self._log("\nPipeline cancelled or no results.")
             self.statusBar().showMessage("Cancelled")
             self.eta_label.setText("")
+            self._write_run_metadata(status="cancelled")
             return
 
         # Pipeline finished cleanly — release the 99% cap and snap to 100.
@@ -1519,6 +1586,11 @@ class TraceWindow(QMainWindow):
                 if r.error:
                     self._log(f"  {r.image_path.name} ({r.error_stage}): {r.error.splitlines()[0]}")
 
+        # Write per-run metadata folder BEFORE opening the output folder
+        # so the log text already includes the final summary line.
+        status = "ok" if failed == 0 else f"partial ({failed} failed)"
+        self._write_run_metadata(status=status)
+
         # Open the output folder in the system file manager so the user can
         # see results without hunting for the path.
         out_dir = self.output_edit.text().strip()
@@ -1534,6 +1606,9 @@ class TraceWindow(QMainWindow):
         self._progress_timer.stop()
         self.eta_label.setText("")
         self._log(f"\nFatal error: {msg}")
+        # Write the run-metadata folder even on fatal error so the
+        # settings + log capture is preserved for debugging.
+        self._write_run_metadata(status="error")
         QMessageBox.critical(self, "Pipeline Error", msg)
 
     # -----------------------------------------------------------------------
