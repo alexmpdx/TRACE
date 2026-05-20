@@ -369,8 +369,62 @@ def _show_fatal_error(title: str, body: str) -> None:
         pass
 
 
+def _migrate_gate_defaults_to_permissive() -> None:
+    """One-shot fixup: if the bundled gate_config.yaml's active gate
+    still matches the Standard tier, replace it with the Permissive
+    tier values.
+
+    The model zip shipped via fetch_assets baked the Standard tier into
+    the active `confidence:` block. Users have reported those thresholds
+    gating out real landmarks on otherwise-fine wings. Without re-uploading
+    a 1.6 GB models bundle, this migration rewrites the YAML in place on
+    every launch. It's a no-op when the YAML has already been migrated
+    (active gate != standard) OR when the user customised the gate.
+
+    Long-term plan: LandmarkLocator owners retune + re-publish the models
+    zip; this migration can then be removed.
+    """
+    try:
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            models_dir = Path(sys.executable).resolve().parent / "TRACE" / "models"
+        else:
+            models_dir = Path(__file__).resolve().parent / "models"
+        gate_path = models_dir / "landmarks" / "gate_config.yaml"
+        if not gate_path.is_file():
+            return
+        import yaml
+
+        data = yaml.safe_load(gate_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
+        conf = data.get("confidence")
+        if not isinstance(conf, dict):
+            return
+        tiers = conf.get("tiers") if isinstance(conf.get("tiers"), dict) else {}
+        permissive = tiers.get("permissive") if isinstance(tiers, dict) else None
+        standard = tiers.get("standard") if isinstance(tiers, dict) else None
+        if not (isinstance(permissive, dict) and isinstance(standard, dict)):
+            return
+        # Heuristic: active gate counts as "still Standard" iff its peak/
+        # sharpness/second_peak_ratio sub-dicts exactly match the standard
+        # tier sub-block. Any user-side tweak breaks the equality and
+        # leaves the file untouched.
+        for section in ("peak", "sharpness", "second_peak_ratio"):
+            if conf.get(section) != standard.get(section):
+                log(f"gate-migration: active.{section} differs from standard - skipping")
+                return
+        for section in ("peak", "sharpness", "second_peak_ratio"):
+            if section in permissive:
+                conf[section] = permissive[section]
+        gate_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+        log(f"gate-migration: rewrote {gate_path} active gate Standard -> Permissive")
+    except Exception as exc:  # noqa: BLE001
+        log_exception("gate-migration: failed", exc)
+
+
 try:
     _bootstrap_models()
+    _migrate_gate_defaults_to_permissive()
 
     log("import: TRACE.gui")
     from TRACE.gui import main  # noqa: E402
