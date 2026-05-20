@@ -11,7 +11,7 @@
 
 #define MyAppName "TRACE"
 #define MyAppVersion "0.1.0"
-#define MyAppPublisher "Murphy Lab"
+#define MyAppPublisher "Blair Lab"
 #define MyAppURL "https://github.com/alexmpdx/TRACE"
 #define MyAppExeName "TRACE.exe"
 ; Source folder produced by PyInstaller. The Actions workflow sets this
