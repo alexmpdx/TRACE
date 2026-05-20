@@ -6,6 +6,15 @@ name: Build Windows installer
 #     installer is uploaded as a Release asset on that tag automatically.
 on:
   workflow_dispatch:
+    inputs:
+      use_pyinstaller_cache:
+        description: >-
+          Reuse PyInstaller's build/ dir between runs.
+          Experimental — incremental PyInstaller builds can produce
+          subtly-broken installers when imports change. Leave OFF for
+          releases. ON is for fast iteration on code-only changes.
+        type: boolean
+        default: false
   push:
     tags:
       - "windows-v*"
@@ -92,6 +101,25 @@ jobs:
             Write-Host "Tag $tag_ref matches __version__ — OK"
           }
         shell: pwsh
+
+      # Experimental: reuse PyInstaller's build/ dir across runs so the
+      # dep-analysis pass (the slow part) can skip work for unchanged
+      # packages. Only fires on a manually-dispatched workflow with the
+      # opt-in toggle ON; release tag-pushes always do a cold build for
+      # predictability. Cache key is requirements + spec — user-source
+      # changes still re-analyze (cheap), but a fresh torch install
+      # invalidates everything.
+      - name: Cache PyInstaller build/ (experimental, dispatch-only)
+        if: github.event_name == 'workflow_dispatch' && inputs.use_pyinstaller_cache
+        id: cache-pyi
+        uses: actions/cache@v4
+        with:
+          path: TRACE/build/build
+          key: >-
+            pyi-${{ runner.os }}-py3.11-${{
+              hashFiles('TRACE/build/trace.spec',
+                        'TRACE/build/requirements-windows.txt')
+            }}
 
       - name: Run PyInstaller
         run: pyinstaller TRACE/build/trace.spec --noconfirm
