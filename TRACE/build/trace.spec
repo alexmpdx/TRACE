@@ -44,6 +44,13 @@ _pathex = [str(ROOT / s) for s in _SIBLINGS]
 hiddenimports = [
     # Sibling top-level packages
     "hinge_chopper",
+    # Sibling top-level scripts (not packages). HingeChopper/ has both
+    # hinge_chopper.py and hinge_psd_loader.py at its root; the latter
+    # is imported dynamically as `from hinge_psd_loader import ...` once
+    # HingeChopper/ is on sys.path. PyInstaller's static analysis sees
+    # the import but resolves it against the host's installed packages
+    # rather than the sibling-dir; pin it here so it's bundled.
+    "hinge_psd_loader",
     "modeltojson",
     "identify_features",
     "wingrotator",

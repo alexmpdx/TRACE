@@ -12,12 +12,22 @@ tab (intermediate outputs checkboxes).
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
 
 # Source folder for bundled example overlays.
-_GUI_IMAGES_DIR = Path(__file__).resolve().parent / "GUI_images"
+#
+# In a PyInstaller onedir bundle, __file__ for TRACE.output_tooltips can
+# resolve to a path inside an archive that QImageReader can't actually
+# read from (Qt's tooltip <img> handler needs a real filesystem path).
+# Use sys._MEIPASS — the temp extraction dir PyInstaller exposes — so
+# we point at the unpacked GUI_images directory on disk.
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _GUI_IMAGES_DIR = Path(sys._MEIPASS) / "TRACE" / "GUI_images"
+else:
+    _GUI_IMAGES_DIR = Path(__file__).resolve().parent / "GUI_images"
 # Cache folder for TIFF→PNG conversions. Lives in tempdir so the source
 # tree stays clean. Re-converted at startup if the source TIFF is newer.
 _CACHE_DIR = Path(tempfile.gettempdir()) / "trace_tooltip_cache"
