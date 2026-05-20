@@ -2,7 +2,7 @@ name: Build Windows installer
 
 # Triggers:
 #   - Manual: Actions tab → "Build Windows installer" → Run workflow
-#   - Tag: push a tag matching windows-v*  (e.g. windows-v0.1) →
+#   - Tag: push a tag matching windows-v*  (e.g. windows-v0.1.0) →
 #     installer is uploaded as a Release asset on that tag automatically.
 on:
   workflow_dispatch:
@@ -28,25 +28,73 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          # Cache key includes the consolidated requirements file so a
-          # change to deps invalidates the cache automatically.
-          cache-dependency-path: TRACE/build/requirements-windows.txt
 
-      - name: Install Python dependencies
+      # Cache the project venv so subsequent runs skip the ~5–15 min
+      # pip install when nothing's changed. Key includes the
+      # requirements file's hash and the editable-install sibling
+      # pyproject.tomls so an edit to any of them auto-invalidates.
+      - name: Cache venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: >-
+            venv-${{ runner.os }}-py3.11-${{
+              hashFiles('TRACE/build/requirements-windows.txt',
+                        'identifyFeatures/pyproject.toml',
+                        'measurementMaker/pyproject.toml',
+                        'LandmarkLocator/pyproject.toml')
+            }}
+
+      - name: Create venv + install dependencies (cache miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          python -m pip install --upgrade pip wheel
-          # The consolidated requirements file pulls torch from the
-          # PyTorch CPU index. -e installs the sibling packages in
-          # editable mode so their modules resolve like they do in dev.
-          python -m pip install -r TRACE/build/requirements-windows.txt
-          python -m pip install -e identifyFeatures
-          python -m pip install -e measurementMaker
-          python -m pip install -e LandmarkLocator
+          python -m venv .venv
+          .\.venv\Scripts\python -m pip install --upgrade pip wheel
+          # Consolidated requirements file pulls torch from the PyTorch
+          # CPU index. -e installs the sibling packages in editable mode
+          # so their modules resolve like they do in dev.
+          .\.venv\Scripts\python -m pip install -r TRACE/build/requirements-windows.txt
+          .\.venv\Scripts\python -m pip install -e identifyFeatures
+          .\.venv\Scripts\python -m pip install -e measurementMaker
+          .\.venv\Scripts\python -m pip install -e LandmarkLocator
+        shell: pwsh
+
+      - name: Activate venv for downstream steps
+        # Prepending the venv's Scripts dir to PATH makes `python` and
+        # `pyinstaller` resolve to the venv copies in every subsequent
+        # `run:` step.
+        run: echo "${{ github.workspace }}\.venv\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: pwsh
+
+      - name: Read TRACE version from __init__.py
+        # Single source of truth for the installed-version string. The
+        # iscc invocation below picks this up via /DMyAppVersion=… so
+        # we don't have to keep installer.iss's MyAppVersion in lockstep
+        # with TRACE/__init__.py manually. The script also fails if the
+        # __version__ doesn't match the pushed tag — catches the "tag
+        # bumped, code forgotten" foot-gun before it ships.
+        id: version
+        run: |
+          $version = python -c "import re,sys; src=open('TRACE/__init__.py').read(); m=re.search(r'__version__\s*=\s*[\x27\x22]([^\x27\x22]+)', src); sys.stdout.write(m.group(1))"
+          if (-not $version) { Write-Error "Could not parse __version__ from TRACE/__init__.py"; exit 1 }
+          Write-Host "TRACE __version__ = $version"
+          echo "trace_version=$version" >> $env:GITHUB_OUTPUT
+          # When triggered by a windows-vX.Y.Z tag, verify the tag's
+          # version segment matches the code's __version__.
+          $tag_ref = "${{ github.ref }}"
+          if ($tag_ref -match '^refs/tags/windows-v(.+)$') {
+            $tag_version = $matches[1]
+            if ($tag_version -ne $version) {
+              Write-Error "Tag version ($tag_version) does not match TRACE.__version__ ($version). Bump them in lockstep."
+              exit 1
+            }
+            Write-Host "Tag $tag_ref matches __version__ — OK"
+          }
+        shell: pwsh
 
       - name: Run PyInstaller
-        run: |
-          pyinstaller TRACE/build/trace.spec --noconfirm
+        run: pyinstaller TRACE/build/trace.spec --noconfirm
         shell: pwsh
 
       - name: Verify dist contents
@@ -61,17 +109,21 @@ jobs:
       - name: Install Inno Setup
         # Chocolatey is pre-installed on windows-latest. innosetup is the
         # official package; --no-progress quiets the install log.
-        run: |
-          choco install innosetup --no-progress -y
+        run: choco install innosetup --no-progress -y
         shell: pwsh
 
       - name: Build installer
         # Chocolatey installs Inno Setup to C:\Program Files (x86)\Inno Setup 6.
         # Call iscc by full path so we don't depend on the post-install PATH
-        # refresh taking effect in this shell.
+        # refresh taking effect in this shell. Pass MyAppVersion via /D so
+        # installer.iss uses the parsed __version__ rather than its own
+        # hard-coded value (single source of truth).
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & "$iscc" /DSourceDir=..\..\dist\TRACE TRACE\build\installer.iss
+          & "$iscc" `
+            "/DSourceDir=..\..\dist\TRACE" `
+            "/DMyAppVersion=${{ steps.version.outputs.trace_version }}" `
+            TRACE\build\installer.iss
         shell: pwsh
 
       - name: Upload installer artifact

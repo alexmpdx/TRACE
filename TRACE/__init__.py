@@ -18,15 +18,16 @@ Usage::
 # "windows-v" prefix when comparing) to tell the user whether they're
 # behind.
 #
-# IMPORTANT: keep all three in lockstep using the full MAJOR.MINOR.PATCH
-# form (no truncating trailing zeroes):
-#   1. __version__ here in TRACE/__init__.py
-#   2. MyAppVersion in TRACE/build/installer.iss
-#   3. git tag pushed to trigger the build, prefixed `windows-v`
-#      (e.g. `windows-v0.2.0`, not `windows-v0.2`)
-# Tags like `windows-v0.2` strip to `0.2` and won't match `__version__`
-# of `0.2.0`, which is why the update check shows the user as "out of
-# date" forever.
+# Single source of truth: the CI workflow reads this string and passes
+# it to Inno Setup via /DMyAppVersion=…, AND verifies it matches the
+# pushed git tag's version segment. So the day-to-day ritual is:
+#   1. Bump __version__ here (full MAJOR.MINOR.PATCH form — no
+#      truncating trailing zeroes, e.g. "0.2.0" not "0.2").
+#   2. Push a matching tag: `git tag windows-v0.2.0 && git push origin
+#      windows-v0.2.0`.
+# A mismatch between the two fails the CI build fast, before producing
+# an installer whose Help-tab updater shows the user as "out of date"
+# forever.
 __version__ = "0.1.2"
 
 from TRACE.pipeline import TraceResult, trace_folder

@@ -10,7 +10,13 @@
 ; Output lands in TRACE/build/Output/TRACE-Setup.exe by default.
 
 #define MyAppName "TRACE"
-#define MyAppVersion "0.1.2"
+; MyAppVersion is normally overridden by CI via `iscc /DMyAppVersion=…`
+; (single source of truth lives in TRACE/__init__.py — see
+; .github/workflows/build-windows.yml). The literal below is the
+; fallback for local builds where the override isn't passed.
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.2"
+#endif
 #define MyAppPublisher "Blair Lab"
 #define MyAppURL "https://github.com/alexmpdx/TRACE"
 #define MyAppExeName "TRACE.exe"
@@ -36,7 +42,11 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputBaseFilename=TRACE-Setup
-Compression=lzma2/ultra64
+; lzma2/normal cuts the compile step roughly in half vs lzma2/ultra64
+; (the previous setting). The installer is ~50–100 MB larger as a
+; result but the runtime model download dwarfs that, so the tradeoff
+; is heavily in favor of faster builds.
+Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64
