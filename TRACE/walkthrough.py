@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from PyQt5.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -71,12 +71,19 @@ class WalkthroughStep:
         Optional callable invoked before the highlight repositions, e.g.
         `lambda w: w.right_tabs.setCurrentIndex(1)` to switch tabs first.
         Receives the main window as its only argument.
+    rect_resolver:
+        Optional callable returning the QRect to highlight, in the central
+        widget's coordinate space. When given, it overrides target_resolver's
+        widget geometry — used to highlight something that is not a whole
+        widget, e.g. a single tab within the tab bar. Receives the main
+        window as its only argument.
     """
 
     target_resolver: Callable[[QWidget], QWidget]
     title: str
     body: str
     pre_action: Optional[Callable[[QWidget], None]] = field(default=None)
+    rect_resolver: Optional[Callable[[QWidget], "QRect"]] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +105,12 @@ class _WalkthroughPopup(QFrame):
         # stylesheet selector matches the QFrame instance rather than every
         # QFrame in the parent's tree.
         self.setObjectName("WalkthroughPopup")
+        # Orange border so the popup reads as distinct from the blue
+        # highlight ring drawn around the target widget.
         self.setStyleSheet(
             "#WalkthroughPopup { "
             "background-color: #2d2d2d; "
-            "border: 2px solid #4aa3ff; "
+            "border: 2px solid #ff9d4a; "
             "border-radius: 6px; "
             "}"
         )
@@ -118,6 +127,9 @@ class _WalkthroughPopup(QFrame):
         title_font.setPointSize(title_font.pointSize() + 1)
         self._title.setFont(title_font)
         self._title.setStyleSheet("color: #d0d0d0;")
+        # Wrap long headers onto a second line instead of clipping them at
+        # the popup's max width.
+        self._title.setWordWrap(True)
         layout.addWidget(self._title)
 
         self._body = QLabel("")
@@ -140,8 +152,14 @@ class _WalkthroughPopup(QFrame):
         footer.addWidget(self._counter)
         footer.addStretch(1)
         self._skip_btn = QPushButton("Skip tutorial")
-        self._skip_btn.setFlat(True)
-        self._skip_btn.setStyleSheet("color: #888;")
+        # Outlined (not flat) so it clearly reads as a clickable button
+        # rather than plain label text.
+        self._skip_btn.setStyleSheet(
+            "QPushButton { color: #999; background-color: transparent; "
+            "border: 1px solid #5a5a5a; border-radius: 4px; padding: 4px 10px; } "
+            "QPushButton:hover { border-color: #ff9d4a; color: #c0c0c0; } "
+            "QPushButton:pressed { background-color: #3a3a3a; }"
+        )
         self._skip_btn.clicked.connect(self.skip_clicked)
         footer.addWidget(self._skip_btn)
         self._prev_btn = QPushButton("Previous")
@@ -149,6 +167,14 @@ class _WalkthroughPopup(QFrame):
         footer.addWidget(self._prev_btn)
         self._next_btn = QPushButton("Next")
         self._next_btn.setDefault(True)
+        # Orange outline to match the popup border — and to override the
+        # Fusion default-button's blue highlight ring.
+        self._next_btn.setStyleSheet(
+            "QPushButton { color: #d0d0d0; background-color: #3a3a3a; "
+            "border: 1px solid #ff9d4a; border-radius: 4px; padding: 4px 12px; } "
+            "QPushButton:hover { background-color: #454545; } "
+            "QPushButton:pressed { background-color: #2f2f2f; }"
+        )
         self._next_btn.clicked.connect(self.next_clicked)
         footer.addWidget(self._next_btn)
         layout.addLayout(footer)
@@ -209,6 +235,9 @@ class WalkthroughOverlay(QWidget):
         self._idx = 0
         self._hole_rect = QRect()
         self._target_widget: Optional[QWidget] = None
+        # Clean snapshot of the UI (overlay hidden) that paintEvent dims.
+        # Re-grabbed each step — see _capture_dim_snapshot.
+        self._dim_pixmap: Optional[QPixmap] = None
 
         # Mouse + focus setup. Overlay catches every click outside the hole
         # so the user can't accidentally interact with grayed controls.
@@ -278,10 +307,15 @@ class WalkthroughOverlay(QWidget):
         """
         if not self.isVisible() or self._target_widget is None:
             return
+        self._capture_dim_snapshot()
         self.setGeometry(self._central.rect())
         self._update_hole_rect()
         self._update_mask()
+        prev_popup_geom = self._popup.geometry()
         self._position_popup()
+        # If the popup moved, clear any ghost it left over the masked hole.
+        if self._popup.geometry() != prev_popup_geom:
+            self._clear_popup_ghost()
         self.update()
 
     # -----------------------------------------------------------------------
@@ -296,6 +330,7 @@ class WalkthroughOverlay(QWidget):
                 # Pre-actions are best-effort UX (e.g. switching tabs); never
                 # let them break the walkthrough flow.
                 pass
+        prev_target = self._target_widget
         try:
             self._target_widget = step.target_resolver(self._window)
         except Exception:
@@ -304,19 +339,79 @@ class WalkthroughOverlay(QWidget):
         self._popup.set_content(step.title, step.body, self._idx, len(self._steps), is_last)
         self._popup.adjustSize()
         self.reposition()
+        # The popup is stacked above the overlay's masked-out highlight hole,
+        # so when it moves between steps Qt won't reliably repaint what was
+        # underneath — leaving a gray ghost of the old popup. Force the
+        # affected widgets to redraw.
+        self._clear_popup_ghost(prev_target)
         # Overlay first, then popup on top — otherwise the dim layer covers
         # the popup (which makes it look gray AND swallows its button clicks).
         self.raise_()
         self._popup.raise_()
         self.setFocus(Qt.OtherFocusReason)
 
+    def _clear_popup_ghost(self, prev_target: Optional[QWidget] = None) -> None:
+        """Repaint regions a moved popup may have left ghosted.
+
+        Where the overlay's mask punches the highlight hole, Qt does not
+        always repaint the widget revealed beneath a popup that moved away.
+        A `central.update()` only recomposites cached backing stores, which
+        isn't enough — so we also explicitly repaint the highlighted widget
+        and its scroll viewport (QListWidget / QTextEdit paint their content
+        on a separate `viewport()` child).
+        """
+        self._central.update()
+        for wdg in (prev_target, self._target_widget):
+            if wdg is None:
+                continue
+            wdg.update()
+            viewport = getattr(wdg, "viewport", None)
+            if callable(viewport):
+                try:
+                    viewport().update()
+                except Exception:
+                    pass
+
+    def _capture_dim_snapshot(self) -> None:
+        """Grab a clean snapshot of the UI for paintEvent to dim.
+
+        The overlay is a translucent child widget, so Qt would otherwise
+        render its dim by propagating the parent's content into its backing
+        — and that content already includes this overlay, a feedback loop
+        that leaves ghosts of previous steps' highlight rings. Instead we
+        briefly hide the overlay and popup, render the parent to an
+        off-screen pixmap (grab() does not touch the screen, so no flash),
+        and dim that pixmap in paintEvent. Re-grabbed every reposition so the
+        snapshot tracks tab switches, scrolling and resizes.
+        """
+        overlay_visible = self.isVisible()
+        popup_visible = self._popup.isVisible()
+        self.hide()
+        self._popup.hide()
+        self._dim_pixmap = self._central.grab()
+        if overlay_visible:
+            self.show()
+        if popup_visible:
+            self._popup.show()
+
     def _update_hole_rect(self) -> None:
-        if self._target_widget is None:
-            self._hole_rect = QRect()
-            return
-        target_origin = self._target_widget.mapTo(self._central, QPoint(0, 0))
-        size = self._target_widget.size()
-        rect = QRect(target_origin, size)
+        # A step may supply an explicit rect (in central-widget coordinates)
+        # via rect_resolver — used to highlight something that isn't a whole
+        # widget, e.g. a single tab within the tab bar. Otherwise the hole is
+        # the target widget's full geometry.
+        rect: Optional[QRect] = None
+        step = self._steps[self._idx] if 0 <= self._idx < len(self._steps) else None
+        if step is not None and step.rect_resolver is not None:
+            try:
+                rect = step.rect_resolver(self._window)
+            except Exception:
+                rect = None
+        if rect is None:
+            if self._target_widget is None:
+                self._hole_rect = QRect()
+                return
+            target_origin = self._target_widget.mapTo(self._central, QPoint(0, 0))
+            rect = QRect(target_origin, self._target_widget.size())
         # Pad the highlight ring outward so the border doesn't sit on top of
         # the widget's own pixel grid (looks cleaner around input fields).
         self._hole_rect = rect.adjusted(
@@ -340,47 +435,65 @@ class WalkthroughOverlay(QWidget):
         self.setMask(mask)
 
     def _position_popup(self) -> None:
-        """Place popup beside the highlight: prefer right, fall back gracefully."""
-        if self._hole_rect.isEmpty():
-            # No target — center the popup in the overlay.
-            popup_size = self._popup.sizeHint()
-            x = (self.width() - popup_size.width()) // 2
-            y = (self.height() - popup_size.height()) // 2
-            self._popup.move(max(0, x), max(0, y))
-            return
+        """Place the popup beside the highlight without covering it.
+
+        Each side (right, left, below, above) is tried in preference order:
+        the candidate is first clamped fully onto the central widget, then
+        accepted only if it still clears the highlight rect. Clamping means a
+        candidate that would have run off-screen is pulled back on-screen
+        rather than discarded — it is rejected only if pulling it back makes
+        it overlap the highlight. If no side clears the highlight (it nearly
+        fills the window), the least-overlapping placement is used.
+        """
         popup_size = self._popup.sizeHint()
-        hole = self._hole_rect
+        pw = popup_size.width()
+        ph = popup_size.height()
         central_w = self._central.width()
         central_h = self._central.height()
+
+        if self._hole_rect.isEmpty():
+            # No target — center the popup in the overlay.
+            self._popup.move(max(0, (central_w - pw) // 2), max(0, (central_h - ph) // 2))
+            return
+
+        hole = self._hole_rect
         gap = self._POPUP_GAP
 
-        candidates = [
-            # Right side — preferred.
-            QRect(hole.right() + gap, hole.top(), popup_size.width(), popup_size.height()),
-            # Left side.
-            QRect(hole.left() - gap - popup_size.width(), hole.top(), popup_size.width(), popup_size.height()),
-            # Below.
-            QRect(hole.left(), hole.bottom() + gap, popup_size.width(), popup_size.height()),
-            # Above.
-            QRect(hole.left(), hole.top() - gap - popup_size.height(), popup_size.width(), popup_size.height()),
+        # Top-left corner for each side, in preference order.
+        side_origins = [
+            (hole.right() + gap, hole.top()),  # right — preferred
+            (hole.left() - gap - pw, hole.top()),  # left
+            (hole.left(), hole.bottom() + gap),  # below
+            (hole.left(), hole.top() - gap - ph),  # above
         ]
-        for cand in candidates:
-            if cand.left() >= 0 and cand.top() >= 0 and cand.right() <= central_w and cand.bottom() <= central_h:
-                self._popup.setGeometry(cand)
+        best: Optional[QRect] = None
+        best_overlap_area: Optional[int] = None
+        for x, y in side_origins:
+            # Pull the candidate fully onto the central widget.
+            x = max(0, min(x, central_w - pw))
+            y = max(0, min(y, central_h - ph))
+            rect = QRect(x, y, pw, ph)
+            if not rect.intersects(hole):
+                # Clears the highlight — use the first such side.
+                self._popup.setGeometry(rect)
                 return
-        # Last resort: clamp to the central rect even if it overlaps the hole.
-        x = min(max(0, hole.right() + gap), central_w - popup_size.width())
-        y = min(max(0, hole.top()), central_h - popup_size.height())
-        self._popup.setGeometry(QRect(x, y, popup_size.width(), popup_size.height()))
+            # Otherwise remember whichever side overlaps the highlight least.
+            overlap = rect.intersected(hole)
+            area = overlap.width() * overlap.height()
+            if best_overlap_area is None or area < best_overlap_area:
+                best, best_overlap_area = rect, area
+        # No side fully clears the highlight — use the least-bad placement.
+        if best is not None:
+            self._popup.setGeometry(best)
 
     # -----------------------------------------------------------------------
     # Qt events
     # -----------------------------------------------------------------------
-    # Visual parameters tuned to match the instruction popup's border
-    # (`#WalkthroughPopup { border: 2px solid #4aa3ff; border-radius: 6px; }`)
-    # so the highlight ring and the popup look like a matched pair.
+    # Highlight ring: same 2 px width / 6 px corner radius as the instruction
+    # popup's border, but blue (`#4aa3ff`) rather than the popup's orange so
+    # the ring around the target reads as distinct from the popup itself.
     _ACCENT_RING_WIDTH = 2
-    _ACCENT_RING_RADIUS = 6  # corner radius in px, matches popup
+    _ACCENT_RING_RADIUS = 6  # corner radius in px
     # px from hole edge to the ring path; the 2 px pen centered on the
     # path then paints in [hole_edge+1, hole_edge+3] — fully outside the
     # hole, so the overlay's mask doesn't clip the stroke.
@@ -390,8 +503,13 @@ class WalkthroughOverlay(QWidget):
         painter = QPainter(self)
         # Anti-alias the rounded corners so they read smooth, not jaggy.
         painter.setRenderHint(QPainter.Antialiasing, True)
-        # Semi-transparent dark fill across the masked region (everything
-        # except the hole).
+        # Paint the cached clean snapshot of the UI, then a translucent dark
+        # layer over it — together these are the "dim". The opaque snapshot
+        # also fully overwrites the backing each frame, so nothing from a
+        # previous step (old dim, old ring) can survive. (See
+        # _capture_dim_snapshot for why a snapshot is used at all.)
+        if self._dim_pixmap is not None:
+            painter.drawPixmap(0, 0, self._dim_pixmap)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
         # Accent ring fully outside the hole so all four sides of the
         # stroke land in the dim region and none of it gets mask-clipped.

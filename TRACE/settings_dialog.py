@@ -22,7 +22,7 @@ from typing import Any
 
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -259,6 +259,12 @@ class PipelineConfigDialog(QDialog):
         # that doesn't fit becomes scrollable.
         self.setMinimumSize(360, 240)
         self.resize(720, 640)
+        # Restore the dialog geometry the user last left (saved in done());
+        # the resize() above is the first-open default.
+        self._settings = QSettings("TRACE", "WingAnalysisPipeline")
+        _saved_geometry = self._settings.value("settings_dialog_geometry")
+        if _saved_geometry is not None:
+            self.restoreGeometry(_saved_geometry)
         self._original_config = config
         self._calib_input_path = input_path
         self._calib_lm_path = landmark_model_path
@@ -283,6 +289,13 @@ class PipelineConfigDialog(QDialog):
         self._wing_expand_spin.setValue(float(wing_expand_fraction))
         if wing_isolation_model_path:
             self._wing_model_edit.setText(wing_isolation_model_path)
+
+    def done(self, result: int) -> None:  # noqa: N802 — Qt API
+        # Persist the dialog geometry (covers OK, Cancel, Esc and the window
+        # close button) so it reopens at the size the user last left.
+        self._settings.setValue("settings_dialog_geometry", self.saveGeometry())
+        self._settings.sync()
+        super().done(result)
 
     # -----------------------------------------------------------------------
     # Public API

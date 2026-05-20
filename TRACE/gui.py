@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from identify_features.config import PipelineConfig
-from PyQt5.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, QRect, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
@@ -243,6 +243,11 @@ class TraceWindow(QMainWindow):
         self.setWindowTitle("TRACE — Wing Analysis Pipeline")
         self.settings = QSettings("TRACE", "WingAnalysisPipeline")
         self.resize(1050, 750)
+        # Restore the window geometry the user last left (saved in closeEvent);
+        # the resize() above is the first-launch default.
+        _saved_geometry = self.settings.value("main_window_geometry")
+        if _saved_geometry is not None:
+            self.restoreGeometry(_saved_geometry)
         self.worker = None
         self._image_paths = []
         self.config = PipelineConfig()
@@ -326,13 +331,8 @@ class TraceWindow(QMainWindow):
     # UI construction
     # -----------------------------------------------------------------------
     def _build_ui(self):
-        # Menu bar — currently just Help → Show Walkthrough so users can
-        # re-trigger the first-launch tutorial after dismissing it.
-        menubar = self.menuBar()
-        help_menu = menubar.addMenu("Help")
-        walkthrough_act = help_menu.addAction("Show Walkthrough")
-        walkthrough_act.triggered.connect(self._show_walkthrough)
-
+        # No menu bar — the walkthrough is re-triggered from the Help tab's
+        # "Replay walkthrough" button instead.
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
@@ -1639,6 +1639,26 @@ class TraceWindow(QMainWindow):
                 body=body,
             )
 
+        def _tab_intro(index: int, title: str, body: str) -> WalkthroughStep:
+            """Build an overview step that highlights one tab in the right-panel
+            tab bar before the steps that walk through that tab's controls."""
+
+            def _tab_rect(w: QWidget) -> QRect:
+                # Rect of just this tab within the tab bar, in central-widget
+                # coordinates (the space the overlay highlights in).
+                bar = w.right_tabs.tabBar()
+                tab_rect = bar.tabRect(index)
+                origin = bar.mapTo(w.centralWidget(), tab_rect.topLeft())
+                return QRect(origin, tab_rect.size())
+
+            return WalkthroughStep(
+                target_resolver=lambda w: w.right_tabs.tabBar(),
+                rect_resolver=_tab_rect,
+                pre_action=lambda w: w.right_tabs.setCurrentIndex(index),
+                title=title,
+                body=body,
+            )
+
         return [
             WalkthroughStep(
                 target_resolver=lambda w: w.input_row,
@@ -1670,6 +1690,12 @@ class TraceWindow(QMainWindow):
                 title="Choose your outputs",
                 body=("Pick what to save: various feature overlays and measurements."),
             ),
+            _tab_intro(
+                0,
+                "The Main tab",
+                "Your run dashboard: it lists the queued images and streams the live "
+                "log while TRACE works. The next two steps cover each.",
+            ),
             WalkthroughStep(
                 target_resolver=lambda w: w.image_list,
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(0),
@@ -1687,6 +1713,13 @@ class TraceWindow(QMainWindow):
                     "The Log streams progress, per-image messages, and warnings while the "
                     "pipeline runs. Check here first if a result looks off."
                 ),
+            ),
+            _tab_intro(
+                1,
+                "The Settings tab",
+                "Where you tune a run: calibration, optional preprocessing, output "
+                "appearance, performance, and resets. The next steps walk through each "
+                "section.",
             ),
             _settings_step(
                 "_scale_group",
@@ -1728,6 +1761,12 @@ class TraceWindow(QMainWindow):
                 "memories goes further — it clears every persisted setting (folders, "
                 "model paths, custom pairs) and returns TRACE to a first-launch state.",
             ),
+            _tab_intro(
+                2,
+                "The Custom Measurements tab",
+                "Define your own landmark-to-landmark distance measurements — they get "
+                "added to every wing's results. The next two steps show how.",
+            ),
             WalkthroughStep(
                 target_resolver=lambda w: w.inline_custom_distances_panel._picker._source_widget,
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(2),
@@ -1747,6 +1786,12 @@ class TraceWindow(QMainWindow):
                     "measurement. Each pair adds custom_<label> columns to the batch CSV "
                     "for every wing."
                 ),
+            ),
+            _tab_intro(
+                3,
+                "The Help tab",
+                "Links to documentation, replays this walkthrough, and checks for TRACE "
+                "updates. The next two steps point out the main buttons.",
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.inline_help_panel.btn_replay_walkthrough,
@@ -1776,9 +1821,9 @@ class TraceWindow(QMainWindow):
 
     def _show_walkthrough(self) -> None:
         """Build a fresh overlay and start it. Called on first launch and
-        from Help → Show Walkthrough."""
+        from the Help tab's "Replay walkthrough" button."""
         # Tear down any existing walkthrough first — happens if the user
-        # clicks Help → Show Walkthrough while one is already running.
+        # clicks "Replay walkthrough" while one is already running.
         if self._walkthrough is not None:
             try:
                 self._walkthrough.finish()
@@ -1801,6 +1846,13 @@ class TraceWindow(QMainWindow):
         super().resizeEvent(event)
         if self._walkthrough is not None:
             self._walkthrough.reposition()
+
+    def closeEvent(self, event):  # noqa: N802 — Qt API
+        # Persist the window geometry so the next launch reopens at the size
+        # and position the user last left.
+        self.settings.setValue("main_window_geometry", self.saveGeometry())
+        self.settings.sync()
+        super().closeEvent(event)
 
 
 # ---------------------------------------------------------------------------

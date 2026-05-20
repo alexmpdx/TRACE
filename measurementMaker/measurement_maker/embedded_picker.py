@@ -214,7 +214,7 @@ class LandmarkPickerWidget(QWidget):
         self._instructions_label = QLabel(
             "1. Click a landmark to select it (turns orange).\n"
             "2. SHIFT-click a second landmark.\n"
-            "3. Type a label, click 'Add pair'."
+            "3. Type a label, click 'Add measurement'."
         )
         left_col.addWidget(self._instructions_label)
         self._sel_label = QLabel("Selected: (none)")
@@ -226,7 +226,7 @@ class LandmarkPickerWidget(QWidget):
         self._label_edit.setPlaceholderText("e.g. wing_span")
         label_row.addWidget(self._label_edit, stretch=1)
         left_col.addLayout(label_row)
-        add_btn = QPushButton("Add pair")
+        add_btn = QPushButton("Add measurement")
         add_btn.clicked.connect(self._add_pair)
         left_col.addWidget(add_btn)
         # No bottom stretch — panel sizes to its natural content height so the
@@ -238,7 +238,7 @@ class LandmarkPickerWidget(QWidget):
         # height as the left column (instructions + selected + label + Add).
         right_col = QVBoxLayout()
         right_col.setSpacing(4)
-        right_col.addWidget(QLabel("Configured pairs:"))
+        right_col.addWidget(QLabel("Custom measurements:"))
         self._list = QListWidget()
         self._list.setMaximumHeight(80)
         self._list.currentRowChanged.connect(self._on_pair_row_changed)
