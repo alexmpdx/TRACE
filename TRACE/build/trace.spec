@@ -140,6 +140,10 @@ _METADATA_PACKAGES = [
     # routine failed" on first PyTorch import (e.g. landmark model load).
     "torch",
     "torchvision",
+    # rasterio — modelTOjson uses it for georeferenced raster I/O and it
+    # has many lazily-imported submodules (rasterio.serde and friends)
+    # that PyInstaller misses without copy_metadata.
+    "rasterio",
 ]
 for pkg in _METADATA_PACKAGES:
     try:
@@ -170,6 +174,8 @@ _COLLECT_ALL_PACKAGES = [
     "ome_types",
     "torch",
     "torchvision",
+    # rasterio — see comment in _METADATA_PACKAGES above.
+    "rasterio",
 ]
 for pkg in _COLLECT_ALL_PACKAGES:
     try:

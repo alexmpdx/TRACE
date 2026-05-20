@@ -79,6 +79,9 @@ def _ensure_png(src: Path) -> Optional[Path]:
         return None
 
 
+_logged_paths: set[str] = set()
+
+
 def output_tooltip_html(key: str, fallback_text: str = "") -> str:
     """Return tooltip markup for an output checkbox.
 
@@ -88,9 +91,36 @@ def output_tooltip_html(key: str, fallback_text: str = "") -> str:
     filename = _OUTPUT_IMAGES.get(key)
     if not filename:
         return fallback_text
-    png = _ensure_png(_GUI_IMAGES_DIR / filename)
+    src = _GUI_IMAGES_DIR / filename
+    png = _ensure_png(src)
     if png is None:
+        # Log once per missing image so we can diagnose path resolution
+        # without spamming the log on repeated hovers.
+        if str(src) not in _logged_paths:
+            _logged_paths.add(str(src))
+            try:
+                from TRACE.startup_log import log
+
+                log(f"tooltip: image MISSING for key={key!r}, looked at {src}")
+                log(f"    _GUI_IMAGES_DIR = {_GUI_IMAGES_DIR}")
+                log(f"    _GUI_IMAGES_DIR.is_dir() = {_GUI_IMAGES_DIR.is_dir()}")
+                if _GUI_IMAGES_DIR.is_dir():
+                    log(f"    contents: {sorted(p.name for p in _GUI_IMAGES_DIR.iterdir())}")
+            except Exception:
+                pass
         return fallback_text
-    # file:// URL is the most portable way to embed a local image in a Qt
-    # tooltip — QTextDocument resolves it via QImageReader.
-    return f'<img src="file://{png.as_posix()}" width="{_TOOLTIP_IMAGE_WIDTH}">'
+    if str(png) not in _logged_paths:
+        _logged_paths.add(str(png))
+        try:
+            from TRACE.startup_log import log
+
+            log(f"tooltip: image OK for key={key!r} -> {png}")
+        except Exception:
+            pass
+    # Qt's QTextDocument (used by QToolTip for HTML rendering) resolves a
+    # bare absolute path correctly on both macOS and Windows. The earlier
+    # `file://...` prefix produced an invalid URL on Windows (file:// +
+    # drive-letter path is malformed; needed file:/// or the bare path).
+    # Forward-slash separators work on Windows in Qt's resolver.
+    src_attr = png.as_posix()
+    return f'<img src="{src_attr}" width="{_TOOLTIP_IMAGE_WIDTH}">'
