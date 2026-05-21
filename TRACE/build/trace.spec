@@ -179,6 +179,11 @@ _COLLECT_ALL_PACKAGES = [
     "torchvision",
     # rasterio — see comment in _METADATA_PACKAGES above.
     "rasterio",
+    # certifi bundles cacert.pem — fetch_assets.make_ssl_context() points
+    # urllib at it so frozen Windows builds can verify GitHub's TLS cert.
+    # Without collect_all, the .pem file doesn't make it into the bundle
+    # and certifi.where() returns a path that doesn't exist at runtime.
+    "certifi",
 ]
 for pkg in _COLLECT_ALL_PACKAGES:
     try:

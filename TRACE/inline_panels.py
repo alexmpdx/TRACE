@@ -1440,12 +1440,14 @@ class InlineHelpPanel(QWidget):
         import json
         import urllib.request
 
+        from TRACE.fetch_assets import make_ssl_context
+
         try:
             req = urllib.request.Request(
                 self._LATEST_RELEASE_API,
                 headers={"User-Agent": "TRACE-update-check"},
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10, context=make_ssl_context()) as resp:
                 data = json.load(resp)
             latest_tag = str(data.get("tag_name") or "")
             html_url = str(data.get("html_url") or self._RELEASES_PAGE_URL)
@@ -1564,8 +1566,10 @@ class InlineHelpPanel(QWidget):
         try:
             import urllib.request
 
+            from TRACE.fetch_assets import make_ssl_context
+
             req = urllib.request.Request(url, headers={"User-Agent": "TRACE-update"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30, context=make_ssl_context()) as resp:
                 total = int(resp.headers.get("Content-Length") or 0) or (self._latest_update_size or 0)
                 downloaded = 0
                 chunk = 1 << 20  # 1 MB

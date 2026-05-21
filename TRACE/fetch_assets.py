@@ -19,12 +19,31 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import ssl
 import sys
 import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional
+
+
+def make_ssl_context() -> ssl.SSLContext:
+    """Build an SSL context that works inside PyInstaller bundles.
+
+    Frozen Windows builds have no access to a system CA store, so urllib
+    hits "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer
+    certificate" the moment it tries to talk to GitHub. Point at certifi's
+    bundled cacert.pem when it's available; fall back to ssl defaults for
+    dev runs on macOS/Linux where the system store is reachable.
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
 
 # GitHub Release asset URL. Bound to a specific tag so the SHA-256 lock
 # below remains meaningful — re-publishing requires a new tag + URL + SHA.
@@ -131,7 +150,7 @@ def _download(
     stderr progress indicator (silently suppressed when stderr is None).
     """
     req = urllib.request.Request(url, headers={"User-Agent": "TRACE-fetch_assets"})
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, context=make_ssl_context()) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         with open(dest, "wb") as out:
             downloaded = 0
