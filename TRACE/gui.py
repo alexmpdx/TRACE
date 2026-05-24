@@ -40,6 +40,7 @@ from PyQt5.QtWidgets import (
 from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json
 from TRACE.inline_panels import InlineCustomDistancesPanel, InlineGeneralPanel, InlineHelpPanel
+from TRACE.ood_check import format_report_line, preflight_batch
 from TRACE.output_tooltips import output_tooltip_html
 from TRACE.pipeline import (
     DEFAULT_MAX_WORKERS,
@@ -47,6 +48,7 @@ from TRACE.pipeline import (
     MEASUREMENT_GROUPS,
     OUTPUT_TOOLTIPS,
     OUTPUT_TYPES,
+    _required_stages,
     compute_progress_weights,
     trace_folder,
 )
@@ -1233,6 +1235,35 @@ class TraceWindow(QMainWindow):
         if not self._confirm_parallel_workers():
             return
 
+        # OOD preflight: sample a few input images and compare per-channel pixel
+        # stats against each enabled model's training distribution. Catches the
+        # obvious failure modes (wrong stain, exposure blowup, missing channel)
+        # before the user commits to a full run. Models without metadata.json
+        # are silently skipped.
+        outputs_now = self._selected_outputs()
+        ood_needs_lm, _, ood_needs_seg = _required_stages(outputs_now)
+        wing_model_dir = None
+        if self._wing_isolation_enabled and self._wing_isolation_model_path.strip():
+            wing_model_dir = Path(self._wing_isolation_model_path)
+        ood_models: dict[str, Path] = {}
+        if ood_needs_lm and self._landmark_model_path:
+            ood_models["landmark"] = Path(self._landmark_model_path)
+        if ood_needs_seg and self._segmentation_model_path:
+            ood_models["vein/intervein"] = Path(self._segmentation_model_path)
+        if wing_model_dir is not None:
+            ood_models["wing isolation"] = wing_model_dir
+        if ood_models and self._image_paths:
+            try:
+                ood_reports = preflight_batch(self._image_paths, ood_models, n_sample=3)
+            except Exception as exc:
+                logger.warning("OOD preflight raised: %s", exc)
+                ood_reports = {}
+            flagged = {n: r for n, r in ood_reports.items() if r.has_warnings}
+            for _name, report in flagged.items():
+                self._log(format_report_line(report))
+            if flagged and not self._confirm_ood_warnings(flagged):
+                return
+
         # UI state
         self.btn_run.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -1275,9 +1306,7 @@ class TraceWindow(QMainWindow):
         for i in range(self.image_list.count()):
             self.image_list.item(i).setForeground(QColor(208, 208, 208))
 
-        wing_model_dir = None
-        if self._wing_isolation_enabled and self._wing_isolation_model_path.strip():
-            wing_model_dir = Path(self._wing_isolation_model_path)
+        # wing_model_dir was resolved above as part of the OOD preflight.
 
         # Resolve the active per-model target. When the user hasn't entered one
         # for the active model, leave target_um_per_px None — preprocessing's
@@ -1325,6 +1354,35 @@ class TraceWindow(QMainWindow):
         self.worker.all_done.connect(self._on_all_done)
         self.worker.error.connect(self._on_error)
         self.worker.start()
+
+    def _confirm_ood_warnings(self, flagged: dict) -> bool:
+        """Show the OOD warning dialog; return True if user wants to proceed."""
+        lines: list[str] = []
+        for _name, report in flagged.items():
+            lines.append(format_report_line(report))
+            for d in report.deviations[:5]:
+                if d.metric == "missing_channel":
+                    lines.append(f"    • channel {d.channel}: missing from image")
+                else:
+                    lines.append(
+                        f"    • channel {d.channel} {d.metric}: image={d.image_value:.1f} "
+                        f"vs training={d.training_value:.1f} ± {d.training_std:.1f}"
+                    )
+            extra = len(report.deviations) - 5
+            if extra > 0:
+                lines.append(f"    ... and {extra} more")
+        body = (
+            "These input images look unusual compared to what the models were trained on. "
+            "Results may be unreliable. Common causes: wrong file type, fluorescence vs "
+            "brightfield, dramatically different exposure, missing color channel.\n\n" + "\n".join(lines)
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Input images look out-of-distribution")
+        box.setText(body)
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Abort)
+        box.setDefaultButton(QMessageBox.Abort)
+        return box.exec_() == QMessageBox.Ok
 
     def _cancel_pipeline(self):
         if self.worker:

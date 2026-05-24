@@ -221,6 +221,16 @@ def parse_args(argv=None):
         default=1.15,
         help="Upper edge of the pass-through ratio band. Default 1.15.",
     )
+    parser.add_argument(
+        "--ignore-ood",
+        action="store_true",
+        help="Skip the out-of-distribution preflight check entirely.",
+    )
+    parser.add_argument(
+        "--strict-ood",
+        action="store_true",
+        help="Treat out-of-distribution warnings as fatal (exit non-zero before running).",
+    )
     return parser.parse_args(argv)
 
 
@@ -394,6 +404,32 @@ def main(argv=None):
             print(f"Error: failed to parse {args.gate_override_yaml}: {e}", file=sys.stderr)
             sys.exit(1)
         gate_override = gate_doc.get("confidence", gate_doc)
+
+    if not args.ignore_ood:
+        from preprocessing.pipeline import discover_images
+        from TRACE.ood_check import format_report_line, preflight_batch
+        from TRACE.pipeline import _required_stages
+
+        needs_lm, _, needs_seg = _required_stages(outputs)
+        ood_models: dict[str, Path] = {}
+        if needs_lm:
+            ood_models["landmark"] = args.landmark_model
+        if needs_seg:
+            ood_models["vein/intervein"] = args.segmentation_model
+        if args.wing_isolation_model is not None:
+            ood_models["wing isolation"] = args.wing_isolation_model
+        sample_images = discover_images(args.input, recursive=args.recursive)
+        if ood_models and sample_images:
+            ood_reports = preflight_batch(sample_images, ood_models, n_sample=3)
+            flagged = [r for r in ood_reports.values() if r.has_warnings]
+            for report in flagged:
+                print(format_report_line(report), file=sys.stderr)
+            if flagged and args.strict_ood:
+                print(
+                    "Aborting: --strict-ood is set and the OOD preflight flagged input images.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
 
     results = trace_folder(
         input_dir=args.input,
