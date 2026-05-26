@@ -42,6 +42,7 @@ NOT_IDENTIFIED = "not identified"
 MEASUREMENT_GROUPS: "OrderedDict[str, str]" = OrderedDict(
     [
         ("wing_area", "Wing area"),
+        ("wing_circularity", "Wing circularity"),
         ("vein_lengths", "Vein lengths"),
         ("intervein_areas", "Intervein region areas"),
         ("cv_ratio", "CV ratio (CV distance, wing length)"),
@@ -190,6 +191,7 @@ def _wing_measurements(
     vals: dict[str, str] = {
         "wing_area_px": "",
         "wing_area_um2": "",
+        "wing_circularity": "",
         "wing_length_px": "",
         "wing_length_um": "",
         "crossvein_distance_px": "",
@@ -203,12 +205,22 @@ def _wing_measurements(
 
     landmarks = wing_result.landmarks if wing_result else {}
 
-    # Wing area only
+    # Wing area
     if "wing_area" in g:
         outline = wing_result.wing_outline if wing_result else None
         if outline is not None:
             vals["wing_area_px"] = f"{outline.area:.1f}"
             vals["wing_area_um2"] = f"{outline.area * scale**2:.1f}" if scale else ""
+
+    # Wing circularity (Polsby-Popper isoperimetric ratio: 4π·A / P²,
+    # dimensionless; 1.0 for a perfect circle, lower for elongated shapes).
+    if "wing_circularity" in g:
+        outline = wing_result.wing_outline if wing_result else None
+        if outline is not None:
+            perimeter = outline.length
+            if perimeter > 0:
+                circularity = 4.0 * math.pi * outline.area / (perimeter * perimeter)
+                vals["wing_circularity"] = f"{circularity:.4f}"
 
     # CV ratio block: wing length + crossvein distance + CV ratio
     if "cv_ratio" in g:
@@ -300,6 +312,21 @@ def export_csv(
                 "area_um2": wm["wing_area_um2"],
                 "length_px": "",
                 "length_um": "",
+            }
+        )
+    if "wing_circularity" in g:
+        rows.append(
+            {
+                "specimen": sid,
+                "feature": "wing circularity",
+                "category": "wing",
+                "type": "",
+                "status": "",
+                "area_px": "",
+                "area_um2": "",
+                "length_px": "",
+                "length_um": "",
+                "ratio": wm["wing_circularity"],
             }
         )
     if "cv_ratio" in g:
@@ -433,6 +460,8 @@ def _build_fieldnames(include_um: bool, groups: Optional[set[str]] = None) -> li
         fields.append("wing area_px")
         if include_um:
             fields.append("wing area_um2")
+    if "wing_circularity" in g:
+        fields.append("wing circularity")
     if "cv_ratio" in g:
         fields.append("wing length_px")
         if include_um:
@@ -483,6 +512,8 @@ def _build_row(
         row["wing area_px"] = wm["wing_area_px"]
         if include_um:
             row["wing area_um2"] = wm["wing_area_um2"]
+    if "wing_circularity" in g:
+        row["wing circularity"] = wm["wing_circularity"]
     if "cv_ratio" in g:
         row["wing length_px"] = wm["wing_length_px"]
         if include_um:

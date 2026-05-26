@@ -77,6 +77,10 @@ hiddenimports = [
     "napari",
     # PyQt5 plugins
     "PyQt5.sip",
+    # QtSvg is needed for QIcon to load logo_dark.svg as the window icon.
+    # PyInstaller's default PyQt5 hook bundles the qsvgicon image plugin
+    # most of the time, but pinning the import is belt-and-suspenders.
+    "PyQt5.QtSvg",
 ]
 
 # --- Data files (kept relative to TRACE.exe at runtime) -------------------

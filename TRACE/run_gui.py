@@ -305,6 +305,17 @@ def _bootstrap_models() -> None:
     from PyQt5.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
     app = QApplication.instance() or QApplication(sys.argv)
+    # Set the app icon early so the first-launch download dialog gets the
+    # TRACE logo in its title bar / taskbar entry instead of the default Qt
+    # icon. Path resolution mirrors output_tooltips._GUI_IMAGES_DIR.
+    from PyQt5.QtGui import QIcon
+
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        _logo = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "logo_dark.svg"
+    else:
+        _logo = Path(__file__).resolve().parent / "GUI_images" / "logo" / "logo_dark.svg"
+    if _logo.is_file():
+        app.setWindowIcon(QIcon(str(_logo)))
     dlg = QProgressDialog(
         "Downloading TRACE models (~1.6 GB).\nThis only happens on first launch.",
         "Cancel",

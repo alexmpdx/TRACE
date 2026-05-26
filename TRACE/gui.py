@@ -1952,6 +1952,15 @@ def _apply_dark_palette(app: QApplication):
     )
 
 
+def _app_icon_path() -> Path:
+    """Path to the TRACE app logo, working in both dev and frozen builds."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS) / "TRACE" / "GUI_images"
+    else:
+        base = Path(__file__).resolve().parent / "GUI_images"
+    return base / "logo" / "logo_dark.svg"
+
+
 def main():
     # Reuse an existing QApplication if one was created by the launcher
     # (run_gui.py creates one early for the bootstrap progress dialog when
@@ -1959,6 +1968,11 @@ def main():
     # the same process is undefined behavior in PyQt5.
     app = QApplication.instance() or QApplication(sys.argv)
     _apply_dark_palette(app)
+    from PyQt5.QtGui import QIcon
+
+    icon_path = _app_icon_path()
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = TraceWindow()
     window.show()
     sys.exit(app.exec_())
