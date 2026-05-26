@@ -1952,49 +1952,6 @@ def _apply_dark_palette(app: QApplication):
     )
 
 
-def _is_os_dark_mode() -> bool:
-    """Best-effort detection of the OS-level dark-mode preference.
-
-    The window icon shows on the title bar / taskbar / Alt-Tab chrome,
-    which Windows renders using the OS theme regardless of our Qt palette.
-    A light-circle logo reads cleanly only when the chrome behind it is
-    dark, so we pick the variant based on OS theme rather than our own
-    palette. Falls back to "light" (the Windows default) on any error.
-    """
-    if sys.platform == "win32":
-        try:
-            import winreg
-
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            ) as key:
-                # AppsUseLightTheme: 1 = light, 0 = dark.
-                return int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0]) == 0
-        except Exception:
-            return False
-    return False
-
-
-def _app_icon_path() -> Path:
-    """Path to the TRACE app logo variant matching the OS theme.
-
-    Uses the Thick-line logo variants because the window icon renders at
-    small sizes (title bar ≈16 px, taskbar ≈24-32 px) where the thin-line
-    logo_dark/logo_light SVGs lose detail. The Thick variants keep the
-    wireframe legible at icon sizes.
-
-    LogoThick_dark.svg → white circle outline → for dark-mode chrome.
-    LogoThick_light.svg → black circle outline → for light-mode chrome.
-    """
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        base = Path(sys._MEIPASS) / "TRACE" / "GUI_images"
-    else:
-        base = Path(__file__).resolve().parent / "GUI_images"
-    variant = "LogoThick_dark.svg" if _is_os_dark_mode() else "LogoThick_light.svg"
-    return base / "logo" / variant
-
-
 def main():
     # Reuse an existing QApplication if one was created by the launcher
     # (run_gui.py creates one early for the bootstrap progress dialog when
@@ -2002,11 +1959,20 @@ def main():
     # the same process is undefined behavior in PyQt5.
     app = QApplication.instance() or QApplication(sys.argv)
     _apply_dark_palette(app)
-    from PyQt5.QtGui import QIcon
+    from TRACE._app_icon import make_app_icon
 
-    icon_path = _app_icon_path()
-    if icon_path.is_file():
-        app.setWindowIcon(QIcon(str(icon_path)))
+    icon = make_app_icon()
+    if icon is not None:
+        app.setWindowIcon(icon)
     window = TraceWindow()
+    # napari's _QtMainWindow.__init__ unconditionally calls
+    # QApplication.setWindowIcon during LandmarkPickerWidget construction,
+    # which silently overwrites the TRACE icon set above. Re-set the app
+    # icon now (post-construction) and also pin it on our main window —
+    # per-window icons survive any subsequent QApplication.setWindowIcon
+    # changes from anywhere in the process.
+    if icon is not None:
+        app.setWindowIcon(icon)
+        window.setWindowIcon(icon)
     window.show()
     sys.exit(app.exec_())

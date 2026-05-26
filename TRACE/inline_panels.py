@@ -1589,6 +1589,16 @@ class InlineHelpPanel(QWidget):
             100,
             self,
         )
+        # napari clobbers QApplication.windowIcon when its embedded viewer
+        # initializes, so by the time the user clicks Install Update the
+        # app-wide icon is already the napari logo. Pin the TRACE icon
+        # directly on this dialog so its title bar / taskbar entry stays
+        # branded TRACE regardless of any prior setWindowIcon calls.
+        from TRACE._app_icon import make_app_icon
+
+        _icon = make_app_icon()
+        if _icon is not None:
+            dlg.setWindowIcon(_icon)
         dlg.setWindowTitle("TRACE update")
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(0)

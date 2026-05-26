@@ -305,40 +305,24 @@ def _bootstrap_models() -> None:
     from PyQt5.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
     app = QApplication.instance() or QApplication(sys.argv)
-    # Set the app icon early so the first-launch download dialog gets the
-    # TRACE logo in its title bar / taskbar entry instead of the default Qt
-    # icon. Pick the variant that contrasts with the OS chrome: white-circle
-    # logo_dark for dark Windows, black-circle logo_light for light Windows
-    # (the default). Fall back to logo_light off-Windows or on any error.
-    from PyQt5.QtGui import QIcon
+    # Set the app icon + per-dialog icon so the first-launch download
+    # dialog gets the TRACE logo in its title bar / taskbar entry instead
+    # of the default Qt icon. make_app_icon renders via QSvgRenderer
+    # (robust to a missing qsvgicon Qt plugin in the frozen bundle) and
+    # picks the OS-theme variant.
+    from TRACE._app_icon import make_app_icon
 
-    _is_dark = False
-    if sys.platform == "win32":
-        try:
-            import winreg
-
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            ) as _key:
-                _is_dark = int(winreg.QueryValueEx(_key, "AppsUseLightTheme")[0]) == 0
-        except Exception:
-            _is_dark = False
-    # Use the Thick-line variants — the window icon renders small (title
-    # bar ≈16 px, taskbar ≈24-32 px) and the thin logo_*.svg loses detail.
-    _variant = "LogoThick_dark.svg" if _is_dark else "LogoThick_light.svg"
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        _logo = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / _variant
-    else:
-        _logo = Path(__file__).resolve().parent / "GUI_images" / "logo" / _variant
-    if _logo.is_file():
-        app.setWindowIcon(QIcon(str(_logo)))
+    _icon = make_app_icon()
+    if _icon is not None:
+        app.setWindowIcon(_icon)
     dlg = QProgressDialog(
         "Downloading TRACE models (~1.6 GB).\nThis only happens on first launch.",
         "Cancel",
         0,
         100,
     )
+    if _icon is not None:
+        dlg.setWindowIcon(_icon)
     dlg.setWindowTitle("Setting up TRACE")
     dlg.setWindowModality(Qt.WindowModal)
     dlg.setMinimumDuration(0)
