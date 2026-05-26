@@ -42,7 +42,7 @@ OUTPUT_TYPES = OrderedDict(
         ("intervein_overlay", "Intervein region overlay PNG"),
         ("ap_overlay", "AP compartment overlay PNG"),
         ("cv_ratio_overlay", "CV ratio overlay PNG"),
-        ("csv", "Batch measurements CSV"),
+        ("csv", "Measurements CSV"),
     ]
 )
 

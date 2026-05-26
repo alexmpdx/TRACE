@@ -464,12 +464,31 @@ class WalkthroughOverlay(QWidget):
         hole = self._hole_rect
         gap = self._POPUP_GAP
 
-        # Top-left corner for each side, in preference order.
+        # Top-left corner for each candidate placement. Each side gets three
+        # anchors (top/centered/bottom for vertical sides, left/centered/right
+        # for horizontal sides) so the algorithm can avoid overlap when the
+        # highlight sits near a window edge — at the bottom-right corner, for
+        # example, the right/left "top-aligned" candidates clamp into the
+        # highlight, but a bottom-aligned variant of the same side clears it.
+        cx = hole.center().x() - pw // 2
+        cy = hole.center().y() - ph // 2
         side_origins = [
-            (hole.right() + gap, hole.top()),  # right — preferred
-            (hole.left() - gap - pw, hole.top()),  # left
-            (hole.left(), hole.bottom() + gap),  # below
-            (hole.left(), hole.top() - gap - ph),  # above
+            # Right of the highlight (preferred).
+            (hole.right() + gap, hole.top()),
+            (hole.right() + gap, cy),
+            (hole.right() + gap, hole.bottom() - ph),
+            # Left of the highlight.
+            (hole.left() - gap - pw, hole.top()),
+            (hole.left() - gap - pw, cy),
+            (hole.left() - gap - pw, hole.bottom() - ph),
+            # Below the highlight.
+            (hole.left(), hole.bottom() + gap),
+            (cx, hole.bottom() + gap),
+            (hole.right() - pw, hole.bottom() + gap),
+            # Above the highlight.
+            (hole.left(), hole.top() - gap - ph),
+            (cx, hole.top() - gap - ph),
+            (hole.right() - pw, hole.top() - gap - ph),
         ]
         best: Optional[QRect] = None
         best_overlap_area: Optional[int] = None

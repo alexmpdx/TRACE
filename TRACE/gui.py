@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from identify_features.config import PipelineConfig
-from PyQt5.QtCore import QEvent, QObject, QRect, QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
@@ -1717,13 +1717,24 @@ class TraceWindow(QMainWindow):
                 body=body,
             )
 
+        def _input_step_rect(w: QWidget) -> QRect:
+            # Highlight both the input-folder picker AND the Include
+            # subfolders checkbox as one region — they're a unit and the
+            # walkthrough text mentions both.
+            tl = w.input_row.mapTo(w.centralWidget(), QPoint(0, 0))
+            chk = w.recursive_chk
+            br = chk.mapTo(w.centralWidget(), QPoint(chk.width(), chk.height()))
+            return QRect(tl, br)
+
         return [
             WalkthroughStep(
                 target_resolver=lambda w: w.input_row,
+                rect_resolver=_input_step_rect,
                 title="Pick an input folder",
                 body=(
                     "Click Browse to choose a folder of wing images (TIFF, BMP, RAW). "
-                    "TRACE will discover every supported image inside and queue them."
+                    "TRACE discovers every supported image inside and queues them. "
+                    "Check Include subfolders to also scan nested directories."
                 ),
             ),
             WalkthroughStep(
@@ -1841,8 +1852,8 @@ class TraceWindow(QMainWindow):
                 title="Custom Measurements — how it works",
                 body=(
                     "Select two landmarks in the viewer to define a straight-line "
-                    "measurement. Each pair adds custom_<label> columns to the batch CSV "
-                    "for every wing."
+                    "measurement. Each pair adds custom_<label> columns to the measurements "
+                    "CSV for every wing."
                 ),
             ),
             _tab_intro(

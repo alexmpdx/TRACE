@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from measurement_maker.distance import load_landmarks_from_geojson
 from measurement_maker.types import LandmarkPair
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
@@ -80,12 +81,18 @@ class LandmarkPickerWidget(QWidget):
         default_image_dir: str = "",
         initial_image_path: str = "",
         initial_landmarks_path: str = "",
+        landmarks_generator: Optional[Callable[[Path], Path]] = None,
     ):
         super().__init__(parent)
         self._pairs: list[LandmarkPair] = list(initial_pairs or [])
         self._default_image_dir = default_image_dir
         self._initial_image_path = initial_image_path
         self._initial_landmarks_path = initial_landmarks_path
+        # Optional callback: takes an image path, runs LandmarkLocator, returns
+        # the path to a freshly-written *_landmarks.geojson. Used by Load when
+        # the user picked an image but no landmarks file — we auto-generate
+        # rather than blocking on the "pick both files" warning.
+        self._landmarks_generator = landmarks_generator
         self._viewer = None  # napari.Viewer (lazy)
         self._points_layer = None
         self._line_layer = None  # Shapes layer holding the highlight line
@@ -316,6 +323,28 @@ class LandmarkPickerWidget(QWidget):
     def _load_clicked(self):
         image_path = self._image_edit.text().strip()
         landmarks_path = self._lm_edit.text().strip()
+        # Auto-generate landmarks when the user picked an image but no GeoJSON
+        # and a generator callback is wired up (TRACE provides one that runs
+        # LandmarkLocator on the image). Falls back to the existing "pick
+        # both files" warning if neither file is set, or if the generator is
+        # absent / fails.
+        if image_path and not landmarks_path and self._landmarks_generator is not None:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                generated = self._landmarks_generator(Path(image_path))
+            except Exception as exc:
+                QApplication.restoreOverrideCursor()
+                logger.exception("Auto-generate landmarks failed")
+                QMessageBox.critical(
+                    self,
+                    "Could not detect landmarks",
+                    f"Auto-detection failed:\n\n{exc}\n\n"
+                    f"Pick a *_landmarks.geojson manually, or try a different image.",
+                )
+                return
+            QApplication.restoreOverrideCursor()
+            landmarks_path = str(generated)
+            self._lm_edit.setText(landmarks_path)
         if not image_path or not landmarks_path:
             QMessageBox.warning(
                 self,

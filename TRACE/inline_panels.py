@@ -20,6 +20,8 @@ itself.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -1132,7 +1134,7 @@ class InlineCustomDistancesPanel(QWidget):
 
         info = QLabel(
             "Configure custom straight-line measurements between any two landmarks. Each pair "
-            "adds custom_<label>_px (and _um when scale is set) columns to the batch CSV. "
+            "adds custom_<label>_px (and _um when scale is set) columns to the measurements CSV. "
             "Pairs are stored by landmark name and applied to every wing in the batch."
         )
         info.setWordWrap(True)
@@ -1174,6 +1176,7 @@ class InlineCustomDistancesPanel(QWidget):
                 default_image_dir=self._window.input_edit.text() if hasattr(self._window, "input_edit") else "",
                 initial_image_path=img_path,
                 initial_landmarks_path=lm_path,
+                landmarks_generator=self._generate_landmarks_for_image,
             )
             log("InlineCustomDistancesPanel: LandmarkPickerWidget OK")
         except BaseException as exc:  # noqa: BLE001
@@ -1230,11 +1233,55 @@ class InlineCustomDistancesPanel(QWidget):
             default_image_dir=self._window.input_edit.text() if hasattr(self._window, "input_edit") else "",
             initial_image_path=img_path,
             initial_landmarks_path=lm_path,
+            landmarks_generator=self._generate_landmarks_for_image,
         )
         self._picker.pairs_changed.connect(self._on_pairs_changed)
         layout.addWidget(self._picker, stretch=1)
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
+
+    def _generate_landmarks_for_image(self, image_path: Path) -> Path:
+        """Run LandmarkLocator on `image_path` and write a *_landmarks.geojson.
+
+        Used as LandmarkPickerWidget.landmarks_generator: lets the user pick
+        only a sample image in the Custom Measurements tab and have its
+        landmarks detected automatically instead of having to also pick a
+        matching GeoJSON. Returns the path to the freshly-written file.
+        """
+        lm_path = (getattr(self._window, "_landmark_model_path", "") or "").strip()
+        if not lm_path:
+            raise RuntimeError(
+                "No landmark model is configured. Set one in Settings → Models, "
+                "or pick a *_landmarks.geojson file manually."
+            )
+
+        from landmark_locator import make_predictor
+        from landmark_locator.data.psd_loader import imread_any
+        from landmark_locator.scripts.predict import _result_to_geojson
+
+        image = imread_any(image_path)
+        if image is None:
+            raise IOError(f"Could not load image: {image_path}")
+        predictor = make_predictor(Path(lm_path))
+        result = predictor.predict(image, include_unreliable=True)
+        internal_to_geojson = {v: k for k, v in (predictor.geojson_to_landmark or {}).items()}
+        geojson = _result_to_geojson(result, internal_to_geojson)
+
+        # Drop the GeoJSON next to the source image when its directory is
+        # writable, so the user can re-load the same wing later without
+        # regenerating. Fall back to the system temp dir if not writable
+        # (e.g. CD image, read-only network share).
+        target = Path(image_path).with_name(f"{Path(image_path).stem}_landmarks.geojson")
+        try:
+            target.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+        except OSError:
+            import tempfile
+
+            fd, tmp_str = tempfile.mkstemp(suffix="_landmarks.geojson", prefix=f"{Path(image_path).stem}_")
+            os.close(fd)
+            target = Path(tmp_str)
+            target.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+        return target
 
 
 # ---------------------------------------------------------------------------
