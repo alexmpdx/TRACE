@@ -119,6 +119,21 @@ class CalibrateWidget(QWidget):
     # Calibration lifecycle
     # ------------------------------------------------------------------
     def _start_calibration(self):
+        # Re-pull state from the parent panel right before the prereq check.
+        # set_paths() was only called once at construction, so any folder /
+        # model change after the Settings tab was built (Browse... on the main
+        # window, OK in the settings dialog, Restore Defaults, ...) wouldn't
+        # otherwise be visible here. Parents that don't expose
+        # _refresh_calibrate_paths (e.g. the standalone help dialog that
+        # already calls set_paths itself) are silently skipped.
+        parent_panel = self.parent()
+        refresh = getattr(parent_panel, "_refresh_calibrate_paths", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
+
         missing = []
         if not self._input_path:
             missing.append("Input folder")
