@@ -114,8 +114,13 @@ class _WalkthroughPopup(QFrame):
             "border-radius: 6px; "
             "}"
         )
-        self.setMinimumWidth(280)
-        self.setMaximumWidth(360)
+        # Min width has to cover the footer at its natural size (counter +
+        # Skip tutorial + Previous + Next buttons) — at 280 the buttons
+        # collapse below their text width and the "Skip tutorial" / "Don't
+        # show again on launch" labels visibly clip. The max gives long
+        # bodies room to render on fewer lines without dominating the window.
+        self.setMinimumWidth(380)
+        self.setMaximumWidth(480)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
