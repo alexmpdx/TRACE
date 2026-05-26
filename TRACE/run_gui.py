@@ -307,13 +307,28 @@ def _bootstrap_models() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     # Set the app icon early so the first-launch download dialog gets the
     # TRACE logo in its title bar / taskbar entry instead of the default Qt
-    # icon. Path resolution mirrors output_tooltips._GUI_IMAGES_DIR.
+    # icon. Pick the variant that contrasts with the OS chrome: white-circle
+    # logo_dark for dark Windows, black-circle logo_light for light Windows
+    # (the default). Fall back to logo_light off-Windows or on any error.
     from PyQt5.QtGui import QIcon
 
+    _is_dark = False
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as _key:
+                _is_dark = int(winreg.QueryValueEx(_key, "AppsUseLightTheme")[0]) == 0
+        except Exception:
+            _is_dark = False
+    _variant = "logo_dark.svg" if _is_dark else "logo_light.svg"
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        _logo = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "logo_dark.svg"
+        _logo = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / _variant
     else:
-        _logo = Path(__file__).resolve().parent / "GUI_images" / "logo" / "logo_dark.svg"
+        _logo = Path(__file__).resolve().parent / "GUI_images" / "logo" / _variant
     if _logo.is_file():
         app.setWindowIcon(QIcon(str(_logo)))
     dlg = QProgressDialog(
