@@ -15,7 +15,7 @@
 ; .github/workflows/build-windows.yml). The literal below is the
 ; fallback for local builds where the override isn't passed.
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.4"
+  #define MyAppVersion "0.1.5"
 #endif
 #define MyAppPublisher "Blair Lab"
 #define MyAppURL "https://github.com/alexmpdx/TRACE"
@@ -71,7 +71,13 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+; {autodesktop} resolves to {userdesktop} for per-user installs (our default
+; via PrivilegesRequired=lowest) and {commondesktop} when the user elevates to
+; a per-machine install. The previous literal {commondesktop} unconditionally
+; targeted C:\Users\Public\Desktop, which needs admin rights — non-admin
+; installs hit "IPersistFile::Save failed; code 0x80070005. Access is denied."
+; the moment the "Create desktop icon" task was checked.
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; \
