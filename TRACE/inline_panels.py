@@ -1568,9 +1568,19 @@ class InlineHelpPanel(QWidget):
             )
             return
 
+        import os
         import tempfile
 
-        dst = Path(tempfile.gettempdir()) / "TRACE-Setup.exe"
+        # Use a unique filename per attempt instead of a fixed
+        # %TEMP%\TRACE-Setup.exe. A stale handle on the fixed name from a
+        # prior attempt (antivirus mid-scan, an installer process still
+        # exiting, an aborted earlier download) locks the path and the
+        # next open(dst, "wb") fails with [Errno 13] Permission denied.
+        # mkstemp picks a guaranteed-fresh name; we close its fd straight
+        # away so the subsequent open() owns the handle.
+        fd, _dst_str = tempfile.mkstemp(suffix="-TRACE-Setup.exe")
+        os.close(fd)
+        dst = Path(_dst_str)
 
         dlg = QProgressDialog(
             f"Downloading TRACE {version}…",
