@@ -1750,7 +1750,7 @@ class TraceWindow(QMainWindow):
                 title="Set µm/px",
                 body=(
                     "Enter the microns-per-pixel conversion factor for your images. "
-                    "All images in a run must have the same scale."
+                    "<b>All images in a run must have the same scale.</b>"
                 ),
             ),
             WalkthroughStep(
