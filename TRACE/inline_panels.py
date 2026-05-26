@@ -1255,13 +1255,14 @@ class InlineHelpPanel(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        # Banner: flicon.svg rendered as a centered wireframe at the top of
-        # the Help tab. Resolves to TRACE/GUI_images/logo/flicon.svg in dev
-        # and to the same path under sys._MEIPASS in a frozen build.
+        # Banner: fliconWhite_real.svg (white-stroke variant of flicon.svg)
+        # rendered as a centered wireframe at the top of the Help tab — the
+        # white strokes show clearly on the dark theme. The README uses the
+        # black-stroke flicon.svg since GitHub renders it on a light page.
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            _flicon = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "flicon.svg"
+            _flicon = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "fliconWhite_real.svg"
         else:
-            _flicon = Path(__file__).resolve().parent / "GUI_images" / "logo" / "flicon.svg"
+            _flicon = Path(__file__).resolve().parent / "GUI_images" / "logo" / "fliconWhite_real.svg"
         if _flicon.is_file():
             from PyQt5.QtGui import QPainter, QPixmap
             from PyQt5.QtSvg import QSvgRenderer
