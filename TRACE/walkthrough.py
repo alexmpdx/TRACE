@@ -215,8 +215,10 @@ class WalkthroughOverlay(QWidget):
     # Hole padding (px) around the target widget's geometry so the highlight
     # ring doesn't visually clip the widget's border.
     _HOLE_PADDING = 6
-    # Gap (px) between the highlight rect and the popup.
-    _POPUP_GAP = 12
+    # Gap (px) between the highlight rect and the popup. Bumped from 12
+    # so the visual separation is clearly readable after the accent ring
+    # (2 px wide, 2 px outset) eats some of the buffer on the highlight side.
+    _POPUP_GAP = 24
 
     finished = pyqtSignal()
 
@@ -464,49 +466,57 @@ class WalkthroughOverlay(QWidget):
         hole = self._hole_rect
         gap = self._POPUP_GAP
 
-        # Top-left corner for each candidate placement. Each side gets three
-        # anchors (top/centered/bottom for vertical sides, left/centered/right
-        # for horizontal sides) so the algorithm can avoid overlap when the
-        # highlight sits near a window edge — at the bottom-right corner, for
-        # example, the right/left "top-aligned" candidates clamp into the
-        # highlight, but a bottom-aligned variant of the same side clears it.
+        # Build candidate placements grouped by side. Each side gets multiple
+        # anchors so the algorithm can find a fit even when the highlight is
+        # near a window edge. Side order is below → above → right → left:
+        # below reads naturally (popup explains the highlight underneath it),
+        # above is the fallback for highlights near the bottom (the previous
+        # algorithm fell back to left/right here, which placed the popup
+        # tightly alongside the highlight and read as "overlapping" visually
+        # even when the rects didn't actually intersect).
         cx = hole.center().x() - pw // 2
         cy = hole.center().y() - ph // 2
-        side_origins = [
-            # Right of the highlight (preferred).
-            (hole.right() + gap, hole.top()),
-            (hole.right() + gap, cy),
-            (hole.right() + gap, hole.bottom() - ph),
-            # Left of the highlight.
-            (hole.left() - gap - pw, hole.top()),
-            (hole.left() - gap - pw, cy),
-            (hole.left() - gap - pw, hole.bottom() - ph),
-            # Below the highlight.
-            (hole.left(), hole.bottom() + gap),
-            (cx, hole.bottom() + gap),
-            (hole.right() - pw, hole.bottom() + gap),
-            # Above the highlight.
-            (hole.left(), hole.top() - gap - ph),
-            (cx, hole.top() - gap - ph),
-            (hole.right() - pw, hole.top() - gap - ph),
+        below_y = hole.bottom() + gap
+        above_y = hole.top() - gap - ph
+        right_x = hole.right() + gap
+        left_x = hole.left() - gap - pw
+        sides = [
+            ("below", [(cx, below_y), (hole.left(), below_y), (hole.right() - pw, below_y)]),
+            ("above", [(cx, above_y), (hole.left(), above_y), (hole.right() - pw, above_y)]),
+            ("right", [(right_x, cy), (right_x, hole.top()), (right_x, hole.bottom() - ph)]),
+            ("left", [(left_x, cy), (left_x, hole.top()), (left_x, hole.bottom() - ph)]),
         ]
+
+        def _fits_unclamped(x: int, y: int) -> bool:
+            """True when (x, y) places the popup fully on the central widget
+            AND clear of the highlight rect, without any clamping. Clamping
+            is what historically pulled candidates from a clean position into
+            the highlight; rejecting unclamped misses outright fixes that.
+            """
+            if x < 0 or y < 0 or x + pw > central_w or y + ph > central_h:
+                return False
+            return not QRect(x, y, pw, ph).intersects(hole)
+
+        for _name, anchors in sides:
+            for x, y in anchors:
+                if _fits_unclamped(x, y):
+                    self._popup.setGeometry(QRect(x, y, pw, ph))
+                    return
+
+        # No clean placement exists (target nearly fills the window). Fall
+        # back to the legacy clamped + least-overlap heuristic so the popup
+        # is at least visible somewhere.
         best: Optional[QRect] = None
         best_overlap_area: Optional[int] = None
-        for x, y in side_origins:
-            # Pull the candidate fully onto the central widget.
+        flat_origins = [origin for _name, anchors in sides for origin in anchors]
+        for x, y in flat_origins:
             x = max(0, min(x, central_w - pw))
             y = max(0, min(y, central_h - ph))
             rect = QRect(x, y, pw, ph)
-            if not rect.intersects(hole):
-                # Clears the highlight — use the first such side.
-                self._popup.setGeometry(rect)
-                return
-            # Otherwise remember whichever side overlaps the highlight least.
             overlap = rect.intersected(hole)
             area = overlap.width() * overlap.height()
             if best_overlap_area is None or area < best_overlap_area:
                 best, best_overlap_area = rect, area
-        # No side fully clears the highlight — use the least-bad placement.
         if best is not None:
             self._popup.setGeometry(best)
 
