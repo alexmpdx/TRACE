@@ -324,7 +324,9 @@ def _bootstrap_models() -> None:
                 _is_dark = int(winreg.QueryValueEx(_key, "AppsUseLightTheme")[0]) == 0
         except Exception:
             _is_dark = False
-    _variant = "logo_dark.svg" if _is_dark else "logo_light.svg"
+    # Use the Thick-line variants — the window icon renders small (title
+    # bar ≈16 px, taskbar ≈24-32 px) and the thin logo_*.svg loses detail.
+    _variant = "LogoThick_dark.svg" if _is_dark else "LogoThick_light.svg"
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         _logo = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / _variant
     else:

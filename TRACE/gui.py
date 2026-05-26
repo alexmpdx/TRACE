@@ -1979,14 +1979,19 @@ def _is_os_dark_mode() -> bool:
 def _app_icon_path() -> Path:
     """Path to the TRACE app logo variant matching the OS theme.
 
-    logo_dark.svg → white circle outline → for dark-mode chrome.
-    logo_light.svg → black circle outline → for light-mode chrome.
+    Uses the Thick-line logo variants because the window icon renders at
+    small sizes (title bar ≈16 px, taskbar ≈24-32 px) where the thin-line
+    logo_dark/logo_light SVGs lose detail. The Thick variants keep the
+    wireframe legible at icon sizes.
+
+    LogoThick_dark.svg → white circle outline → for dark-mode chrome.
+    LogoThick_light.svg → black circle outline → for light-mode chrome.
     """
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         base = Path(sys._MEIPASS) / "TRACE" / "GUI_images"
     else:
         base = Path(__file__).resolve().parent / "GUI_images"
-    variant = "logo_dark.svg" if _is_os_dark_mode() else "logo_light.svg"
+    variant = "LogoThick_dark.svg" if _is_os_dark_mode() else "LogoThick_light.svg"
     return base / "logo" / variant
 
 
