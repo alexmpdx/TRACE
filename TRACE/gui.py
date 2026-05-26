@@ -1732,26 +1732,25 @@ class TraceWindow(QMainWindow):
                 rect_resolver=_input_step_rect,
                 title="Pick an input folder",
                 body=(
-                    "Click Browse to choose a folder of wing images (TIFF, BMP, RAW). "
-                    "TRACE discovers every supported image inside and queues them. "
-                    "Check Include subfolders to also scan nested directories."
+                    "Click Browse to choose a folder of wing images. TRACE will "
+                    "discover and queue all supported images. To search subfolders "
+                    "for images, check the Include subfolders box."
                 ),
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.output_row,
                 title="Pick an output folder",
                 body=(
-                    "Click Browse to choose where selected outputs are written. "
-                    "TRACE opens this folder automatically when done."
+                    "Click Browse to choose where to save TRACE results. This folder "
+                    "opens automatically when a run has been completed."
                 ),
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.scale_spin,
                 title="Set µm/px",
                 body=(
-                    "Enter the microns-per-pixel calibration for your microscope — every "
-                    "measurement gets converted to physical units. "
-                    "All images in the input folder must be captured at the same scale."
+                    "Enter the microns-per-pixel conversion factor for your images. "
+                    "All images in a run must have the same scale."
                 ),
             ),
             WalkthroughStep(
@@ -1762,16 +1761,15 @@ class TraceWindow(QMainWindow):
             _tab_intro(
                 0,
                 "The Main tab",
-                "Your run dashboard: it lists the queued images and streams the live "
-                "log while TRACE works. The next two steps cover each.",
+                "Your run dashboard: it lists the queued images and streams the live " "log while TRACE works.",
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.image_list,
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(0),
                 title="Main tab — image queue",
                 body=(
-                    "The Images list shows every wing TRACE discovered in your input "
-                    "folder. Each row updates with its status as the run proceeds."
+                    "All images discovered in the input folder. Each row updates with "
+                    "its status as the run proceeds."
                 ),
             ),
             WalkthroughStep(
@@ -1786,29 +1784,28 @@ class TraceWindow(QMainWindow):
             _tab_intro(
                 1,
                 "The Settings tab",
-                "Where you tune a run: calibration, optional preprocessing, output "
-                "appearance, performance, and resets. The next steps walk through each "
-                "section.",
+                "Where you tune a run: scale calibration, optional preprocessing steps, "
+                "output appearance, and processing throughput.",
             ),
             _settings_step(
                 "_scale_group",
                 "Settings — Scale",
-                "Set µm/px here, or click Estimate to derive it from the landmark model. "
-                "This field stays in sync with the µm/px box on the left panel.",
+                "Another place where you can set µm/px conversion factor. If you are "
+                "unsure of your scale, click on the Estimate button and TRACE will "
+                "make a guess based on the location of landmark points.",
             ),
             _settings_step(
                 "_optional_preprocessing_group",
                 "Settings — Optional preprocessing",
-                "Toggle wing isolation and wing rotation. These extra steps run before "
-                "the rest of the pipeline and are off by default. Use wing isolation "
-                "when neighboring wings are visible in your images, and wing rotation "
-                "when your wings are not right-side up.",
+                "Extra steps that can be toggled on to improve TRACE's accuracy at the "
+                "expense of time. Use wing isolation when neighboring wings are visible "
+                "in your images and wing rotation if your wings are not right-side-up.",
             ),
             _settings_step(
                 "_output_options_group",
                 "Settings — Output options",
-                "Control overlay appearance: vein and intervein opacity, per-vein and "
-                "per-region colors, and whether to fill buffered vein tissue.",
+                "If you have selected vein and/or intervein overlay output(s), control "
+                "the appearance of detected veins/intervein regions.",
             ),
             _settings_step(
                 "_parallel_processing_group",
@@ -1833,8 +1830,8 @@ class TraceWindow(QMainWindow):
             _tab_intro(
                 2,
                 "The Custom Measurements tab",
-                "Define your own landmark-to-landmark distance measurements — they get "
-                "added to every wing's results. The next two steps show how.",
+                "Define your own landmark-to-landmark measurements — these can be added "
+                "to the measurements CSV (selectable under Outputs as Custom measurements).",
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.inline_custom_distances_panel._picker._source_widget,
@@ -1851,40 +1848,36 @@ class TraceWindow(QMainWindow):
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(2),
                 title="Custom Measurements — how it works",
                 body=(
-                    "Select two landmarks in the viewer to define a straight-line "
-                    "measurement. Each pair adds custom_<label> columns to the measurements "
-                    "CSV for every wing."
+                    "Select two points in the view to define a straight-line measurement. "
+                    "Each custom measurement will appear as a separate column in the "
+                    "measurements CSV."
                 ),
             ),
             _tab_intro(
                 3,
                 "The Help tab",
-                "Links to documentation, replays this walkthrough, and checks for TRACE "
-                "updates. The next two steps point out the main buttons.",
+                "Links to documentation, replays this walkthrough, and checks for TRACE " "updates.",
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.inline_help_panel.btn_replay_walkthrough,
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(3),
                 title="Help — replay this walkthrough",
-                body=("Re-run this guided tour anytime from here. Step with Next / " "Previous, or press Esc to skip."),
+                body="Re-run this guided tour anytime from here.",
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.inline_help_panel.btn_check_updates,
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(3),
                 title="Help — check for updates",
                 body=(
-                    "Check the GitHub Releases page for a newer TRACE installer. When an "
-                    "update is available, an Install Update button appears alongside."
+                    "Check for a newer version of TRACE. When an update is available, an "
+                    "Install Update button appears — click on that to update TRACE."
                 ),
             ),
             WalkthroughStep(
                 target_resolver=lambda w: w.btn_run,
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(0),
                 title="Run the pipeline",
-                body=(
-                    "Click here when everything's set. Progress and ETA appear below the "
-                    "tabs; the log streams on the Main tab. The output folder opens when done."
-                ),
+                body=("Click here when everything's set. Progress bar and ETA appear at the " "bottom of the window."),
             ),
         ]
 
