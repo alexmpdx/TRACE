@@ -188,6 +188,12 @@ _COLLECT_ALL_PACKAGES = [
     # Without collect_all, the .pem file doesn't make it into the bundle
     # and certifi.where() returns a path that doesn't exist at runtime.
     "certifi",
+    # onnxruntime is imported lazily inside OnnxModelWrapper.__init__
+    # (modelTOjson/modeltojson.py) which PyInstaller's static analysis
+    # misses. Without collect_all we also lose the native DLLs and the
+    # capi/ subdir, so the wing-isolation ONNX model fails to load at
+    # runtime with "onnxruntime is required for ONNX models".
+    "onnxruntime",
 ]
 for pkg in _COLLECT_ALL_PACKAGES:
     try:
