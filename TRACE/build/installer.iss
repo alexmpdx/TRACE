@@ -15,7 +15,7 @@
 ; .github/workflows/build-windows.yml). The literal below is the
 ; fallback for local builds where the override isn't passed.
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.8"
+  #define MyAppVersion "0.1.9"
 #endif
 #define MyAppPublisher "Blair Lab"
 #define MyAppURL "https://github.com/alexmpdx/TRACE"
@@ -53,7 +53,11 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 ; Skip the "ready to install" page since we don't ask the user any questions.
 DisableReadyPage=no
-SetupIconFile=
+; trace_icon.ico is generated from TRACE/GUI_images/logo/logo_dark.svg —
+; re-run `python TRACE/build/make_installer_icon.py` to regenerate after
+; any logo edit. The .ico contains 16/24/32/48/64/128/256-px resolutions so
+; Windows can pick the right size for taskbar, Explorer, and Start Menu.
+SetupIconFile=trace_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]

@@ -1255,6 +1255,31 @@ class InlineHelpPanel(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
+        # Banner: flicon.svg rendered as a centered wireframe at the top of
+        # the Help tab. Resolves to TRACE/GUI_images/logo/flicon.svg in dev
+        # and to the same path under sys._MEIPASS in a frozen build.
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            _flicon = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "flicon.svg"
+        else:
+            _flicon = Path(__file__).resolve().parent / "GUI_images" / "logo" / "flicon.svg"
+        if _flicon.is_file():
+            from PyQt5.QtGui import QPainter, QPixmap
+            from PyQt5.QtSvg import QSvgRenderer
+
+            renderer = QSvgRenderer(str(_flicon))
+            default = renderer.defaultSize()
+            banner_width = 280
+            banner_h = max(1, int(banner_width * default.height() / max(1, default.width())))
+            pixmap = QPixmap(banner_width, banner_h)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            banner = QLabel()
+            banner.setPixmap(pixmap)
+            banner.setAlignment(Qt.AlignCenter)
+            layout.addWidget(banner)
+
         title = QLabel("Documentation")
         title_font = QFont(title.font())
         title_font.setPointSize(title_font.pointSize() + 2)

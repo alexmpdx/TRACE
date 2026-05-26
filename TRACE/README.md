@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="GUI_images/logo/flicon.svg" alt="TRACE" width="320"/>
+</p>
+
 # TRACE
 
 End-to-end *Drosophila* wing morphology analysis. Takes a folder of brightfield wing images and produces named vein/intervein overlays, a per-batch measurements CSV (areas, lengths, optional custom landmark distances), and intermediate GeoJSON artifacts. The orchestration spans six preprocessing stages and six analysis steps; this README is the entry point.
