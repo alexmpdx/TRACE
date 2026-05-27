@@ -1929,16 +1929,41 @@ class TraceWindow(QMainWindow):
             diffs = diffs[:10] + [f"  … and {extra} more change(s)"]
         return diffs
 
+    def _apply_original_settings(self, saved: dict) -> None:
+        """Restore current GUI / config state from a saved settings dict.
+
+        Inverse of _current_settings_snapshot_dict. Routes the three
+        sub-dicts (pipeline_config, gate_override, gui_state) through the
+        existing import-settings helpers, so inline panels refresh too
+        (apply_gui_state ends with refresh_from_state() calls).
+        """
+        from TRACE.config_io import config_from_dict
+
+        pcfg = saved.get("pipeline_config")
+        if pcfg:
+            try:
+                self.config = config_from_dict(pcfg)
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"Could not apply original pipeline_config: {exc}")
+        self._gate_override = saved.get("gate_override") or None
+        gs = saved.get("gui_state")
+        if isinstance(gs, dict):
+            self.apply_gui_state(gs)
+
     def _confirm_settings_drift(self, run_folder: Path) -> bool:
         """Compare current settings to the latest snapshot in ``run_folder``.
 
-        If they differ, prompt the user. On accept, also persist a new
-        ``settings_partN.yaml`` so the post-drift settings are preserved
-        for posterity, and log a short diff summary so the user sees what
-        changed.
+        On drift, offers three choices:
+          - Use original — restore the saved snapshot into the GUI / config
+            and resume as if nothing changed (no settings_partN.yaml
+            written; the original part stays in force).
+          - Continue with current — write settings_part<N+1>.yaml, log the
+            diff, resume with the new settings applied to remaining images.
+          - Cancel — bail; the GUI stays in its paused state and the user
+            can re-tweak before clicking Resume again.
 
-        Returns True when the user wants to proceed (no diff, or "Continue
-        with current settings" picked), False to abort the resume.
+        Returns True when the resume should proceed (matched, restored, or
+        user picked "Continue"), False to abort.
         """
         snapshot_path, current_part = self._latest_settings_yaml(run_folder)
         if snapshot_path is None:
@@ -1958,21 +1983,34 @@ class TraceWindow(QMainWindow):
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Settings changed since last run")
         box.setText(
-            "The TRACE settings have changed since this run started. "
-            "Resuming with the current settings means the new values apply "
-            "only to the remaining images — the already-completed images "
-            "were processed with the original settings."
+            "The TRACE settings have changed since this run started. " "Choose how to handle the remaining images."
         )
-        body = "Continue with current settings, or cancel?"
+        body = (
+            "Use original — restore the saved settings before resuming.\n"
+            "Continue with current — apply the new settings only to the "
+            "remaining images (already-completed images keep their original "
+            "results).\n"
+            "Cancel — go back to the Paused state without resuming."
+        )
         if diff_lines:
             body += "\n\nChanged:\n" + "\n".join(diff_lines)
         box.setInformativeText(body)
-        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        box.button(QMessageBox.Ok).setText("Continue with current settings")
-        box.setDefaultButton(QMessageBox.Ok)
-        if box.exec_() != QMessageBox.Ok:
+        btn_original = box.addButton("Use original", QMessageBox.AcceptRole)
+        btn_current = box.addButton("Continue with current", QMessageBox.AcceptRole)
+        btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_cancel)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is btn_cancel:
             return False
-        # User accepted: snapshot the new settings as settings_part<N+1>.yaml
+        if clicked is btn_original:
+            # Restore the saved snapshot into current state. No new
+            # settings_partN.yaml — we're conceptually returning to the
+            # state the manifest already references.
+            self._apply_original_settings(saved)
+            self._log(f"Resumed with the original settings from {snapshot_path.name}.")
+            return True
+        # btn_current — snapshot the new settings as settings_part<N+1>.yaml
         # so the post-drift state is preserved alongside the original. Also
         # log the diff so a reader of the run.log knows the run was
         # processed under more than one settings configuration.
