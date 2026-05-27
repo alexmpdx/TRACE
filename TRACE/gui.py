@@ -608,22 +608,17 @@ class TraceWindow(QMainWindow):
 
         left_layout.addWidget(out_group)
 
-        # -- Run / Pause / Resume --
-        # btn_pause doubles as Resume: text toggles based on worker state.
-        # It also folds in the old Cancel-during-run role — pause is a clean
-        # stop between images, and "give up" is "Pause then close the app
-        # without resuming" (or wipe the output folder before re-running).
+        # -- Run / Pause / Resume (one button) + Cancel --
+        # btn_run is the tri-state action button: it shows "Run Pipeline"
+        # when idle, "Pause" while the worker is going, and "Resume" while
+        # paused. Cancel is a separate hard-stop that discards the run.
         btn_layout = QHBoxLayout()
         self.btn_run = QPushButton("Run Pipeline")
-        self.btn_run.setToolTip("Start processing every image in the input folder. Opens the output folder when done.")
-        self.btn_run.clicked.connect(self._run_pipeline)
-        self.btn_pause = QPushButton("Pause")
-        self.btn_pause.setToolTip(
-            "Pause the run between images. The current image finishes cleanly; partial outputs are kept. "
-            "Click again to Resume — TRACE skips the images already completed and picks up where it left off."
+        self.btn_run.setToolTip(
+            "Run Pipeline — start processing every image in the input folder. "
+            "While running, this button becomes Pause; once paused, Resume."
         )
-        self.btn_pause.clicked.connect(self._pause_or_resume_pipeline)
-        self.btn_pause.setEnabled(False)
+        self.btn_run.clicked.connect(self._on_run_button_clicked)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setToolTip(
             "Stop the run and discard its progress. Per-image outputs already written stay on disk, but "
@@ -632,7 +627,6 @@ class TraceWindow(QMainWindow):
         self.btn_cancel.clicked.connect(self._cancel_pipeline)
         self.btn_cancel.setEnabled(False)
         btn_layout.addWidget(self.btn_run)
-        btn_layout.addWidget(self.btn_pause)
         btn_layout.addWidget(self.btn_cancel)
         left_layout.addLayout(btn_layout)
         # Tracks whether the worker is currently in a paused state. Drives
@@ -1445,10 +1439,10 @@ class TraceWindow(QMainWindow):
             # User cancelled; bail without starting.
             return
 
-        # UI state
-        self.btn_run.setEnabled(False)
-        self.btn_pause.setEnabled(True)
-        self.btn_pause.setText("Pause")
+        # UI state — btn_run stays enabled but flips its label to Pause
+        # while the worker is going. Cancel becomes available.
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("Pause")
         self.btn_cancel.setEnabled(True)
         self._is_paused = False
         self._resume_skip_set = resume_skip_set
@@ -1608,25 +1602,28 @@ class TraceWindow(QMainWindow):
         box.setDefaultButton(QMessageBox.Abort)
         return box.exec_() == QMessageBox.Ok
 
-    def _pause_or_resume_pipeline(self):
-        """Pause the running worker, or resume a paused run.
+    def _on_run_button_clicked(self):
+        """Tri-state dispatch for the single Run / Pause / Resume button.
 
-        Two states:
-          - Worker is running → tell it to pause. The worker finishes the
-            current image cleanly and emits paused(...) when done. _on_paused
-            then flips the button label to Resume and re-enables Run.
-          - Worker is None and self._is_paused is True → start a fresh
-            worker continuing from the manifest's completed list.
+        - Worker is running → Pause it. The worker finishes the current
+          image cleanly and emits paused(...) when done. _on_paused then
+          flips the button label to Resume.
+        - Worker is None and self._is_paused is True → Resume by
+          spawning a fresh worker that continues from the manifest's
+          completed list.
+        - Otherwise (idle) → kick off a new run via _run_pipeline.
         """
         if self.worker is not None:
             self.worker.pause()
             self._log("Pause requested — finishing the current image first.")
-            # Disable until the worker actually acks the pause to avoid
-            # the user spam-clicking and queuing weird state.
-            self.btn_pause.setEnabled(False)
+            # Disable during the transition (between click and the worker's
+            # paused-ack) so the user can't spam-click and queue weird state.
+            self.btn_run.setEnabled(False)
             return
         if self._is_paused:
             self._resume_paused_run()
+            return
+        self._run_pipeline()
 
     def _cancel_pipeline(self) -> None:
         """Hard-stop the run and discard its resume state.
@@ -1657,7 +1654,10 @@ class TraceWindow(QMainWindow):
             self.worker.cancel()
             self._log("Cancelling — the current image will finish first.")
             self.btn_cancel.setEnabled(False)
-            self.btn_pause.setEnabled(False)
+            # Disable the combo button during the cancel transition (worker
+            # is still finishing the in-flight image). _finalize_cancel
+            # re-enables it with the "Run Pipeline" label.
+            self.btn_run.setEnabled(False)
             return
         # Paused state: no worker thread is running. Just clean up.
         self._finalize_cancel()
@@ -1681,8 +1681,7 @@ class TraceWindow(QMainWindow):
         self._is_resuming = False
         self._run_folder = None
         self.btn_run.setEnabled(True)
-        self.btn_pause.setEnabled(False)
-        self.btn_pause.setText("Pause")
+        self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
         self.statusBar().showMessage("Cancelled")
         self.eta_label.setText("")
@@ -1754,15 +1753,13 @@ class TraceWindow(QMainWindow):
         # routes through _resume_paused_run.
         self.worker = None
         self._is_paused = True
-        self.btn_pause.setText("Resume")
-        self.btn_pause.setEnabled(True)
+        # The combo button now means "Resume" — click it to continue.
+        self.btn_run.setText("Resume")
+        self.btn_run.setEnabled(True)
         # Cancel stays enabled while paused so the user can fully abandon
         # the run from the paused state (no worker is running, but the
         # manifest still claims the run is in-progress).
         self.btn_cancel.setEnabled(True)
-        # Leave btn_run disabled while paused so an accidental Run-click
-        # doesn't try to start a fresh run on top of the partial outputs.
-        self.btn_run.setEnabled(False)
 
     def _resume_paused_run(self) -> None:
         """User clicked Resume after pausing in-session — re-launch the worker
@@ -1771,8 +1768,7 @@ class TraceWindow(QMainWindow):
             # Should never happen — _is_paused without a manifest is a bug,
             # not a state we should silently tolerate. Reset UI defensively.
             self._is_paused = False
-            self.btn_pause.setText("Pause")
-            self.btn_pause.setEnabled(False)
+            self.btn_run.setText("Run Pipeline")
             self.btn_run.setEnabled(True)
             return
         # Re-run _run_pipeline with the existing manifest available so
@@ -2248,8 +2244,7 @@ class TraceWindow(QMainWindow):
 
     def _on_all_done(self, results):
         self.btn_run.setEnabled(True)
-        self.btn_pause.setEnabled(False)
-        self.btn_pause.setText("Pause")
+        self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
         self._is_paused = False
         self._progress_timer.stop()
@@ -2314,7 +2309,7 @@ class TraceWindow(QMainWindow):
 
     def _on_error(self, msg):
         self.btn_run.setEnabled(True)
-        self.btn_pause.setEnabled(False)
+        self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
         self._progress_timer.stop()
         self.eta_label.setText("")
