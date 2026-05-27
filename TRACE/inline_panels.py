@@ -1216,15 +1216,21 @@ class InlineCustomDistancesPanel(QWidget):
         cartoon_row.addStretch(1)
         layout.addLayout(cartoon_row)
 
-        # Auto-load only when the user has previously saved paths to real
-        # files (QSettings restore). On a fresh launch with nothing saved,
-        # _resolve_paths returns blank strings and the viewer stays empty
-        # until the user picks an image or clicks Restore cartoon wing.
+        # Auto-load behavior:
+        #   - Saved real-wing paths from a prior session → restore them
+        #     normally (fields + viewer both populated via load_initial).
+        #   - Nothing saved → show the bundled cartoon in the viewer with
+        #     the path fields left blank. load_into_viewer bypasses the
+        #     edits so the next Browse + Load is treated as a fresh user
+        #     pick (auto-detect can fire) rather than as a re-load of a
+        #     pre-filled cartoon path.
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
+        elif self._CARTOON_IMAGE.is_file() and self._CARTOON_LANDMARKS.is_file():
+            QTimer.singleShot(0, lambda: self._picker.load_into_viewer(self._CARTOON_IMAGE, self._CARTOON_LANDMARKS))
 
     def _restore_cartoon(self) -> None:
-        """Load the bundled cartoon wing + its landmarks into the picker."""
+        """Load the bundled cartoon wing into the viewer; clear the path fields."""
         if self._picker is None:
             return
         if not self._CARTOON_IMAGE.is_file() or not self._CARTOON_LANDMARKS.is_file():
@@ -1235,9 +1241,13 @@ class InlineCustomDistancesPanel(QWidget):
                 f"  {self._CARTOON_IMAGE}\n  {self._CARTOON_LANDMARKS}",
             )
             return
-        self._picker.set_image_path(str(self._CARTOON_IMAGE))
-        self._picker.set_landmarks_path(str(self._CARTOON_LANDMARKS))
-        self._picker.load_initial()
+        self._picker.set_image_path("")
+        self._picker.set_landmarks_path("")
+        self._picker.load_into_viewer(self._CARTOON_IMAGE, self._CARTOON_LANDMARKS)
+        # Forget any previously-saved user image so next session also
+        # opens on the cartoon instead of restoring the prior pick.
+        self._window._distance_sample_image = ""
+        self._window._distance_sample_landmarks = ""
 
     def _on_pairs_changed(self, pairs) -> None:
         self._window._user_landmark_distances = [asdict(p) for p in pairs]
@@ -1279,8 +1289,13 @@ class InlineCustomDistancesPanel(QWidget):
         # Slot the picker BEFORE the cartoon-restore button row so layout
         # order stays the same as on initial build.
         layout.insertWidget(layout.count() - 1, self._picker, stretch=1)
+        # Same auto-load policy as _build_ui: restore saved real-wing paths
+        # if any, otherwise drop into the cartoon-in-viewer / blank-fields
+        # state. Matches the fresh-launch experience after a Restore / wipe.
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
+        elif self._CARTOON_IMAGE.is_file() and self._CARTOON_LANDMARKS.is_file():
+            QTimer.singleShot(0, lambda: self._picker.load_into_viewer(self._CARTOON_IMAGE, self._CARTOON_LANDMARKS))
 
     def _generate_landmarks_for_image(self, image_path: Path) -> Path:
         """Run LandmarkLocator on `image_path` and write a *_landmarks.geojson.

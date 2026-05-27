@@ -151,6 +151,17 @@ class LandmarkPickerWidget(QWidget):
         """Programmatically set the landmarks-GeoJSON path (does not trigger load)."""
         self._lm_edit.setText(path or "")
 
+    def load_into_viewer(self, image_path: Path, landmarks_path: Path) -> None:
+        """Load image + landmarks into the viewer WITHOUT touching the path fields.
+
+        Hosts use this to show a starter / cartoon example in the viewer
+        while leaving the Sample Image and Landmarks GeoJSON fields blank,
+        so the next Browse + Load is treated as a fresh user pick (and
+        the landmarks_generator auto-detect path can fire) rather than
+        as a re-load of the pre-filled defaults.
+        """
+        self._load_wing(Path(image_path), Path(landmarks_path))
+
     def load_initial(self) -> bool:
         """Load the current image_path + landmarks_path into the viewer.
 
