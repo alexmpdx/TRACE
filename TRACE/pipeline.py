@@ -685,18 +685,22 @@ def _run(
     successful_preproc: list[_PreprocResult] = []
     failed_preproc_lock = threading.Lock()
 
-    def _signal_failed_preproc(image_basename: str) -> None:
+    def _signal_failed_preproc(image_basename: str, error_text: str) -> None:
         """Thread-safe wrapper around the host's on_image_failed_preproc
         callback. Called for each image whose Stage 1 errored out so the
         host (GUI) can mark it in the manifest. On resume with unchanged
         settings, the host adds these to skip_image_basenames so Stage 1
         doesn't re-attempt them — see run_state.RunManifest.
+
+        ``error_text`` carries the human-readable error so the GUI can
+        surface it next to the failed image in the list. May be the
+        empty string when no upstream error message was provided.
         """
         if on_image_failed_preproc is None:
             return
         with failed_preproc_lock:
             try:
-                on_image_failed_preproc(image_basename)
+                on_image_failed_preproc(image_basename, error_text)
             except Exception:
                 logger.exception("on_image_failed_preproc callback raised")
 
@@ -715,7 +719,8 @@ def _run(
             # failed_preproc_images entry. On a same-settings resume the
             # host adds this to the next Stage 1's skip set — gate
             # failures aren't going to change without a settings change.
-            _signal_failed_preproc(r.image_path.name)
+            error_text = r.error or "No segmentation output produced"
+            _signal_failed_preproc(r.image_path.name, error_text)
         else:
             successful_preproc.append(r)
 
@@ -773,7 +778,7 @@ def _run(
         with progress_lock:
             progress_callback(idx, total, stem, "analysis", detail)
 
-    def _signal_complete(image_basename: str, success: bool) -> None:
+    def _signal_complete(image_basename: str, success: bool, error_text: str = "") -> None:
         """Thread-safe wrapper around the per-image-completion callbacks.
 
         Called once per image after Stage 2 attempt. Dispatches based on
@@ -781,14 +786,17 @@ def _run(
           - success=True  → on_image_complete (resume bookkeeping + GUI
             "Succeeded" status).
           - success=False → on_image_failed_analysis (GUI "Failed"
-            status) AND on_image_complete (the manifest still records
-            failed Stage 2 images as "done" so they're not retried on
-            resume without an explicit settings change).
+            status, with error_text) AND on_image_complete (the manifest
+            still records failed Stage 2 images as "done" so they're
+            not retried on resume without an explicit settings change).
+
+        ``error_text`` carries the human-readable error for the GUI to
+        surface next to the failed row. Ignored on success.
         """
         with completion_lock:
             try:
                 if not success and on_image_failed_analysis is not None:
-                    on_image_failed_analysis(image_basename)
+                    on_image_failed_analysis(image_basename, error_text)
                 if on_image_complete is not None:
                     on_image_complete(image_basename)
             except Exception:
@@ -994,7 +1002,8 @@ def _run(
             if not (pause_event is not None and pause_event.is_set()):
                 slot = stage2_slots[i]
                 success = slot is not None and slot.error is None
-                _signal_complete(preproc_result.image_path.name, success)
+                error_text = "" if success else (slot.error if slot is not None and slot.error else "Stage 2 failed")
+                _signal_complete(preproc_result.image_path.name, success, error_text)
 
     interrupted = False
     paused = False

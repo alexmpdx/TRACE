@@ -212,8 +212,8 @@ class TraceWorker(QThread):
     paused = pyqtSignal(list)  # results — pause-then-stop completion
     cancelled = pyqtSignal(list)  # results — hard-cancel completion (run discarded)
     image_completed = pyqtSignal(str)  # basename of an image whose Stage 2 succeeded
-    image_failed_preproc = pyqtSignal(str)  # basename of an image whose Stage 1 errored
-    image_failed_analysis = pyqtSignal(str)  # basename of an image whose Stage 2 errored
+    image_failed_preproc = pyqtSignal(str, str)  # basename, error message (Stage 1)
+    image_failed_analysis = pyqtSignal(str, str)  # basename, error message (Stage 2)
     error = pyqtSignal(str)
 
     def __init__(self, kwargs):
@@ -259,8 +259,10 @@ class TraceWorker(QThread):
             # so emitting a Qt signal from here is safe regardless of how
             # many Stage 2 workers are running.
             self.kwargs["on_image_complete"] = lambda basename: self.image_completed.emit(basename)
-            self.kwargs["on_image_failed_preproc"] = lambda basename: self.image_failed_preproc.emit(basename)
-            self.kwargs["on_image_failed_analysis"] = lambda basename: self.image_failed_analysis.emit(basename)
+            self.kwargs["on_image_failed_preproc"] = lambda basename, err: self.image_failed_preproc.emit(basename, err)
+            self.kwargs["on_image_failed_analysis"] = lambda basename, err: self.image_failed_analysis.emit(
+                basename, err
+            )
             results = trace_folder(**self.kwargs)
             if self._pause.is_set():
                 self.paused.emit(results)
@@ -379,6 +381,11 @@ class TraceWindow(QMainWindow):
         self._image_status: dict[str, ImageStatus] = {}
         self._basename_to_row: dict[str, int] = {}
         self._row_base_labels: list[str] = []
+        # Per-basename failure message — set when _on_image_failed_preproc
+        # or _on_image_failed_analysis fires. _update_image_status reads
+        # this and appends a short one-liner after the filename when the
+        # row is in the FAILED state.
+        self._image_error_text: dict[str, str] = {}
         self.config = PipelineConfig()
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
@@ -789,6 +796,7 @@ class TraceWindow(QMainWindow):
             self._image_status.clear()
             self._basename_to_row.clear()
             self._row_base_labels.clear()
+            self._image_error_text.clear()
             return
         folder = Path(folder_text)
         if not folder.is_dir():
@@ -799,6 +807,7 @@ class TraceWindow(QMainWindow):
         self._image_status.clear()
         self._basename_to_row.clear()
         self._row_base_labels.clear()
+        self._image_error_text.clear()
         for idx, p in enumerate(self._image_paths):
             # Show path relative to the input folder when recursing so subfolder
             # context is visible; otherwise just the name.
@@ -825,8 +834,31 @@ class TraceWindow(QMainWindow):
             if status == ImageStatus.IN_PROGRESS:
                 self._update_image_status(basename, ImageStatus.PENDING)
 
+    @staticmethod
+    def _shorten_error(error_text: str, max_len: int = 70) -> str:
+        """Squash a (potentially-multi-line, potentially-traceback) error to
+        one short line for inline display next to the row's filename.
+
+        Takes the first non-empty line and truncates to ``max_len`` with an
+        ellipsis. The full text is preserved in the run log; this trimming
+        only affects the inline at-a-glance value in the image list.
+        """
+        if not error_text:
+            return ""
+        first = next((line.strip() for line in error_text.splitlines() if line.strip()), "")
+        if not first:
+            return ""
+        if len(first) > max_len:
+            first = first[: max_len - 1].rstrip() + "…"
+        return first
+
     def _update_image_status(self, basename: str, status: ImageStatus) -> None:
-        """Set a row's glyph + foreground color from the given status."""
+        """Set a row's glyph + foreground color from the given status.
+
+        For FAILED rows, also appends a short single-line error message
+        sourced from self._image_error_text (populated by the Stage-1 /
+        Stage-2 failure slots). Non-FAILED states ignore the error map.
+        """
         row = self._basename_to_row.get(basename)
         if row is None:
             return
@@ -835,7 +867,12 @@ class TraceWindow(QMainWindow):
             return
         base_label = self._row_base_labels[row] if 0 <= row < len(self._row_base_labels) else basename
         self._image_status[basename] = status
-        item.setText(f"{_STATUS_GLYPH[status]}{base_label}")
+        label = f"{_STATUS_GLYPH[status]}{base_label}"
+        if status == ImageStatus.FAILED:
+            err = self._shorten_error(self._image_error_text.get(basename, ""))
+            if err:
+                label = f"{label} — {err}"
+        item.setText(label)
         item.setForeground(_STATUS_COLOR[status])
 
     def _select_output(self):
@@ -1189,6 +1226,7 @@ class TraceWindow(QMainWindow):
         self._image_status.clear()
         self._basename_to_row.clear()
         self._row_base_labels.clear()
+        self._image_error_text.clear()
 
         # Snap every widget back. blockSignals where the slot would re-fire a
         # warning or write back to a no-longer-stale value.
@@ -1815,7 +1853,7 @@ class TraceWindow(QMainWindow):
             save_manifest(self._run_folder, self._manifest)
         self._update_image_status(basename, ImageStatus.SUCCEEDED)
 
-    def _on_image_failed_preproc(self, basename: str) -> None:
+    def _on_image_failed_preproc(self, basename: str, error_text: str = "") -> None:
         """One image's Stage 1 errored — record it for resume bookkeeping.
 
         On a resume with unchanged settings these get folded into the
@@ -1823,22 +1861,28 @@ class TraceWindow(QMainWindow):
         won't change without a settings change. Picking "Continue with
         current settings" on a settings-drift dialog clears them so
         they're given another shot under the new gate thresholds.
+
+        ``error_text`` is shown next to the row as a short one-liner.
         """
         if self._manifest is not None and self._run_folder is not None:
             self._manifest.mark_failed_preproc(basename)
             save_manifest(self._run_folder, self._manifest)
+        if error_text:
+            self._image_error_text[basename] = error_text
         self._update_image_status(basename, ImageStatus.FAILED)
 
-    def _on_image_failed_analysis(self, basename: str) -> None:
+    def _on_image_failed_analysis(self, basename: str, error_text: str = "") -> None:
         """One image's Stage 2 errored — mark the row failed.
 
         Manifest bookkeeping happens via the companion image_completed
         signal that the pipeline fires alongside this one (see
         _signal_complete in TRACE/pipeline.py): Stage-2-failed images
         are still recorded as "completed" so they're not retried on
-        resume under unchanged settings. This handler just flips the
-        row visual to FAILED.
+        resume under unchanged settings. This handler flips the row
+        visual to FAILED and stashes the inline error text.
         """
+        if error_text:
+            self._image_error_text[basename] = error_text
         self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_paused(self, results: list) -> None:
