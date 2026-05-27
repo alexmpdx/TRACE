@@ -1376,6 +1376,26 @@ class InlineCustomDistancesPanel(QWidget):
 # ---------------------------------------------------------------------------
 
 
+def _version_is_newer(candidate: str, installed: str) -> bool:
+    """Return True iff ``candidate`` is strictly newer than ``installed``.
+
+    Parses semver-ish dotted version strings as tuples of ints and
+    compares element-wise (so "0.2.0" > "0.1.44" — index 1 wins before
+    index 2 is consulted). On any parse failure, falls back to "not
+    newer" — preferring to under-announce updates over offering the
+    user a downgrade. The empty / "unknown" cases both fall through
+    to that conservative branch.
+    """
+    if not candidate or not installed:
+        return False
+    try:
+        cand_parts = [int(x) for x in candidate.split(".")]
+        inst_parts = [int(x) for x in installed.split(".")]
+    except (ValueError, AttributeError):
+        return False
+    return cand_parts > inst_parts
+
+
 class _UpdateCheckThread(QThread):
     """Runs the GitHub /releases/latest query off the GUI thread.
 
@@ -1739,7 +1759,18 @@ class InlineHelpPanel(QWidget):
                 )
             return
 
-        if latest_version == installed_version:
+        # Decide which branch to take by comparing as semver-ish tuples
+        # of integers, not by raw string equality. The user can be:
+        #   (a) exactly matching the latest release → up to date,
+        #   (b) behind it → genuine update available,
+        #   (c) AHEAD of it (running a source / dev build whose version
+        #       has been bumped locally but CI hasn't published the
+        #       matching tag yet). String-equality treated (c) as
+        #       "different = update available" and offered the user a
+        #       downgrade, which is wrong; only (b) should surface the
+        #       update UI.
+        latest_is_newer = _version_is_newer(latest_version, installed_version)
+        if not latest_is_newer:
             self._update_status_label.setText(
                 f"<span style='color: #6c6;'>✓ You're up to date (installed: {installed_version}).</span>"
             )

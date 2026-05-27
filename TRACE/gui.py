@@ -3041,19 +3041,27 @@ class TraceWindow(QMainWindow):
         ]
 
     def _maybe_auto_check_updates(self) -> None:
-        """Auto-check entrypoint with an hourly throttle on top of the
-        per-launch trigger.
+        """Auto-check entrypoint with a short anti-spam throttle.
 
-        Reads ``last_update_check_time`` from QSettings (updated whenever
-        ``_apply_update_check_result`` runs, regardless of which path
-        triggered it) and skips if a check happened in the last hour.
-        Manual button clicks bypass this — they call
+        Previously throttled to once per hour, which made the launch
+        auto-check fire approximately never during normal testing
+        (repeat-launches within an hour got silently suppressed, so
+        neither the badge nor the notification dialog appeared). The
+        throttle is now 60 seconds — enough to avoid hammering GitHub
+        on a tight relaunch loop but short enough that the very next
+        launch reliably surfaces a pending update.
+
+        GitHub's anonymous rate limit is 60 requests/hour/IP. One
+        request per launch under a 60s anti-spam window stays well
+        within that even with aggressive launching.
+
+        Manual button clicks bypass this entirely — they call
         ``InlineHelpPanel._check_for_updates`` directly.
         """
         import time as _time
 
         last = int(self.settings.value("last_update_check_time", 0, type=int) or 0)
-        if _time.time() - last < 3600:
+        if _time.time() - last < 60:
             return
         self.inline_help_panel._check_for_updates(silent=True)
 
@@ -3133,13 +3141,15 @@ class TraceWindow(QMainWindow):
         except Exception:
             installed_version = "unknown"
 
-        dlg = QDialog(self)
+        # Window flags must be passed in the constructor — calling
+        # setWindowFlags() AFTER construction re-parents the widget and
+        # implicitly hides it, which on some macOS configurations races
+        # with exec_()'s show() and leaves the dialog invisible. Frameless
+        # + WindowStaysOnTop make it float over the main window like the
+        # walkthrough popup. The blue accent border (matching the badge
+        # dot) makes it visually distinct from system dialogs.
+        dlg = QDialog(self, _Qt.Dialog | _Qt.FramelessWindowHint | _Qt.WindowStaysOnTopHint)
         dlg.setWindowTitle("Update available")
-        dlg.setModal(False)
-        # Frameless + WindowStaysOnTop so it floats over the main window
-        # like the walkthrough popup. The blue accent border (matching
-        # the badge dot) makes it visually distinct from system dialogs.
-        dlg.setWindowFlags(_Qt.Dialog | _Qt.FramelessWindowHint | _Qt.WindowStaysOnTopHint)
         dlg.setObjectName("UpdateAvailableDialog")
         dlg.setStyleSheet(
             "#UpdateAvailableDialog { "
