@@ -167,6 +167,55 @@ def save_manifest(output_dir: Path, manifest: RunManifest) -> None:
         logger.warning("run_state: cannot write %s: %s", target, exc)
 
 
+def merge_resume_csv(new_csv: Path, append_source: Path) -> int:
+    """Append rows from ``append_source`` whose specimen isn't already in ``new_csv``.
+
+    Used by the pause/resume CSV-append flow: before the new slice's
+    ``export_csv_batch`` writes, the existing measurements.csv is moved
+    aside to a ``.append_source`` sibling. After the new write completes,
+    this helper folds the un-re-processed rows back in so the consolidated
+    CSV reflects the union of all completed images across slices.
+
+    Matching is by the "specimen" column (the image stem, not basename).
+    Returns the number of rows appended, or 0 if nothing to merge.
+
+    Errors are logged and swallowed — never raises. The new CSV stays as
+    written by export_csv_batch even if the merge fails; the worst case
+    is a resumed run's CSV missing rows from a prior slice, recoverable
+    by re-running the affected images.
+    """
+    import csv
+
+    if not append_source.is_file() or not new_csv.is_file():
+        return 0
+    try:
+        with open(new_csv, newline="", encoding="utf-8") as f:
+            new_rows = list(csv.DictReader(f))
+        with open(append_source, newline="", encoding="utf-8") as f:
+            old_rows = list(csv.DictReader(f))
+    except Exception as exc:
+        logger.warning("run_state: cannot read CSVs for merge: %s", exc)
+        return 0
+    if not old_rows:
+        return 0
+    new_specimens = {row.get("specimen", "") for row in new_rows}
+    to_append = [row for row in old_rows if row.get("specimen", "") not in new_specimens]
+    if not to_append:
+        return 0
+    # Column order follows the NEW csv (it reflects the user's current
+    # output-group selections; the old one might have stale columns).
+    fieldnames = list(new_rows[0].keys()) if new_rows else list(old_rows[0].keys())
+    try:
+        with open(new_csv, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            for row in to_append:
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+    except OSError as exc:
+        logger.warning("run_state: cannot append merged rows to %s: %s", new_csv, exc)
+        return 0
+    return len(to_append)
+
+
 def new_manifest(
     *,
     input_dir: Path,

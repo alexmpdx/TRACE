@@ -1026,6 +1026,19 @@ def _run(
     # --- Batch CSV ---
     if "csv" in outputs:
         csv_path = output_dir / "measurements.csv"
+        # Resume support: if we're skipping previously-completed images,
+        # park the prior measurements.csv aside so its rows can be folded
+        # back in after the new slice writes. The merge happens at the
+        # end of this block (covering both the fast path and the normal
+        # export_csv_batch path).
+        csv_append_source: Optional[Path] = None
+        if skip_image_basenames and csv_path.is_file():
+            csv_append_source = csv_path.with_suffix(".csv.append_source")
+            try:
+                csv_path.replace(csv_append_source)
+            except OSError as exc:
+                logger.warning("CSV resume: cannot move %s aside: %s", csv_path, exc)
+                csv_append_source = None
         if fast_csv_path:
             # Fast path: identifyFeatures did not run, so there is no
             # measurements.csv to augment. Write one from scratch using only
@@ -1064,5 +1077,19 @@ def _run(
                             )
                     except Exception:
                         logger.exception("Failed to add user-defined distance columns to CSV")
+
+        # Fold prior-slice rows back in for resume cases. Done after any
+        # post-processing (user-distance augmentation) so the appended rows
+        # are matched against the final column set written by this slice.
+        if csv_append_source is not None and csv_append_source.is_file():
+            try:
+                from TRACE.run_state import merge_resume_csv
+
+                appended = merge_resume_csv(csv_path, csv_append_source)
+                if appended:
+                    logger.info("CSV resume: folded %d row(s) from prior slice into %s", appended, csv_path)
+                csv_append_source.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("CSV resume: merge failed; leaving %s in place", csv_append_source)
 
     return results

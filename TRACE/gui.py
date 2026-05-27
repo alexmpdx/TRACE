@@ -1525,7 +1525,10 @@ class TraceWindow(QMainWindow):
                 outputs_selected=outputs_for_run,
                 csv_measurement_groups=csv_groups_for_run,
                 total_images=total,
+                settings_snapshot_path="_run_settings.yaml",
             )
+            # Snapshot current settings so a later resume can detect drift.
+            self._write_settings_snapshot(Path(self.output_edit.text()) / "_run_settings.yaml")
         else:
             # Resume path: keep the existing completed list, mark running.
             self._manifest.status = STATUS_RUNNING
@@ -1701,8 +1704,87 @@ class TraceWindow(QMainWindow):
             return None, None
         if clicked is btn_fresh:
             return set(), None
-        # Resume — also fold in the settings-diff prompt if applicable.
+        # Resume — fold in a settings-drift check. If the saved snapshot
+        # doesn't match current state, the user gets a second prompt
+        # explaining that the new settings will only apply to remaining
+        # images (per-run-settings rebinding mid-run isn't supported yet).
+        if manifest.settings_snapshot_path:
+            snapshot_path = output_dir / manifest.settings_snapshot_path
+            if not self._confirm_settings_drift(snapshot_path):
+                return None, None
         return manifest.completed_set(), manifest
+
+    def _current_settings_snapshot_dict(self) -> dict:
+        """Build the dict that gets persisted as _run_settings.yaml.
+
+        Includes only the user-tunable run knobs (pipeline_config, gate
+        override, gui_state) — no timestamps or status fields, so the dict
+        is directly comparable between runs.
+        """
+        from TRACE.config_io import config_to_dict
+
+        return {
+            "pipeline_config": config_to_dict(self.config),
+            "gate_override": self._gate_override or None,
+            "gui_state": self.get_gui_state(),
+        }
+
+    def _write_settings_snapshot(self, path: Path) -> None:
+        """Write the current settings snapshot to ``path`` as YAML.
+
+        Best-effort: errors are logged but never block the run. Used by
+        _run_pipeline at the start of a fresh run so a later resume can
+        compare against current state.
+        """
+        try:
+            import yaml as _yaml
+
+            payload = self._current_settings_snapshot_dict()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                _yaml.safe_dump(payload, sort_keys=False, default_flow_style=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Warning: could not write settings snapshot: {exc}")
+
+    def _confirm_settings_drift(self, snapshot_path: Path) -> bool:
+        """Diff the snapshot against current state; prompt if they differ.
+
+        Returns True when the user wants to proceed (no diff, or "Continue
+        with current settings" picked), False to abort the resume.
+        """
+        if not snapshot_path.is_file():
+            return True
+        try:
+            import yaml as _yaml
+
+            saved = _yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Could not read settings snapshot: {exc}")
+            return True
+        current = self._current_settings_snapshot_dict()
+        if saved == current:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Settings changed since last run")
+        box.setText(
+            "The TRACE settings have changed since this run started. "
+            "Resuming with the current settings means the new values apply "
+            "only to the remaining images — the already-completed images "
+            "were processed with the original settings."
+        )
+        box.setInformativeText(
+            "Continue with current settings, or cancel? "
+            "To run with the original settings instead, click Cancel, "
+            "then use Settings → Import... to load _run_settings.yaml "
+            "from the output folder before clicking Run again."
+        )
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.button(QMessageBox.Ok).setText("Continue with current settings")
+        box.setDefaultButton(QMessageBox.Ok)
+        return box.exec_() == QMessageBox.Ok
 
     # -----------------------------------------------------------------------
     # Logging and callbacks
