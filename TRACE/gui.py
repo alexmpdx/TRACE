@@ -226,6 +226,96 @@ def _translate_landmark_names(text: str) -> str:
     return pattern.sub(lambda m: f"{m.group(1)}{names[m.group(2)]}{m.group(1)}", text)
 
 
+def _format_compact_value(v) -> str:
+    """Render a single value for the compact run-settings preamble."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "True" if v else "False"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, str):
+        return v if v else "''"
+    if isinstance(v, list):
+        return "[" + ", ".join(_format_compact_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{k}: {_format_compact_value(val)}" for k, val in v.items()) + "}"
+    return str(v)
+
+
+def _emit_compact_section(d: dict, lines: list, wrap_width: int, *, indent: str, parent_path: str = "") -> None:
+    """Emit one dict's contents as packed key=value lines + nested [section] blocks.
+
+    Short scalars (bool, number, null, string ≤40 chars) pack onto wrapped
+    lines at ``wrap_width``. Long strings and lists each get their own
+    ``key = value`` line, with ``=`` column-aligned across the group.
+    Nested dicts get their own ``[parent.child]`` section header, indented
+    at the same depth as their parent's body (the dotted name carries the
+    nesting; visual indent stays flat).
+    """
+    packable: list[tuple[str, str]] = []
+    long_pairs: list[tuple[str, str]] = []
+    nested: list[tuple[str, dict]] = []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            nested.append((k, v))
+            continue
+        rendered = _format_compact_value(v)
+        # Anything long enough to crowd a packed line gets its own row.
+        if (isinstance(v, str) and len(rendered) > 40) or isinstance(v, list):
+            long_pairs.append((k, rendered))
+        else:
+            packable.append((k, rendered))
+
+    if packable:
+        cur = indent
+        for k, rendered in packable:
+            tok = f"{k}={rendered}"
+            if cur != indent and len(cur) + 2 + len(tok) > wrap_width:
+                lines.append(cur)
+                cur = indent + tok
+            elif cur == indent:
+                cur = cur + tok
+            else:
+                cur = cur + "  " + tok
+        lines.append(cur)
+
+    if long_pairs:
+        max_key = max(len(k) for k, _ in long_pairs)
+        for k, rendered in long_pairs:
+            lines.append(f"{indent}{k.ljust(max_key)} = {rendered}")
+
+    for k, sub in nested:
+        path = f"{parent_path}.{k}" if parent_path else k
+        lines.append("")
+        lines.append(f"[{path}]")
+        _emit_compact_section(sub, lines, wrap_width, indent="  ", parent_path=path)
+
+
+def _format_run_settings_compact(data: dict, wrap_width: int = 110) -> str:
+    """Render the run-settings preamble dict in a compact, LLM-parseable form.
+
+    Tops the log with packed ``key=value`` lines for scalars / long-path or
+    list assignments; ``settings.pipeline_config``, ``settings.gui_state``,
+    etc. become ``[name]``-headed sections. Designed so an LLM can pick up
+    individual values without learning a custom grammar, while staying
+    short enough that a human can verify "did I run with X enabled?" at a
+    glance. The canonical machine-readable copy lives in settings.yaml.
+    """
+    lines: list[str] = []
+    settings = data.get("settings") or {}
+    top = {k: v for k, v in data.items() if k != "settings"}
+    _emit_compact_section(top, lines, wrap_width, indent="")
+    for k, v in settings.items():
+        lines.append("")
+        lines.append(f"[{k}]")
+        if isinstance(v, dict):
+            _emit_compact_section(v, lines, wrap_width, indent="  ", parent_path=k)
+        else:
+            lines.append(f"  {_format_compact_value(v)}")
+    return "\n".join(lines)
+
+
 class _SignalLogHandler(logging.Handler):
     """Logging handler that forwards records through a pyqtSignal."""
 
@@ -2361,34 +2451,26 @@ class TraceWindow(QMainWindow):
         }
 
     def _log_run_settings(self) -> None:
-        """Write a YAML-formatted summary of the active run config into the log.
+        """Write a compact summary of the active run config into the log.
 
         Emitted as one ``---``-fenced block (no per-line ``[HH:MM:SS]``
-        prefixes) so the block round-trips cleanly through ``yaml.safe_load``
-        if someone later parses ``run.log`` to recover the run's config.
+        prefixes) so the whole block reads as a coherent header. The
+        canonical machine-readable copy is settings.yaml in the run
+        folder; this preamble is the human/LLM-glance version.
 
         Called once at the start of every fresh run and again at the start
         of every resume — resumes stack a second block in-place, so a
         ``diff`` across blocks shows exactly what changed between slices.
         """
         try:
-            import yaml as _yaml
-
-            text = _yaml.safe_dump(
-                self._run_log_preamble_dict(),
-                sort_keys=False,
-                default_flow_style=False,
-            )
+            text = _format_run_settings_compact(self._run_log_preamble_dict())
         except Exception as exc:  # noqa: BLE001
             # Best-effort — never block a run because the preamble can't render.
             self._log(f"Warning: could not format run-settings preamble: {exc}")
             return
         self._log("Run settings:")
-        # Append the YAML block directly (no _log() wrapping) so each line
-        # is not prefixed with "[HH:MM:SS]"; that makes the block readable
-        # as a coherent header and parseable by yaml.safe_load.
         self.log_text.append("---")
-        self.log_text.append(text.rstrip())
+        self.log_text.append(text)
         self.log_text.append("---")
         self.log_text.append("")
         sb = self.log_text.verticalScrollBar()
