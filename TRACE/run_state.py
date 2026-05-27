@@ -73,16 +73,40 @@ class RunManifest:
     settings_snapshot_path: str = ""
     total_images: int = 0
     completed_images: list[str] = field(default_factory=list)
+    # Images whose Stage 1 (preprocessing — landmarks / hinge / segmentation)
+    # errored, including confidence-gate failures. Tracked separately from
+    # completed_images because on resume we want to skip them — but only if
+    # settings are unchanged. A gate-threshold change could unblock them,
+    # so a resume that picks "Continue with current settings" clears these
+    # from the skip set to give them another shot.
+    failed_preproc_images: list[str] = field(default_factory=list)
 
     def mark_completed(self, image_basename: str) -> None:
-        """Record an image as done. Idempotent; updates the timestamp."""
+        """Record an image as Stage-2-done. Idempotent; updates the timestamp.
+
+        Also removes the basename from failed_preproc_images if present —
+        the image was previously failing preprocessing and has now
+        succeeded, so it no longer belongs on the failure list.
+        """
         if image_basename not in self.completed_images:
             self.completed_images.append(image_basename)
+        if image_basename in self.failed_preproc_images:
+            self.failed_preproc_images.remove(image_basename)
+        self.updated_at = _now_iso()
+
+    def mark_failed_preproc(self, image_basename: str) -> None:
+        """Record an image as Stage-1-failed. Idempotent; updates the timestamp."""
+        if image_basename not in self.failed_preproc_images:
+            self.failed_preproc_images.append(image_basename)
         self.updated_at = _now_iso()
 
     def completed_set(self) -> set[str]:
         """Set view of the completed-image basenames for O(1) lookup."""
         return set(self.completed_images)
+
+    def failed_preproc_set(self) -> set[str]:
+        """Set view of the preproc-failed basenames for O(1) lookup."""
+        return set(self.failed_preproc_images)
 
     def is_in_progress(self) -> bool:
         """True when this run can be resumed (running or paused, not done)."""
@@ -142,6 +166,7 @@ def load_manifest(output_dir: Path) -> Optional[RunManifest]:
             settings_snapshot_path=str(data.get("settings_snapshot_path", "")),
             total_images=int(data.get("total_images", 0)),
             completed_images=list(data.get("completed_images", []) or []),
+            failed_preproc_images=list(data.get("failed_preproc_images", []) or []),
         )
     except (TypeError, ValueError) as exc:
         logger.warning("run_state: %s has bad fields: %s", path, exc)

@@ -450,6 +450,7 @@ def trace_folder(
     skip_image_basenames: Optional[set[str]] = None,
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
+    on_image_failed_preproc=None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -576,6 +577,7 @@ def trace_folder(
             skip_image_basenames=skip_image_basenames,
             pause_event=pause_event,
             on_image_complete=on_image_complete,
+            on_image_failed_preproc=on_image_failed_preproc,
         )
     finally:
         if temp_dir_obj is not None:
@@ -611,6 +613,7 @@ def _run(
     skip_image_basenames: Optional[set[str]] = None,
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
+    on_image_failed_preproc=None,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -669,10 +672,31 @@ def _run(
         target_um_per_px=target_um_per_px,
         rescale_tolerance_low=rescale_tolerance_low,
         rescale_tolerance_high=rescale_tolerance_high,
+        # Filter at Stage 1 itself rather than post-hoc, so the
+        # already-processed (or previously-failed-on-same-settings)
+        # images don't even go through landmark / hinge / segmentation.
+        skip_image_basenames=skip_image_basenames,
     )
 
     results: list[TraceResult] = []
     successful_preproc: list[_PreprocResult] = []
+    failed_preproc_lock = threading.Lock()
+
+    def _signal_failed_preproc(image_basename: str) -> None:
+        """Thread-safe wrapper around the host's on_image_failed_preproc
+        callback. Called for each image whose Stage 1 errored out so the
+        host (GUI) can mark it in the manifest. On resume with unchanged
+        settings, the host adds these to skip_image_basenames so Stage 1
+        doesn't re-attempt them — see run_state.RunManifest.
+        """
+        if on_image_failed_preproc is None:
+            return
+        with failed_preproc_lock:
+            try:
+                on_image_failed_preproc(image_basename)
+            except Exception:
+                logger.exception("on_image_failed_preproc callback raised")
+
     for r in preproc_results:
         missing_seg = needs_seg and not r.segmentation_geojson_path
         if r.error is not None or missing_seg:
@@ -684,31 +708,15 @@ def _run(
                     error_stage=err_stage,
                 )
             )
+            # Record the Stage-1 failure so the host's manifest grows a
+            # failed_preproc_images entry. On a same-settings resume the
+            # host adds this to the next Stage 1's skip set — gate
+            # failures aren't going to change without a settings change.
+            _signal_failed_preproc(r.image_path.name)
         else:
             successful_preproc.append(r)
 
     logger.info("Preprocessed %d/%d images successfully", len(successful_preproc), len(preproc_results))
-
-    # Resume support: drop images that a previous run already finished
-    # Stage 2 on. The manifest's completed list is the source of truth for
-    # the skip decision — see TRACE/run_state.py. Per-image basenames are
-    # used (no folder parts) so the manifest stays portable across moves
-    # of the input folder.
-    if skip_image_basenames:
-        kept: list[_PreprocResult] = []
-        skipped = 0
-        for r in successful_preproc:
-            if r.image_path.name in skip_image_basenames:
-                skipped += 1
-                # Surface a TraceResult marked as a resume-skip so callers
-                # know the image was intentionally skipped (vs lost). No
-                # error field set — this isn't a failure.
-                results.append(TraceResult(image_path=r.image_path))
-            else:
-                kept.append(r)
-        if skipped:
-            logger.info("Resume: skipped %d already-completed image(s)", skipped)
-        successful_preproc = kept
 
     if not successful_preproc:
         return results

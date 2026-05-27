@@ -911,6 +911,7 @@ def process_folder(
     target_um_per_px: Optional[float] = None,
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
+    skip_image_basenames: Optional[set[str]] = None,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -936,7 +937,19 @@ def process_folder(
         device = _auto_device()
 
     images = discover_images(input_dir, recursive=recursive)
+    if skip_image_basenames:
+        # Resume support: drop images the host has already processed (or
+        # which previously failed under identical settings). The basename
+        # match is used because the manifest stores names without folder
+        # parts. See TRACE/run_state.py for the rationale.
+        images = [im for im in images if im.name not in skip_image_basenames]
     if not images:
+        # All input images were filtered out — likely a resume where the
+        # previous slice already finished everything. Return an empty
+        # result list rather than raising, so callers can complete the
+        # run cleanly (CSV merge, manifest finalize, etc.).
+        if skip_image_basenames:
+            return []
         raise FileNotFoundError(f"No supported images found in {input_dir}")
 
     # When recursing, flatten each image's path-relative-to-input into a single

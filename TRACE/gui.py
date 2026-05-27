@@ -211,6 +211,7 @@ class TraceWorker(QThread):
     paused = pyqtSignal(list)  # results — pause-then-stop completion
     cancelled = pyqtSignal(list)  # results — hard-cancel completion (run discarded)
     image_completed = pyqtSignal(str)  # basename of an image whose Stage 2 finished
+    image_failed_preproc = pyqtSignal(str)  # basename of an image whose Stage 1 errored
     error = pyqtSignal(str)
 
     def __init__(self, kwargs):
@@ -256,6 +257,7 @@ class TraceWorker(QThread):
             # so emitting a Qt signal from here is safe regardless of how
             # many Stage 2 workers are running.
             self.kwargs["on_image_complete"] = lambda basename: self.image_completed.emit(basename)
+            self.kwargs["on_image_failed_preproc"] = lambda basename: self.image_failed_preproc.emit(basename)
             results = trace_folder(**self.kwargs)
             if self._pause.is_set():
                 self.paused.emit(results)
@@ -1545,6 +1547,7 @@ class TraceWindow(QMainWindow):
         self.worker.paused.connect(self._on_paused)
         self.worker.cancelled.connect(self._on_cancelled)
         self.worker.image_completed.connect(self._on_image_completed)
+        self.worker.image_failed_preproc.connect(self._on_image_failed_preproc)
         self.worker.error.connect(self._on_error)
         # Initialize the manifest now (after a possible resume merge), so
         # the first image completion already has somewhere to write.
@@ -1705,6 +1708,20 @@ class TraceWindow(QMainWindow):
         self._manifest.mark_completed(basename)
         save_manifest(self._run_folder, self._manifest)
 
+    def _on_image_failed_preproc(self, basename: str) -> None:
+        """One image's Stage 1 errored — record it for resume bookkeeping.
+
+        On a resume with unchanged settings these get folded into the
+        skip set so Stage 1 doesn't re-attempt them: gate failures
+        won't change without a settings change. Picking "Continue with
+        current settings" on a settings-drift dialog clears them so
+        they're given another shot under the new gate thresholds.
+        """
+        if self._manifest is None or self._run_folder is None:
+            return
+        self._manifest.mark_failed_preproc(basename)
+        save_manifest(self._run_folder, self._manifest)
+
     def _on_paused(self, results: list) -> None:
         """Worker stopped between images after a Pause click.
 
@@ -1797,7 +1814,7 @@ class TraceWindow(QMainWindow):
                 if not self._confirm_settings_drift(self._run_folder):
                     return None, None
             self._is_resuming = True
-            return self._manifest.completed_set(), self._manifest
+            return self._compute_resume_skip_set(self._manifest), self._manifest
 
         from TRACE.run_state import find_resumable_manifest
 
@@ -1849,7 +1866,21 @@ class TraceWindow(QMainWindow):
                 self._run_folder = None
                 return None, None
         self._is_resuming = True
-        return manifest.completed_set(), manifest
+        return self._compute_resume_skip_set(manifest), manifest
+
+    def _compute_resume_skip_set(self, manifest: "RunManifest") -> set[str]:
+        """Build the resume skip set from a manifest.
+
+        Always includes the completed images. Includes the previously-
+        failed-preproc images too unless the user chose "Continue with
+        current settings" on the drift dialog (in which case the gate
+        thresholds may have changed and those images deserve another
+        shot).
+        """
+        skip = manifest.completed_set()
+        if not getattr(self, "_resume_settings_changed", False):
+            skip |= manifest.failed_preproc_set()
+        return skip
 
     def _current_settings_snapshot_dict(self) -> dict:
         """Build the dict that gets persisted as _run_settings.yaml.
@@ -1964,7 +1995,14 @@ class TraceWindow(QMainWindow):
 
         Returns True when the resume should proceed (matched, restored, or
         user picked "Continue"), False to abort.
+
+        Side effect: sets ``self._resume_settings_changed`` to True iff the
+        caller chose "Continue with current settings" (i.e. accepted that
+        new settings will apply to remaining images). The caller uses this
+        flag to decide whether to retry previously-failed-preproc images
+        — a settings change may unblock them, so the skip set drops them.
         """
+        self._resume_settings_changed = False
         snapshot_path, current_part = self._latest_settings_yaml(run_folder)
         if snapshot_path is None:
             return True
@@ -2014,6 +2052,7 @@ class TraceWindow(QMainWindow):
         # so the post-drift state is preserved alongside the original. Also
         # log the diff so a reader of the run.log knows the run was
         # processed under more than one settings configuration.
+        self._resume_settings_changed = True
         new_part = max(2, current_part + 1)
         new_path = run_folder / f"settings_part{new_part}.yaml"
         self._write_settings_snapshot(new_path)
