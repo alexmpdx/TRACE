@@ -33,6 +33,10 @@ _se_dir = str(Path(__file__).resolve().parent.parent / "scaleEstimator")
 if _se_dir not in sys.path:
     sys.path.insert(0, _se_dir)
 
+_ll_dir = str(Path(__file__).resolve().parent.parent / "LandmarkLocator")
+if _ll_dir not in sys.path:
+    sys.path.insert(0, _ll_dir)
+
 from TRACE.cli import main
 
 if __name__ == "__main__":

@@ -62,6 +62,15 @@ _se_dir = str(Path(__file__).resolve().parent.parent / "scaleEstimator")
 if _se_dir not in sys.path:
     sys.path.insert(0, _se_dir)
 
+# LandmarkLocator/ holds the `landmark_locator` package. Without this on
+# sys.path the Landmarks-tab gate-config UI errors with
+#   ModuleNotFoundError: No module named 'landmark_locator'
+# whenever the dev env doesn't have an editable install of it (e.g. after
+# moving the repo, which invalidates the .pth file from `pip install -e`).
+_ll_dir = str(Path(__file__).resolve().parent.parent / "LandmarkLocator")
+if _ll_dir not in sys.path:
+    sys.path.insert(0, _ll_dir)
+
 # --- Startup logging ------------------------------------------------------
 # Initialise the file logger as early as possible so anything that fails
 # below (imports, Qt setup, napari plugin load, etc.) leaves a trace.

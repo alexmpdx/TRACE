@@ -21,6 +21,10 @@ _rot_dir = str(Path(__file__).resolve().parent.parent / "wingRotator")
 if _rot_dir not in sys.path:
     sys.path.insert(0, _rot_dir)
 
+_ll_dir = str(Path(__file__).resolve().parent.parent / "LandmarkLocator")
+if _ll_dir not in sys.path:
+    sys.path.insert(0, _ll_dir)
+
 from preprocessing.cli import main
 
 if __name__ == "__main__":
