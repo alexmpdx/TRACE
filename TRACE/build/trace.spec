@@ -230,9 +230,21 @@ binaries += collect_dynamic_libs("onnxruntime")
 # Two options to fix end-user-side: (1) ship the VC++ Redist installer in
 # Inno Setup and run it — but that needs admin/UAC, breaking our
 # PrivilegesRequired=lowest per-user install. (2) Microsoft explicitly
-# permits *app-local* deployment of these DLLs: drop them next to the
-# .exe and Windows' DLL search order finds them first. We go with (2)
+# permits *app-local* deployment of these DLLs: drop them in the DLL
+# search path next to the .pyd that link-imports them. We go with (2)
 # so the per-user install path stays UAC-free.
+#
+# Critical placement detail: in PyInstaller 6.x onedir layout, the
+# destination "." resolves to dist/TRACE/_internal/, NOT dist/TRACE/
+# (where TRACE.exe lives). For implicit .pyd imports Windows searches
+# the .pyd's own directory first, then TRACE.exe's directory — but NOT
+# _internal/ itself. So dropping these DLLs at the bundle "root" (which
+# is really _internal/) doesn't help. The v0.1.47 attempt did this and
+# end users still hit the same DLL-init failure.
+#
+# The fix is to co-locate them with onnxruntime_pybind11_state.pyd at
+# _internal/onnxruntime/capi/, where Windows' loader will find them as
+# the .pyd's static imports get fixed up at load time.
 #
 # Source: copy from C:\Windows\System32 on the build runner (which is
 # always windows-latest in CI and has an up-to-date VC++ runtime installed
@@ -253,8 +265,10 @@ if sys.platform == "win32":
     for _dll in _VCRT_DLLS:
         _src = _system32 / _dll
         if _src.exists():
-            # Target "." → root of the dist folder (next to TRACE.exe).
-            binaries.append((str(_src), "."))
+            # Co-locate with onnxruntime_pybind11_state.pyd so the
+            # Windows loader resolves its imports from the .pyd's own
+            # directory (the first place searched for implicit imports).
+            binaries.append((str(_src), "onnxruntime/capi"))
         else:
             _missing.append(_dll)
     if _missing:
