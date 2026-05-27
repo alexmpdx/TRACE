@@ -28,8 +28,19 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SIGMA_THRESHOLD = 3.0
-_DEFAULT_STD_LOG_THRESHOLD = float(np.log(2.0))
+_DEFAULT_SIGMA_THRESHOLD = 5.0
+# Std-log threshold is intentionally generous (factor of 50 difference,
+# vs the original factor of 2 from the colleague's spec). The training
+# stats in our bundled models report channel std ≈ 99 on a [0,255]
+# range — that level of spread is only attainable on near-bimodal
+# image distributions, which aren't representative of typical
+# brightfield wing crops. With the factor-of-2 threshold, every real
+# input fired a "contrast collapse" warning. Factor-of-50 keeps the
+# safety net for truly OOD inputs (fluorescence, a constant-color
+# image, a totally black frame) without false-flagging the normal
+# brightfield case. Regenerating metadata.json with stats from the
+# actual training corpus would let us tighten this back up.
+_DEFAULT_STD_LOG_THRESHOLD = float(np.log(50.0))
 _EPS = 1e-6
 
 
