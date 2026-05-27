@@ -1632,11 +1632,22 @@ class TraceWindow(QMainWindow):
         else:
             self._log("Starting TRACE pipeline...")
 
-        # Initialize per-image status. Resume-skipped basenames start as
-        # SKIPPED (the pipeline never re-emits signals for them); all
-        # others reset to PENDING. _resume_skip_set was populated above
-        # by _maybe_offer_resume.
+        # Initialize per-image status. Rules:
+        #   - SUCCEEDED / FAILED rows from an earlier slice in this same
+        #     session keep their glyphs untouched — overwriting them with
+        #     SKIPPED ↷ would erase the result the user just saw.
+        #   - Everything else (PENDING / IN_PROGRESS / SKIPPED / unset)
+        #     is reset based on the resume skip set: in the set → SKIPPED,
+        #     otherwise → PENDING. The pipeline never re-emits signals
+        #     for skipped images, so the SKIPPED label is the truth.
+        # On a cross-session resume the statuses are all unset (the prior
+        # session's run-finish path cleared self._image_status indirectly
+        # via _refresh_image_list), so the SKIPPED initialization paints
+        # those rows correctly from a blank starting state.
         for basename in list(self._basename_to_row):
+            current = self._image_status.get(basename)
+            if current in (ImageStatus.SUCCEEDED, ImageStatus.FAILED):
+                continue
             initial = ImageStatus.SKIPPED if basename in self._resume_skip_set else ImageStatus.PENDING
             self._update_image_status(basename, initial)
 
