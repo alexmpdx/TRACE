@@ -297,6 +297,13 @@ class TraceWindow(QMainWindow):
         # run is active.
         self._manifest: Optional[RunManifest] = None
         self._resume_skip_set: set[str] = set()
+        # Per-run folder under <output_dir>/. Holds the manifest, the
+        # settings YAML(s), and the run.log. Created at run start so the
+        # pause/resume bookkeeping always has a stable place to write.
+        self._run_folder: Optional[Path] = None
+        # True when the current launch is a resume of an existing run (vs.
+        # a fresh start). Drives log-clearing + "Resuming run." log line.
+        self._is_resuming: bool = False
         # Pulse-and-hint registry for the Measurements-CSV child checkboxes.
         # Populated by _wrap_csv_child in _build_ui; consumed by the app-level
         # eventFilter installed at the end of __init__. Parallel to (and
@@ -1458,9 +1465,15 @@ class TraceWindow(QMainWindow):
             wing_isolation_enabled=self._wing_isolation_enabled,
             skip_intervein_regions=getattr(self.config, "skip_intervein_regions", False),
         )
-        self.log_text.clear()
+        # Preserve the existing log when resuming so the user can see what
+        # happened in the prior slice. Fresh runs always start clean.
+        if not self._is_resuming:
+            self.log_text.clear()
         self._save_settings()
-        self._log("Starting TRACE pipeline...")
+        if self._is_resuming:
+            self._log("Resuming run.")
+        else:
+            self._log("Starting TRACE pipeline...")
 
         for i in range(self.image_list.count()):
             self.image_list.item(i).setForeground(QColor(208, 208, 208))
@@ -1517,7 +1530,14 @@ class TraceWindow(QMainWindow):
         self.worker.error.connect(self._on_error)
         # Initialize the manifest now (after a possible resume merge), so
         # the first image completion already has somewhere to write.
+        out_dir = Path(self.output_edit.text())
         if self._manifest is None:
+            # Fresh run — make a new run_<timestamp>/ folder to hold the
+            # manifest, settings snapshot, and run.log. Timestamp matches
+            # _run_start_wall above so the folder name is human-readable.
+            stamp = self._run_start_wall.strftime("%Y%m%d-%H%M%S")
+            self._run_folder = out_dir / f"run_{stamp}"
+            self._run_folder.mkdir(parents=True, exist_ok=True)
             total = max(1, len(self._image_paths))
             self._manifest = new_manifest(
                 input_dir=Path(self.input_edit.text()),
@@ -1525,14 +1545,17 @@ class TraceWindow(QMainWindow):
                 outputs_selected=outputs_for_run,
                 csv_measurement_groups=csv_groups_for_run,
                 total_images=total,
-                settings_snapshot_path="_run_settings.yaml",
+                settings_snapshot_path="settings.yaml",
             )
-            # Snapshot current settings so a later resume can detect drift.
-            self._write_settings_snapshot(Path(self.output_edit.text()) / "_run_settings.yaml")
+            # Snapshot current settings into the run folder. Future resumes
+            # diff against this; settings_partN.yaml gets written when the
+            # user resumes with changed settings.
+            self._write_settings_snapshot(self._run_folder / "settings.yaml")
         else:
             # Resume path: keep the existing completed list, mark running.
+            # self._run_folder was populated by _maybe_offer_resume.
             self._manifest.status = STATUS_RUNNING
-        save_manifest(Path(self.output_edit.text()), self._manifest)
+        save_manifest(self._run_folder, self._manifest)
         self.worker.start()
 
     def _confirm_ood_warnings(self, flagged: dict) -> bool:
@@ -1593,10 +1616,10 @@ class TraceWindow(QMainWindow):
         sync with on-disk artifacts; cost is one ~1 KB JSON write per
         image, dwarfed by the per-image overlay PNGs.
         """
-        if self._manifest is None or not self.output_edit.text():
+        if self._manifest is None or self._run_folder is None:
             return
         self._manifest.mark_completed(basename)
-        save_manifest(Path(self.output_edit.text()), self._manifest)
+        save_manifest(self._run_folder, self._manifest)
 
     def _on_paused(self, results: list) -> None:
         """Worker stopped between images after a Pause click.
@@ -1614,9 +1637,17 @@ class TraceWindow(QMainWindow):
         self.statusBar().showMessage(f"Paused — {n_done} of {n_total} done")
         self._progress_timer.stop()
         # Persist paused status.
-        if self._manifest is not None and self.output_edit.text():
+        if self._manifest is not None and self._run_folder is not None:
             self._manifest.status = STATUS_PAUSED
-            save_manifest(Path(self.output_edit.text()), self._manifest)
+            save_manifest(self._run_folder, self._manifest)
+        # Append a clear pause marker to the run log so the user (and a
+        # later reader of run.log) sees exactly when each slice ended.
+        from datetime import datetime as _dt
+
+        self._log(f"--- Paused at {_dt.now().isoformat(timespec='seconds')} ---")
+        # Flush the log to disk so a hard kill (close TRACE without Resume)
+        # leaves run.log in sync with what the user just saw on screen.
+        self._write_run_metadata(status="paused")
         # Worker thread has exited at this point (paused signal is emitted
         # at the end of run()). Clear the handle so the next Resume click
         # routes through _resume_paused_run.
@@ -1669,15 +1700,24 @@ class TraceWindow(QMainWindow):
           3. Manifest on disk from a prior session → prompt the user.
         """
         # Path 2: in-session resume after Pause. self._manifest is still
-        # populated from the paused worker and the output_dir hasn't
-        # changed under us.
+        # populated from the paused worker; self._run_folder still points
+        # at the same place. Just hand the data back.
         if self._manifest is not None and self._manifest.is_in_progress():
+            self._is_resuming = True
             return self._manifest.completed_set(), self._manifest
 
-        manifest = load_manifest(output_dir)
-        if manifest is None or not manifest.is_in_progress():
+        from TRACE.run_state import find_resumable_manifest
+
+        found = find_resumable_manifest(output_dir)
+        if found is None:
             # Fresh run — no resumable state on disk.
+            self._is_resuming = False
             return set(), None
+        manifest, run_folder = found
+        # Keep self._run_folder pointed at the resumed folder so the
+        # downstream save_manifest / settings-drift-snapshot calls land
+        # alongside the existing files.
+        self._run_folder = run_folder
 
         n_done = len(manifest.completed_images)
         n_total = manifest.total_images
@@ -1701,17 +1741,21 @@ class TraceWindow(QMainWindow):
         box.exec_()
         clicked = box.clickedButton()
         if clicked is btn_cancel:
+            self._run_folder = None
             return None, None
         if clicked is btn_fresh:
+            self._run_folder = None  # Fresh run will create a new folder.
+            self._is_resuming = False
             return set(), None
-        # Resume — fold in a settings-drift check. If the saved snapshot
-        # doesn't match current state, the user gets a second prompt
-        # explaining that the new settings will only apply to remaining
-        # images (per-run-settings rebinding mid-run isn't supported yet).
+        # Resume — fold in a settings-drift check against the most recent
+        # settings*.yaml in the run folder. If the user accepts new
+        # settings, _confirm_settings_drift writes settings_partN.yaml
+        # and logs a diff summary.
         if manifest.settings_snapshot_path:
-            snapshot_path = output_dir / manifest.settings_snapshot_path
-            if not self._confirm_settings_drift(snapshot_path):
+            if not self._confirm_settings_drift(run_folder):
+                self._run_folder = None
                 return None, None
+        self._is_resuming = True
         return manifest.completed_set(), manifest
 
     def _current_settings_snapshot_dict(self) -> dict:
@@ -1748,13 +1792,63 @@ class TraceWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._log(f"Warning: could not write settings snapshot: {exc}")
 
-    def _confirm_settings_drift(self, snapshot_path: Path) -> bool:
-        """Diff the snapshot against current state; prompt if they differ.
+    def _latest_settings_yaml(self, run_folder: Path) -> tuple[Optional[Path], int]:
+        """Locate the most-recent settings YAML in ``run_folder``.
+
+        Returns (path, part_number). ``part_number`` is 1 for the base
+        settings.yaml, 2+ for settings_partN.yaml. (path, 0) when nothing
+        is found.
+        """
+        base = run_folder / "settings.yaml"
+        parts: list[tuple[int, Path]] = []
+        for p in run_folder.glob("settings_part*.yaml"):
+            try:
+                n = int(p.stem.removeprefix("settings_part"))
+            except ValueError:
+                continue
+            parts.append((n, p))
+        if parts:
+            parts.sort(reverse=True)
+            return parts[0][1], parts[0][0]
+        if base.is_file():
+            return base, 1
+        return None, 0
+
+    def _summarize_settings_diff(self, saved: dict, current: dict) -> list[str]:
+        """Walk two nested settings dicts and return human-readable diff lines.
+
+        Caps at ~10 lines so a wholesale settings rewrite doesn't flood the
+        log. Each line is "<dotted.key>: <saved> → <current>".
+        """
+        diffs: list[str] = []
+
+        def _walk(prefix: str, a, b) -> None:
+            if isinstance(a, dict) and isinstance(b, dict):
+                keys = sorted(set(a) | set(b))
+                for k in keys:
+                    _walk(f"{prefix}.{k}" if prefix else k, a.get(k), b.get(k))
+            elif a != b:
+                diffs.append(f"  {prefix}: {a!r} → {b!r}")
+
+        _walk("", saved or {}, current or {})
+        if len(diffs) > 10:
+            extra = len(diffs) - 10
+            diffs = diffs[:10] + [f"  … and {extra} more change(s)"]
+        return diffs
+
+    def _confirm_settings_drift(self, run_folder: Path) -> bool:
+        """Compare current settings to the latest snapshot in ``run_folder``.
+
+        If they differ, prompt the user. On accept, also persist a new
+        ``settings_partN.yaml`` so the post-drift settings are preserved
+        for posterity, and log a short diff summary so the user sees what
+        changed.
 
         Returns True when the user wants to proceed (no diff, or "Continue
         with current settings" picked), False to abort the resume.
         """
-        if not snapshot_path.is_file():
+        snapshot_path, current_part = self._latest_settings_yaml(run_folder)
+        if snapshot_path is None:
             return True
         try:
             import yaml as _yaml
@@ -1766,6 +1860,7 @@ class TraceWindow(QMainWindow):
         current = self._current_settings_snapshot_dict()
         if saved == current:
             return True
+        diff_lines = self._summarize_settings_diff(saved, current)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Settings changed since last run")
@@ -1775,16 +1870,28 @@ class TraceWindow(QMainWindow):
             "only to the remaining images — the already-completed images "
             "were processed with the original settings."
         )
-        box.setInformativeText(
-            "Continue with current settings, or cancel? "
-            "To run with the original settings instead, click Cancel, "
-            "then use Settings → Import... to load _run_settings.yaml "
-            "from the output folder before clicking Run again."
-        )
+        body = "Continue with current settings, or cancel?"
+        if diff_lines:
+            body += "\n\nChanged:\n" + "\n".join(diff_lines)
+        box.setInformativeText(body)
         box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
         box.button(QMessageBox.Ok).setText("Continue with current settings")
         box.setDefaultButton(QMessageBox.Ok)
-        return box.exec_() == QMessageBox.Ok
+        if box.exec_() != QMessageBox.Ok:
+            return False
+        # User accepted: snapshot the new settings as settings_part<N+1>.yaml
+        # so the post-drift state is preserved alongside the original. Also
+        # log the diff so a reader of the run.log knows the run was
+        # processed under more than one settings configuration.
+        new_part = max(2, current_part + 1)
+        new_path = run_folder / f"settings_part{new_part}.yaml"
+        self._write_settings_snapshot(new_path)
+        if self._manifest is not None:
+            self._manifest.settings_snapshot_path = new_path.name
+        self._log(f"Settings changed since last slice; new settings saved to {new_path.name}.")
+        for line in diff_lines:
+            self._log(line)
+        return True
 
     # -----------------------------------------------------------------------
     # Logging and callbacks
@@ -1946,63 +2053,27 @@ class TraceWindow(QMainWindow):
         self.eta_label.setText(self._format_eta(self._eta_smoothed_seconds))
 
     def _write_run_metadata(self, status: str) -> Optional[Path]:
-        """Drop a per-run folder beside the per-image outputs with the
-        settings snapshot and log text.
+        """Flush the live Log panel contents to ``run.log`` in the run folder.
 
-        Folder name: ``run_<YYYYMMDD-HHMMSS>/`` — timestamped from the
-        run's wall-clock start so multiple runs into the same output
-        directory each get their own record.
+        The settings YAML(s) and the manifest are written at run START
+        (and updated on resume drift) by _run_pipeline; this function no
+        longer duplicates them here. The run folder itself was created at
+        run start and lives at self._run_folder; if for some reason it
+        wasn't (e.g. validation failed before run-folder creation), this
+        is a no-op.
 
-        Contents:
-          - ``settings.yaml`` — full settings snapshot: PipelineConfig,
-            gate_override, GUI-only flags (model paths, intermediate
-            outputs, workers, custom distances), plus run metadata
-            (started_at, finished_at, status, TRACE version,
-            input/output folders).
-          - ``run.log`` — verbatim contents of the Log panel.
-
-        Returns the folder path, or None if the output dir is missing
-        or the write failed.
+        Returns the run folder path, or None when nothing was written.
         """
-        out_dir = self.output_edit.text().strip()
-        if not out_dir:
+        meta_dir = self._run_folder
+        if meta_dir is None:
             return None
         try:
-            from datetime import datetime as _dt
-
-            from TRACE import __version__ as _trace_version
-            from TRACE.config_io import config_to_dict
-
-            stamp_dt = getattr(self, "_run_start_wall", _dt.now())
-            stamp = stamp_dt.strftime("%Y%m%d-%H%M%S")
-            meta_dir = Path(out_dir) / f"run_{stamp}"
             meta_dir.mkdir(parents=True, exist_ok=True)
-
-            settings_payload = {
-                "run_metadata": {
-                    "trace_version": _trace_version,
-                    "status": status,
-                    "started_at": stamp_dt.isoformat(timespec="seconds"),
-                    "finished_at": _dt.now().isoformat(timespec="seconds"),
-                    "input_folder": self.input_edit.text(),
-                    "output_folder": out_dir,
-                    "recursive": bool(self.recursive_chk.isChecked()),
-                },
-                "pipeline_config": config_to_dict(self.config),
-                "gate_override": self._gate_override or None,
-                "gui_state": self.get_gui_state(),
-            }
-            import yaml
-
-            (meta_dir / "settings.yaml").write_text(
-                yaml.safe_dump(settings_payload, sort_keys=False, default_flow_style=False),
-                encoding="utf-8",
-            )
             (meta_dir / "run.log").write_text(self.log_text.toPlainText(), encoding="utf-8")
             return meta_dir
         except Exception as e:  # noqa: BLE001
             # Don't let a metadata-write failure mask the actual run result.
-            self._log(f"Warning: could not write run metadata: {e}")
+            self._log(f"Warning: could not write run log: {e}")
             return None
 
     def _on_all_done(self, results):
@@ -2014,17 +2085,21 @@ class TraceWindow(QMainWindow):
 
         # Mark the manifest as completed so the next run on this output
         # folder doesn't surface the resume prompt.
-        if self._manifest is not None and self.output_edit.text():
+        if self._manifest is not None and self._run_folder is not None:
             self._manifest.status = STATUS_COMPLETED
-            save_manifest(Path(self.output_edit.text()), self._manifest)
+            save_manifest(self._run_folder, self._manifest)
         # Clear so any subsequent fresh run rebuilds from scratch.
         self._manifest = None
+        self._is_resuming = False
+        # Keep self._run_folder set — _write_run_metadata below writes
+        # run.log into it; it gets cleared after that.
 
         if not results:
             self._log("\nPipeline cancelled or no results.")
             self.statusBar().showMessage("Cancelled")
             self.eta_label.setText("")
             self._write_run_metadata(status="cancelled")
+            self._run_folder = None
             return
 
         # Pipeline finished cleanly — release the 99% cap and snap to 100.
@@ -2055,6 +2130,7 @@ class TraceWindow(QMainWindow):
         # so the log text already includes the final summary line.
         status = "ok" if failed == 0 else f"partial ({failed} failed)"
         self._write_run_metadata(status=status)
+        self._run_folder = None
 
         # Open the output folder in the system file manager so the user can
         # see results without hunting for the path.

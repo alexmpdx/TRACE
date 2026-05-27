@@ -167,6 +167,38 @@ def save_manifest(output_dir: Path, manifest: RunManifest) -> None:
         logger.warning("run_state: cannot write %s: %s", target, exc)
 
 
+def find_resumable_manifest(output_dir: Path) -> Optional[tuple["RunManifest", Path]]:
+    """Look in ``output_dir/run_*/`` for an in-progress manifest.
+
+    Returns ``(manifest, run_folder)`` for the most-recent resumable run,
+    or ``None`` if there's nothing to resume. Falls back to the legacy
+    top-level ``output_dir/_run_state.json`` location so users on v0.1.28
+    or earlier (where the manifest lived at the top of the output folder)
+    can still pick up an unfinished run after upgrading.
+
+    "Most recent" is determined by manifest.started_at, not by folder
+    mtime, so the timestamps remain meaningful even after a user has
+    copied the output folder around.
+    """
+    candidates: list[tuple[RunManifest, Path]] = []
+    for run_dir in Path(output_dir).glob("run_*"):
+        if not run_dir.is_dir():
+            continue
+        m = load_manifest(run_dir)
+        if m is not None and m.is_in_progress():
+            candidates.append((m, run_dir))
+    # Legacy fallback: older versions wrote the manifest at the top level.
+    legacy_path = manifest_path(output_dir)
+    if legacy_path.is_file():
+        m = load_manifest(output_dir)
+        if m is not None and m.is_in_progress():
+            candidates.append((m, Path(output_dir)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda mr: mr[0].started_at, reverse=True)
+    return candidates[0]
+
+
 def merge_resume_csv(new_csv: Path, append_source: Path) -> int:
     """Append rows from ``append_source`` whose specimen isn't already in ``new_csv``.
 
