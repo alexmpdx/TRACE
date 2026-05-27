@@ -15,7 +15,7 @@
 ; .github/workflows/build-windows.yml). The literal below is the
 ; fallback for local builds where the override isn't passed.
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.19"
+  #define MyAppVersion "0.1.20"
 #endif
 #define MyAppPublisher "Blair Lab"
 #define MyAppURL "https://github.com/alexmpdx/TRACE"

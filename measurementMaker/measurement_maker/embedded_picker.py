@@ -82,8 +82,16 @@ class LandmarkPickerWidget(QWidget):
         initial_image_path: str = "",
         initial_landmarks_path: str = "",
         landmarks_generator: Optional[Callable[[Path], Path]] = None,
+        show_landmarks_picker: bool = True,
     ):
         super().__init__(parent)
+        # When False, the "Landmarks GeoJSON" row is hidden from the UI —
+        # the host (e.g. TRACE) is responsible for either providing a
+        # landmarks_generator or programmatically setting the path before
+        # Load is clicked. Lets hosts force every user-supplied image
+        # through auto-detection without exposing a "pick a GeoJSON"
+        # step that's only useful for the bundled-sample case.
+        self._show_landmarks_picker = show_landmarks_picker
         self._pairs: list[LandmarkPair] = list(initial_pairs or [])
         self._default_image_dir = default_image_dir
         self._initial_image_path = initial_image_path
@@ -135,6 +143,14 @@ class LandmarkPickerWidget(QWidget):
         """Currently entered landmarks-GeoJSON path (may be empty)."""
         return self._lm_edit.text().strip()
 
+    def set_image_path(self, path: str) -> None:
+        """Programmatically set the sample-image path (does not trigger load)."""
+        self._image_edit.setText(path or "")
+
+    def set_landmarks_path(self, path: str) -> None:
+        """Programmatically set the landmarks-GeoJSON path (does not trigger load)."""
+        self._lm_edit.setText(path or "")
+
     def load_initial(self) -> bool:
         """Load the current image_path + landmarks_path into the viewer.
 
@@ -175,8 +191,13 @@ class LandmarkPickerWidget(QWidget):
         row.addWidget(btn_image)
         source_layout.addLayout(row)
 
-        # Row 2: landmarks picker
-        row = QHBoxLayout()
+        # Row 2: landmarks picker. Wrapped in a container widget so callers
+        # that want auto-detection only (show_landmarks_picker=False) can
+        # hide the whole row — the internal _lm_edit still tracks the path
+        # under the hood for the Load click logic.
+        self._landmarks_picker_row = QWidget()
+        row = QHBoxLayout(self._landmarks_picker_row)
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(QLabel("Landmarks GeoJSON:"))
         self._lm_edit = QLineEdit()
         self._lm_edit.setReadOnly(True)
@@ -185,7 +206,9 @@ class LandmarkPickerWidget(QWidget):
         btn_lm.clicked.connect(self._select_landmarks)
         row.addWidget(self._lm_edit, stretch=1)
         row.addWidget(btn_lm)
-        source_layout.addLayout(row)
+        source_layout.addWidget(self._landmarks_picker_row)
+        if not self._show_landmarks_picker:
+            self._landmarks_picker_row.hide()
 
         # Row 3: viewer options + load button
         row = QHBoxLayout()
@@ -304,9 +327,12 @@ class LandmarkPickerWidget(QWidget):
         )
         if path:
             self._image_edit.setText(path)
-            # Default the landmarks picker to the same folder.
-            if not self._lm_edit.text():
-                self._default_image_dir = str(Path(path).parent)
+            # Picking a new image invalidates any prior landmarks selection
+            # (those landmarks belonged to a different wing). Clearing here
+            # also unblocks the auto-detect path: a downstream landmarks_generator
+            # only fires when the landmarks edit is empty on Load click.
+            self._lm_edit.setText("")
+            self._default_image_dir = str(Path(path).parent)
 
     def _select_landmarks(self):
         start_dir = str(Path(self._image_edit.text()).parent) if self._image_edit.text() else self._default_image_dir

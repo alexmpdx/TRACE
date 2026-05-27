@@ -1838,9 +1838,9 @@ class TraceWindow(QMainWindow):
                 pre_action=lambda w: w.right_tabs.setCurrentIndex(2),
                 title="Custom Measurements — sample wing",
                 body=(
-                    "Pick a sample wing image and its landmarks GeoJSON, then load them "
-                    "into the viewer. A cartoon wing is loaded by default so you can "
-                    "start straight away."
+                    "Pick a sample wing image and load it into the viewer — TRACE "
+                    "detects landmarks automatically. Click Restore cartoon wing for "
+                    "a bundled example you can experiment with."
                 ),
             ),
             WalkthroughStep(

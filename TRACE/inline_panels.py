@@ -1117,15 +1117,14 @@ class InlineCustomDistancesPanel(QWidget):
     def _resolve_paths(self) -> tuple[str, str]:
         """Return (image, landmarks) paths to seed the picker.
 
-        User-saved paths take precedence; otherwise the bundled cartoon is
-        used (if present). Either or both may end up empty when nothing's
-        configured and the cartoon files are missing.
+        Returns user-saved paths from QSettings, or empty strings when
+        nothing is configured. The cartoon-wing default is NOT auto-loaded
+        here — running LandmarkLocator on a cartoon drawing produces
+        nonsense, and the cartoon path leaking in as a pre-fill would also
+        block the auto-detect branch on Load. The user invokes the cartoon
+        explicitly via the "Restore cartoon wing" button.
         """
-        img = self._window._distance_sample_image or (str(self._CARTOON_IMAGE) if self._CARTOON_IMAGE.is_file() else "")
-        lm = self._window._distance_sample_landmarks or (
-            str(self._CARTOON_LANDMARKS) if self._CARTOON_LANDMARKS.is_file() else ""
-        )
-        return img, lm
+        return (self._window._distance_sample_image or "", self._window._distance_sample_landmarks or "")
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -1177,6 +1176,7 @@ class InlineCustomDistancesPanel(QWidget):
                 initial_image_path=img_path,
                 initial_landmarks_path=lm_path,
                 landmarks_generator=self._generate_landmarks_for_image,
+                show_landmarks_picker=False,
             )
             log("InlineCustomDistancesPanel: LandmarkPickerWidget OK")
         except BaseException as exc:  # noqa: BLE001
@@ -1195,10 +1195,49 @@ class InlineCustomDistancesPanel(QWidget):
             return
         self._picker.pairs_changed.connect(self._on_pairs_changed)
         layout.addWidget(self._picker, stretch=1)
-        # Auto-load when both paths point at real files — covers the bundled-
-        # cartoon-default case and the user-restored-session case.
+
+        # "Restore cartoon wing" button — explicit opt-in for the bundled
+        # cartoon (with its hand-curated landmarks). Sits below the picker
+        # so it's visible but doesn't crowd the source-image row that the
+        # walkthrough highlights. Auto-loading the cartoon by default would
+        # populate the landmarks edit and silently disable the auto-detect
+        # path for real wings, plus running LandmarkLocator on a cartoon
+        # drawing produces nonsense — both reasons to gate it behind a
+        # deliberate click.
+        cartoon_row = QHBoxLayout()
+        cartoon_row.setContentsMargins(0, 0, 0, 0)
+        self._btn_restore_cartoon = QPushButton("Restore cartoon wing")
+        self._btn_restore_cartoon.setToolTip(
+            "Load the bundled cartoon wing + its hand-curated landmarks into the viewer. "
+            "Useful for experimenting without running LandmarkLocator on a real wing."
+        )
+        self._btn_restore_cartoon.clicked.connect(self._restore_cartoon)
+        cartoon_row.addWidget(self._btn_restore_cartoon)
+        cartoon_row.addStretch(1)
+        layout.addLayout(cartoon_row)
+
+        # Auto-load only when the user has previously saved paths to real
+        # files (QSettings restore). On a fresh launch with nothing saved,
+        # _resolve_paths returns blank strings and the viewer stays empty
+        # until the user picks an image or clicks Restore cartoon wing.
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
+
+    def _restore_cartoon(self) -> None:
+        """Load the bundled cartoon wing + its landmarks into the picker."""
+        if self._picker is None:
+            return
+        if not self._CARTOON_IMAGE.is_file() or not self._CARTOON_LANDMARKS.is_file():
+            QMessageBox.warning(
+                self,
+                "Cartoon wing missing",
+                "The bundled cartoon-wing files weren't found in this install:\n"
+                f"  {self._CARTOON_IMAGE}\n  {self._CARTOON_LANDMARKS}",
+            )
+            return
+        self._picker.set_image_path(str(self._CARTOON_IMAGE))
+        self._picker.set_landmarks_path(str(self._CARTOON_LANDMARKS))
+        self._picker.load_initial()
 
     def _on_pairs_changed(self, pairs) -> None:
         self._window._user_landmark_distances = [asdict(p) for p in pairs]
@@ -1234,9 +1273,12 @@ class InlineCustomDistancesPanel(QWidget):
             initial_image_path=img_path,
             initial_landmarks_path=lm_path,
             landmarks_generator=self._generate_landmarks_for_image,
+            show_landmarks_picker=False,
         )
         self._picker.pairs_changed.connect(self._on_pairs_changed)
-        layout.addWidget(self._picker, stretch=1)
+        # Slot the picker BEFORE the cartoon-restore button row so layout
+        # order stays the same as on initial build.
+        layout.insertWidget(layout.count() - 1, self._picker, stretch=1)
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
 
