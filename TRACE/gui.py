@@ -1818,18 +1818,36 @@ class TraceWindow(QMainWindow):
         # Hard-cancel routes through the worker's cancel() for running runs;
         # for paused runs there's no worker, so finalize directly.
         if self.worker is not None:
+            # Disconnect all worker signals before tearing it down so any
+            # late emission from the dying thread (e.g. a final
+            # image_completed flush) can't bleed into the now-idle UI.
+            for sig in (
+                self.worker.progress,
+                self.worker.log_message,
+                self.worker.all_done,
+                self.worker.paused,
+                self.worker.cancelled,
+                self.worker.image_completed,
+                self.worker.image_failed_preproc,
+                self.worker.image_failed_analysis,
+                self.worker.error,
+            ):
+                try:
+                    sig.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            # Cooperative flag + forcible terminate. The flag lets any
+            # in-flight cancel check exit cleanly if it happens to fire
+            # before the OS reaps the thread; terminate guarantees the
+            # thread stops mid-operation regardless. Cost is a possible
+            # temp-dir leak (trace_folder's finally block doesn't run on
+            # terminate) and any in-progress per-image write may be left
+            # half-finished on disk — both acceptable for a discard.
             self.worker.cancel()
-            msg = "Cancelling — the current image will finish first."
-            self._log(msg)
-            self.transient_status_label.setText(msg)
-            self.transient_status_label.show()
-            self.btn_cancel.setEnabled(False)
-            # Disable the combo button during the cancel transition (worker
-            # is still finishing the in-flight image). _finalize_cancel
-            # re-enables it with the "Run Pipeline" label.
-            self.btn_run.setEnabled(False)
-            return
-        # Paused state: no worker thread is running. Just clean up.
+            self.worker.terminate()
+            self.worker.wait(200)  # brief grace period; don't block the GUI
+            self.worker = None
+        # Either path (running or paused) lands here.
         self._finalize_cancel()
 
     def _finalize_cancel(self) -> None:
