@@ -1232,9 +1232,21 @@ class TraceWindow(QMainWindow):
         """Open the advanced settings dialog (6 tabs: Landmarks, Models,
         Skeletonization & Pruning, Bridging, Tracing, Intervein).
 
+        Non-modal: the user can still interact with the main window (run
+        the pipeline, change inputs, etc.) while the dialog is open.
+        Settings only apply when the user clicks OK — Cancel and window-
+        close discard pending edits. If the dialog is already open when
+        the user clicks Advanced again, the existing window is raised
+        rather than spawning a second instance.
+
         General and Custom Distances live as right-panel tabs on the main
-        window; they don't pass through the dialog anymore.
+        window; they don't pass through this dialog.
         """
+        existing = getattr(self, "_settings_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
         dlg = PipelineConfigDialog(
             self.config,
             self,
@@ -1252,24 +1264,45 @@ class TraceWindow(QMainWindow):
             rescale_tolerance_low=self._rescale_tolerance_low,
             rescale_tolerance_high=self._rescale_tolerance_high,
         )
-        if dlg.exec_() == QDialog.Accepted:
-            self.config = dlg.get_config()
-            self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
-            self._gate_override = dlg.get_gate_override()
-            self._wing_expand_fraction = dlg.get_wing_expand_fraction()
-            self._wing_isolation_model_path = dlg.get_wing_isolation_model_path()
-            self._landmark_model_path = dlg.get_landmark_model_path()
-            self._segmentation_model_path = dlg.get_segmentation_model_path()
-            self._landmark_target_um_per_px = dlg.get_landmark_target_um_per_px()
-            self._segmentation_target_um_per_px = dlg.get_segmentation_target_um_per_px()
-            self._wing_isolation_target_um_per_px = dlg.get_wing_isolation_target_um_per_px()
-            self._active_rescale_target = dlg.get_active_rescale_target()
-            self._rescale_tolerance_low = dlg.get_rescale_tolerance_low()
-            self._rescale_tolerance_high = dlg.get_rescale_tolerance_high()
-            # Dialog may have edited fields the inline General panel mirrors
-            # (e.g. synthesize_missing_crossveins on the Tracing tab) — pull
-            # current state into the panel widgets so they stay in sync.
-            self.inline_general_panel.refresh_from_state()
+        # Window-modal flag stays False (the QDialog default) so show()
+        # leaves the parent interactive. setAttribute(WA_DeleteOnClose)
+        # would simplify lifetime but we keep the reference around so
+        # the raise-existing path above works regardless of how the
+        # dialog was last dismissed.
+        self._settings_dialog = dlg
+        dlg.accepted.connect(lambda d=dlg: self._apply_settings_dialog_result(d))
+        dlg.finished.connect(lambda _r: self._on_settings_dialog_finished())
+        dlg.show()
+
+    def _apply_settings_dialog_result(self, dlg) -> None:
+        """Copy settings from the now-accepted dialog back onto self.
+
+        Called by the dialog's ``accepted`` signal (OK button). On
+        Cancel / close-window the dialog emits ``rejected`` and this is
+        skipped — the existing self.config etc. stay untouched.
+        """
+        self.config = dlg.get_config()
+        self._include_unreliable_landmarks = dlg.get_include_unreliable_landmarks()
+        self._gate_override = dlg.get_gate_override()
+        self._wing_expand_fraction = dlg.get_wing_expand_fraction()
+        self._wing_isolation_model_path = dlg.get_wing_isolation_model_path()
+        self._landmark_model_path = dlg.get_landmark_model_path()
+        self._segmentation_model_path = dlg.get_segmentation_model_path()
+        self._landmark_target_um_per_px = dlg.get_landmark_target_um_per_px()
+        self._segmentation_target_um_per_px = dlg.get_segmentation_target_um_per_px()
+        self._wing_isolation_target_um_per_px = dlg.get_wing_isolation_target_um_per_px()
+        self._active_rescale_target = dlg.get_active_rescale_target()
+        self._rescale_tolerance_low = dlg.get_rescale_tolerance_low()
+        self._rescale_tolerance_high = dlg.get_rescale_tolerance_high()
+        # Dialog may have edited fields the inline General panel mirrors
+        # (e.g. synthesize_missing_crossveins on the Tracing tab) — pull
+        # current state into the panel widgets so they stay in sync.
+        self.inline_general_panel.refresh_from_state()
+
+    def _on_settings_dialog_finished(self) -> None:
+        """Drop the cached dialog reference so the next Advanced click
+        builds a fresh dialog rather than re-raising a hidden one."""
+        self._settings_dialog = None
 
     # Import/Save pipeline-config JSON lives on PipelineConfigDialog (next to
     # Restore Defaults) — it's only useful in the context of editing the full
@@ -1889,7 +1922,44 @@ class TraceWindow(QMainWindow):
         if self._is_paused:
             self._resume_paused_run()
             return
+        if not self._confirm_no_pending_settings_edits():
+            return
         self._run_pipeline()
+
+    def _confirm_no_pending_settings_edits(self) -> bool:
+        """Warn the user if the Advanced Settings dialog is open when Run
+        is clicked — unapplied edits there won't take effect until OK.
+
+        Returns True if the run should proceed, False if the user wants
+        to go back to the dialog first. Always True when the dialog
+        isn't open. Tracking "actual edits" vs. "dialog merely open" is
+        not worth the per-widget dirty-flag plumbing — the warning fires
+        whenever the dialog is visible, since the user already knows
+        whether they made changes and the cost of an extra confirmation
+        click is small compared to running with the wrong settings.
+        """
+        dlg = getattr(self, "_settings_dialog", None)
+        if dlg is None or not dlg.isVisible():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Advanced Settings still open")
+        box.setText("You have the Advanced Settings dialog open.")
+        box.setInformativeText(
+            "Any unapplied changes there won't affect this run — settings only "
+            "apply after you click OK in the dialog.\n\n"
+            "Run anyway, or go back to the settings dialog?"
+        )
+        btn_run = box.addButton("Run with current settings", QMessageBox.AcceptRole)
+        btn_back = box.addButton("Go to settings", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_back)
+        box.exec_()
+        if box.clickedButton() is btn_run:
+            return True
+        # User chose to go back — raise the dialog to the front.
+        dlg.raise_()
+        dlg.activateWindow()
+        return False
 
     def _cancel_pipeline(self) -> None:
         """Hard-stop the run and discard its resume state.
