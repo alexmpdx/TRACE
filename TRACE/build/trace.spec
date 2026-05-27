@@ -108,6 +108,7 @@ binaries = []
 from PyInstaller.utils.hooks import (
     collect_all,
     collect_data_files,
+    collect_dynamic_libs,
     collect_submodules,
     copy_metadata,
 )
@@ -188,12 +189,6 @@ _COLLECT_ALL_PACKAGES = [
     # Without collect_all, the .pem file doesn't make it into the bundle
     # and certifi.where() returns a path that doesn't exist at runtime.
     "certifi",
-    # onnxruntime is imported lazily inside OnnxModelWrapper.__init__
-    # (modelTOjson/modeltojson.py) which PyInstaller's static analysis
-    # misses. Without collect_all we also lose the native DLLs and the
-    # capi/ subdir, so the wing-isolation ONNX model fails to load at
-    # runtime with "onnxruntime is required for ONNX models".
-    "onnxruntime",
 ]
 for pkg in _COLLECT_ALL_PACKAGES:
     try:
@@ -203,6 +198,27 @@ for pkg in _COLLECT_ALL_PACKAGES:
         hiddenimports += _hidden
     except Exception:
         pass
+
+# onnxruntime is imported lazily inside OnnxModelWrapper.__init__
+# (modelTOjson/modeltojson.py) so PyInstaller's static analysis misses
+# it. Without collect_all we also lose the native DLLs and the capi/
+# subdir, so the wing-isolation ONNX model fails to load at runtime
+# with the misleading "onnxruntime is required for ONNX models" error.
+#
+# Pulled out of _COLLECT_ALL_PACKAGES on purpose: this one is mandatory
+# for wing isolation. The blanket try/except above silently masks
+# collection failures, which previously shipped a broken installer with
+# no onnxruntime bundled. Letting this raise loudly turns a silent
+# runtime failure into an immediate build failure.
+import onnxruntime  # noqa: F401  build-time presence check
+_ort_data, _ort_bin, _ort_hidden = collect_all("onnxruntime")
+datas += _ort_data
+binaries += _ort_bin
+hiddenimports += _ort_hidden
+# collect_all should catch onnxruntime/capi/*.dll already, but pull it
+# in explicitly as belt-and-suspenders — the native DLLs are what fail
+# to load on machines without VC++ runtime / when bundling skips them.
+binaries += collect_dynamic_libs("onnxruntime")
 
 # Belt-and-suspenders: explicit submodule lists for the ones that
 # matter most. collect_all should cover these but a duplicate entry is

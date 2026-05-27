@@ -15,6 +15,7 @@ Each stage can be run independently or as part of the full pipeline.
 
 import contextvars
 import json
+import os
 import shutil
 import threading
 import traceback
@@ -93,17 +94,39 @@ def discover_images(folder: Path, recursive: bool = False) -> list[Path]:
 
     When recursive=True, walk all subdirectories; otherwise only the top level.
     Hidden files/dirs and macOS resource-fork files (._*) are always skipped.
+    Subdirectories that can't be read (e.g. macOS TCC-protected paths like
+    ``~/Desktop`` without Files-and-Folders permission) are silently skipped
+    rather than aborting the entire scan.
     """
+
+    def _hidden(name: str) -> bool:
+        return name.startswith(".") or name.startswith("._")
+
     images: list[Path] = []
-    iterator = folder.rglob("*") if recursive else folder.iterdir()
-    for f in iterator:
-        if not f.is_file():
-            continue
-        # Skip hidden files and any path component that is hidden (e.g. .git/foo.tif).
-        if any(part.startswith(".") or part.startswith("._") for part in f.relative_to(folder).parts):
-            continue
-        if f.suffix.lower() in IMAGE_EXTENSIONS:
-            images.append(f)
+    if recursive:
+        for dirpath, dirnames, filenames in os.walk(folder, onerror=lambda _e: None):
+            # Prune hidden subdirs in-place so os.walk doesn't descend into them.
+            dirnames[:] = [d for d in dirnames if not _hidden(d)]
+            for name in filenames:
+                if _hidden(name):
+                    continue
+                if Path(name).suffix.lower() in IMAGE_EXTENSIONS:
+                    images.append(Path(dirpath) / name)
+    else:
+        try:
+            entries = list(folder.iterdir())
+        except (PermissionError, OSError):
+            return []
+        for f in entries:
+            if _hidden(f.name):
+                continue
+            try:
+                if not f.is_file():
+                    continue
+            except (PermissionError, OSError):
+                continue
+            if f.suffix.lower() in IMAGE_EXTENSIONS:
+                images.append(f)
     return sorted(images)
 
 

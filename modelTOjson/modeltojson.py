@@ -130,11 +130,23 @@ class OnnxModelWrapper(ModelWrapper):
     def __init__(self, onnx_path: str, device: torch.device):
         try:
             import onnxruntime as ort
-        except ImportError:
+        except ImportError as e:
+            # Surface the underlying exception. On Windows in particular,
+            # this is often a bundled-but-broken onnxruntime: "DLL load
+            # failed while importing onnxruntime_pybind11_state" usually
+            # means the Microsoft Visual C++ Redistributable is missing.
+            # The original message ("onnxruntime is required... install
+            # with pip") was a red herring whenever onnxruntime WAS
+            # present but couldn't initialize.
             raise ImportError(
-                "onnxruntime is required for ONNX models. "
-                "Install it with: pip install onnxruntime  (or onnxruntime-gpu)"
-            )
+                f"Failed to import onnxruntime ({type(e).__name__}: {e}). "
+                "If onnxruntime is not installed, run: pip install onnxruntime. "
+                "If it is installed (e.g. inside a packaged TRACE build) and "
+                "you still see this, the native runtime DLLs are likely "
+                "failing to load — install the latest Microsoft Visual C++ "
+                "Redistributable (https://aka.ms/vs/17/release/vc_redist.x64.exe) "
+                "and retry."
+            ) from e
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         if device.type == "cpu":
             providers = ["CPUExecutionProvider"]

@@ -892,10 +892,19 @@ class TraceWindow(QMainWindow):
             self._image_error_text.clear()
             return
         folder = Path(folder_text)
-        if not folder.is_dir():
+        try:
+            if not folder.is_dir():
+                return
+        except (PermissionError, OSError):
             return
         recursive = self.recursive_chk.isChecked()
-        self._image_paths = discover_images(folder, recursive=recursive)
+        try:
+            self._image_paths = discover_images(folder, recursive=recursive)
+        except (PermissionError, OSError) as exc:
+            # macOS TCC can deny iterdir() on protected locations (Desktop,
+            # Documents, Downloads, iCloud) — don't let that abort startup.
+            self._image_paths = []
+            self.statusBar().showMessage(f"Cannot read folder: {exc}")
         self.image_list.clear()
         self._image_status.clear()
         self._basename_to_row.clear()
