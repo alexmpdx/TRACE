@@ -1196,25 +1196,17 @@ class InlineCustomDistancesPanel(QWidget):
         self._picker.pairs_changed.connect(self._on_pairs_changed)
         layout.addWidget(self._picker, stretch=1)
 
-        # "Restore cartoon wing" button — explicit opt-in for the bundled
-        # cartoon (with its hand-curated landmarks). Sits below the picker
-        # so it's visible but doesn't crowd the source-image row that the
-        # walkthrough highlights. Auto-loading the cartoon by default would
-        # populate the landmarks edit and silently disable the auto-detect
-        # path for real wings, plus running LandmarkLocator on a cartoon
-        # drawing produces nonsense — both reasons to gate it behind a
-        # deliberate click.
-        cartoon_row = QHBoxLayout()
-        cartoon_row.setContentsMargins(0, 0, 0, 0)
+        # "Restore cartoon wing" — slotted into the picker's source area
+        # via add_source_action so it sits directly below the Load button
+        # (rather than below the napari canvas), keeping the related
+        # actions grouped together.
         self._btn_restore_cartoon = QPushButton("Restore cartoon wing")
         self._btn_restore_cartoon.setToolTip(
             "Load the bundled cartoon wing + its hand-curated landmarks into the viewer. "
             "Useful for experimenting without running LandmarkLocator on a real wing."
         )
         self._btn_restore_cartoon.clicked.connect(self._restore_cartoon)
-        cartoon_row.addWidget(self._btn_restore_cartoon)
-        cartoon_row.addStretch(1)
-        layout.addLayout(cartoon_row)
+        self._picker.add_source_action(self._btn_restore_cartoon)
 
         # Auto-load behavior:
         #   - Saved real-wing paths from a prior session → restore them
@@ -1286,12 +1278,17 @@ class InlineCustomDistancesPanel(QWidget):
             show_landmarks_picker=False,
         )
         self._picker.pairs_changed.connect(self._on_pairs_changed)
-        # Slot the picker BEFORE the cartoon-restore button row so layout
-        # order stays the same as on initial build.
-        layout.insertWidget(layout.count() - 1, self._picker, stretch=1)
-        # Same auto-load policy as _build_ui: restore saved real-wing paths
-        # if any, otherwise drop into the cartoon-in-viewer / blank-fields
-        # state. Matches the fresh-launch experience after a Restore / wipe.
+        layout.addWidget(self._picker, stretch=1)
+        # Re-add the Restore cartoon wing button into the new picker's
+        # source area. The previous instance was a child of the deleted
+        # picker and went away with it, so a fresh QPushButton is needed.
+        self._btn_restore_cartoon = QPushButton("Restore cartoon wing")
+        self._btn_restore_cartoon.setToolTip(
+            "Load the bundled cartoon wing + its hand-curated landmarks into the viewer. "
+            "Useful for experimenting without running LandmarkLocator on a real wing."
+        )
+        self._btn_restore_cartoon.clicked.connect(self._restore_cartoon)
+        self._picker.add_source_action(self._btn_restore_cartoon)
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
         elif self._CARTOON_IMAGE.is_file() and self._CARTOON_LANDMARKS.is_file():

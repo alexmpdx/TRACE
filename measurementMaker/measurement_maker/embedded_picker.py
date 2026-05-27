@@ -162,6 +162,20 @@ class LandmarkPickerWidget(QWidget):
         """
         self._load_wing(Path(image_path), Path(landmarks_path))
 
+    def add_source_action(self, widget: QWidget) -> None:
+        """Append a host-action widget right-aligned below the Load button.
+
+        Lets hosts (e.g. TRACE) place their own buttons — a "Restore
+        cartoon wing" trigger, for example — alongside Load rather than
+        far below the viewer canvas. Matches the Load row's right
+        alignment so the column of action buttons reads as a unit.
+        """
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch(1)
+        row.addWidget(widget)
+        self._source_widget.layout().addLayout(row)
+
     def load_initial(self) -> bool:
         """Load the current image_path + landmarks_path into the viewer.
 
@@ -255,14 +269,14 @@ class LandmarkPickerWidget(QWidget):
         self._instructions_label = QLabel(
             "1. Click a landmark to select it (turns orange).\n"
             "2. SHIFT-click a second landmark.\n"
-            "3. Type a label, click 'Add measurement'."
+            "3. Type a name, click 'Add measurement'."
         )
         left_col.addWidget(self._instructions_label)
         self._sel_label = QLabel("Selected: (none)")
         self._sel_label.setWordWrap(True)
         left_col.addWidget(self._sel_label)
         label_row = QHBoxLayout()
-        label_row.addWidget(QLabel("Label:"))
+        label_row.addWidget(QLabel("Name:"))
         self._label_edit = QLineEdit()
         self._label_edit.setPlaceholderText("e.g. wing_span")
         label_row.addWidget(self._label_edit, stretch=1)
@@ -560,7 +574,7 @@ class LandmarkPickerWidget(QWidget):
             return
         label = self._label_edit.text().strip()
         if not label:
-            QMessageBox.warning(self, "Missing label", "Type a label for this pair.")
+            QMessageBox.warning(self, "Missing name", "Type a name for this pair.")
             return
         self._pairs.append(LandmarkPair(name_a=sel[0], name_b=sel[1], label=label))
         self._label_edit.clear()
