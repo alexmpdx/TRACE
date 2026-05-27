@@ -220,6 +220,56 @@ hiddenimports += _ort_hidden
 # to load on machines without VC++ runtime / when bundling skips them.
 binaries += collect_dynamic_libs("onnxruntime")
 
+# --- VC++ 2015-2022 runtime DLLs (Windows app-local deployment) -----------
+# onnxruntime_pybind11_state.pyd link-imports vcruntime140_1.dll,
+# msvcp140.dll, etc. End-user machines that haven't installed the VS 2019+
+# redistributable hit
+#   ImportError: DLL load failed while importing
+#   onnxruntime_pybind11_state: A dynamic link library (DLL) initialization
+#   routine failed.
+# Two options to fix end-user-side: (1) ship the VC++ Redist installer in
+# Inno Setup and run it — but that needs admin/UAC, breaking our
+# PrivilegesRequired=lowest per-user install. (2) Microsoft explicitly
+# permits *app-local* deployment of these DLLs: drop them next to the
+# .exe and Windows' DLL search order finds them first. We go with (2)
+# so the per-user install path stays UAC-free.
+#
+# Source: copy from C:\Windows\System32 on the build runner (which is
+# always windows-latest in CI and has an up-to-date VC++ runtime installed
+# system-wide). Skipped on non-Windows builds because the DLLs only exist
+# on Windows and the resulting dist would never be packaged for those
+# platforms anyway.
+if sys.platform == "win32":
+    _VCRT_DLLS = [
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "concrt140.dll",
+    ]
+    _system32 = Path(r"C:\Windows\System32")
+    _missing = []
+    for _dll in _VCRT_DLLS:
+        _src = _system32 / _dll
+        if _src.exists():
+            # Target "." → root of the dist folder (next to TRACE.exe).
+            binaries.append((str(_src), "."))
+        else:
+            _missing.append(_dll)
+    if _missing:
+        # vcruntime140_1.dll specifically is the one onnxruntime needs and
+        # the one missing on machines with an old (pre-2019) VC++ runtime.
+        # If even the *build* runner is missing it, that's a real CI-image
+        # regression — surface it rather than silently shipping an installer
+        # that will fail on every end-user.
+        raise SystemExit(
+            "Build aborted: required VC++ runtime DLLs not found in "
+            f"{_system32}: {_missing}. The Windows runner is expected to "
+            "have these installed system-wide; check whether the "
+            "windows-latest image has changed."
+        )
+
 # Belt-and-suspenders: explicit submodule lists for the ones that
 # matter most. collect_all should cover these but a duplicate entry is
 # cheaper than a missed one.

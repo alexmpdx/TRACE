@@ -28,7 +28,7 @@ Usage::
 # A mismatch between the two fails the CI build fast, before producing
 # an installer whose Help-tab updater shows the user as "out of date"
 # forever.
-__version__ = "0.1.46"
+__version__ = "0.1.47"
 
 from TRACE.pipeline import TraceResult, trace_folder
 
