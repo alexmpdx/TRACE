@@ -134,26 +134,34 @@ def _default_model_path(key: str) -> str:
     return str(path) if path.is_dir() else ""
 
 
-def _migrate_legacy_model_path(saved: str) -> str:
-    """Auto-fall-back to a flat-layout model dir when a saved path is stale.
+def _restore_model_path(saved: str, default_key: str) -> str:
+    """Map a saved-QSettings model path to a usable path on disk.
 
-    LandmarkLocator used to ship checkpoints inside a `<name>_checkpoints/` (or
-    `checkpoints/`) sub-folder. The flat layout puts `best_fold*.pt`,
-    `gate_config.yaml`, `training_chart.png`, and `training.log` all directly in
-    the model folder. If a user's saved path still points at the (now-deleted)
-    nested sub-folder, transparently substitute the parent when the parent is a
-    valid flat-layout model dir. Otherwise return the saved path unchanged so
-    the user gets an obvious "missing path" signal in Settings.
+    Resolution order, returning the first match:
+      1. Saved path exists on disk → use as-is.
+      2. Saved path is the legacy nested-checkpoints layout
+         (parent dir contains ``best_fold*.pt``) → return the parent.
+         LandmarkLocator used to ship checkpoints inside a
+         ``<name>_checkpoints/`` sub-folder; the flat layout puts the
+         weights directly in the model folder.
+      3. Saved path is stale (project dir was moved or deleted between
+         sessions) but a bundled default exists under ``TRACE/models/``
+         → fall back to the bundled default. Without this rescue,
+         relocating the repo silently breaks every saved path and the
+         user has to re-pick three model folders by hand.
+      4. Otherwise return the saved value unchanged so the missing path
+         stays visible in Settings and the user can re-pick it.
     """
     if not saved:
-        return saved
+        return _default_model_path(default_key)
     p = Path(saved)
     if p.exists():
         return saved
     parent = p.parent
     if parent.exists() and parent.is_dir() and any(parent.glob("best_fold*.pt")):
         return str(parent)
-    return saved
+    fallback = _default_model_path(default_key)
+    return fallback if fallback else saved
 
 
 def _picker_initial_path(current: str) -> str:
@@ -1560,20 +1568,12 @@ class TraceWindow(QMainWindow):
         val = s.value("output_folder", "")
         if val:
             self.output_edit.setText(val)
-        # Fall back to bundled defaults (TRACE/models/*) when no saved value
-        # exists — first-time launch preloads the model paths so the user
-        # only has to point them elsewhere if they want a different model.
-        # `_migrate_legacy_model_path` rescues saved paths that pointed into a
-        # now-deleted nested checkpoints folder by substituting the parent dir
-        # when it's a valid flat-layout model.
-        val = s.value("landmark_model", "")
-        self._landmark_model_path = _migrate_legacy_model_path(val) if val else _default_model_path("landmark")
-        val = s.value("segmentation_model", "")
-        self._segmentation_model_path = _migrate_legacy_model_path(val) if val else _default_model_path("segmentation")
-        val = s.value("wing_isolation_model", "")
-        self._wing_isolation_model_path = (
-            _migrate_legacy_model_path(val) if val else _default_model_path("wing_isolation")
-        )
+        # `_restore_model_path` handles all four cases at once: saved-and-valid,
+        # legacy nested-checkpoints layout, stale path (project dir moved between
+        # sessions) with a bundled default available, and pristine first-launch.
+        self._landmark_model_path = _restore_model_path(s.value("landmark_model", ""), "landmark")
+        self._segmentation_model_path = _restore_model_path(s.value("segmentation_model", ""), "segmentation")
+        self._wing_isolation_model_path = _restore_model_path(s.value("wing_isolation_model", ""), "wing_isolation")
 
         def _parse_optional_float(raw) -> Optional[float]:
             if raw in (None, ""):
