@@ -1132,9 +1132,10 @@ class InlineCustomDistancesPanel(QWidget):
         layout.setSpacing(6)
 
         info = QLabel(
-            "Configure custom straight-line measurements between any two landmarks. Each pair "
-            "adds custom_<label>_px (and _um when scale is set) columns to the measurements CSV. "
-            "Pairs are stored by landmark name and applied to every wing in the batch."
+            "Configure custom straight-line measurements between any two landmark points. "
+            "When Custom measurements is selected as an output, your measurements will be "
+            "applied to every wing in the run (measured in both px and µm) and will appear "
+            "in the final measurements CSV."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa;")
