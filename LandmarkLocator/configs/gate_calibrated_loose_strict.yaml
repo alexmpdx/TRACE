@@ -1,0 +1,57 @@
+confidence:
+  peak:
+    global: 0.248
+    per_landmark:
+      acv_a: 0.627
+      acv_p: 0.352
+      alula_notch: 0.294
+      dtip: 0.703
+      l1_rs: 0.412
+      l2_d: 0.517
+      l2_l3: 0.568
+      l4_d: 0.612
+      l4_l5: 0.248
+      l5_d: 0.436
+      pcv_a: 0.71
+      pcv_p: 0.743
+      subcostal_break: 0.604
+  sharpness:
+    global: 1.21
+    per_landmark:
+      acv_a: 1.35
+      acv_p: 1.31
+      alula_notch: 1.21
+      dtip: 1.33
+      l1_rs: 1.32
+      l2_d: 1.3
+      l2_l3: 1.28
+      l4_d: 1.33
+      l4_l5: 1.28
+      l5_d: 1.3
+      pcv_a: 1.36
+      pcv_p: 1.35
+      subcostal_break: 1.3
+  second_peak_ratio:
+    global: 0.29
+    per_landmark:
+      acv_a: 0.1
+      acv_p: 0.2
+      alula_notch: 0.16
+      dtip: 0.22
+      l1_rs: 0.15
+      l2_d: 0.12
+      l2_l3: 0.08
+      l4_d: 0.29
+      l4_l5: 0.13
+      l5_d: 0.22
+      pcv_a: 0.18
+      pcv_p: 0.12
+      subcostal_break: 0.06
+  second_peak_suppression_radius_px: 30
+  core_landmarks:
+  - alula_notch
+  - dtip
+  - l1_rs
+  - l2_l3
+  - l4_l5
+  - subcostal_break

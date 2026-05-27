@@ -1157,12 +1157,45 @@ class GateConfigPanel(QWidget):
             ),
             "Abort": "Check to fail the whole image when this landmark misses.",
         }
+        # Metric columns get a checkbox to the left of the label so the user can
+        # disable an entire gate column without losing its threshold values.
+        # Default ON. Stored state lives on the panel and is emitted via
+        # `result_override()` as `confidence.<metric>.enabled`.
+        self._gate_enabled: dict[str, QCheckBox] = {}
+        gate_enabled_tooltip = (
+            "Uncheck to disable this gate. Disabled gates can't reject a "
+            "landmark regardless of its threshold values (the values stay "
+            "saved so re-enabling restores them)."
+        )
+        metric_by_header = {
+            "peak ≥": "peak",
+            "sharp ≥": "sharpness",
+            "sp_ratio ≤": "second_peak_ratio",
+        }
         for col, h in enumerate(headers):
-            lbl = QLabel(h)
-            lbl.setStyleSheet("font-weight: bold;")
-            if h in header_tooltips:
-                lbl.setToolTip(header_tooltips[h])
-            grid.addWidget(lbl, 0, col)
+            if h in metric_by_header:
+                metric_key = metric_by_header[h]
+                cell = QWidget()
+                cell_layout = QHBoxLayout(cell)
+                cell_layout.setContentsMargins(0, 0, 0, 0)
+                cell_layout.setSpacing(4)
+                chk = QCheckBox()
+                chk.setChecked(bool(self._cfg.get(metric_key, {}).get("enabled", True)))
+                chk.setToolTip(gate_enabled_tooltip)
+                chk.toggled.connect(self._on_gate_enabled_toggled)
+                self._gate_enabled[metric_key] = chk
+                cell_layout.addWidget(chk)
+                lbl = QLabel(h)
+                lbl.setStyleSheet("font-weight: bold;")
+                cell_layout.addWidget(lbl)
+                cell_layout.addStretch(1)
+                grid.addWidget(cell, 0, col)
+            else:
+                lbl = QLabel(h)
+                lbl.setStyleSheet("font-weight: bold;")
+                if h in header_tooltips:
+                    lbl.setToolTip(header_tooltips[h])
+                grid.addWidget(lbl, 0, col)
 
         core = set(self._cfg.get("core_landmarks", []) or [])
         peak_pl = self._cfg.get("peak", {}).get("per_landmark", {}) or {}
@@ -1299,9 +1332,16 @@ class GateConfigPanel(QWidget):
 
     def _sync_row_editability(self, name: str) -> None:
         row = self._rows[name]
-        editable = row["combo"].currentText() == "Custom"
+        custom = row["combo"].currentText() == "Custom"
         for key in ("peak", "sharpness", "second_peak_ratio"):
-            row[key].setEnabled(editable)
+            # Editable iff the tier is Custom AND this gate column is enabled.
+            gate_on = bool(self._gate_enabled[key].isChecked())
+            row[key].setEnabled(custom and gate_on)
+
+    def _on_gate_enabled_toggled(self) -> None:
+        """Refresh every row's spinbox editability when a gate checkbox flips."""
+        for name in self._landmark_order:
+            self._sync_row_editability(name)
 
     def result_override(self) -> dict:
         """Build a confidence-override dict from the current widget state.
@@ -1322,10 +1362,22 @@ class GateConfigPanel(QWidget):
             spr_pl[name] = float(row["second_peak_ratio"].value())
             if row["abort"].isChecked():
                 core.append(name)
+        peak_enabled = bool(self._gate_enabled["peak"].isChecked())
+        sharp_enabled = bool(self._gate_enabled["sharpness"].isChecked())
+        spr_enabled = bool(self._gate_enabled["second_peak_ratio"].isChecked())
         return {
-            "peak": {"global": self._cfg["peak"]["global"], "per_landmark": peak_pl},
-            "sharpness": {"global": self._cfg["sharpness"]["global"], "per_landmark": sharp_pl},
+            "peak": {
+                "enabled": peak_enabled,
+                "global": self._cfg["peak"]["global"],
+                "per_landmark": peak_pl,
+            },
+            "sharpness": {
+                "enabled": sharp_enabled,
+                "global": self._cfg["sharpness"]["global"],
+                "per_landmark": sharp_pl,
+            },
             "second_peak_ratio": {
+                "enabled": spr_enabled,
                 "global": self._cfg["second_peak_ratio"]["global"],
                 "per_landmark": spr_pl,
             },
@@ -1407,6 +1459,12 @@ class GateConfigPanel(QWidget):
         sharp_pl = override.get("sharpness", {}).get("per_landmark", {}) or {}
         spr_pl = override.get("second_peak_ratio", {}).get("per_landmark", {}) or {}
         core = set(override.get("core_landmarks", []) or [])
+        # Gate-column enabled flags (default True for files written before this flag existed).
+        self._gate_enabled["peak"].setChecked(bool(override.get("peak", {}).get("enabled", True)))
+        self._gate_enabled["sharpness"].setChecked(bool(override.get("sharpness", {}).get("enabled", True)))
+        self._gate_enabled["second_peak_ratio"].setChecked(
+            bool(override.get("second_peak_ratio", {}).get("enabled", True))
+        )
         for name, row in self._rows.items():
             if name in peak_pl or name in sharp_pl or name in spr_pl:
                 row["combo"].setCurrentText("Custom")

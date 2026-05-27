@@ -188,17 +188,29 @@ def _gate_landmark(
     metric: dict[str, float],
     gate_cfg: dict,
 ) -> tuple[bool, str]:
-    """Return (passed, reason). reason is empty when passed."""
-    peak_thr = gate_cfg["peak"]["per_landmark"].get(name, gate_cfg["peak"]["global"])
-    sharp_thr = gate_cfg["sharpness"]["per_landmark"].get(name, gate_cfg["sharpness"]["global"])
-    sp_thr = gate_cfg["second_peak_ratio"]["per_landmark"].get(name, gate_cfg["second_peak_ratio"]["global"])
+    """Return (passed, reason). reason is empty when passed.
 
-    if metric["peak"] < peak_thr:
-        return False, f"peak={metric['peak']:.3f}<{peak_thr:.3f}"
-    if metric["sharpness"] < sharp_thr:
-        return False, f"sharpness={metric['sharpness']:.2f}<{sharp_thr:.2f}"
-    if metric["second_peak_ratio"] > sp_thr:
-        return False, f"second_peak={metric['second_peak_ratio']:.2f}>{sp_thr:.2f}"
+    Each metric block may carry an `enabled` flag (default True). When False
+    the gate is short-circuited and that metric cannot reject the landmark —
+    used by the GUI checkboxes to disable a whole gate column without losing
+    the calibrated threshold values.
+    """
+    peak_cfg = gate_cfg["peak"]
+    sharp_cfg = gate_cfg["sharpness"]
+    sp_cfg = gate_cfg["second_peak_ratio"]
+
+    if peak_cfg.get("enabled", True):
+        peak_thr = peak_cfg["per_landmark"].get(name, peak_cfg["global"])
+        if metric["peak"] < peak_thr:
+            return False, f"peak={metric['peak']:.3f}<{peak_thr:.3f}"
+    if sharp_cfg.get("enabled", True):
+        sharp_thr = sharp_cfg["per_landmark"].get(name, sharp_cfg["global"])
+        if metric["sharpness"] < sharp_thr:
+            return False, f"sharpness={metric['sharpness']:.2f}<{sharp_thr:.2f}"
+    if sp_cfg.get("enabled", True):
+        sp_thr = sp_cfg["per_landmark"].get(name, sp_cfg["global"])
+        if metric["second_peak_ratio"] > sp_thr:
+            return False, f"second_peak={metric['second_peak_ratio']:.2f}>{sp_thr:.2f}"
     return True, ""
 
 

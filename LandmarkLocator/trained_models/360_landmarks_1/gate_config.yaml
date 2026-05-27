@@ -6,53 +6,53 @@ confidence:
   # from tiers.strict). "Save as Model Default" writes back to this `confidence:`
   # block (the tier sub-blocks below are preserved on save).
   peak:
-    global: 0.04
+    global: 0.021
     per_landmark:
-      acv_a: 0.193
-      acv_p: 0.04
-      alula_notch: 0.075
-      dtip: 0.245
-      l1_rs: 0.043
-      l2_d: 0.359
-      l2_l3: 0.329
-      l4_d: 0.215
-      l4_l5: 0.084
-      l5_d: 0.132
-      pcv_a: 0.285
-      pcv_p: 0.248
-      subcostal_break: 0.449
+      acv_a: 0.089
+      acv_p: 0.025
+      alula_notch: 0.069
+      dtip: 0.134
+      l1_rs: 0.028
+      l2_d: 0.204
+      l2_l3: 0.272
+      l4_d: 0.116
+      l4_l5: 0.042
+      l5_d: 0.069
+      pcv_a: 0.021
+      pcv_p: 0.169
+      subcostal_break: 0.405
   sharpness:
-    global: 1.19
+    global: 1.18
     per_landmark:
       acv_a: 1.31
-      acv_p: 1.28
-      alula_notch: 1.19
-      dtip: 1.31
-      l1_rs: 1.28
-      l2_d: 1.29
-      l2_l3: 1.25
-      l4_d: 1.28
-      l4_l5: 1.24
-      l5_d: 1.24
-      pcv_a: 1.32
-      pcv_p: 1.31
-      subcostal_break: 1.26
+      acv_p: 1.26
+      alula_notch: 1.18
+      dtip: 1.3
+      l1_rs: 1.26
+      l2_d: 1.27
+      l2_l3: 1.24
+      l4_d: 1.26
+      l4_l5: 1.23
+      l5_d: 1.21
+      pcv_a: 1.31
+      pcv_p: 1.3
+      subcostal_break: 1.25
   second_peak_ratio:
-    global: 0.86
+    global: 0.95
     per_landmark:
-      acv_a: 0.44
-      acv_p: 0.76
-      alula_notch: 0.73
-      dtip: 0.58
-      l1_rs: 0.6
-      l2_d: 0.8
-      l2_l3: 0.13
-      l4_d: 0.86
-      l4_l5: 0.46
-      l5_d: 0.82
-      pcv_a: 0.67
-      pcv_p: 0.5
-      subcostal_break: 0.26
+      acv_a: 0.77
+      acv_p: 0.94
+      alula_notch: 0.86
+      dtip: 0.73
+      l1_rs: 0.83
+      l2_d: 0.95
+      l2_l3: 0.42
+      l4_d: 0.95
+      l4_l5: 0.55
+      l5_d: 0.94
+      pcv_a: 0.87
+      pcv_p: 0.63
+      subcostal_break: 0.41
   second_peak_suppression_radius_px: 30
   core_landmarks:
   - alula_notch
@@ -62,59 +62,59 @@ confidence:
   - l4_l5
   - subcostal_break
   # Named tier presets — used by the GUI tier dropdown. Each landmark can be set to
-  # "Permissive" (2nd/2nd/98th-pct calibration), "Standard" (5th/5th/95th-pct), or
-  # "Strict" (15th/15th/85th-pct calibration) and the per-landmark values below are
-  # dropped into the active gate.
+  # "Permissive" (0.5th/0.5th/99.5th-pct calibration), "Standard" (5th/5th/95th-pct),
+  # or "Strict" (15th/15th/85th-pct calibration) and the per-landmark values below
+  # are dropped into the active gate.
   tiers:
     permissive:
       peak:
-        global: 0.04
+        global: 0.021
         per_landmark:
-          acv_a: 0.193
-          acv_p: 0.04
-          alula_notch: 0.075
-          dtip: 0.245
-          l1_rs: 0.043
-          l2_d: 0.359
-          l2_l3: 0.329
-          l4_d: 0.215
-          l4_l5: 0.084
-          l5_d: 0.132
-          pcv_a: 0.285
-          pcv_p: 0.248
-          subcostal_break: 0.449
+          acv_a: 0.089
+          acv_p: 0.025
+          alula_notch: 0.069
+          dtip: 0.134
+          l1_rs: 0.028
+          l2_d: 0.204
+          l2_l3: 0.272
+          l4_d: 0.116
+          l4_l5: 0.042
+          l5_d: 0.069
+          pcv_a: 0.021
+          pcv_p: 0.169
+          subcostal_break: 0.405
       sharpness:
-        global: 1.19
+        global: 1.18
         per_landmark:
           acv_a: 1.31
-          acv_p: 1.28
-          alula_notch: 1.19
-          dtip: 1.31
-          l1_rs: 1.28
-          l2_d: 1.29
-          l2_l3: 1.25
-          l4_d: 1.28
-          l4_l5: 1.24
-          l5_d: 1.24
-          pcv_a: 1.32
-          pcv_p: 1.31
-          subcostal_break: 1.26
+          acv_p: 1.26
+          alula_notch: 1.18
+          dtip: 1.3
+          l1_rs: 1.26
+          l2_d: 1.27
+          l2_l3: 1.24
+          l4_d: 1.26
+          l4_l5: 1.23
+          l5_d: 1.21
+          pcv_a: 1.31
+          pcv_p: 1.3
+          subcostal_break: 1.25
       second_peak_ratio:
-        global: 0.86
+        global: 0.95
         per_landmark:
-          acv_a: 0.44
-          acv_p: 0.76
-          alula_notch: 0.73
-          dtip: 0.58
-          l1_rs: 0.6
-          l2_d: 0.8
-          l2_l3: 0.13
-          l4_d: 0.86
-          l4_l5: 0.46
-          l5_d: 0.82
-          pcv_a: 0.67
-          pcv_p: 0.5
-          subcostal_break: 0.26
+          acv_a: 0.77
+          acv_p: 0.94
+          alula_notch: 0.86
+          dtip: 0.73
+          l1_rs: 0.83
+          l2_d: 0.95
+          l2_l3: 0.42
+          l4_d: 0.95
+          l4_l5: 0.55
+          l5_d: 0.94
+          pcv_a: 0.87
+          pcv_p: 0.63
+          subcostal_break: 0.41
     standard:
       peak:
         global: 0.108
