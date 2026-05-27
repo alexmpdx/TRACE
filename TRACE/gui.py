@@ -39,7 +39,13 @@ from PyQt5.QtWidgets import (
 
 from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json
-from TRACE.inline_panels import InlineCustomDistancesPanel, InlineGeneralPanel, InlineHelpPanel
+from TRACE.inline_panels import (
+    InlineCustomDistancesPanel,
+    InlineGeneralPanel,
+    InlineHelpPanel,
+    _DependentRow,
+    _pulse_text,
+)
 from TRACE.ood_check import format_report_line, preflight_batch
 from TRACE.output_tooltips import output_tooltip_html
 from TRACE.pipeline import (
@@ -244,6 +250,15 @@ class TraceWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("TRACE — Wing Analysis Pipeline")
         self.settings = QSettings("TRACE", "WingAnalysisPipeline")
+        # Pulse-and-hint registry for the Measurements-CSV child checkboxes.
+        # Populated by _wrap_csv_child in _build_ui; consumed by the app-level
+        # eventFilter installed at the end of __init__. Parallel to (and
+        # independent of) InlineGeneralPanel._pulse_dependencies — both
+        # filters fire on every MouseButtonPress and iterate their own dicts.
+        self._pulse_dependencies: dict[QCheckBox, tuple[QCheckBox, Optional[QLabel]]] = {}
+        # Hints we own, so the CSV parent's toggled handler can hide them all
+        # in one pass when the user re-enables Measurements CSV.
+        self._csv_dependency_hints: list[QLabel] = []
         self.resize(1050, 750)
         # Restore the window geometry the user last left (saved in closeEvent);
         # the resize() above is the first-launch default.
@@ -324,10 +339,32 @@ class TraceWindow(QMainWindow):
         self._walkthrough: Optional[WalkthroughOverlay] = None
         self._build_ui()
         self._restore_settings()
+        # App-level event filter so clicks on the disabled CSV-child checkboxes
+        # trigger pulse + hint. Mirrors InlineGeneralPanel's approach — both
+        # filters coexist and iterate their own dicts.
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.installEventFilter(self)
         # First-launch auto-show. Deferred until after the event loop starts
         # so the window has been shown and every widget has a valid geometry.
         if not self.settings.value("walkthrough_completed", False, type=bool):
             QTimer.singleShot(0, self._show_walkthrough)
+
+    # -----------------------------------------------------------------------
+    # App-level event filter for the CSV-child dependent-checkbox pulse
+    # -----------------------------------------------------------------------
+    def eventFilter(self, obj, event):  # noqa: N802 — Qt API
+        if event.type() == QEvent.MouseButtonPress and self._pulse_dependencies:
+            global_pos = event.globalPos()
+            for child, (parent_chk, hint) in self._pulse_dependencies.items():
+                if not child.isEnabled() and child.isVisible():
+                    local = child.mapFromGlobal(global_pos)
+                    if child.rect().contains(local):
+                        _pulse_text(parent_chk)
+                        if hint is not None:
+                            hint.show()
+                        break
+        return super().eventFilter(obj, event)
 
     # -----------------------------------------------------------------------
     # UI construction
@@ -454,12 +491,10 @@ class TraceWindow(QMainWindow):
                     gchk = QCheckBox(glabel)
                     gchk.setChecked(True)
                     self.csv_group_checks[gkey] = gchk
-                    cgl.addWidget(gchk)
+                    cgl.addWidget(self._wrap_csv_child(gchk, chk))
                 # Custom landmark distances also writes only into the batch CSV,
                 # so it sits alongside the measurement-group sub-checkboxes and
                 # tracks the parent CSV checkbox's enabled state.
-                cd_row = QHBoxLayout()
-                cd_row.setContentsMargins(0, 0, 0, 0)
                 self.include_custom_measurements_chk = QCheckBox("Custom measurements")
                 self.include_custom_measurements_chk.setChecked(True)
                 self.include_custom_measurements_chk.setToolTip(
@@ -467,7 +502,6 @@ class TraceWindow(QMainWindow):
                     "as custom_<label>_px (and _um when scale is set) columns.\n\n"
                     "No effect when no pairs are configured."
                 )
-                cd_row.addWidget(self.include_custom_measurements_chk)
                 self.btn_edit_custom_distances = QPushButton("Edit...")
                 self.btn_edit_custom_distances.setToolTip(
                     "Jump to the Custom Measurements tab on the right to add/edit/remove " "landmark measurement pairs."
@@ -475,12 +509,37 @@ class TraceWindow(QMainWindow):
                 self.btn_edit_custom_distances.clicked.connect(
                     lambda: self.right_tabs.setCurrentWidget(self.inline_custom_distances_panel)
                 )
-                cd_row.addWidget(self.btn_edit_custom_distances)
-                cd_row.addStretch()
-                cgl.addLayout(cd_row)
+                # The Custom measurements row uniquely also has an Edit... button
+                # next to the checkbox. _wrap_csv_child can't handle that out of
+                # the box, so build the row inline but still register the
+                # checkbox in the pulse registry.
+                cd_row_widget = _DependentRow(self.include_custom_measurements_chk, chk)
+                cd_h = QHBoxLayout(cd_row_widget)
+                cd_h.setContentsMargins(0, 0, 0, 0)
+                cd_h.setSpacing(8)
+                cd_h.addWidget(self.include_custom_measurements_chk)
+                cd_h.addWidget(self.btn_edit_custom_distances)
+                cd_hint = QLabel("requires Measurements CSV")
+                cd_hint.setStyleSheet("color: #4aa3ff;")
+                cd_hint.hide()
+                cd_row_widget.set_hint(cd_hint)
+                cd_h.addWidget(cd_hint)
+                cd_h.addStretch(1)
+                self._pulse_dependencies[self.include_custom_measurements_chk] = (chk, cd_hint)
+                self._csv_dependency_hints.append(cd_hint)
+                cgl.addWidget(cd_row_widget)
                 ol.addWidget(self._csv_group_container)
+
                 # Enable/disable nested checkboxes with parent CSV state.
-                chk.toggled.connect(self._csv_group_container.setEnabled)
+                # Also hide any "requires Measurements CSV" hints that the
+                # event filter may have surfaced — they'd otherwise linger
+                # next to now-enabled children.
+                def _on_csv_toggled(checked: bool) -> None:
+                    self._csv_group_container.setEnabled(checked)
+                    for _h in self._csv_dependency_hints:
+                        _h.hide()
+
+                chk.toggled.connect(_on_csv_toggled)
                 self._csv_group_container.setEnabled(chk.isChecked())
 
         left_layout.addWidget(out_group)
@@ -560,6 +619,29 @@ class TraceWindow(QMainWindow):
         main_layout.addWidget(self._splitter)
 
         self.statusBar().showMessage("Ready")
+
+    def _wrap_csv_child(self, child_chk: QCheckBox, parent_chk: QCheckBox) -> _DependentRow:
+        """Wrap a Measurements-CSV child checkbox in a pulse-and-hint row.
+
+        Mirrors InlineGeneralPanel._wrap_with_hint but writes into TraceWindow's
+        own _pulse_dependencies registry (consumed by self.eventFilter) and
+        collects the hint label in _csv_dependency_hints so the parent-toggle
+        handler can clear every hint in one pass.
+        """
+        row = _DependentRow(child_chk, parent_chk)
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        h.addWidget(child_chk)
+        hint = QLabel("requires Measurements CSV")
+        hint.setStyleSheet("color: #4aa3ff;")
+        hint.hide()
+        row.set_hint(hint)
+        h.addWidget(hint)
+        h.addStretch(1)
+        self._pulse_dependencies[child_chk] = (parent_chk, hint)
+        self._csv_dependency_hints.append(hint)
+        return row
 
     # -----------------------------------------------------------------------
     # Folder / model selection
