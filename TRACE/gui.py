@@ -58,6 +58,15 @@ from TRACE.pipeline import (
     compute_progress_weights,
     trace_folder,
 )
+from TRACE.run_state import (
+    STATUS_COMPLETED,
+    STATUS_PAUSED,
+    STATUS_RUNNING,
+    RunManifest,
+    load_manifest,
+    new_manifest,
+    save_manifest,
+)
 from TRACE.settings_dialog import PipelineConfigDialog
 from TRACE.walkthrough import WalkthroughOverlay, WalkthroughStep
 
@@ -184,20 +193,44 @@ class _SignalLogHandler(logging.Handler):
 
 
 class TraceWorker(QThread):
-    """Runs trace_folder() in a background thread."""
+    """Runs trace_folder() in a background thread.
+
+    Two distinct stop semantics:
+      - cancel()  — hard abort: raises InterruptedError out of trace_folder,
+                    emits all_done([]).
+      - pause()   — clean stop between images: trace_folder returns with the
+                    slice's partial results, paused(list) is emitted instead
+                    of all_done. The host (TraceWindow) flips the Pause
+                    button to Resume and re-launches a worker continuing
+                    from where this one stopped.
+    """
 
     progress = pyqtSignal(int, int, str, str, str)  # idx, total, name, stage, detail
     log_message = pyqtSignal(str)  # forwarded log records from captured loggers
-    all_done = pyqtSignal(list)  # results
+    all_done = pyqtSignal(list)  # results — natural completion
+    paused = pyqtSignal(list)  # results — pause-then-stop completion
+    image_completed = pyqtSignal(str)  # basename of an image whose Stage 2 finished
     error = pyqtSignal(str)
 
     def __init__(self, kwargs):
         super().__init__()
         self.kwargs = kwargs
         self._cancel = False
+        # Threaded pause: trace_folder polls this between images. Owned by
+        # the worker so the host can call pause()/is_paused() without
+        # worrying about thread safety (Event is itself thread-safe).
+        import threading as _threading
+
+        self._pause = _threading.Event()
 
     def cancel(self):
         self._cancel = True
+
+    def pause(self):
+        self._pause.set()
+
+    def is_paused(self) -> bool:
+        return self._pause.is_set()
 
     def run(self):
         handler = _SignalLogHandler(self.log_message)
@@ -217,8 +250,16 @@ class TraceWorker(QThread):
                 self.progress.emit(idx, total, name, stage, detail)
 
             self.kwargs["progress_callback"] = _progress
+            self.kwargs["pause_event"] = self._pause
+            # on_image_complete is invoked inside trace_folder under a lock,
+            # so emitting a Qt signal from here is safe regardless of how
+            # many Stage 2 workers are running.
+            self.kwargs["on_image_complete"] = lambda basename: self.image_completed.emit(basename)
             results = trace_folder(**self.kwargs)
-            self.all_done.emit(results)
+            if self._pause.is_set():
+                self.paused.emit(results)
+            else:
+                self.all_done.emit(results)
         except InterruptedError:
             self.all_done.emit([])
         except Exception as e:
@@ -250,6 +291,12 @@ class TraceWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("TRACE — Wing Analysis Pipeline")
         self.settings = QSettings("TRACE", "WingAnalysisPipeline")
+        # Pause/resume state: manifest tracks completed images + status.
+        # Populated either by _run_pipeline (fresh run) or by
+        # _maybe_offer_resume (resume from a prior session). None when no
+        # run is active.
+        self._manifest: Optional[RunManifest] = None
+        self._resume_skip_set: set[str] = set()
         # Pulse-and-hint registry for the Measurements-CSV child checkboxes.
         # Populated by _wrap_csv_child in _build_ui; consumed by the app-level
         # eventFilter installed at the end of __init__. Parallel to (and
@@ -544,18 +591,29 @@ class TraceWindow(QMainWindow):
 
         left_layout.addWidget(out_group)
 
-        # -- Run / Cancel --
+        # -- Run / Pause / Resume --
+        # btn_pause doubles as Resume: text toggles based on worker state.
+        # It also folds in the old Cancel-during-run role — pause is a clean
+        # stop between images, and "give up" is "Pause then close the app
+        # without resuming" (or wipe the output folder before re-running).
         btn_layout = QHBoxLayout()
         self.btn_run = QPushButton("Run Pipeline")
         self.btn_run.setToolTip("Start processing every image in the input folder. Opens the output folder when done.")
         self.btn_run.clicked.connect(self._run_pipeline)
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setToolTip("Stop the running batch at the next safe point. Partial results are kept.")
-        self.btn_cancel.clicked.connect(self._cancel_pipeline)
-        self.btn_cancel.setEnabled(False)
+        self.btn_pause = QPushButton("Pause")
+        self.btn_pause.setToolTip(
+            "Pause the run between images. The current image finishes cleanly; partial outputs are kept. "
+            "Click again to Resume — TRACE skips the images already completed and picks up where it left off."
+        )
+        self.btn_pause.clicked.connect(self._pause_or_resume_pipeline)
+        self.btn_pause.setEnabled(False)
         btn_layout.addWidget(self.btn_run)
-        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_pause)
         left_layout.addLayout(btn_layout)
+        # Tracks whether the worker is currently in a paused state. Drives
+        # the button label (Pause ↔ Resume) and the next-Run-click decision
+        # (continue current paused run vs. start fresh).
+        self._is_paused = False
 
         left_layout.addStretch()
 
@@ -1346,9 +1404,28 @@ class TraceWindow(QMainWindow):
             if flagged and not self._confirm_ood_warnings(flagged):
                 return
 
+        # Resume support: if the output folder has an in-progress manifest
+        # from a prior run, prompt the user. Returns the set of basenames
+        # to skip (empty for "start fresh") and the manifest object (None
+        # if user opted to start fresh / there was no manifest). Returns
+        # (None, None) when the user cancelled the dialog entirely.
+        outputs_for_run = self._selected_outputs()
+        csv_groups_for_run = {gkey for gkey, gchk in self.csv_group_checks.items() if gchk.isChecked()}
+        resume_skip_set, self._manifest = self._maybe_offer_resume(
+            output_dir=Path(self.output_edit.text()),
+            outputs=outputs_for_run,
+            csv_groups=csv_groups_for_run,
+        )
+        if resume_skip_set is None:
+            # User cancelled; bail without starting.
+            return
+
         # UI state
         self.btn_run.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
+        self.btn_pause.setEnabled(True)
+        self.btn_pause.setText("Pause")
+        self._is_paused = False
+        self._resume_skip_set = resume_skip_set
         self._progress_pct_high = 0
         self.progress.setValue(0)
         # Restore the default Highlight color (the bar turns green on a clean
@@ -1429,12 +1506,30 @@ class TraceWindow(QMainWindow):
                 target_um_per_px=target_um_per_px,
                 rescale_tolerance_low=self._rescale_tolerance_low,
                 rescale_tolerance_high=self._rescale_tolerance_high,
+                skip_image_basenames=self._resume_skip_set,
             )
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.log_message.connect(self._log)
         self.worker.all_done.connect(self._on_all_done)
+        self.worker.paused.connect(self._on_paused)
+        self.worker.image_completed.connect(self._on_image_completed)
         self.worker.error.connect(self._on_error)
+        # Initialize the manifest now (after a possible resume merge), so
+        # the first image completion already has somewhere to write.
+        if self._manifest is None:
+            total = max(1, len(self._image_paths))
+            self._manifest = new_manifest(
+                input_dir=Path(self.input_edit.text()),
+                recursive=self.recursive_chk.isChecked(),
+                outputs_selected=outputs_for_run,
+                csv_measurement_groups=csv_groups_for_run,
+                total_images=total,
+            )
+        else:
+            # Resume path: keep the existing completed list, mark running.
+            self._manifest.status = STATUS_RUNNING
+        save_manifest(Path(self.output_edit.text()), self._manifest)
         self.worker.start()
 
     def _confirm_ood_warnings(self, flagged: dict) -> bool:
@@ -1466,10 +1561,148 @@ class TraceWindow(QMainWindow):
         box.setDefaultButton(QMessageBox.Abort)
         return box.exec_() == QMessageBox.Ok
 
-    def _cancel_pipeline(self):
-        if self.worker:
-            self.worker.cancel()
-            self._log("Cancelling...")
+    def _pause_or_resume_pipeline(self):
+        """Pause the running worker, or resume a paused run.
+
+        Two states:
+          - Worker is running → tell it to pause. The worker finishes the
+            current image cleanly and emits paused(...) when done. _on_paused
+            then flips the button label to Resume and re-enables Run.
+          - Worker is None and self._is_paused is True → start a fresh
+            worker continuing from the manifest's completed list.
+        """
+        if self.worker is not None:
+            self.worker.pause()
+            self._log("Pause requested — finishing the current image first.")
+            # Disable until the worker actually acks the pause to avoid
+            # the user spam-clicking and queuing weird state.
+            self.btn_pause.setEnabled(False)
+            return
+        if self._is_paused:
+            self._resume_paused_run()
+
+    def _on_image_completed(self, basename: str) -> None:
+        """One image's Stage 2 finished — record it in the manifest.
+
+        Called on the GUI thread via TraceWorker.image_completed signal,
+        so no locking needed. Save-after-each-image is wasteful for very
+        large batches but is the simplest way to keep the manifest in
+        sync with on-disk artifacts; cost is one ~1 KB JSON write per
+        image, dwarfed by the per-image overlay PNGs.
+        """
+        if self._manifest is None or not self.output_edit.text():
+            return
+        self._manifest.mark_completed(basename)
+        save_manifest(Path(self.output_edit.text()), self._manifest)
+
+    def _on_paused(self, results: list) -> None:
+        """Worker stopped between images after a Pause click.
+
+        Mark manifest paused, flip the button label so the user can resume
+        in-session, and leave btn_run disabled (clicking Run while paused
+        would conceptually mean "start over"; the user can wipe outputs +
+        manifest if that's what they want).
+        """
+        # Treat paused like an early return from a successful slice — no
+        # error messaging, but acknowledge in the log.
+        n_done = len(self._manifest.completed_images) if self._manifest is not None else 0
+        n_total = self._manifest.total_images if self._manifest is not None else 0
+        self._log(f"Paused at image {n_done} of {n_total}. Click Resume to continue.")
+        self.statusBar().showMessage(f"Paused — {n_done} of {n_total} done")
+        self._progress_timer.stop()
+        # Persist paused status.
+        if self._manifest is not None and self.output_edit.text():
+            self._manifest.status = STATUS_PAUSED
+            save_manifest(Path(self.output_edit.text()), self._manifest)
+        # Worker thread has exited at this point (paused signal is emitted
+        # at the end of run()). Clear the handle so the next Resume click
+        # routes through _resume_paused_run.
+        self.worker = None
+        self._is_paused = True
+        self.btn_pause.setText("Resume")
+        self.btn_pause.setEnabled(True)
+        # Leave btn_run disabled while paused so an accidental Run-click
+        # doesn't try to start a fresh run on top of the partial outputs.
+        self.btn_run.setEnabled(False)
+
+    def _resume_paused_run(self) -> None:
+        """User clicked Resume after pausing in-session — re-launch the worker
+        with the manifest's completed list as the skip set."""
+        if self._manifest is None:
+            # Should never happen — _is_paused without a manifest is a bug,
+            # not a state we should silently tolerate. Reset UI defensively.
+            self._is_paused = False
+            self.btn_pause.setText("Pause")
+            self.btn_pause.setEnabled(False)
+            self.btn_run.setEnabled(True)
+            return
+        # Re-run _run_pipeline with the existing manifest available so
+        # _maybe_offer_resume's "active manifest is current state, don't
+        # re-prompt" branch kicks in. Simpler than duplicating the
+        # validation + worker-construction code here.
+        self._is_paused = False
+        self.btn_run.setEnabled(True)  # _run_pipeline disables it again immediately
+        self._run_pipeline()
+
+    def _maybe_offer_resume(
+        self,
+        output_dir: Path,
+        outputs: set,
+        csv_groups: set,
+    ) -> tuple[Optional[set[str]], Optional["RunManifest"]]:
+        """Check for an existing in-progress manifest; ask the user what to do.
+
+        Returns ``(skip_set, manifest)``:
+          - skip_set is the set of basenames to skip on this run (empty for
+            a fresh start),
+          - manifest is the loaded RunManifest to continue with (None to
+            create a new one),
+          - ``(None, None)`` if the user cancelled.
+
+        Three call paths:
+          1. No manifest on disk → return ({}, None) silently (fresh run).
+          2. In-session Resume click → existing self._manifest matches the
+             output_dir, skip its completed set, return it directly.
+          3. Manifest on disk from a prior session → prompt the user.
+        """
+        # Path 2: in-session resume after Pause. self._manifest is still
+        # populated from the paused worker and the output_dir hasn't
+        # changed under us.
+        if self._manifest is not None and self._manifest.is_in_progress():
+            return self._manifest.completed_set(), self._manifest
+
+        manifest = load_manifest(output_dir)
+        if manifest is None or not manifest.is_in_progress():
+            # Fresh run — no resumable state on disk.
+            return set(), None
+
+        n_done = len(manifest.completed_images)
+        n_total = manifest.total_images
+        # Prompt: resume vs. start over vs. cancel.
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Resume previous run?")
+        box.setText(
+            f"This output folder has an unfinished TRACE run from "
+            f"{manifest.started_at or '(unknown time)'}: "
+            f"{n_done} of {n_total} images completed."
+        )
+        box.setInformativeText(
+            "Resume from where it left off, start over (existing outputs are "
+            "kept on disk but won't be skipped), or cancel?"
+        )
+        btn_resume = box.addButton("Resume", QMessageBox.AcceptRole)
+        btn_fresh = box.addButton("Start over", QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_resume)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is btn_cancel:
+            return None, None
+        if clicked is btn_fresh:
+            return set(), None
+        # Resume — also fold in the settings-diff prompt if applicable.
+        return manifest.completed_set(), manifest
 
     # -----------------------------------------------------------------------
     # Logging and callbacks
@@ -1692,8 +1925,18 @@ class TraceWindow(QMainWindow):
 
     def _on_all_done(self, results):
         self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("Pause")
+        self._is_paused = False
         self._progress_timer.stop()
+
+        # Mark the manifest as completed so the next run on this output
+        # folder doesn't surface the resume prompt.
+        if self._manifest is not None and self.output_edit.text():
+            self._manifest.status = STATUS_COMPLETED
+            save_manifest(Path(self.output_edit.text()), self._manifest)
+        # Clear so any subsequent fresh run rebuilds from scratch.
+        self._manifest = None
 
         if not results:
             self._log("\nPipeline cancelled or no results.")
@@ -1742,7 +1985,7 @@ class TraceWindow(QMainWindow):
 
     def _on_error(self, msg):
         self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
+        self.btn_pause.setEnabled(False)
         self._progress_timer.stop()
         self.eta_label.setText("")
         self._log(f"\nFatal error: {msg}")
