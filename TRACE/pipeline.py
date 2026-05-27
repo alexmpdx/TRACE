@@ -36,7 +36,9 @@ OUTPUT_TYPES = OrderedDict(
         ("wing_isolated_image", "Isolated wing image"),
         ("chopped_image", "Wing after hinge removal"),
         ("landmarks_overlay", "Landmark points overlay PNG"),
+        ("landmarks_geojson", "Landmark predictions GeoJSON"),
         ("segmentation_overlay", "Vein/intervein inference overlay PNG"),
+        ("segmentation_geojson", "Vein/intervein inference GeoJSON"),
         ("geojson", "Named vein and/or intervein GeoJSON"),
         ("vein_overlay", "Vein overlay PNG"),
         ("intervein_overlay", "Intervein region overlay PNG"),
@@ -55,7 +57,15 @@ OUTPUT_TOOLTIPS = {
     ),
     "chopped_image": ("Save the hinge-removed image written by HingeChopper before segmentation."),
     "landmarks_overlay": ("Render predicted landmark points on a PNG copy of the input image."),
+    "landmarks_geojson": (
+        "Save the raw per-image landmark predictions as GeoJSON points "
+        "(post-rotation, so coordinates align with the final overlays)."
+    ),
     "segmentation_overlay": ("Render the raw vein/intervein semantic-segmentation classes on top of the image."),
+    "segmentation_geojson": (
+        "Save the raw vein/intervein semantic-segmentation polygons as GeoJSON, "
+        "before identifyFeatures names veins and regions."
+    ),
     "geojson": (
         "Per-wing GeoJSON file with named vein centerlines and intervein region polygons "
         "(consumable by QuPath, napari, etc.)."
@@ -127,7 +137,9 @@ INTERMEDIATE_OUTPUTS = frozenset(
         "wing_isolated_image",
         "chopped_image",
         "landmarks_overlay",
+        "landmarks_geojson",
         "segmentation_overlay",
+        "segmentation_geojson",
         "geojson",
     }
 )
@@ -145,7 +157,9 @@ class TraceResult:
     chopped_image_path: Optional[Path] = None
     wing_isolated_image_path: Optional[Path] = None
     landmarks_overlay_path: Optional[Path] = None
+    landmarks_geojson_path: Optional[Path] = None
     segmentation_overlay_path: Optional[Path] = None
+    segmentation_geojson_path: Optional[Path] = None
     error: Optional[str] = None
     error_stage: Optional[str] = None  # "preprocessing", "analysis", or "wing_isolation"
 
@@ -161,7 +175,9 @@ _OUTPUT_STAGE_REQUIREMENTS = {
     "wing_isolated_image": (False, False, False),
     "chopped_image": (True, True, False),
     "landmarks_overlay": (True, False, False),
+    "landmarks_geojson": (True, False, False),
     "segmentation_overlay": (True, True, True),
+    "segmentation_geojson": (True, True, True),
     "geojson": (True, True, True),
     "vein_overlay": (True, True, True),
     "intervein_overlay": (True, True, True),
@@ -954,6 +970,36 @@ def _run(
                 else:
                     logger.warning("%s: chopped_image requested but no chopped file found", stem)
 
+            if "landmarks_geojson" in outputs:
+                # Stage 1 overwrites this file in-place after rotation, so the
+                # copy here picks up the post-rotation coordinates that align
+                # with the landmarks overlay PNG.
+                lm_src = getattr(preproc_result, "landmarks_geojson_path", None)
+                if lm_src and Path(lm_src).exists():
+                    lm_dst = output_dir / Path(lm_src).name
+                    try:
+                        shutil.copy2(lm_src, lm_dst)
+                        trace_result.landmarks_geojson_path = lm_dst
+                    except OSError as exc:
+                        logger.warning("%s: failed to copy landmarks GeoJSON: %s", stem, exc)
+                else:
+                    logger.warning("%s: landmarks_geojson requested but no source file found", stem)
+
+            if "segmentation_geojson" in outputs:
+                # The temp file is bare "<stem>.geojson"; rename on copy so the
+                # user's folder doesn't end up with an ambiguous name next to
+                # the analyzed "<stem>_output.geojson".
+                seg_src = getattr(preproc_result, "segmentation_geojson_path", None)
+                if seg_src and Path(seg_src).exists():
+                    seg_dst = output_dir / f"{stem}_segmentation.geojson"
+                    try:
+                        shutil.copy2(seg_src, seg_dst)
+                        trace_result.segmentation_geojson_path = seg_dst
+                    except OSError as exc:
+                        logger.warning("%s: failed to copy segmentation GeoJSON: %s", stem, exc)
+                else:
+                    logger.warning("%s: segmentation_geojson requested but no source file found", stem)
+
             if "wing_isolated_image" in outputs:
                 wi_src = getattr(preproc_result, "wing_isolated_image_path", None)
                 if wi_src and Path(wi_src).exists():
@@ -994,15 +1040,22 @@ def _run(
             )
         finally:
             # Stage 2 attempt finished (success or per-image error) — tell
-            # the host this image is "done" for resume bookkeeping. Skipped
-            # by the pause-event short-circuit above so an interrupted run
-            # doesn't mark its mid-loop image as done. Success/failure is
-            # read off stage2_slots[i] — a slot with .error set means the
-            # except-Exception branch above ran.
-            if not (pause_event is not None and pause_event.is_set()):
-                slot = stage2_slots[i]
-                success = slot is not None and slot.error is None
-                error_text = "" if success else (slot.error if slot is not None and slot.error else "Stage 2 failed")
+            # the host this image is "done" for resume bookkeeping.
+            #
+            # Gate: signal only when stage2_slots[i] was populated. A None
+            # slot means either (a) the pause-event short-circuit at the
+            # top of _analyze_one fired before any work started, or (b) an
+            # InterruptedError unwound through the cancel path (in which
+            # case the manifest gets discarded anyway). Either way there's
+            # nothing to record. Notably this is NOT gated on pause_event
+            # itself — if the user clicked Pause mid-image, the image
+            # still finishes cleanly and its artifacts are on disk, so
+            # the manifest needs the completion entry to avoid
+            # re-processing on resume.
+            slot = stage2_slots[i]
+            if slot is not None:
+                success = slot.error is None
+                error_text = "" if success else (slot.error or "Stage 2 failed")
                 _signal_complete(preproc_result.image_path.name, success, error_text)
 
     interrupted = False

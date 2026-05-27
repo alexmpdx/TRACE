@@ -19,6 +19,12 @@ from measurement_maker.distance import (
     compute_pair_distance_px,
     load_landmarks_from_geojson,
 )
+from measurement_maker.landmark_names import (
+    ALL_LANDMARK_KEY_DISPLAY_NAMES,
+    LANDMARK_DISPLAY_NAMES,
+    LANDMARK_GATE_KEY_DISPLAY_NAMES,
+    landmark_display_name,
+)
 from measurement_maker.types import LandmarkPair, pairs_from_dicts, pairs_to_dicts
 
 __all__ = [
@@ -30,6 +36,10 @@ __all__ = [
     "augment_csv_with_user_distances",
     "write_distances_csv",
     "LandmarkPickerWidget",
+    "LANDMARK_DISPLAY_NAMES",
+    "LANDMARK_GATE_KEY_DISPLAY_NAMES",
+    "ALL_LANDMARK_KEY_DISPLAY_NAMES",
+    "landmark_display_name",
 ]
 
 

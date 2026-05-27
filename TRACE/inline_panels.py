@@ -27,7 +27,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt5.QtCore import QEvent, Qt, QTimer, QUrl
+from PyQt5.QtCore import QEvent, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -932,6 +932,35 @@ class InlineGeneralPanel(QWidget):
             return
         reference_um = float(self._scale_ref_um_spin.value())
         QApplication.setOverrideCursor(Qt.WaitCursor)
+        # Route scale_estimator's logger to the GUI log panel for the
+        # duration of this synchronous call. _CAPTURED_LOGGERS attaches
+        # forwarders only when a TraceWorker is running; this interactive
+        # scale-estimation runs on the GUI thread with no worker active,
+        # so without this scope-local handler the "scaleEstimator: <img>
+        # → x µm/px (L3 distal end ↔ L1-Rs junction = …)" info line never
+        # surfaces.
+        import logging as _logging
+
+        scale_logger = _logging.getLogger("scale_estimator")
+        prev_level = scale_logger.level
+
+        class _DirectLogHandler(_logging.Handler):
+            def __init__(self, log_method):
+                super().__init__()
+                self._log = log_method
+                self.setFormatter(_logging.Formatter("%(name)s %(levelname)s: %(message)s"))
+
+            def emit(self, record):
+                try:
+                    self._log(self.format(record))
+                except Exception:
+                    pass
+
+        log_handler = _DirectLogHandler(self._window._log)
+        log_handler.setLevel(_logging.INFO)
+        if scale_logger.level == _logging.NOTSET or scale_logger.level > _logging.INFO:
+            scale_logger.setLevel(_logging.INFO)
+        scale_logger.addHandler(log_handler)
         try:
             from scale_estimator import ScaleEstimate, ScaleEstimationError, estimate_um_per_px
 
@@ -954,6 +983,9 @@ class InlineGeneralPanel(QWidget):
             return
         finally:
             QApplication.restoreOverrideCursor()
+            scale_logger.removeHandler(log_handler)
+            if prev_level != scale_logger.level and prev_level == _logging.NOTSET:
+                scale_logger.setLevel(_logging.NOTSET)
 
         self.scale_spin.setValue(float(estimate.um_per_px))
         flags = []
@@ -1344,6 +1376,36 @@ class InlineCustomDistancesPanel(QWidget):
 # ---------------------------------------------------------------------------
 
 
+class _UpdateCheckThread(QThread):
+    """Runs the GitHub /releases/latest query off the GUI thread.
+
+    The synchronous version of the update check froze the window for the
+    duration of the HTTP round-trip — fine on a fast connection, bad on
+    a slow / flaky one. This thread does the network + JSON parse in the
+    background and emits a single ``result`` payload back to the GUI
+    thread for rendering.
+
+    Lifetime is managed by the caller: store the instance on the panel,
+    wire ``finished`` to ``deleteLater``, and guard against starting a
+    second thread while one is in-flight.
+    """
+
+    result = pyqtSignal(dict)
+
+    def __init__(self, api_url: str, parent=None):
+        super().__init__(parent)
+        self._api_url = api_url
+
+    def run(self):
+        try:
+            payload = InlineHelpPanel._fetch_latest_release_info(self._api_url)
+            self.result.emit({"ok": True, **payload})
+        except Exception as exc:  # noqa: BLE001
+            # Caller decides whether to surface the error (manual click)
+            # or swallow it (auto-launch check on a flaky network).
+            self.result.emit({"ok": False, "error": str(exc)})
+
+
 class InlineHelpPanel(QWidget):
     """Help tab — clickable links to the TRACE README and project repo."""
 
@@ -1514,10 +1576,28 @@ class InlineHelpPanel(QWidget):
         update_row.addStretch(1)
         layout.addLayout(update_row)
 
+        # Auto-check opt-out. Default ON — the check is silent, throttled
+        # to once per hour, and only surfaces UI when an update is found.
+        self.chk_auto_check_updates = QCheckBox("Auto-check for updates on launch")
+        self.chk_auto_check_updates.setToolTip(
+            "When checked, TRACE silently queries the Releases page on launch "
+            "(throttled to once per hour) and flags the Help tab if an update is available."
+        )
+        self.chk_auto_check_updates.setChecked(
+            self._window.settings.value("auto_update_check_enabled", True, type=bool)
+        )
+        self.chk_auto_check_updates.toggled.connect(
+            lambda on: self._window.settings.setValue("auto_update_check_enabled", bool(on))
+        )
+        layout.addWidget(self.chk_auto_check_updates)
+
         # Populated by _check_for_updates when a newer release is found.
         self._latest_update_url: Optional[str] = None
         self._latest_update_size: Optional[int] = None
         self._latest_update_version: Optional[str] = None
+        # In-flight thread guard so rapid clicks (or an auto-check colliding
+        # with a manual click) don't fire two concurrent requests.
+        self._update_thread: Optional[_UpdateCheckThread] = None
 
         layout.addStretch(1)
 
@@ -1548,69 +1628,115 @@ class InlineHelpPanel(QWidget):
 
             webbrowser.open(self._RELEASES_PAGE_URL)
 
-    def _check_for_updates(self) -> None:
-        """Query GitHub's REST API for the latest release tag and compare.
+    @staticmethod
+    def _fetch_latest_release_info(api_url: str) -> dict:
+        """Pure network + parse helper. No UI access. Raises on failure.
 
-        Runs synchronously — the request is small (a few KB of JSON) and
-        completes in well under a second on a normal connection. Network
-        failures show a friendly message instead of crashing.
+        Returns a dict with keys: ``tag`` (raw GitHub tag, e.g.
+        ``windows-v0.2.0``), ``latest_version`` (the bare semver with
+        the ``windows-v`` / ``v`` prefix stripped, for direct comparison
+        with ``TRACE.__version__``), ``html_url`` (the release page),
+        ``asset_url`` (``TRACE-Setup.exe`` download URL, or None), and
+        ``asset_size`` (bytes, or None).
+
+        Lives as a static method so the worker thread can call it
+        without holding a reference to a UI instance.
         """
-        try:
-            from TRACE import __version__ as installed_version
-        except Exception:
-            installed_version = "unknown"
-
-        self._update_status_label.setText("<span style='color: #888;'>Checking for updates…</span>")
-        # Force a repaint before the blocking HTTP request so the user
-        # sees the "checking" message right away.
-        self._update_status_label.repaint()
-
         import json
         import urllib.request
 
         from TRACE.fetch_assets import make_ssl_context
 
-        try:
-            req = urllib.request.Request(
-                self._LATEST_RELEASE_API,
-                headers={"User-Agent": "TRACE-update-check"},
-            )
-            with urllib.request.urlopen(req, timeout=10, context=make_ssl_context()) as resp:
-                data = json.load(resp)
-            latest_tag = str(data.get("tag_name") or "")
-            html_url = str(data.get("html_url") or self._RELEASES_PAGE_URL)
-            # Find the TRACE-Setup.exe asset on this release so the
-            # "Install Update" button can download it directly.
-            asset_url: Optional[str] = None
-            asset_size: Optional[int] = None
-            for asset in data.get("assets") or []:
-                if asset.get("name") == "TRACE-Setup.exe":
-                    asset_url = asset.get("browser_download_url") or asset.get("url")
-                    try:
-                        asset_size = int(asset.get("size") or 0) or None
-                    except Exception:
-                        asset_size = None
-                    break
-        except Exception as e:
-            self._update_status_label.setText(
-                f"<span style='color: #f88;'>Could not check for updates: {e}</span><br>"
-                f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>Open the Releases page manually</a>"
-            )
-            return
+        req = urllib.request.Request(api_url, headers={"User-Agent": "TRACE-update-check"})
+        with urllib.request.urlopen(req, timeout=10, context=make_ssl_context()) as resp:
+            data = json.load(resp)
 
-        # Strip a "windows-v" / "v" prefix from the tag for comparison.
+        latest_tag = str(data.get("tag_name") or "")
         latest_version = latest_tag
         for prefix in ("windows-v", "v"):
             if latest_version.startswith(prefix):
                 latest_version = latest_version[len(prefix) :]
                 break
 
+        asset_url: Optional[str] = None
+        asset_size: Optional[int] = None
+        for asset in data.get("assets") or []:
+            if asset.get("name") == "TRACE-Setup.exe":
+                asset_url = asset.get("browser_download_url") or asset.get("url")
+                try:
+                    asset_size = int(asset.get("size") or 0) or None
+                except Exception:
+                    asset_size = None
+                break
+
+        return {
+            "tag": latest_tag,
+            "latest_version": latest_version,
+            "html_url": str(data.get("html_url") or InlineHelpPanel._RELEASES_PAGE_URL),
+            "asset_url": asset_url,
+            "asset_size": asset_size,
+        }
+
+    def _check_for_updates(self, *, silent: bool = False) -> None:
+        """Kick off the GitHub release-tag query on a background thread.
+
+        ``silent=False`` (the manual-button path) shows a "Checking…" hint
+        in the label and surfaces network/parse errors in red so the user
+        knows their click did something. ``silent=True`` (the auto-launch
+        path from TraceWindow._maybe_auto_check_updates) skips both —
+        nothing visible happens unless an update is actually found.
+
+        Concurrency: at most one check runs at a time. A second click
+        while a check is in-flight is a no-op (the result slot will
+        update the label when the first one lands).
+        """
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        if not silent:
+            self._update_status_label.setText("<span style='color: #888;'>Checking for updates…</span>")
+        self._update_thread = _UpdateCheckThread(self._LATEST_RELEASE_API, parent=self)
+        self._update_thread.result.connect(lambda payload: self._apply_update_check_result(payload, silent=silent))
+        self._update_thread.finished.connect(self._update_thread.deleteLater)
+        self._update_thread.start()
+
+    def _apply_update_check_result(self, payload: dict, *, silent: bool) -> None:
+        """GUI-thread slot for _UpdateCheckThread.result. Updates the label,
+        Install button, and the Help-tab attention indicator.
+
+        Always stamps ``last_update_check_time`` so the hourly auto-throttle
+        in _maybe_auto_check_updates works regardless of whether the check
+        was manual or automatic.
+        """
+        import time
+
+        self._window.settings.setValue("last_update_check_time", int(time.time()))
+
+        if not payload.get("ok"):
+            # Silent path: leave whatever label state was there before.
+            # Better than flashing red on a flaky home Wi-Fi; if the prior
+            # check succeeded, the "up to date" label remains visible.
+            if not silent:
+                err = payload.get("error", "")
+                self._update_status_label.setText(
+                    f"<span style='color: #f88;'>Could not check for updates: {err}</span><br>"
+                    f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>"
+                    f"Open the Releases page manually</a>"
+                )
+            return
+
+        try:
+            from TRACE import __version__ as installed_version
+        except Exception:
+            installed_version = "unknown"
+
+        latest_version = payload["latest_version"]
         if not latest_version:
-            self._update_status_label.setText(
-                f"<span style='color: #aaa;'>No releases found on GitHub yet. "
-                f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>"
-                f"Check the Releases page</a>.</span>"
-            )
+            if not silent:
+                self._update_status_label.setText(
+                    f"<span style='color: #aaa;'>No releases found on GitHub yet. "
+                    f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>"
+                    f"Check the Releases page</a>.</span>"
+                )
             return
 
         if latest_version == installed_version:
@@ -1621,22 +1747,22 @@ class InlineHelpPanel(QWidget):
             self._latest_update_url = None
             self._latest_update_size = None
             self._latest_update_version = None
+            # An earlier check that flagged an update may have left the
+            # Help tab badged AND cached its version in QSettings —
+            # clear both so the badge doesn't come back on next launch.
+            self._window.clear_update_available_indicator(clear_cache=True)
             return
 
-        # Newer (or just different) version available. Stash the asset
-        # URL + size for the Install Update button. If we couldn't find
-        # a TRACE-Setup.exe asset, or we're running from source rather
-        # than a frozen bundle (where launching an installer makes no
-        # sense), fall back to the release-page link.
-        self._latest_update_url = asset_url
-        self._latest_update_size = asset_size
+        # Update available — stash for the Install Update button.
+        self._latest_update_url = payload["asset_url"]
+        self._latest_update_size = payload["asset_size"]
         self._latest_update_version = latest_version
 
-        can_install_in_place = bool(asset_url) and getattr(sys, "frozen", False) and sys.platform == "win32"
+        can_install_in_place = bool(payload["asset_url"]) and getattr(sys, "frozen", False) and sys.platform == "win32"
         if can_install_in_place:
             self.btn_install_update.setText(f"Install update {latest_version}")
             self.btn_install_update.setVisible(True)
-            size_mb = (asset_size or 0) // (1024 * 1024)
+            size_mb = (payload["asset_size"] or 0) // (1024 * 1024)
             size_blurb = f" ({size_mb} MB)" if size_mb else ""
             self._update_status_label.setText(
                 f"<span style='color: #ffb05a;'>Update available: "
@@ -1649,9 +1775,14 @@ class InlineHelpPanel(QWidget):
             self._update_status_label.setText(
                 f"<span style='color: #ffb05a;'>A different version is available: "
                 f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
-                f"<a href='{html_url}' style='color: #4aa3ff;'>"
+                f"<a href='{payload['html_url']}' style='color: #4aa3ff;'>"
                 f"Open the release page and download TRACE-Setup.exe</a>"
             )
+        self._window.show_update_available_indicator(latest_version)
+        # Fresh-result paths get the centered notification dialog. The
+        # cached-restore path on launch deliberately doesn't (the user
+        # already saw + dismissed it last session; the badge is enough).
+        self._window.show_update_available_dialog(latest_version)
 
     def _install_update(self) -> None:
         """Download the latest TRACE-Setup.exe and launch it.

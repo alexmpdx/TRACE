@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from measurement_maker.distance import load_landmarks_from_geojson
+from measurement_maker.landmark_names import LANDMARK_DISPLAY_NAMES, landmark_display_name
 from measurement_maker.types import LandmarkPair
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -36,30 +37,9 @@ from PyQt5.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 
-# Friendly anatomical descriptions for the raw GeoJSON landmark names produced
-# by LandmarkLocator. The picker stores pairs by raw name (so the same pair
-# applies cleanly across wings), but every user-visible label is run through
-# `_display()` so the UI shows the anatomical name instead.
-_LANDMARK_DISPLAY_NAMES: dict[str, str] = {
-    "ACV.a": "ACV-L3 junction",
-    "ACV.p": "ACV-L4 junction",
-    "alula notch": "alula notch",
-    "DTip": "L3 distal end",
-    "L1-Rs": "L1-Rs junction",
-    "L2.d": "L2 distal end",
-    "L2-L3": "L2-L3-Rs junction",
-    "L4.d": "L4 distal end",
-    "L4-L5": "L4-L5 junction",
-    "L5.d": "L5 distal end",
-    "PCV.a": "PCV-L4 junction",
-    "PCV.p": "PCV-L5 junction",
-    "subcostal break": "subcostal break",
-}
-
-
-def _display(name: str) -> str:
-    """Friendly anatomical name for a raw GeoJSON landmark name, falling back to the raw form."""
-    return _LANDMARK_DISPLAY_NAMES.get(name, name)
+# The raw-key → friendly-name mapping and the lookup helper live in
+# measurement_maker.landmark_names so non-GUI callers (TRACE's log handler)
+# can import them without pulling in napari. Imported at top of this module.
 
 
 class LandmarkPickerWidget(QWidget):
@@ -450,7 +430,7 @@ class LandmarkPickerWidget(QWidget):
             border_color="black",
             border_width=0.15,
             # Pair lookups use raw names (self._names); napari shows friendly labels.
-            features={"name": [_display(n) for n in names]},
+            features={"name": [landmark_display_name(n) for n in names]},
             text={
                 "string": "{name}",
                 "size": 12,
@@ -542,7 +522,9 @@ class LandmarkPickerWidget(QWidget):
 
     def _update_selection_label(self, _event=None):
         sel = self._selected_names()
-        self._sel_label.setText("Selected: " + ", ".join(_display(n) for n in sel) if sel else "Selected: (none)")
+        self._sel_label.setText(
+            "Selected: " + ", ".join(landmark_display_name(n) for n in sel) if sel else "Selected: (none)"
+        )
 
     def _update_face_colors(self, _event=None):
         """Recolor selected landmarks orange; unselected stay cyan."""
@@ -615,7 +597,9 @@ class LandmarkPickerWidget(QWidget):
     def _refresh_list(self):
         self._list.clear()
         for pair in self._pairs:
-            self._list.addItem(f"{pair.label}: {_display(pair.name_a)} ↔ {_display(pair.name_b)}")
+            self._list.addItem(
+                f"{pair.label}: {landmark_display_name(pair.name_a)} ↔ {landmark_display_name(pair.name_b)}"
+            )
 
     # --- Highlight line ----------------------------------------------------
     def _on_pair_row_changed(self, row: int):

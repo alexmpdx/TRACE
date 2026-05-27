@@ -76,7 +76,7 @@ from TRACE.walkthrough import WalkthroughOverlay, WalkthroughStep
 # ---------------------------------------------------------------------------
 
 
-_CAPTURED_LOGGERS = ("identify_features", "TRACE", "preprocessing")
+_CAPTURED_LOGGERS = ("identify_features", "TRACE", "preprocessing", "scale_estimator")
 
 
 class _PlaceholderSpinBox(QDoubleSpinBox):
@@ -172,6 +172,60 @@ def _picker_initial_path(current: str) -> str:
     return "/"
 
 
+def _build_landmark_name_pattern():
+    """Compile the regex used to swap raw landmark keys for anatomical names.
+
+    Built lazily and cached on the function so the (cheap) compile happens
+    at most once. Uses ALL_LANDMARK_KEY_DISPLAY_NAMES so both GeoJSON-style
+    keys (``DTip``, ``L2-L3``, …) and gate-config snake_case keys
+    (``dtip``, ``l4_l5``, …) get translated — the latter surface in
+    ``LowConfidenceLandmarkError`` messages when a confidence gate trips.
+
+    Sorted longest-first so multi-token keys ("L2-L3", "subcostal break",
+    "alula_notch") match before any shorter substring that could fight
+    them, and so future additions remain collision-safe.
+
+    The capture group around the optional quote handles logging's %r
+    formatter, which wraps string args in single quotes (or double quotes
+    if the value itself contains a single quote). The backreference \\1
+    forces a matched pair, so we don't strip a leading quote without a
+    trailing one. Unquoted keys (e.g. the comma-separated list in
+    LowConfidenceLandmarkError) match too because the quote group is
+    optional.
+    """
+    import re
+
+    from measurement_maker import ALL_LANDMARK_KEY_DISPLAY_NAMES
+
+    if _build_landmark_name_pattern.cached is None:
+        keys_alt = "|".join(re.escape(k) for k in sorted(ALL_LANDMARK_KEY_DISPLAY_NAMES, key=len, reverse=True))
+        _build_landmark_name_pattern.cached = (
+            re.compile(r"(['\"]?)(" + keys_alt + r")\1"),
+            ALL_LANDMARK_KEY_DISPLAY_NAMES,
+        )
+    return _build_landmark_name_pattern.cached
+
+
+_build_landmark_name_pattern.cached = None
+
+
+def _translate_landmark_names(text: str) -> str:
+    """Swap raw GeoJSON landmark keys in a log line for their anatomical names.
+
+    Used by _SignalLogHandler.emit so messages like ``Landmark 'DTip'
+    snapped to node 42`` surface in the TRACE GUI log as ``Landmark 'L3
+    distal end' snapped to node 42``. identifyFeatures' own log output
+    (CLI mode, no TRACE handler attached) is unaffected — only the GUI
+    handler runs this transform.
+
+    Identity-mapped keys ("alula notch", "subcostal break") still match
+    and substitute, which is a no-op; that's intentional so the regex
+    stays symmetric and the mapping stays authoritative.
+    """
+    pattern, names = _build_landmark_name_pattern()
+    return pattern.sub(lambda m: f"{m.group(1)}{names[m.group(2)]}{m.group(1)}", text)
+
+
 class _SignalLogHandler(logging.Handler):
     """Logging handler that forwards records through a pyqtSignal."""
 
@@ -185,6 +239,12 @@ class _SignalLogHandler(logging.Handler):
             from preprocessing.pipeline import current_image
 
             text = self.format(record)
+            # Translation runs on logger records only; direct self._log()
+            # calls from _on_progress carry image filenames, not landmark
+            # keys, and don't need this hook. If a future caller starts
+            # routing landmark names through _log, run them through
+            # _translate_landmark_names() at that call site too.
+            text = _translate_landmark_names(text)
             img = current_image.get()
             if img:
                 text = f"[{img}] {text}"
@@ -315,7 +375,7 @@ _STATUS_GLYPH: dict[ImageStatus, str] = {
 # existing green/red palette already used by the progress bar fills.
 _STATUS_COLOR: dict[ImageStatus, QColor] = {
     ImageStatus.PENDING: QColor("#d0d0d0"),
-    ImageStatus.IN_PROGRESS: QColor("#ffc107"),
+    ImageStatus.IN_PROGRESS: QColor("#0d6efd"),
     ImageStatus.SUCCEEDED: QColor("#5cb85c"),
     ImageStatus.FAILED: QColor("#ff3333"),
     ImageStatus.SKIPPED: QColor("#808080"),
@@ -468,6 +528,17 @@ class TraceWindow(QMainWindow):
         # so the window has been shown and every widget has a valid geometry.
         if not self.settings.value("walkthrough_completed", False, type=bool):
             QTimer.singleShot(0, self._show_walkthrough)
+        # Re-apply the update-available badge from QSettings if the prior
+        # session saw an update and the user hasn't upgraded yet. Runs
+        # synchronously here so the dot is on the Help tab from the very
+        # first paint — no network round-trip required.
+        self._restore_update_badge_from_cache()
+        # Auto-check for updates. Deferred so the window is shown first.
+        # Throttled to once per hour via QSettings so a user relaunching
+        # rapidly doesn't burn GitHub's anonymous rate budget. The Help
+        # panel exposes an opt-out checkbox backed by the same setting.
+        if self.settings.value("auto_update_check_enabled", True, type=bool):
+            QTimer.singleShot(0, self._maybe_auto_check_updates)
 
     # -----------------------------------------------------------------------
     # App-level event filter for the CSV-child dependent-checkbox pulse
@@ -688,6 +759,13 @@ class TraceWindow(QMainWindow):
         # the button label (Pause ↔ Resume) and the next-Run-click decision
         # (continue current paused run vs. start fresh).
         self._is_paused = False
+        # Set when the user clicks Cancel on a running worker. The worker
+        # is left to exit cooperatively (no QThread.terminate — that
+        # corrupts torch MPS internal state on Apple Silicon and segfaults
+        # the next run). While this flag is set the Run/Cancel buttons
+        # stay disabled, and whichever signal the worker emits on exit
+        # (cancelled / all_done / error) is rerouted into _finalize_cancel.
+        self._cancel_requested = False
 
         left_layout.addStretch()
 
@@ -726,6 +804,11 @@ class TraceWindow(QMainWindow):
         # Tab 3 — Help
         self.inline_help_panel = InlineHelpPanel(self)
         self.right_tabs.addTab(self.inline_help_panel, "Help")
+
+        # Clear the update-available "●" badge whenever the user lands
+        # on the Help tab. Connection lives here so the signal exists
+        # regardless of whether an auto-check ever runs.
+        self.right_tabs.currentChanged.connect(self._on_right_tab_changed)
 
         # Progress bar + ETA stay outside the tab widget so they're visible
         # regardless of which tab the user is viewing during a run.
@@ -834,7 +917,7 @@ class TraceWindow(QMainWindow):
     def _revert_in_progress_to_pending(self) -> None:
         """Roll back any rows still showing IN_PROGRESS to PENDING.
 
-        Used by the pause/cancel/error/all-done handlers — if the worker
+        Used by the pause/error/all-done handlers — if the worker
         exits while a Stage-2 image is mid-flight, the row was flipped
         to IN_PROGRESS by _on_progress but will never receive a
         succeeded/failed signal for that slice. Resetting it to PENDING
@@ -844,23 +927,35 @@ class TraceWindow(QMainWindow):
             if status == ImageStatus.IN_PROGRESS:
                 self._update_image_status(basename, ImageStatus.PENDING)
 
-    @staticmethod
-    def _shorten_error(error_text: str, max_len: int = 70) -> str:
-        """Squash a (potentially-multi-line, potentially-traceback) error to
-        one short line for inline display next to the row's filename.
+    def _mark_incomplete_as_skipped(self) -> None:
+        """Flip PENDING + IN_PROGRESS rows to SKIPPED.
 
-        Takes the first non-empty line and truncates to ``max_len`` with an
-        ellipsis. The full text is preserved in the run log; this trimming
-        only affects the inline at-a-glance value in the image list.
+        Used by the cancel finalizer: a cancelled run is discarded, so
+        anything that didn't reach SUCCEEDED or FAILED stays unprocessed
+        for good (until the user starts a brand-new run). SKIPPED is the
+        right resting state — the gray ↷ glyph signals "we didn't do
+        this one" rather than the PENDING dot which would imply "still
+        coming".
+        """
+        for basename, status in list(self._image_status.items()):
+            if status in (ImageStatus.PENDING, ImageStatus.IN_PROGRESS):
+                self._update_image_status(basename, ImageStatus.SKIPPED)
+
+    @staticmethod
+    def _shorten_error(error_text: str) -> str:
+        """Squash a (potentially-multi-line, potentially-traceback) error to
+        one line for inline display next to the row's filename.
+
+        Takes the first non-empty line so multi-line tracebacks render
+        tidily. Length is intentionally NOT capped here — QListWidget
+        handles horizontal overflow on its own and the failure messages
+        we surface (e.g. gate-confidence summaries with multiple
+        landmarks) are far more useful when shown in full. The full
+        text is also preserved in the run log either way.
         """
         if not error_text:
             return ""
-        first = next((line.strip() for line in error_text.splitlines() if line.strip()), "")
-        if not first:
-            return ""
-        if len(first) > max_len:
-            first = first[: max_len - 1].rstrip() + "…"
-        return first
+        return next((line.strip() for line in error_text.splitlines() if line.strip()), "")
 
     def _update_image_status(self, basename: str, status: ImageStatus) -> None:
         """Set a row's glyph + foreground color from the given status.
@@ -1631,6 +1726,10 @@ class TraceWindow(QMainWindow):
             self._log("Resuming run.")
         else:
             self._log("Starting TRACE pipeline...")
+        # Emit the active configuration as a YAML block right after the
+        # banner. Done on every fresh-run AND resume so the log captures
+        # any settings drift between slices in-place.
+        self._log_run_settings()
 
         # Initialize per-image status. Rules:
         #   - SUCCEEDED / FAILED rows from an earlier slice in this same
@@ -1815,40 +1914,49 @@ class TraceWindow(QMainWindow):
         box.setDefaultButton(QMessageBox.No)
         if box.exec_() != QMessageBox.Yes:
             return
-        # Hard-cancel routes through the worker's cancel() for running runs;
-        # for paused runs there's no worker, so finalize directly.
-        if self.worker is not None:
-            # Disconnect all worker signals before tearing it down so any
-            # late emission from the dying thread (e.g. a final
-            # image_completed flush) can't bleed into the now-idle UI.
-            for sig in (
-                self.worker.progress,
-                self.worker.log_message,
-                self.worker.all_done,
-                self.worker.paused,
-                self.worker.cancelled,
-                self.worker.image_completed,
-                self.worker.image_failed_preproc,
-                self.worker.image_failed_analysis,
-                self.worker.error,
-            ):
-                try:
-                    sig.disconnect()
-                except (TypeError, RuntimeError):
-                    pass
-            # Cooperative flag + forcible terminate. The flag lets any
-            # in-flight cancel check exit cleanly if it happens to fire
-            # before the OS reaps the thread; terminate guarantees the
-            # thread stops mid-operation regardless. Cost is a possible
-            # temp-dir leak (trace_folder's finally block doesn't run on
-            # terminate) and any in-progress per-image write may be left
-            # half-finished on disk — both acceptable for a discard.
-            self.worker.cancel()
-            self.worker.terminate()
-            self.worker.wait(200)  # brief grace period; don't block the GUI
-            self.worker = None
-        # Either path (running or paused) lands here.
-        self._finalize_cancel()
+        # Paused path: no worker thread is running, so we can finalize
+        # immediately. No torch ops are in flight to corrupt.
+        if self.worker is None:
+            self._finalize_cancel()
+            return
+        # Running path: cooperative cancel only. Do NOT call terminate() —
+        # killing a thread mid-torch-MPS op corrupts MPSGraphCache /
+        # MetalShaderLibrary internal state, which then crashes the *next*
+        # run when it touches MPS (observed: SIGSEGV in
+        # MetalShaderLibrary::getLibraryPipelineState during hash rehash).
+        # Instead: flip the cancel flag, mute the UI-facing signals so the
+        # display freezes immediately, and let the worker exit at the next
+        # per-image progress checkpoint. The worker's `cancelled` /
+        # `all_done` / `error` signal lands in its handler, which routes
+        # through _finalize_cancel because _cancel_requested is set.
+        self._cancel_requested = True
+        # Mute the chatty stream signals so the UI freezes immediately, but
+        # leave the per-image completion signals connected. The image that
+        # was mid-flight when Cancel was clicked finishes cleanly (artifacts
+        # are written inside the analyze try-block before the next progress
+        # tick raises InterruptedError); we want its row to land on
+        # SUCCEEDED / FAILED, not the misleading SKIPPED that
+        # _mark_incomplete_as_skipped would otherwise paint over the
+        # still-IN_PROGRESS row.
+        for sig in (
+            self.worker.progress,
+            self.worker.log_message,
+        ):
+            try:
+                sig.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+        self.worker.cancel()
+        # Lock the UI into Cancelling state. Both buttons disabled so the
+        # user can't double-cancel or start a parallel run (two concurrent
+        # TraceWorkers is the bug we're avoiding). _on_cancelled (or the
+        # all_done/error fallbacks) re-enables Run when the worker exits.
+        self.btn_cancel.setEnabled(False)
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("Cancelling…")
+        self.transient_status_label.setText("Cancel requested — finishing the current image first.")
+        self.transient_status_label.show()
+        self.statusBar().showMessage("Cancelling…")
 
     def _finalize_cancel(self) -> None:
         """Shared cleanup for both running-then-cancelled and paused-then-
@@ -1856,7 +1964,10 @@ class TraceWindow(QMainWindow):
         and resets the UI to idle."""
         from TRACE.run_state import STATUS_CANCELLED
 
-        self._revert_in_progress_to_pending()
+        # Discard semantics: every unfinished image becomes SKIPPED, not
+        # PENDING, because the run is dead — a fresh Run is the only way
+        # those images get processed now.
+        self._mark_incomplete_as_skipped()
         self.transient_status_label.hide()
 
         if self._manifest is not None and self._run_folder is not None:
@@ -1882,6 +1993,7 @@ class TraceWindow(QMainWindow):
         self.statusBar().showMessage("Cancelled")
         self.eta_label.setText("")
         self._progress_timer.stop()
+        self._cancel_requested = False
 
     def _on_cancelled(self, _results) -> None:
         """Worker exited via TraceWorker.cancelled (user clicked Cancel
@@ -1921,7 +2033,11 @@ class TraceWindow(QMainWindow):
             self._manifest.mark_failed_preproc(basename)
             save_manifest(self._run_folder, self._manifest)
         if error_text:
-            self._image_error_text[basename] = error_text
+            # Translate raw landmark keys to anatomical names here, at
+            # storage, so the inline row label (rendered via
+            # _shorten_error → _update_image_status) shows friendly names
+            # alongside the run log.
+            self._image_error_text[basename] = _translate_landmark_names(error_text)
         self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_image_failed_analysis(self, basename: str, error_text: str = "") -> None:
@@ -1935,7 +2051,7 @@ class TraceWindow(QMainWindow):
         visual to FAILED and stashes the inline error text.
         """
         if error_text:
-            self._image_error_text[basename] = error_text
+            self._image_error_text[basename] = _translate_landmark_names(error_text)
         self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_paused(self, results: list) -> None:
@@ -2138,6 +2254,67 @@ class TraceWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._log(f"Warning: could not write settings snapshot: {exc}")
 
+    def _run_log_preamble_dict(self) -> dict:
+        """Build the configuration block written to the top of the run log.
+
+        Superset of _current_settings_snapshot_dict — also captures
+        input/output paths, recursive flag, final-output toggles, CSV
+        measurement groups, run timestamp, and the TRACE version, so the
+        saved run.log is self-describing on its own (without needing the
+        sibling settings.yaml / manifest.json).
+
+        Folder paths are included intentionally despite being potentially
+        user-identifying — the log is meant to be sharable as a
+        reproducibility artifact, and the absolute paths let a reviewer
+        correlate a run with its input dataset.
+        """
+        from TRACE import __version__ as _trace_version
+
+        return {
+            "trace_version": _trace_version,
+            "run_started": self._run_start_wall.isoformat(timespec="seconds"),
+            "input_folder": self.input_edit.text(),
+            "output_folder": self.output_edit.text(),
+            "recursive": bool(self.recursive_chk.isChecked()),
+            "final_outputs": sorted(k for k, chk in self.output_checks.items() if chk.isChecked()),
+            "csv_measurement_groups": sorted(k for k, chk in self.csv_group_checks.items() if chk.isChecked()),
+            "settings": self._current_settings_snapshot_dict(),
+        }
+
+    def _log_run_settings(self) -> None:
+        """Write a YAML-formatted summary of the active run config into the log.
+
+        Emitted as one ``---``-fenced block (no per-line ``[HH:MM:SS]``
+        prefixes) so the block round-trips cleanly through ``yaml.safe_load``
+        if someone later parses ``run.log`` to recover the run's config.
+
+        Called once at the start of every fresh run and again at the start
+        of every resume — resumes stack a second block in-place, so a
+        ``diff`` across blocks shows exactly what changed between slices.
+        """
+        try:
+            import yaml as _yaml
+
+            text = _yaml.safe_dump(
+                self._run_log_preamble_dict(),
+                sort_keys=False,
+                default_flow_style=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Best-effort — never block a run because the preamble can't render.
+            self._log(f"Warning: could not format run-settings preamble: {exc}")
+            return
+        self._log("Run settings:")
+        # Append the YAML block directly (no _log() wrapping) so each line
+        # is not prefixed with "[HH:MM:SS]"; that makes the block readable
+        # as a coherent header and parseable by yaml.safe_load.
+        self.log_text.append("---")
+        self.log_text.append(text.rstrip())
+        self.log_text.append("---")
+        self.log_text.append("")
+        sb = self.log_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
     def _latest_settings_yaml(self, run_folder: Path) -> tuple[Optional[Path], int]:
         """Locate the most-recent settings YAML in ``run_folder``.
 
@@ -2289,7 +2466,14 @@ class TraceWindow(QMainWindow):
     # Logging and callbacks
     # -----------------------------------------------------------------------
     def _log(self, msg):
-        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        # Run every message through the landmark-name translator so direct
+        # _log() callers (e.g. the "Failed images:" summary in _on_all_done,
+        # which doesn't route through the logging-module handler) get the
+        # same friendly anatomical names as records flowing through
+        # _SignalLogHandler. _log_run_settings appends its YAML block via
+        # log_text.append directly, intentionally bypassing this hook so
+        # the block stays machine-parseable.
+        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {_translate_landmark_names(msg)}")
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -2474,6 +2658,15 @@ class TraceWindow(QMainWindow):
             return None
 
     def _on_all_done(self, results):
+        # Cancel-pending fallback: the worker finished naturally between
+        # the user's Cancel click and the next progress checkpoint (no
+        # InterruptedError was raised). Reroute into _finalize_cancel so
+        # the run gets discarded as requested instead of being treated as
+        # a normal completion.
+        if self._cancel_requested:
+            self.worker = None
+            self._finalize_cancel()
+            return
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
@@ -2544,6 +2737,15 @@ class TraceWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir))
 
     def _on_error(self, msg):
+        # Cancel-pending fallback: worker errored out after Cancel was
+        # requested. Treat it as a cancel rather than a fatal error so the
+        # user doesn't get a "Pipeline Error" dialog for a run they
+        # already discarded. The actual error text is still logged below.
+        if self._cancel_requested:
+            self._log(f"\nWorker exited with error after cancel: {msg}")
+            self.worker = None
+            self._finalize_cancel()
+            return
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
@@ -2767,6 +2969,238 @@ class TraceWindow(QMainWindow):
                 body=("Click here when everything's set. Progress bar and ETA appear at the " "bottom of the window."),
             ),
         ]
+
+    def _maybe_auto_check_updates(self) -> None:
+        """Auto-check entrypoint with an hourly throttle on top of the
+        per-launch trigger.
+
+        Reads ``last_update_check_time`` from QSettings (updated whenever
+        ``_apply_update_check_result`` runs, regardless of which path
+        triggered it) and skips if a check happened in the last hour.
+        Manual button clicks bypass this — they call
+        ``InlineHelpPanel._check_for_updates`` directly.
+        """
+        import time as _time
+
+        last = int(self.settings.value("last_update_check_time", 0, type=int) or 0)
+        if _time.time() - last < 3600:
+            return
+        self.inline_help_panel._check_for_updates(silent=True)
+
+    def _update_badge_icon(self) -> "QIcon":
+        """Cached blue-dot QIcon used as the Help-tab attention indicator.
+
+        Drawn programmatically on a transparent QPixmap so the badge
+        sits next to the tab text without re-coloring "Help" itself.
+        Color matches the bootstrap-primary accent used elsewhere
+        (IN_PROGRESS row glyphs, default progress bar fill).
+        """
+        from PyQt5.QtCore import Qt as _Qt
+        from PyQt5.QtGui import QIcon, QPainter, QPixmap
+
+        if getattr(self, "_cached_update_badge_icon", None) is None:
+            size = 12
+            pix = QPixmap(size, size)
+            pix.fill(_Qt.transparent)
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(QColor("#0d6efd"))
+            painter.setPen(_Qt.NoPen)
+            painter.drawEllipse(0, 0, size, size)
+            painter.end()
+            self._cached_update_badge_icon = QIcon(pix)
+        return self._cached_update_badge_icon
+
+    def show_update_available_indicator(self, latest_version: str) -> None:
+        """Mark the Help tab so the user notices an update.
+
+        Sets a small blue dot as the Help tab's icon (tab text stays
+        "Help" so the badge is the colored part, not the whole label).
+        The badge persists across sessions: the latest-known version is
+        cached in QSettings under ``cached_latest_release_version`` so a
+        relaunch immediately re-applies the badge without waiting for
+        the auto-check throttle window. Cleared on Help-tab activation
+        for the session, and cleared from QSettings when the user
+        upgrades (the next up-to-date result drops the cache key).
+
+        The user-facing notification dialog is a separate call
+        (``show_update_available_dialog``) so the launch-time cached
+        restore path can re-apply the badge without re-popping the
+        dialog the user already dismissed.
+        """
+        help_index = self.right_tabs.indexOf(self.inline_help_panel)
+        if help_index < 0:
+            return
+        self.right_tabs.setTabIcon(help_index, self._update_badge_icon())
+        self.settings.setValue("cached_latest_release_version", latest_version)
+
+    def show_update_available_dialog(self, latest_version: str) -> None:
+        """Centered, non-modal notification announcing an update.
+
+        Fires on every TRACE launch when an update is detected (the
+        launch-time cached-restore path calls this), and again on
+        in-session auto-checks / manual clicks that discover a NEWER
+        version than the one already shown this session. Within a
+        single session the dialog is suppressed for a repeat of the
+        same version so the hourly auto-check colliding with the
+        launch-time fire doesn't re-pop the same dialog.
+
+        Two buttons: Dismiss (close, badge stays as the passive
+        reminder) and View update (close + jump to the Help tab so
+        the Install Update button is one click away).
+        """
+        from PyQt5.QtCore import Qt as _Qt
+        from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+
+        # Session-only de-dup. Per-launch repetition is exactly what
+        # the user wants — they want the dialog every time TRACE
+        # opens with a known pending update — so we do NOT persist
+        # this attribute in QSettings.
+        if getattr(self, "_dialog_fired_for_version", None) == latest_version:
+            return
+        try:
+            from TRACE import __version__ as installed_version
+        except Exception:
+            installed_version = "unknown"
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Update available")
+        dlg.setModal(False)
+        # Frameless + WindowStaysOnTop so it floats over the main window
+        # like the walkthrough popup. The blue accent border (matching
+        # the badge dot) makes it visually distinct from system dialogs.
+        dlg.setWindowFlags(_Qt.Dialog | _Qt.FramelessWindowHint | _Qt.WindowStaysOnTopHint)
+        dlg.setObjectName("UpdateAvailableDialog")
+        dlg.setStyleSheet(
+            "#UpdateAvailableDialog { "
+            "background-color: #2d2d2d; "
+            "border: 2px solid #0d6efd; "
+            "border-radius: 6px; "
+            "}"
+        )
+        dlg.setMinimumWidth(380)
+        dlg.setMaximumWidth(480)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("Update available")
+        title_font = QFont(title.font())
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 1)
+        title.setFont(title_font)
+        title.setStyleSheet("color: #d0d0d0;")
+        layout.addWidget(title)
+
+        body = QLabel(
+            f"TRACE <b>{latest_version}</b> is now available — you're running <b>{installed_version}</b>.<br><br>"
+            "Click <b>View update</b> to jump to the Help tab, where the "
+            "<b>Install Update</b> button downloads and launches the new installer. "
+            "Your settings and downloaded models are preserved."
+        )
+        body.setWordWrap(True)
+        body.setStyleSheet("color: #c0c0c0;")
+        layout.addWidget(body)
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.addStretch(1)
+        btn_dismiss = QPushButton("Dismiss")
+        btn_dismiss.setStyleSheet(
+            "QPushButton { color: #999; background-color: transparent; "
+            "border: 1px solid #5a5a5a; border-radius: 4px; padding: 4px 10px; } "
+            "QPushButton:hover { border-color: #0d6efd; color: #c0c0c0; } "
+            "QPushButton:pressed { background-color: #3a3a3a; }"
+        )
+        btn_dismiss.clicked.connect(dlg.reject)
+        footer.addWidget(btn_dismiss)
+        btn_view = QPushButton("View update")
+        btn_view.setDefault(True)
+        btn_view.setStyleSheet(
+            "QPushButton { color: #d0d0d0; background-color: #3a3a3a; "
+            "border: 1px solid #0d6efd; border-radius: 4px; padding: 4px 12px; } "
+            "QPushButton:hover { background-color: #454545; } "
+            "QPushButton:pressed { background-color: #2f2f2f; }"
+        )
+        btn_view.clicked.connect(dlg.accept)
+        footer.addWidget(btn_view)
+        layout.addLayout(footer)
+
+        # Remember in-memory only (NOT persisted) so an hourly auto-check
+        # firing the same version in the same session doesn't re-pop the
+        # dialog. The next launch resets this to None and fires the
+        # dialog again — by design, per user request.
+        self._dialog_fired_for_version = latest_version
+
+        # Center over the main window. show() then geometry math gives Qt
+        # a chance to compute sizeHint based on the populated layout.
+        dlg.adjustSize()
+        host_geo = self.frameGeometry()
+        dlg.move(
+            host_geo.center().x() - dlg.width() // 2,
+            host_geo.center().y() - dlg.height() // 2,
+        )
+
+        result = dlg.exec_()
+        if result == QDialog.Accepted:
+            help_index = self.right_tabs.indexOf(self.inline_help_panel)
+            if help_index >= 0:
+                self.right_tabs.setCurrentIndex(help_index)
+
+    def clear_update_available_indicator(self, *, clear_cache: bool = False) -> None:
+        """Remove the blue dot from the Help tab.
+
+        Default behavior (``clear_cache=False``) hides the dot for this
+        session only — used by the Help-tab activation hook. The cached
+        latest-version key stays in QSettings, so the next launch will
+        re-apply the badge if the user still hasn't upgraded.
+
+        ``clear_cache=True`` also drops the QSettings key — used when a
+        check confirms the installed version IS the latest (so the
+        badge doesn't come back on subsequent launches).
+        """
+        from PyQt5.QtGui import QIcon
+
+        help_index = self.right_tabs.indexOf(self.inline_help_panel)
+        if help_index >= 0:
+            self.right_tabs.setTabIcon(help_index, QIcon())
+        if clear_cache:
+            self.settings.remove("cached_latest_release_version")
+
+    def _restore_update_badge_from_cache(self) -> None:
+        """Re-apply the Help-tab badge AND fire the dialog on launch when
+        a prior session saw an update.
+
+        Cleared-state-doesn't-persist semantics: if the user dismissed
+        the badge by visiting the Help tab last session — or dismissed
+        the notification dialog — but the installed version is still
+        behind the cached latest, both the badge and the dialog
+        reappear on relaunch. Once the user actually upgrades, the
+        next ``_apply_update_check_result`` confirms up-to-date and
+        drops the cache key — at which point neither the badge nor
+        the dialog comes back on launch.
+        """
+        cached = str(self.settings.value("cached_latest_release_version", "") or "")
+        if not cached:
+            return
+        try:
+            from TRACE import __version__ as installed_version
+        except Exception:
+            return
+        if cached != installed_version:
+            self.show_update_available_indicator(cached)
+            # Defer the dialog one tick so the main window finishes
+            # showing before the centered notification appears over it.
+            # The dialog dedups by version in-session, so the
+            # immediately-following auto-check returning the same
+            # cached version won't re-pop the dialog.
+            QTimer.singleShot(0, lambda: self.show_update_available_dialog(cached))
+
+    def _on_right_tab_changed(self, index: int) -> None:
+        """Tab-change hook: clear the update-available badge on Help visit."""
+        if self.right_tabs.widget(index) is self.inline_help_panel:
+            self.clear_update_available_indicator()
 
     def _show_walkthrough(self) -> None:
         """Build a fresh overlay and start it. Called on first launch and
