@@ -1683,6 +1683,11 @@ class TraceWindow(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
+        # Recolor the progress-bar fill red as a visual cue. _run_pipeline
+        # resets it to the default highlight at the start of the next run.
+        pal = self.progress.palette()
+        pal.setColor(QPalette.Highlight, QColor("#d9534f"))
+        self.progress.setPalette(pal)
         self.statusBar().showMessage("Cancelled")
         self.eta_label.setText("")
         self._progress_timer.stop()
@@ -1756,6 +1761,11 @@ class TraceWindow(QMainWindow):
         # The combo button now means "Resume" — click it to continue.
         self.btn_run.setText("Resume")
         self.btn_run.setEnabled(True)
+        # Recolor the progress-bar fill yellow as a visual cue. Reset back
+        # to the default highlight color happens in _run_pipeline on Resume.
+        pal = self.progress.palette()
+        pal.setColor(QPalette.Highlight, QColor("#f0ad4e"))
+        self.progress.setPalette(pal)
         # Cancel stays enabled while paused so the user can fully abandon
         # the run from the paused state (no worker is running, but the
         # manifest still claims the run is in-progress).
