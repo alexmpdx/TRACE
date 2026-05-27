@@ -276,9 +276,16 @@ class LandmarkPickerWidget(QWidget):
         self._sel_label.setWordWrap(True)
         left_col.addWidget(self._sel_label)
         label_row = QHBoxLayout()
-        label_row.addWidget(QLabel("Name:"))
+        name_tooltip = (
+            "Each custom measurement will appear in the measurements CSV as two "
+            'additional columns "custom_[Name]_px" and "custom_[Name]_um".'
+        )
+        name_label = QLabel("Name:")
+        name_label.setToolTip(name_tooltip)
+        label_row.addWidget(name_label)
         self._label_edit = QLineEdit()
         self._label_edit.setPlaceholderText("e.g. wing_span")
+        self._label_edit.setToolTip(name_tooltip)
         label_row.addWidget(self._label_edit, stretch=1)
         left_col.addLayout(label_row)
         add_btn = QPushButton("Add measurement")
