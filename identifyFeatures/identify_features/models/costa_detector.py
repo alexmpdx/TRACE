@@ -81,6 +81,20 @@ def detect_costa_edges(
         prox_dx /= pmag
         prox_dy /= pmag
 
+    # SC position (for the both-endpoints-proximal rejection below).
+    sc_x = sc_y = None
+    if sc is not None:
+        sc_x, sc_y = sc.x, sc.y
+
+    def _is_proximal_of_sc(node_id: int) -> bool:
+        """A node is proximal of SC if its position has a positive dot product
+        with the SC→AN direction. Used to reject the L1 portion of a merged
+        anterior-margin chain that would otherwise be labeled costa."""
+        if sc_x is None or (prox_dx == 0 and prox_dy == 0):
+            return False
+        nd = G.nodes[node_id]
+        return ((nd["x"] - sc_x) * prox_dx + (nd["y"] - sc_y) * prox_dy) > 0
+
     for u, v, data in G.edges(data=True):
         line = data.get("line")
         if line is None or line.is_empty:
@@ -88,40 +102,54 @@ def detect_costa_edges(
 
         fraction = _edge_in_band_fraction(line, margin_band)
 
-        if fraction >= min_fraction:
-            # Reject edges departing SC in the proximal direction (toward AN).
-            # Costa runs distal from SC; anything proximal is L1.
-            if sc_node is not None and (prox_dx != 0 or prox_dy != 0):
-                if u == sc_node or v == sc_node:
-                    # Get the other endpoint
-                    other = v if u == sc_node else u
-                    other_data = G.nodes[other]
-                    sc_data = G.nodes[sc_node]
-                    edge_dx = other_data["x"] - sc_data["x"]
-                    edge_dy = other_data["y"] - sc_data["y"]
-                    emag = max((edge_dx**2 + edge_dy**2) ** 0.5, 1e-6)
-                    edge_dx /= emag
-                    edge_dy /= emag
-                    # Dot product with proximal direction: >0 means proximal
-                    dot = edge_dx * prox_dx + edge_dy * prox_dy
-                    if dot > 0:
-                        logger.info(
-                            "Costa reject %d↔%d: departs SC proximally (dot=%.2f)",
-                            u,
-                            v,
-                            dot,
-                        )
-                        continue
+        if fraction < min_fraction:
+            continue
 
-            key = (min(u, v), max(u, v))
-            costa_keys.add(key)
-            logger.info(
-                "Costa edge %d↔%d: %.0fpx, %.1f%% in band",
-                u,
-                v,
-                data.get("length_px", 0),
-                fraction * 100,
-            )
+        # Two rejection rules for the L1 territory (anterior margin proximal of SC):
+        #   1. Edge incident to SC departing proximally — the historical check,
+        #      catches the SC-incident L1-side edge directly.
+        #   2. Edge whose BOTH endpoints are proximal of SC — catches the deeper
+        #      L1 chain that the costa detector still accepts at 100% in-band
+        #      because _cut_at_subcostal_break only removes the strip immediately
+        #      anterior of the SC→AN line, not the slightly-interior parallel
+        #      chain (e.g. 0010 has a node cluster ~150 px posterior of the
+        #      cut that the band still includes).
+        if sc_node is not None and (prox_dx != 0 or prox_dy != 0):
+            if u == sc_node or v == sc_node:
+                other = v if u == sc_node else u
+                other_data = G.nodes[other]
+                sc_data = G.nodes[sc_node]
+                edge_dx = other_data["x"] - sc_data["x"]
+                edge_dy = other_data["y"] - sc_data["y"]
+                emag = max((edge_dx**2 + edge_dy**2) ** 0.5, 1e-6)
+                edge_dx /= emag
+                edge_dy /= emag
+                dot = edge_dx * prox_dx + edge_dy * prox_dy
+                if dot > 0:
+                    logger.info(
+                        "Costa reject %d↔%d: departs SC proximally (dot=%.2f)",
+                        u,
+                        v,
+                        dot,
+                    )
+                    continue
+            elif _is_proximal_of_sc(u) and _is_proximal_of_sc(v):
+                logger.info(
+                    "Costa reject %d↔%d: both endpoints proximal of SC",
+                    u,
+                    v,
+                )
+                continue
+
+        key = (min(u, v), max(u, v))
+        costa_keys.add(key)
+        logger.info(
+            "Costa edge %d↔%d: %.0fpx, %.1f%% in band",
+            u,
+            v,
+            data.get("length_px", 0),
+            fraction * 100,
+        )
 
     logger.info("Detected %d costa edges", len(costa_keys))
     return costa_keys, margin_band
