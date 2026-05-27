@@ -46,6 +46,7 @@ _MANIFEST_VERSION = 1
 STATUS_RUNNING = "running"
 STATUS_PAUSED = "paused"
 STATUS_COMPLETED = "completed"
+STATUS_CANCELLED = "cancelled"
 
 
 @dataclass

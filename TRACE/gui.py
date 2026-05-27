@@ -209,6 +209,7 @@ class TraceWorker(QThread):
     log_message = pyqtSignal(str)  # forwarded log records from captured loggers
     all_done = pyqtSignal(list)  # results — natural completion
     paused = pyqtSignal(list)  # results — pause-then-stop completion
+    cancelled = pyqtSignal(list)  # results — hard-cancel completion (run discarded)
     image_completed = pyqtSignal(str)  # basename of an image whose Stage 2 finished
     error = pyqtSignal(str)
 
@@ -261,7 +262,14 @@ class TraceWorker(QThread):
             else:
                 self.all_done.emit(results)
         except InterruptedError:
-            self.all_done.emit([])
+            # InterruptedError is the cancel path (TraceWorker.cancel sets
+            # self._cancel; the progress callback raises). Emit the
+            # cancelled signal so the host can distinguish hard-cancel
+            # (discard run) from natural-empty-result completion.
+            if self._cancel:
+                self.cancelled.emit([])
+            else:
+                self.all_done.emit([])
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
         finally:
@@ -614,8 +622,16 @@ class TraceWindow(QMainWindow):
         )
         self.btn_pause.clicked.connect(self._pause_or_resume_pipeline)
         self.btn_pause.setEnabled(False)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setToolTip(
+            "Stop the run and discard its progress. Per-image outputs already written stay on disk, but "
+            "the run state is wiped so the next Run starts fresh (no Resume prompt)."
+        )
+        self.btn_cancel.clicked.connect(self._cancel_pipeline)
+        self.btn_cancel.setEnabled(False)
         btn_layout.addWidget(self.btn_run)
         btn_layout.addWidget(self.btn_pause)
+        btn_layout.addWidget(self.btn_cancel)
         left_layout.addLayout(btn_layout)
         # Tracks whether the worker is currently in a paused state. Drives
         # the button label (Pause ↔ Resume) and the next-Run-click decision
@@ -1431,6 +1447,7 @@ class TraceWindow(QMainWindow):
         self.btn_run.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_pause.setText("Pause")
+        self.btn_cancel.setEnabled(True)
         self._is_paused = False
         self._resume_skip_set = resume_skip_set
         self._progress_pct_high = 0
@@ -1526,6 +1543,7 @@ class TraceWindow(QMainWindow):
         self.worker.log_message.connect(self._log)
         self.worker.all_done.connect(self._on_all_done)
         self.worker.paused.connect(self._on_paused)
+        self.worker.cancelled.connect(self._on_cancelled)
         self.worker.image_completed.connect(self._on_image_completed)
         self.worker.error.connect(self._on_error)
         # Initialize the manifest now (after a possible resume merge), so
@@ -1607,6 +1625,72 @@ class TraceWindow(QMainWindow):
         if self._is_paused:
             self._resume_paused_run()
 
+    def _cancel_pipeline(self) -> None:
+        """Hard-stop the run and discard its resume state.
+
+        Confirms with the user (because canceling can't be undone — the
+        manifest gets marked cancelled so the next Run starts fresh).
+        Per-image outputs already written stay on disk; the user can
+        delete them manually if desired.
+        """
+        n_done = len(self._manifest.completed_images) if self._manifest is not None else 0
+        n_total = self._manifest.total_images if self._manifest is not None else 0
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Cancel run?")
+        box.setText(
+            f"Cancel this run and discard its resume state? " f"({n_done} of {n_total} images completed so far.)"
+        )
+        box.setInformativeText(
+            "Per-image outputs already written to disk are kept. The next Run " "starts fresh — no Resume prompt."
+        )
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        if box.exec_() != QMessageBox.Yes:
+            return
+        # Hard-cancel routes through the worker's cancel() for running runs;
+        # for paused runs there's no worker, so finalize directly.
+        if self.worker is not None:
+            self.worker.cancel()
+            self._log("Cancelling — the current image will finish first.")
+            self.btn_cancel.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            return
+        # Paused state: no worker thread is running. Just clean up.
+        self._finalize_cancel()
+
+    def _finalize_cancel(self) -> None:
+        """Shared cleanup for both running-then-cancelled and paused-then-
+        cancelled paths. Marks the manifest cancelled, flushes the log,
+        and resets the UI to idle."""
+        from TRACE.run_state import STATUS_CANCELLED
+
+        if self._manifest is not None and self._run_folder is not None:
+            self._manifest.status = STATUS_CANCELLED
+            save_manifest(self._run_folder, self._manifest)
+        from datetime import datetime as _dt
+
+        self._log(f"--- Cancelled at {_dt.now().isoformat(timespec='seconds')} ---")
+        self._log("Run cancelled — resume state discarded.")
+        self._write_run_metadata(status="cancelled")
+        self._manifest = None
+        self._is_paused = False
+        self._is_resuming = False
+        self._run_folder = None
+        self.btn_run.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("Pause")
+        self.btn_cancel.setEnabled(False)
+        self.statusBar().showMessage("Cancelled")
+        self.eta_label.setText("")
+        self._progress_timer.stop()
+
+    def _on_cancelled(self, _results) -> None:
+        """Worker exited via TraceWorker.cancelled (user clicked Cancel
+        while the run was running). Flow into the shared finalizer."""
+        self.worker = None
+        self._finalize_cancel()
+
     def _on_image_completed(self, basename: str) -> None:
         """One image's Stage 2 finished — record it in the manifest.
 
@@ -1655,6 +1739,10 @@ class TraceWindow(QMainWindow):
         self._is_paused = True
         self.btn_pause.setText("Resume")
         self.btn_pause.setEnabled(True)
+        # Cancel stays enabled while paused so the user can fully abandon
+        # the run from the paused state (no worker is running, but the
+        # manifest still claims the run is in-progress).
+        self.btn_cancel.setEnabled(True)
         # Leave btn_run disabled while paused so an accidental Run-click
         # doesn't try to start a fresh run on top of the partial outputs.
         self.btn_run.setEnabled(False)
@@ -2085,6 +2173,7 @@ class TraceWindow(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("Pause")
+        self.btn_cancel.setEnabled(False)
         self._is_paused = False
         self._progress_timer.stop()
 
@@ -2149,6 +2238,7 @@ class TraceWindow(QMainWindow):
     def _on_error(self, msg):
         self.btn_run.setEnabled(True)
         self.btn_pause.setEnabled(False)
+        self.btn_cancel.setEnabled(False)
         self._progress_timer.stop()
         self.eta_label.setText("")
         self._log(f"\nFatal error: {msg}")
