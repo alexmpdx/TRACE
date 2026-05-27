@@ -1701,8 +1701,13 @@ class TraceWindow(QMainWindow):
         """
         # Path 2: in-session resume after Pause. self._manifest is still
         # populated from the paused worker; self._run_folder still points
-        # at the same place. Just hand the data back.
+        # at the same place. Run the settings-drift check (the user may
+        # have tweaked things between Pause and Resume), then hand the
+        # data back.
         if self._manifest is not None and self._manifest.is_in_progress():
+            if self._run_folder is not None and self._manifest.settings_snapshot_path:
+                if not self._confirm_settings_drift(self._run_folder):
+                    return None, None
             self._is_resuming = True
             return self._manifest.completed_set(), self._manifest
 
