@@ -66,10 +66,22 @@ def _resolve_metadata_path(model_path: Path) -> Path:
 
 
 def load_training_stats(model_path: Path) -> Optional[list[dict]]:
-    """Read ``normalization_stats`` from the model's ``metadata.json``.
+    """Read per-channel training stats from the model's ``metadata.json``.
 
-    Returns None when metadata.json is absent or has no normalization_stats —
-    callers treat that as "OOD check unavailable for this model", not an error.
+    Looks for the stats in two places, in order:
+      1. Top-level ``normalization_stats`` (the QuPath schema we
+         standardized on),
+      2. ``input_config.normalization.channel_stats`` (older / alternate
+         layout).
+
+    The list is then truncated to ``input_config.num_channels`` when that
+    field is present — some training pipelines append extra entries
+    beyond the model's actual input channel count (e.g. a second
+    training pass with different normalization left its stats appended
+    rather than replacing). The truth is num_channels, not len(stats).
+
+    Returns None when no usable stats exist; callers treat that as
+    "OOD check unavailable for this model" rather than an error.
     """
     meta_path = _resolve_metadata_path(model_path)
     if not meta_path.is_file():
@@ -81,7 +93,22 @@ def load_training_stats(model_path: Path) -> Optional[list[dict]]:
         return None
     stats = meta.get("normalization_stats")
     if not stats or not isinstance(stats, list):
-        return None
+        # Fallback to the nested location used by some training pipelines.
+        ic = meta.get("input_config") or {}
+        norm = ic.get("normalization") or {}
+        stats = norm.get("channel_stats")
+        if not stats or not isinstance(stats, list):
+            return None
+    # Pin to num_channels when present so a stats-list with extra trailing
+    # entries doesn't falsely flag input images as "missing channels".
+    ic = meta.get("input_config") or {}
+    raw_nc = ic.get("num_channels")
+    try:
+        num_channels = int(raw_nc) if raw_nc is not None else None
+    except (TypeError, ValueError):
+        num_channels = None
+    if num_channels is not None and 0 < num_channels < len(stats):
+        stats = stats[:num_channels]
     return stats
 
 
