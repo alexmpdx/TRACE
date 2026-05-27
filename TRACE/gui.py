@@ -739,6 +739,16 @@ class TraceWindow(QMainWindow):
         self.eta_label = QLabel("")
         self.eta_label.setStyleSheet("color: #888;")
         right_layout.addWidget(self.eta_label)
+        # Transient one-line status under the ETA. Used to surface the
+        # "Pause requested — finishing the current image first." and
+        # "Cancelling — the current image will finish first." messages
+        # so the user has visible confirmation that their click landed
+        # while the worker finishes its in-flight image. Cleared once
+        # the worker actually pauses / cancels / completes.
+        self.transient_status_label = QLabel("")
+        self.transient_status_label.setStyleSheet("color: #ffc107;")
+        self.transient_status_label.hide()
+        right_layout.addWidget(self.transient_status_label)
 
         # --- Assemble ---
         # Assigned to self so the walkthrough can listen to splitterMoved and
@@ -1574,6 +1584,10 @@ class TraceWindow(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Pause")
         self.btn_cancel.setEnabled(True)
+        # Defensive: any leftover transient status from a prior slice
+        # (e.g. a "Pause requested…" that somehow stuck) gets cleared
+        # at the start of a fresh run / resume.
+        self.transient_status_label.hide()
         self._is_paused = False
         self._resume_skip_set = resume_skip_set
         self._progress_pct_high = 0
@@ -1751,7 +1765,13 @@ class TraceWindow(QMainWindow):
         """
         if self.worker is not None:
             self.worker.pause()
-            self._log("Pause requested — finishing the current image first.")
+            msg = "Pause requested — finishing the current image first."
+            self._log(msg)
+            # Persistent transient label under the ETA so the message
+            # doesn't get buried in the scrolling log while the in-flight
+            # image finishes. Cleared in _on_paused.
+            self.transient_status_label.setText(msg)
+            self.transient_status_label.show()
             # Disable during the transition (between click and the worker's
             # paused-ack) so the user can't spam-click and queue weird state.
             self.btn_run.setEnabled(False)
@@ -1788,7 +1808,10 @@ class TraceWindow(QMainWindow):
         # for paused runs there's no worker, so finalize directly.
         if self.worker is not None:
             self.worker.cancel()
-            self._log("Cancelling — the current image will finish first.")
+            msg = "Cancelling — the current image will finish first."
+            self._log(msg)
+            self.transient_status_label.setText(msg)
+            self.transient_status_label.show()
             self.btn_cancel.setEnabled(False)
             # Disable the combo button during the cancel transition (worker
             # is still finishing the in-flight image). _finalize_cancel
@@ -1805,6 +1828,7 @@ class TraceWindow(QMainWindow):
         from TRACE.run_state import STATUS_CANCELLED
 
         self._revert_in_progress_to_pending()
+        self.transient_status_label.hide()
 
         if self._manifest is not None and self._run_folder is not None:
             self._manifest.status = STATUS_CANCELLED
@@ -1894,6 +1918,9 @@ class TraceWindow(QMainWindow):
         manifest if that's what they want).
         """
         self._revert_in_progress_to_pending()
+        # The transient "Pause requested…" label served its purpose; hide
+        # it now that the worker has actually paused.
+        self.transient_status_label.hide()
         # Treat paused like an early return from a successful slice — no
         # error messaging, but acknowledge in the log.
         n_done = len(self._manifest.completed_images) if self._manifest is not None else 0
@@ -2427,6 +2454,7 @@ class TraceWindow(QMainWindow):
         # the slice ended early via cancel — gets rolled back so the
         # resting state of the list is honest.
         self._revert_in_progress_to_pending()
+        self.transient_status_label.hide()
 
         # Mark the manifest as completed so the next run on this output
         # folder doesn't surface the resume prompt.
@@ -2490,6 +2518,7 @@ class TraceWindow(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
+        self.transient_status_label.hide()
         self._progress_timer.stop()
         self.eta_label.setText("")
         self._log(f"\nFatal error: {msg}")
