@@ -447,6 +447,9 @@ def trace_folder(
     target_um_per_px: Optional[float] = None,
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
+    skip_image_basenames: Optional[set[str]] = None,
+    pause_event: Optional["threading.Event"] = None,
+    on_image_complete=None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -570,6 +573,9 @@ def trace_folder(
             target_um_per_px=target_um_per_px,
             rescale_tolerance_low=rescale_tolerance_low,
             rescale_tolerance_high=rescale_tolerance_high,
+            skip_image_basenames=skip_image_basenames,
+            pause_event=pause_event,
+            on_image_complete=on_image_complete,
         )
     finally:
         if temp_dir_obj is not None:
@@ -602,6 +608,9 @@ def _run(
     target_um_per_px: Optional[float] = None,
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
+    skip_image_basenames: Optional[set[str]] = None,
+    pause_event: Optional["threading.Event"] = None,
+    on_image_complete=None,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -680,6 +689,27 @@ def _run(
 
     logger.info("Preprocessed %d/%d images successfully", len(successful_preproc), len(preproc_results))
 
+    # Resume support: drop images that a previous run already finished
+    # Stage 2 on. The manifest's completed list is the source of truth for
+    # the skip decision — see TRACE/run_state.py. Per-image basenames are
+    # used (no folder parts) so the manifest stays portable across moves
+    # of the input folder.
+    if skip_image_basenames:
+        kept: list[_PreprocResult] = []
+        skipped = 0
+        for r in successful_preproc:
+            if r.image_path.name in skip_image_basenames:
+                skipped += 1
+                # Surface a TraceResult marked as a resume-skip so callers
+                # know the image was intentionally skipped (vs lost). No
+                # error field set — this isn't a failure.
+                results.append(TraceResult(image_path=r.image_path))
+            else:
+                kept.append(r)
+        if skipped:
+            logger.info("Resume: skipped %d already-completed image(s)", skipped)
+        successful_preproc = kept
+
     if not successful_preproc:
         return results
 
@@ -724,6 +754,7 @@ def _run(
 
     progress_lock = threading.Lock()
     cancel_event = threading.Event()
+    completion_lock = threading.Lock()
 
     def _emit_progress(idx: int, stem: str, detail: str):
         if progress_callback is None:
@@ -731,8 +762,29 @@ def _run(
         with progress_lock:
             progress_callback(idx, total, stem, "analysis", detail)
 
+    def _signal_complete(image_basename: str) -> None:
+        """Thread-safe wrapper around the host's on_image_complete callback.
+
+        Called once per image after Stage 2 attempt (success or per-image
+        error — both count as "done" for resume purposes; the user can
+        re-run with a wiped output folder to retry errored images).
+        """
+        if on_image_complete is None:
+            return
+        with completion_lock:
+            try:
+                on_image_complete(image_basename)
+            except Exception:
+                logger.exception("on_image_complete callback raised")
+
     def _analyze_one(i: int, preproc_result) -> None:
         if cancel_event.is_set():
+            return
+        # Pause: between images only — running images finish cleanly so
+        # the per-image artifacts aren't half-written. The Stage 2 caller
+        # below also checks the event before submitting more work, so
+        # ThreadPool workers stop being scheduled after the pause click.
+        if pause_event is not None and pause_event.is_set():
             return
         # When recursive discovery flattened the input path into a unique basename,
         # `processed_image_path` points at the renamed copy in preproc_dir; otherwise
@@ -915,10 +967,21 @@ def _run(
                 error=f"{e}\n{traceback.format_exc()}",
                 error_stage="analysis",
             )
+        finally:
+            # Stage 2 attempt finished (success or per-image error) — tell
+            # the host this image is "done" for resume bookkeeping. Skipped
+            # by the pause-event short-circuit above so an interrupted run
+            # doesn't mark its mid-loop image as done.
+            if not (pause_event is not None and pause_event.is_set()):
+                _signal_complete(preproc_result.image_path.name)
 
     interrupted = False
+    paused = False
     if max_workers <= 1:
         for i, preproc_result in enumerate(successful_preproc):
+            if pause_event is not None and pause_event.is_set():
+                paused = True
+                break
             try:
                 _analyze_one(i, preproc_result)
             except InterruptedError:
@@ -935,6 +998,11 @@ def _run(
                     cancel_event.set()
                 except Exception:
                     logger.exception("Unexpected error in Stage 2 worker")
+                if pause_event is not None and pause_event.is_set():
+                    paused = True
+                    # Don't cancel — let the in-flight workers finish their
+                    # current images cleanly. _analyze_one's own pause check
+                    # stops any not-yet-started worker from doing real work.
 
     for tr in stage2_slots:
         if tr is not None:
@@ -944,6 +1012,16 @@ def _run(
 
     if interrupted:
         raise InterruptedError("Cancelled by user")
+
+    # Pause is a clean stop — return whatever images finished without
+    # raising. The caller (GUI worker) sees a normal return and knows to
+    # write/update the manifest with status=paused. CSV is still written
+    # below for the images that did complete in this slice; resume merges
+    # via Phase 3's append-only logic (until then a resume run replaces
+    # rather than merges, so the consolidated CSV reflects only the latest
+    # slice — per-image GeoJSONs / overlays are preserved either way).
+    if paused:
+        logger.info("Pipeline paused: %d image(s) completed in this slice", len(batch_results))
 
     # --- Batch CSV ---
     if "csv" in outputs:
