@@ -451,6 +451,7 @@ def trace_folder(
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
     on_image_failed_preproc=None,
+    on_image_failed_analysis=None,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -578,6 +579,7 @@ def trace_folder(
             pause_event=pause_event,
             on_image_complete=on_image_complete,
             on_image_failed_preproc=on_image_failed_preproc,
+            on_image_failed_analysis=on_image_failed_analysis,
         )
     finally:
         if temp_dir_obj is not None:
@@ -614,6 +616,7 @@ def _run(
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
     on_image_failed_preproc=None,
+    on_image_failed_analysis=None,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -770,20 +773,26 @@ def _run(
         with progress_lock:
             progress_callback(idx, total, stem, "analysis", detail)
 
-    def _signal_complete(image_basename: str) -> None:
-        """Thread-safe wrapper around the host's on_image_complete callback.
+    def _signal_complete(image_basename: str, success: bool) -> None:
+        """Thread-safe wrapper around the per-image-completion callbacks.
 
-        Called once per image after Stage 2 attempt (success or per-image
-        error — both count as "done" for resume purposes; the user can
-        re-run with a wiped output folder to retry errored images).
+        Called once per image after Stage 2 attempt. Dispatches based on
+        outcome:
+          - success=True  → on_image_complete (resume bookkeeping + GUI
+            "Succeeded" status).
+          - success=False → on_image_failed_analysis (GUI "Failed"
+            status) AND on_image_complete (the manifest still records
+            failed Stage 2 images as "done" so they're not retried on
+            resume without an explicit settings change).
         """
-        if on_image_complete is None:
-            return
         with completion_lock:
             try:
-                on_image_complete(image_basename)
+                if not success and on_image_failed_analysis is not None:
+                    on_image_failed_analysis(image_basename)
+                if on_image_complete is not None:
+                    on_image_complete(image_basename)
             except Exception:
-                logger.exception("on_image_complete callback raised")
+                logger.exception("image-completion callback raised")
 
     def _analyze_one(i: int, preproc_result) -> None:
         if cancel_event.is_set():
@@ -979,9 +988,13 @@ def _run(
             # Stage 2 attempt finished (success or per-image error) — tell
             # the host this image is "done" for resume bookkeeping. Skipped
             # by the pause-event short-circuit above so an interrupted run
-            # doesn't mark its mid-loop image as done.
+            # doesn't mark its mid-loop image as done. Success/failure is
+            # read off stage2_slots[i] — a slot with .error set means the
+            # except-Exception branch above ran.
             if not (pause_event is not None and pause_event.is_set()):
-                _signal_complete(preproc_result.image_path.name)
+                slot = stage2_slots[i]
+                success = slot is not None and slot.error is None
+                _signal_complete(preproc_result.image_path.name, success)
 
     interrupted = False
     paused = False

@@ -9,6 +9,7 @@ import sys
 import time
 import traceback
 from collections import OrderedDict
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -210,8 +211,9 @@ class TraceWorker(QThread):
     all_done = pyqtSignal(list)  # results — natural completion
     paused = pyqtSignal(list)  # results — pause-then-stop completion
     cancelled = pyqtSignal(list)  # results — hard-cancel completion (run discarded)
-    image_completed = pyqtSignal(str)  # basename of an image whose Stage 2 finished
+    image_completed = pyqtSignal(str)  # basename of an image whose Stage 2 succeeded
     image_failed_preproc = pyqtSignal(str)  # basename of an image whose Stage 1 errored
+    image_failed_analysis = pyqtSignal(str)  # basename of an image whose Stage 2 errored
     error = pyqtSignal(str)
 
     def __init__(self, kwargs):
@@ -258,6 +260,7 @@ class TraceWorker(QThread):
             # many Stage 2 workers are running.
             self.kwargs["on_image_complete"] = lambda basename: self.image_completed.emit(basename)
             self.kwargs["on_image_failed_preproc"] = lambda basename: self.image_failed_preproc.emit(basename)
+            self.kwargs["on_image_failed_analysis"] = lambda basename: self.image_failed_analysis.emit(basename)
             results = trace_folder(**self.kwargs)
             if self._pause.is_set():
                 self.paused.emit(results)
@@ -277,6 +280,44 @@ class TraceWorker(QThread):
         finally:
             for lg in attached:
                 lg.removeHandler(handler)
+
+
+# ---------------------------------------------------------------------------
+# Per-image status display (Main tab image list)
+# ---------------------------------------------------------------------------
+
+
+class ImageStatus(Enum):
+    """Per-image state surfaced as a glyph + color in the Main tab list."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"  # resume: image was already done in a prior run slice
+
+
+# Leading glyph rendered before each row's filename. PENDING keeps no
+# prefix so the resting state of the list looks identical to the
+# pre-status-indicator behavior.
+_STATUS_GLYPH: dict[ImageStatus, str] = {
+    ImageStatus.PENDING: "",
+    ImageStatus.IN_PROGRESS: "→ ",
+    ImageStatus.SUCCEEDED: "✓ ",
+    ImageStatus.FAILED: "✗ ",
+    ImageStatus.SKIPPED: "↷ ",
+}
+
+# Row foreground colors. PENDING + IN_PROGRESS pick palette tones that
+# read on both dark and light themes; SUCCEEDED/FAILED reuse the
+# existing green/red palette already used by the progress bar fills.
+_STATUS_COLOR: dict[ImageStatus, QColor] = {
+    ImageStatus.PENDING: QColor("#d0d0d0"),
+    ImageStatus.IN_PROGRESS: QColor("#ffc107"),
+    ImageStatus.SUCCEEDED: QColor("#5cb85c"),
+    ImageStatus.FAILED: QColor("#ff3333"),
+    ImageStatus.SKIPPED: QColor("#808080"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +372,13 @@ class TraceWindow(QMainWindow):
             self.restoreGeometry(_saved_geometry)
         self.worker = None
         self._image_paths = []
+        # Main-tab image-list status tracking. _basename_to_row keeps an
+        # O(1) lookup; _row_base_labels stores the prefix-less filename
+        # per row so re-applying a glyph doesn't compound on top of an
+        # earlier one. Rebuilt on every _refresh_image_list().
+        self._image_status: dict[str, ImageStatus] = {}
+        self._basename_to_row: dict[str, int] = {}
+        self._row_base_labels: list[str] = []
         self.config = PipelineConfig()
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
@@ -738,6 +786,9 @@ class TraceWindow(QMainWindow):
         if not folder_text:
             self._image_paths = []
             self.image_list.clear()
+            self._image_status.clear()
+            self._basename_to_row.clear()
+            self._row_base_labels.clear()
             return
         folder = Path(folder_text)
         if not folder.is_dir():
@@ -745,12 +796,47 @@ class TraceWindow(QMainWindow):
         recursive = self.recursive_chk.isChecked()
         self._image_paths = discover_images(folder, recursive=recursive)
         self.image_list.clear()
-        for p in self._image_paths:
+        self._image_status.clear()
+        self._basename_to_row.clear()
+        self._row_base_labels.clear()
+        for idx, p in enumerate(self._image_paths):
             # Show path relative to the input folder when recursing so subfolder
             # context is visible; otherwise just the name.
             label = str(p.relative_to(folder)) if recursive else p.name
             self.image_list.addItem(label)
+            self._row_base_labels.append(label)
+            # Index by basename — that's what TraceWorker's image_* signals
+            # carry. Known limitation: same-basename collisions across
+            # different subdirs on a recursive scan land on the same row;
+            # avoid by structuring inputs to keep basenames unique.
+            self._basename_to_row[p.name] = idx
         self.statusBar().showMessage(f"Found {len(self._image_paths)} images")
+
+    def _revert_in_progress_to_pending(self) -> None:
+        """Roll back any rows still showing IN_PROGRESS to PENDING.
+
+        Used by the pause/cancel/error/all-done handlers — if the worker
+        exits while a Stage-2 image is mid-flight, the row was flipped
+        to IN_PROGRESS by _on_progress but will never receive a
+        succeeded/failed signal for that slice. Resetting it to PENDING
+        gives an honest "not done yet" view.
+        """
+        for basename, status in list(self._image_status.items()):
+            if status == ImageStatus.IN_PROGRESS:
+                self._update_image_status(basename, ImageStatus.PENDING)
+
+    def _update_image_status(self, basename: str, status: ImageStatus) -> None:
+        """Set a row's glyph + foreground color from the given status."""
+        row = self._basename_to_row.get(basename)
+        if row is None:
+            return
+        item = self.image_list.item(row)
+        if item is None:
+            return
+        base_label = self._row_base_labels[row] if 0 <= row < len(self._row_base_labels) else basename
+        self._image_status[basename] = status
+        item.setText(f"{_STATUS_GLYPH[status]}{base_label}")
+        item.setForeground(_STATUS_COLOR[status])
 
     def _select_output(self):
         folder = QFileDialog.getExistingDirectory(
@@ -1097,6 +1183,12 @@ class TraceWindow(QMainWindow):
         self._distance_sample_landmarks = ""
         self._workers_warning_shown = False
         self._image_paths = []
+        # Wipe the per-row status tracking too — the list is about to be
+        # repopulated from scratch by _refresh_image_list once the input
+        # path is cleared.
+        self._image_status.clear()
+        self._basename_to_row.clear()
+        self._row_base_labels.clear()
 
         # Snap every widget back. blockSignals where the slot would re-fire a
         # warning or write back to a no-longer-stale value.
@@ -1488,8 +1580,13 @@ class TraceWindow(QMainWindow):
         else:
             self._log("Starting TRACE pipeline...")
 
-        for i in range(self.image_list.count()):
-            self.image_list.item(i).setForeground(QColor(208, 208, 208))
+        # Initialize per-image status. Resume-skipped basenames start as
+        # SKIPPED (the pipeline never re-emits signals for them); all
+        # others reset to PENDING. _resume_skip_set was populated above
+        # by _maybe_offer_resume.
+        for basename in list(self._basename_to_row):
+            initial = ImageStatus.SKIPPED if basename in self._resume_skip_set else ImageStatus.PENDING
+            self._update_image_status(basename, initial)
 
         # wing_model_dir was resolved above as part of the OOD preflight.
 
@@ -1542,6 +1639,7 @@ class TraceWindow(QMainWindow):
         self.worker.cancelled.connect(self._on_cancelled)
         self.worker.image_completed.connect(self._on_image_completed)
         self.worker.image_failed_preproc.connect(self._on_image_failed_preproc)
+        self.worker.image_failed_analysis.connect(self._on_image_failed_analysis)
         self.worker.error.connect(self._on_error)
         # Initialize the manifest now (after a possible resume merge), so
         # the first image completion already has somewhere to write.
@@ -1668,6 +1766,8 @@ class TraceWindow(QMainWindow):
         and resets the UI to idle."""
         from TRACE.run_state import STATUS_CANCELLED
 
+        self._revert_in_progress_to_pending()
+
         if self._manifest is not None and self._run_folder is not None:
             self._manifest.status = STATUS_CANCELLED
             save_manifest(self._run_folder, self._manifest)
@@ -1699,18 +1799,21 @@ class TraceWindow(QMainWindow):
         self._finalize_cancel()
 
     def _on_image_completed(self, basename: str) -> None:
-        """One image's Stage 2 finished — record it in the manifest.
+        """One image's Stage 2 succeeded — record + visually mark done.
 
         Called on the GUI thread via TraceWorker.image_completed signal,
         so no locking needed. Save-after-each-image is wasteful for very
         large batches but is the simplest way to keep the manifest in
         sync with on-disk artifacts; cost is one ~1 KB JSON write per
         image, dwarfed by the per-image overlay PNGs.
+
+        Note: this signal only fires for successes — Stage 2 errors go
+        through image_failed_analysis (which also marks the row).
         """
-        if self._manifest is None or self._run_folder is None:
-            return
-        self._manifest.mark_completed(basename)
-        save_manifest(self._run_folder, self._manifest)
+        if self._manifest is not None and self._run_folder is not None:
+            self._manifest.mark_completed(basename)
+            save_manifest(self._run_folder, self._manifest)
+        self._update_image_status(basename, ImageStatus.SUCCEEDED)
 
     def _on_image_failed_preproc(self, basename: str) -> None:
         """One image's Stage 1 errored — record it for resume bookkeeping.
@@ -1721,10 +1824,22 @@ class TraceWindow(QMainWindow):
         current settings" on a settings-drift dialog clears them so
         they're given another shot under the new gate thresholds.
         """
-        if self._manifest is None or self._run_folder is None:
-            return
-        self._manifest.mark_failed_preproc(basename)
-        save_manifest(self._run_folder, self._manifest)
+        if self._manifest is not None and self._run_folder is not None:
+            self._manifest.mark_failed_preproc(basename)
+            save_manifest(self._run_folder, self._manifest)
+        self._update_image_status(basename, ImageStatus.FAILED)
+
+    def _on_image_failed_analysis(self, basename: str) -> None:
+        """One image's Stage 2 errored — mark the row failed.
+
+        Manifest bookkeeping happens via the companion image_completed
+        signal that the pipeline fires alongside this one (see
+        _signal_complete in TRACE/pipeline.py): Stage-2-failed images
+        are still recorded as "completed" so they're not retried on
+        resume under unchanged settings. This handler just flips the
+        row visual to FAILED.
+        """
+        self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_paused(self, results: list) -> None:
         """Worker stopped between images after a Pause click.
@@ -1734,6 +1849,7 @@ class TraceWindow(QMainWindow):
         would conceptually mean "start over"; the user can wipe outputs +
         manifest if that's what they want).
         """
+        self._revert_in_progress_to_pending()
         # Treat paused like an early return from a successful slice — no
         # error messaging, but acknowledge in the log.
         n_done = len(self._manifest.completed_images) if self._manifest is not None else 0
@@ -2084,6 +2200,11 @@ class TraceWindow(QMainWindow):
         _refresh_progress, which is called both here and from a 250ms QTimer
         so the bar interpolates smoothly between completion events.
         """
+        # First progress event for a PENDING image flips it to IN_PROGRESS.
+        # Never downgrade a terminal status (SUCCEEDED / FAILED / SKIPPED)
+        # — substep events can fire after the image has been marked done.
+        if self._image_status.get(name) == ImageStatus.PENDING:
+            self._update_image_status(name, ImageStatus.IN_PROGRESS)
         # Detect stage transitions so the hybrid ETA can reset its throughput
         # tracker (Stage 2 per-image cost is wildly different from Stage 1).
         if stage in ("preprocessing", "analysis") and stage != self._current_stage:
@@ -2258,6 +2379,10 @@ class TraceWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         self._is_paused = False
         self._progress_timer.stop()
+        # Any image still marked IN_PROGRESS after the worker exits — e.g.
+        # the slice ended early via cancel — gets rolled back so the
+        # resting state of the list is honest.
+        self._revert_in_progress_to_pending()
 
         # Mark the manifest as completed so the next run on this output
         # folder doesn't surface the resume prompt.
