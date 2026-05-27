@@ -250,7 +250,11 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon=str(TRACE / "GUI_images" / "trace_icon.ico"),  # add when we have one
+    # Embeds the TRACE logo as the .exe's Windows shell icon, so Add/Remove
+    # Programs, the Start Menu shortcut, the taskbar, and Explorer all show
+    # the TRACE wireframe instead of the generic application icon. The same
+    # .ico is also used by Inno Setup via SetupIconFile= in installer.iss.
+    icon=str(TRACE / "build" / "trace_icon.ico"),
 )
 coll = COLLECT(
     exe,
