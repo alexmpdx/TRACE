@@ -4084,6 +4084,15 @@ class TraceWindow(QMainWindow):
         next ``_apply_update_check_result`` confirms up-to-date and
         drops the cache key — at which point neither the badge nor
         the dialog comes back on launch.
+
+        Uses the same semver-tuple comparison as the fresh auto-check
+        path (_apply_update_check_result → _version_is_newer). String
+        inequality on raw version strings would offer a downgrade if
+        the user upgraded past whatever the QSettings cache last saw
+        (e.g. cached=0.1.51, installed=0.1.53 after skipping a broken
+        intermediate release). A stale cache entry that's not strictly
+        newer also gets dropped here so it stops re-firing on each
+        launch until the next auto-check refreshes it.
         """
         cached = str(self.settings.value("cached_latest_release_version", "") or "")
         if not cached:
@@ -4092,14 +4101,21 @@ class TraceWindow(QMainWindow):
             from TRACE import __version__ as installed_version
         except Exception:
             return
-        if cached != installed_version:
-            self.show_update_available_indicator(cached)
-            # Defer the dialog one tick so the main window finishes
-            # showing before the centered notification appears over it.
-            # The dialog dedups by version in-session, so the
-            # immediately-following auto-check returning the same
-            # cached version won't re-pop the dialog.
-            QTimer.singleShot(0, lambda: self.show_update_available_dialog(cached))
+        from TRACE.inline_panels import _version_is_newer
+
+        if not _version_is_newer(cached, installed_version):
+            # Cache is stale (same or older than installed). Drop it so
+            # we don't keep evaluating it on every launch — the next
+            # auto-check will repopulate from GitHub.
+            self.settings.remove("cached_latest_release_version")
+            return
+        self.show_update_available_indicator(cached)
+        # Defer the dialog one tick so the main window finishes
+        # showing before the centered notification appears over it.
+        # The dialog dedups by version in-session, so the
+        # immediately-following auto-check returning the same
+        # cached version won't re-pop the dialog.
+        QTimer.singleShot(0, lambda: self.show_update_available_dialog(cached))
 
     def _on_right_tab_changed(self, index: int) -> None:
         """Tab-change hook: clear the update-available badge on Help visit."""
