@@ -909,6 +909,12 @@ class TraceWindow(QMainWindow):
         main_tab_layout.setContentsMargins(4, 4, 4, 4)
         main_tab_layout.addWidget(QLabel("Images:"))
         self.image_list = QListWidget()
+        # ExtendedSelection: click selects a single row, Shift-click
+        # extends the selection to a contiguous range, Ctrl-click (Cmd
+        # on macOS — Qt translates) toggles individual rows in/out.
+        # The bulk Skip/Unskip context menu items operate on whatever
+        # is selected here.
+        self.image_list.setSelectionMode(QListWidget.ExtendedSelection)
         # Per-row check state drives _user_skip_set. itemChanged fires
         # whenever the user clicks a checkbox; _on_image_check_toggled
         # short-circuits when _suppress_check_signal is True (which we
