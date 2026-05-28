@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Entry point for the preprocessing pipeline CLI."""
 
+# OpenMP duplicate-library guard. See TRACE/run_gui.py for the full
+# rationale — bundled torch + onnxruntime each pull in their own OpenMP
+# runtime, and the second to load aborts on Windows.
+import os
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import sys
 from pathlib import Path
 

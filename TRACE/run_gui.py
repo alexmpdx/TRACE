@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 """Entry point for the TRACE combined pipeline GUI."""
 
+# OpenMP duplicate-library guard. MUST be set before *any* C extension
+# that links to an OpenMP runtime initializes — practically that means
+# before importing torch, onnxruntime, scikit-learn, scipy, or anything
+# that pulls in libiomp5md.dll / vcomp140.dll. We bundle multiple
+# OpenMP runtimes by transitive dependency (torch ships libiomp5md.dll;
+# sklearn / rawpy ship vcomp140.dll), and Intel OpenMP aborts (with
+# DllMain returning FALSE) when it detects a second OpenMP runtime in
+# the process. KMP_DUPLICATE_LIB_OK=TRUE is Intel's documented escape
+# hatch: emit a warning, but allow the load. Without this, end users
+# hit "ImportError: DLL load failed while importing
+# onnxruntime_pybind11_state: A dynamic link library (DLL) init
+# routine failed" the first time wing-isolation runs.
+import os
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 # multiprocessing.freeze_support() must be called BEFORE any code that
 # can spawn child processes. On Windows the default start method is
 # "spawn", which re-executes the frozen entry point in a child process
@@ -289,6 +305,31 @@ def _probe_torch_environment() -> None:
                     log(f"probe: {runtime} -> NOT bundled AND system load FAILED: {e}")
 
 
+def _probe_onnxruntime_environment() -> None:
+    """Eagerly import onnxruntime BEFORE torch so it claims OpenMP first.
+
+    Both libraries link against OpenMP — torch via Intel libiomp5md.dll,
+    onnxruntime via Microsoft vcomp140.dll. Whichever loads first
+    initializes the OpenMP runtime; on some Windows configurations
+    (notably PyInstaller-frozen builds shipping both stacks in the same
+    process), the second-loaded OpenMP init returns FALSE from DllMain
+    and surfaces as "DLL initialization routine failed" — exactly the
+    wing-isolation failure mode we're guarding against.
+    KMP_DUPLICATE_LIB_OK=TRUE (set at module top) covers most cases on
+    its own; importing onnxruntime first is belt-and-suspenders, and
+    also lets us log a clear "ort import failed" trail in
+    trace_startup.log when something deeper is wrong.
+    """
+    log("probe: importing onnxruntime (before torch)")
+    try:
+        import onnxruntime as _ort
+
+        log(f"probe: onnxruntime import OK (version={getattr(_ort, '__version__', '?')})")
+    except BaseException as exc:  # noqa: BLE001
+        log_exception("probe: onnxruntime import FAILED", exc)
+
+
+_probe_onnxruntime_environment()
 _probe_torch_environment()
 
 

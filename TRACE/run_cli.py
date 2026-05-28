@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Entry point for the TRACE combined pipeline CLI."""
 
+# OpenMP duplicate-library guard. See run_gui.py for the full rationale —
+# tl;dr: bundled torch + onnxruntime each pull in their own OpenMP runtime,
+# and Intel OpenMP aborts when the second one tries to init. The escape
+# hatch must be set before any C extension that links OpenMP imports.
+import os
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import sys
 from pathlib import Path
 
