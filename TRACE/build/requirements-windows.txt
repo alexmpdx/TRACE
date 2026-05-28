@@ -17,19 +17,7 @@ torch==2.4.1
 torchvision==0.19.1
 
 # --- Core scientific stack -------------------------------------------------
-# numpy is pinned to the 1.x line because torch 2.4.1 (also pinned, for
-# its own DllMain stability — see trace.spec) was built against the
-# numpy 1.x C-API. Letting pip pull numpy 2.x produces a runtime ABI
-# conflict that surfaces specifically when both torch and onnxruntime
-# load in the same process: onnxruntime_pybind11_state.pyd's static
-# init calls into numpy's C-API, finds torch's numpy-1.x type slots
-# pre-corrupted by numpy-2.x's redesigned dtype layout, and DllMain
-# returns FALSE → "DLL load failed: A dynamic link library (DLL)
-# initialization routine failed" (Windows error 1114). Pinning numpy
-# to <2 aligns the whole bundle on numpy 1.x and resolves the conflict.
-# 1.26.x is the last 1.x release; the lower bound is pandas 3.0+'s
-# minimum.
-numpy>=1.26,<2
+numpy
 scipy
 pandas
 scikit-image
@@ -57,7 +45,16 @@ rasterio
 
 # --- ML --------------------------------------------------------------------
 albumentations
-onnxruntime
+# onnxruntime is pinned to 1.17.3: the latest 1.20+ wheels Microsoft ships
+# fail to load inside PyInstaller bundles on otherwise-modern Windows
+# machines with Windows error 1114 (ERROR_DLL_INIT_FAILED) — a transitive
+# DLL's DllMain returns FALSE during onnxruntime_pybind11_state.pyd init.
+# 1.17.3 (Feb 2024) is the last version widely confirmed to bundle cleanly
+# via PyInstaller hooks; later versions add platform-feature detection
+# during static init that interacts poorly with the loader's
+# `os.add_dll_directory` search-path additions. If a future onnxruntime
+# release fixes this, unpin.
+onnxruntime==1.17.3
 segmentation-models-pytorch
 
 # --- GUI -------------------------------------------------------------------
