@@ -67,6 +67,28 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
   GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; Wipe the bundled-deps tree before laying down new files. Inno Setup's
+; default install behavior only overwrites same-named files; it never
+; deletes anything. Each pip-installed package's metadata lives in a
+; folder whose name embeds the version (e.g. numpy-2.4.6.dist-info,
+; shapely-2.1.2.dist-info), so updates that change package versions
+; leave the OLD .dist-info dirs sitting alongside the new ones. Python's
+; importlib.metadata then picks up whichever wins the dir listing, often
+; producing an inconsistent install where shapely's .pyd asks the
+; running numpy for a symbol that only exists in the version embedded in
+; the stale metadata. The symptom is a startup ImportError pointing at
+; numpy._core.umath (or a similar transitively-loaded native dep). Users
+; have been working around this by uninstalling fully before reinstalling
+; — the [InstallDelete] section does that for them automatically every
+; update.
+;
+; The TRACE models cache at {app}\TRACE\models\ is NOT inside _internal/
+; (it sits next to TRACE.exe at the install root), so the ~1.6 GB of
+; downloaded weights are preserved across updates. Same for the desktop
+; / Start Menu shortcuts (managed by [Icons], untouched by this).
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 ; Pull in the entire PyInstaller bundle. recursesubdirs handles nested
 ; data files (GUI_images/, presets/, Qt plugins, etc.).
