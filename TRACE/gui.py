@@ -3219,6 +3219,7 @@ class TraceWindow(QMainWindow):
         the Install Update button is one click away).
         """
         from PyQt5.QtCore import Qt as _Qt
+        from PyQt5.QtGui import QFont
         from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
         # Session-only de-dup. Per-launch repetition is exactly what
@@ -3294,7 +3295,17 @@ class TraceWindow(QMainWindow):
             "QPushButton:hover { background-color: #454545; } "
             "QPushButton:pressed { background-color: #2f2f2f; }"
         )
-        btn_view.clicked.connect(dlg.accept)
+        # "View update" closes the dialog AND jumps to the Help tab so
+        # the Install Update button is one click away. The tab switch
+        # used to live in the post-exec_() branch below; with show() it
+        # has to fire from the click handler itself.
+        def _on_view_update() -> None:
+            dlg.accept()
+            help_index = self.right_tabs.indexOf(self.inline_help_panel)
+            if help_index >= 0:
+                self.right_tabs.setCurrentIndex(help_index)
+
+        btn_view.clicked.connect(_on_view_update)
         footer.addWidget(btn_view)
         layout.addLayout(footer)
 
@@ -3304,8 +3315,24 @@ class TraceWindow(QMainWindow):
         # dialog again — by design, per user request.
         self._dialog_fired_for_version = latest_version
 
-        # Center over the main window. show() then geometry math gives Qt
-        # a chance to compute sizeHint based on the populated layout.
+        # Use show() + signal handlers instead of exec_(). On Windows,
+        # the combination of Qt.Dialog + FramelessWindowHint +
+        # WindowStaysOnTopHint + exec_() is unreliable — the modal
+        # nested event loop sometimes returns instantly without ever
+        # rendering the dialog, so the user sees the Help-tab badge but
+        # no notification. show() + raise_() + activateWindow() forces
+        # the dialog to actually appear. v0.1.45 tried fixing this by
+        # moving the flags into the constructor; that didn't address
+        # the modal/frameless conflict, hence this rewrite.
+        #
+        # Keep a reference on the window so the dialog isn't garbage
+        # collected the moment this method returns — show() is
+        # non-blocking, so a local-only ref would die immediately.
+        self._pending_update_dialog = dlg
+        dlg.finished.connect(lambda _result: setattr(self, "_pending_update_dialog", None))
+
+        # Center over the main window. adjustSize() resolves the
+        # populated layout's sizeHint so width()/height() are accurate.
         dlg.adjustSize()
         host_geo = self.frameGeometry()
         dlg.move(
@@ -3313,11 +3340,12 @@ class TraceWindow(QMainWindow):
             host_geo.center().y() - dlg.height() // 2,
         )
 
-        result = dlg.exec_()
-        if result == QDialog.Accepted:
-            help_index = self.right_tabs.indexOf(self.inline_help_panel)
-            if help_index >= 0:
-                self.right_tabs.setCurrentIndex(help_index)
+        dlg.show()
+        # raise_() and activateWindow() are belt-and-suspenders for
+        # WindowStaysOnTopHint, which Windows ignores when the dialog
+        # was constructed while the main window wasn't yet activated.
+        dlg.raise_()
+        dlg.activateWindow()
 
     def clear_update_available_indicator(self, *, clear_cache: bool = False) -> None:
         """Remove the blue dot from the Help tab.
