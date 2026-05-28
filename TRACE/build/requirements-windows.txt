@@ -17,7 +17,19 @@ torch==2.4.1
 torchvision==0.19.1
 
 # --- Core scientific stack -------------------------------------------------
-numpy
+# numpy is pinned to the 1.x line because torch 2.4.1 (also pinned, for
+# its own DllMain stability — see trace.spec) was built against the
+# numpy 1.x C-API. Letting pip pull numpy 2.x produces a runtime ABI
+# conflict that surfaces specifically when both torch and onnxruntime
+# load in the same process: onnxruntime_pybind11_state.pyd's static
+# init calls into numpy's C-API, finds torch's numpy-1.x type slots
+# pre-corrupted by numpy-2.x's redesigned dtype layout, and DllMain
+# returns FALSE → "DLL load failed: A dynamic link library (DLL)
+# initialization routine failed" (Windows error 1114). Pinning numpy
+# to <2 aligns the whole bundle on numpy 1.x and resolves the conflict.
+# 1.26.x is the last 1.x release; the lower bound is pandas 3.0+'s
+# minimum.
+numpy>=1.26,<2
 scipy
 pandas
 scikit-image
