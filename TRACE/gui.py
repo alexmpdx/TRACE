@@ -3274,7 +3274,10 @@ class TraceWindow(QMainWindow):
                 title="Main tab — image queue",
                 body=(
                     "All images discovered in the input folder. Each row updates with "
-                    "its status as the run proceeds."
+                    "its status as the run proceeds. <b>Uncheck</b> a row to skip that "
+                    "image when you click Run; right-click for bulk Skip / Unskip "
+                    "actions on the selection or the whole list. Your selections are "
+                    "remembered per input folder."
                 ),
             ),
             WalkthroughStep(
