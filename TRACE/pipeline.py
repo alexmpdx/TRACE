@@ -464,6 +464,7 @@ def trace_folder(
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
     skip_image_basenames: Optional[set[str]] = None,
+    csv_filename_override: Optional[str] = None,
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
     on_image_failed_preproc=None,
@@ -592,6 +593,7 @@ def trace_folder(
             rescale_tolerance_low=rescale_tolerance_low,
             rescale_tolerance_high=rescale_tolerance_high,
             skip_image_basenames=skip_image_basenames,
+            csv_filename_override=csv_filename_override,
             pause_event=pause_event,
             on_image_complete=on_image_complete,
             on_image_failed_preproc=on_image_failed_preproc,
@@ -629,6 +631,7 @@ def _run(
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
     skip_image_basenames: Optional[set[str]] = None,
+    csv_filename_override: Optional[str] = None,
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
     on_image_failed_preproc=None,
@@ -1108,14 +1111,20 @@ def _run(
 
     # --- Batch CSV ---
     if "csv" in outputs:
-        csv_path = output_dir / "measurements.csv"
+        # csv_filename_override is the rerun-failed "Write to new CSV"
+        # branch. When set, write to that filename and skip the
+        # resume-merge entirely — the user explicitly asked for a fresh,
+        # standalone CSV. When unset, default name + normal merge path.
+        csv_path = output_dir / (csv_filename_override or "measurements.csv")
         # Resume support: if we're skipping previously-completed images,
         # park the prior measurements.csv aside so its rows can be folded
         # back in after the new slice writes. The merge happens at the
         # end of this block (covering both the fast path and the normal
         # export_csv_batch path).
+        # The override-branch deliberately skips this — it's writing a
+        # new file by name, so there's nothing to fold in.
         csv_append_source: Optional[Path] = None
-        if skip_image_basenames and csv_path.is_file():
+        if not csv_filename_override and skip_image_basenames and csv_path.is_file():
             csv_append_source = csv_path.with_suffix(".csv.append_source")
             try:
                 csv_path.replace(csv_append_source)
