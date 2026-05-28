@@ -1615,6 +1615,12 @@ class InlineHelpPanel(QWidget):
         self._latest_update_url: Optional[str] = None
         self._latest_update_size: Optional[int] = None
         self._latest_update_version: Optional[str] = None
+        # When the "Update now" button in the launch-time notification
+        # dialog is clicked BEFORE the auto-check has populated the
+        # asset URL, set this True. The next _apply_update_check_result
+        # consumes it and immediately fires _install_update() instead
+        # of just updating the Help-tab UI.
+        self._install_after_next_check: bool = False
         # In-flight thread guard so rapid clicks (or an auto-check colliding
         # with a manual click) don't fire two concurrent requests.
         self._update_thread: Optional[_UpdateCheckThread] = None
@@ -1814,6 +1820,18 @@ class InlineHelpPanel(QWidget):
         # cached-restore path on launch deliberately doesn't (the user
         # already saw + dismissed it last session; the badge is enough).
         self._window.show_update_available_dialog(latest_version)
+        # If the user clicked "Update now" in the launch-time
+        # notification BEFORE this check completed, the asset URL
+        # wasn't populated yet — _install_update would have early-
+        # returned. Now that we have the URL, fire the install.
+        if self._install_after_next_check and can_install_in_place:
+            self._install_after_next_check = False
+            self._install_update()
+        else:
+            # If the chain was requested but in-place install isn't
+            # available (non-Windows / non-frozen), clear the flag —
+            # the user gets the release-page link instead.
+            self._install_after_next_check = False
 
     def _install_update(self) -> None:
         """Download the latest TRACE-Setup.exe and launch it.

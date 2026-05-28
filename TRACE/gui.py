@@ -3899,8 +3899,11 @@ class TraceWindow(QMainWindow):
         launch-time fire doesn't re-pop the same dialog.
 
         Two buttons: Dismiss (close, badge stays as the passive
-        reminder) and View update (close + jump to the Help tab so
-        the Install Update button is one click away).
+        reminder) and Update now (close + download the new installer
+        and launch it — no extra clicks needed). On the launch-time
+        cached-restore path the asset URL isn't populated yet; the
+        Update-now handler chains the install onto the next auto-check
+        result via InlineHelpPanel._install_after_next_check.
         """
         from PyQt5.QtCore import Qt as _Qt
         from PyQt5.QtGui import QFont
@@ -3951,8 +3954,7 @@ class TraceWindow(QMainWindow):
 
         body = QLabel(
             f"TRACE <b>{latest_version}</b> is now available — you're running <b>{installed_version}</b>.<br><br>"
-            "Click <b>View update</b> to jump to the Help tab, where the "
-            "<b>Install Update</b> button downloads and launches the new installer. "
+            "Click <b>Update now</b> to download and launch the new installer. "
             "Your settings and downloaded models are preserved."
         )
         body.setWordWrap(True)
@@ -3971,26 +3973,45 @@ class TraceWindow(QMainWindow):
         )
         btn_dismiss.clicked.connect(dlg.reject)
         footer.addWidget(btn_dismiss)
-        btn_view = QPushButton("View update")
-        btn_view.setDefault(True)
-        btn_view.setStyleSheet(
+        btn_update = QPushButton("Update now")
+        btn_update.setDefault(True)
+        btn_update.setStyleSheet(
             "QPushButton { color: #d0d0d0; background-color: #3a3a3a; "
             "border: 1px solid #0d6efd; border-radius: 4px; padding: 4px 12px; } "
             "QPushButton:hover { background-color: #454545; } "
             "QPushButton:pressed { background-color: #2f2f2f; }"
         )
-        # "View update" closes the dialog AND jumps to the Help tab so
-        # the Install Update button is one click away. The tab switch
-        # used to live in the post-exec_() branch below; with show() it
-        # has to fire from the click handler itself.
-        def _on_view_update() -> None:
+        # "Update now" closes the dialog and triggers the actual
+        # download + installer launch directly. Previously this was a
+        # "View update" button that just switched to the Help tab so
+        # the user could then click another button — one extra step
+        # per upgrade for no added information.
+        #
+        # Two code paths reach the dialog:
+        #   1. Launch-time cached-restore (_restore_update_badge_from_cache)
+        #      — the asset URL isn't populated yet because the network
+        #      auto-check hasn't completed. _install_update would
+        #      early-return on a missing URL. We instead trigger a
+        #      check + set _install_after_next_check so the install
+        #      fires when results land.
+        #   2. Post-auto-check (_apply_update_check_result) — URL is
+        #      populated, fire the install immediately.
+        def _on_update_now() -> None:
             dlg.accept()
-            help_index = self.right_tabs.indexOf(self.inline_help_panel)
-            if help_index >= 0:
-                self.right_tabs.setCurrentIndex(help_index)
+            panel = self.inline_help_panel
+            if panel._latest_update_url:
+                panel._install_update()
+            else:
+                # No URL yet — chain the install to the next check's
+                # result. _maybe_auto_check_updates may already be in
+                # flight from launch; this either piggybacks on it
+                # (via the in-flight guard in _check_for_updates) or
+                # starts a fresh check.
+                panel._install_after_next_check = True
+                panel._check_for_updates(silent=True)
 
-        btn_view.clicked.connect(_on_view_update)
-        footer.addWidget(btn_view)
+        btn_update.clicked.connect(_on_update_now)
+        footer.addWidget(btn_update)
         layout.addLayout(footer)
 
         # Remember in-memory only (NOT persisted) so an hourly auto-check
