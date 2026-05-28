@@ -455,28 +455,38 @@ class ImageStatus(Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"  # resume: image was already done in a prior run slice
+    USER_SKIPPED = "user_skipped"  # user unchecked this row before the run
 
 
 # Leading glyph rendered before each row's filename. PENDING keeps no
 # prefix so the resting state of the list looks identical to the
 # pre-status-indicator behavior.
+#
+# USER_SKIPPED uses ⊘ (U+2298 CIRCLED DIVISION SLASH) — distinct from
+# resume SKIPPED's ↷ so the log/visual review can tell "user opted
+# out" from "previously completed". Different cause, different
+# reversibility (user can re-tick; resume can't).
 _STATUS_GLYPH: dict[ImageStatus, str] = {
     ImageStatus.PENDING: "",
     ImageStatus.IN_PROGRESS: "→ ",
     ImageStatus.SUCCEEDED: "✓ ",
     ImageStatus.FAILED: "✗ ",
     ImageStatus.SKIPPED: "↷ ",
+    ImageStatus.USER_SKIPPED: "⊘ ",
 }
 
 # Row foreground colors. PENDING + IN_PROGRESS pick palette tones that
 # read on both dark and light themes; SUCCEEDED/FAILED reuse the
 # existing green/red palette already used by the progress bar fills.
+# USER_SKIPPED is a warmer gray than the resume SKIPPED so the two
+# are visually distinguishable on the same screen.
 _STATUS_COLOR: dict[ImageStatus, QColor] = {
     ImageStatus.PENDING: QColor("#d0d0d0"),
     ImageStatus.IN_PROGRESS: QColor("#0d6efd"),
     ImageStatus.SUCCEEDED: QColor("#5cb85c"),
     ImageStatus.FAILED: QColor("#ff3333"),
     ImageStatus.SKIPPED: QColor("#808080"),
+    ImageStatus.USER_SKIPPED: QColor("#a08070"),
 }
 
 
@@ -544,6 +554,23 @@ class TraceWindow(QMainWindow):
         # this and appends a short one-liner after the filename when the
         # row is in the FAILED state.
         self._image_error_text: dict[str, str] = {}
+        # User-driven skip: basenames the user has explicitly unchecked
+        # in the Main-tab image list. Held separately from
+        # _resume_skip_set (which is derived from the run manifest and
+        # rebuilt on every input-folder change) — the two lifecycles
+        # are different. Both are merged into a single
+        # skip_image_basenames arg at worker launch time so the pipeline
+        # contract stays unchanged.
+        # Known limitation: keyed by basename, so in recursive scans
+        # marking foo.tif in one subdir skips foo.tif everywhere.
+        # Mirrors the existing _basename_to_row caveat.
+        self._user_skip_set: set[str] = set()
+        # Re-entrancy guard around QListWidgetItem.setCheckState — we
+        # programmatically toggle states during _refresh_image_list /
+        # _apply_skip / _disable_skip_checkboxes, and each setCheckState
+        # fires itemChanged. The slot would otherwise recurse-mutate the
+        # user-skip set while we're rebuilding it.
+        self._suppress_check_signal: bool = False
         self.config = PipelineConfig()
         self._show_vein_tissue = False
         self._include_unreliable_landmarks = False
@@ -882,6 +909,14 @@ class TraceWindow(QMainWindow):
         main_tab_layout.setContentsMargins(4, 4, 4, 4)
         main_tab_layout.addWidget(QLabel("Images:"))
         self.image_list = QListWidget()
+        # Per-row check state drives _user_skip_set. itemChanged fires
+        # whenever the user clicks a checkbox; _on_image_check_toggled
+        # short-circuits when _suppress_check_signal is True (which we
+        # set around programmatic refreshes). Context menu adds bulk
+        # Skip/Unskip ops on the current selection.
+        self.image_list.itemChanged.connect(self._on_image_check_toggled)
+        self.image_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.image_list.customContextMenuRequested.connect(self._on_image_list_context_menu)
         main_tab_layout.addWidget(self.image_list, stretch=1)
         main_tab_layout.addWidget(QLabel("Log:"))
         self.log_text = QTextEdit()
@@ -988,6 +1023,7 @@ class TraceWindow(QMainWindow):
             self._basename_to_row.clear()
             self._row_base_labels.clear()
             self._image_error_text.clear()
+            self._user_skip_set.clear()
             return
         folder = Path(folder_text)
         try:
@@ -1003,23 +1039,193 @@ class TraceWindow(QMainWindow):
             # Documents, Downloads, iCloud) — don't let that abort startup.
             self._image_paths = []
             self.statusBar().showMessage(f"Cannot read folder: {exc}")
-        self.image_list.clear()
-        self._image_status.clear()
-        self._basename_to_row.clear()
-        self._row_base_labels.clear()
-        self._image_error_text.clear()
-        for idx, p in enumerate(self._image_paths):
-            # Show path relative to the input folder when recursing so subfolder
-            # context is visible; otherwise just the name.
-            label = str(p.relative_to(folder)) if recursive else p.name
-            self.image_list.addItem(label)
-            self._row_base_labels.append(label)
-            # Index by basename — that's what TraceWorker's image_* signals
-            # carry. Known limitation: same-basename collisions across
-            # different subdirs on a recursive scan land on the same row;
-            # avoid by structuring inputs to keep basenames unique.
-            self._basename_to_row[p.name] = idx
+        # Pull this folder's saved user-skip set BEFORE the population
+        # loop so each new row gets the correct initial checkState.
+        self._restore_user_skip_set()
+        # Programmatic setCheckState below would otherwise re-enter
+        # _on_image_check_toggled and double-mutate _user_skip_set.
+        self._suppress_check_signal = True
+        try:
+            self.image_list.clear()
+            self._image_status.clear()
+            self._basename_to_row.clear()
+            self._row_base_labels.clear()
+            self._image_error_text.clear()
+            for idx, p in enumerate(self._image_paths):
+                # Show path relative to the input folder when recursing so subfolder
+                # context is visible; otherwise just the name.
+                label = str(p.relative_to(folder)) if recursive else p.name
+                self.image_list.addItem(label)
+                self._row_base_labels.append(label)
+                # Index by basename — that's what TraceWorker's image_* signals
+                # carry. Known limitation: same-basename collisions across
+                # different subdirs on a recursive scan land on the same row;
+                # avoid by structuring inputs to keep basenames unique.
+                self._basename_to_row[p.name] = idx
+                # Checked = include in run; unchecked = skip. Reads more
+                # naturally than the inverse (a ticked box is the thing
+                # the user wants to process).
+                item = self.image_list.item(idx)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked if p.name in self._user_skip_set else Qt.Checked)
+                # Paint the user-skip glyph for any pre-populated skips
+                # so a freshly-restored folder shows ⊘ rows immediately.
+                if p.name in self._user_skip_set:
+                    self._update_image_status(p.name, ImageStatus.USER_SKIPPED)
+        finally:
+            self._suppress_check_signal = False
         self.statusBar().showMessage(f"Found {len(self._image_paths)} images")
+
+    # -----------------------------------------------------------------------
+    # User-driven skip (per-row checkbox + context menu)
+    # -----------------------------------------------------------------------
+    _TERMINAL_OR_LIVE_STATUSES = (
+        ImageStatus.SUCCEEDED,
+        ImageStatus.FAILED,
+        ImageStatus.IN_PROGRESS,
+    )
+
+    def _on_image_check_toggled(self, item) -> None:
+        """Single-row checkbox toggle → update _user_skip_set + glyph.
+
+        Programmatic setCheckState calls during refresh / bulk-apply set
+        ``self._suppress_check_signal`` so they don't recurse through
+        here. The terminal-status guard keeps a user untick from
+        downgrading a row that already finished a run.
+        """
+        if self._suppress_check_signal:
+            return
+        row = self.image_list.row(item)
+        if not 0 <= row < len(self._image_paths):
+            return
+        basename = self._image_paths[row].name
+        if item.checkState() == Qt.Unchecked:
+            self._user_skip_set.add(basename)
+            if self._image_status.get(basename) not in self._TERMINAL_OR_LIVE_STATUSES:
+                self._update_image_status(basename, ImageStatus.USER_SKIPPED)
+        else:
+            self._user_skip_set.discard(basename)
+            if self._image_status.get(basename) == ImageStatus.USER_SKIPPED:
+                self._update_image_status(basename, ImageStatus.PENDING)
+        self._persist_user_skip_set()
+
+    def _on_image_list_context_menu(self, pos) -> None:
+        """Right-click menu for bulk Skip / Unskip on the current selection.
+
+        ``Skip selected`` / ``Unskip selected`` operate on currently
+        selected rows (use Ctrl/Shift-click to multi-select first).
+        ``Skip all`` / ``Unskip all`` cover the whole list.
+        """
+        from PyQt5.QtWidgets import QMenu
+
+        menu = QMenu(self.image_list)
+        act_skip = menu.addAction("Skip selected")
+        act_unskip = menu.addAction("Unskip selected")
+        menu.addSeparator()
+        act_skip_all = menu.addAction("Skip all")
+        act_unskip_all = menu.addAction("Unskip all")
+        chosen = menu.exec_(self.image_list.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_skip:
+            self._apply_skip([self.image_list.row(i) for i in self.image_list.selectedItems()], skip=True)
+        elif chosen is act_unskip:
+            self._apply_skip([self.image_list.row(i) for i in self.image_list.selectedItems()], skip=False)
+        elif chosen is act_skip_all:
+            self._apply_skip(range(self.image_list.count()), skip=True)
+        elif chosen is act_unskip_all:
+            self._apply_skip(range(self.image_list.count()), skip=False)
+
+    def _apply_skip(self, rows, *, skip: bool) -> None:
+        """Toggle multiple rows at once + persist + repaint glyphs."""
+        self._suppress_check_signal = True
+        try:
+            for row in rows:
+                item = self.image_list.item(row)
+                if item is None or not 0 <= row < len(self._image_paths):
+                    continue
+                item.setCheckState(Qt.Unchecked if skip else Qt.Checked)
+                basename = self._image_paths[row].name
+                if skip:
+                    self._user_skip_set.add(basename)
+                    if self._image_status.get(basename) not in self._TERMINAL_OR_LIVE_STATUSES:
+                        self._update_image_status(basename, ImageStatus.USER_SKIPPED)
+                else:
+                    self._user_skip_set.discard(basename)
+                    if self._image_status.get(basename) == ImageStatus.USER_SKIPPED:
+                        self._update_image_status(basename, ImageStatus.PENDING)
+        finally:
+            self._suppress_check_signal = False
+        self._persist_user_skip_set()
+
+    def _set_skip_checkboxes_enabled(self, enabled: bool) -> None:
+        """Lock/unlock the per-row check toggles for the duration of a run.
+
+        The worker captures the skip set at launch; mid-run toggles
+        would be confusing because they'd silently no-op until the
+        next run. Locking the checkboxes during a run makes the
+        affordance honest.
+        """
+        self._suppress_check_signal = True
+        try:
+            for i in range(self.image_list.count()):
+                item = self.image_list.item(i)
+                if item is None:
+                    continue
+                flags = item.flags()
+                if enabled:
+                    item.setFlags(flags | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                else:
+                    item.setFlags(flags & ~Qt.ItemIsEnabled)
+        finally:
+            self._suppress_check_signal = False
+
+    def _user_skip_qsettings_key(self) -> Optional[str]:
+        """QSettings key for the current input folder's user-skip set.
+
+        Hashes the folder path so the key is bounded and registry/plist
+        safe regardless of path length or characters. Returns None when
+        no folder is selected — callers treat that as no-op.
+        """
+        folder = self.input_edit.text().strip()
+        if not folder:
+            return None
+        import hashlib
+
+        h = hashlib.sha1(folder.encode("utf-8")).hexdigest()[:16]
+        return f"user_skip/{h}"
+
+    def _persist_user_skip_set(self) -> None:
+        """Write the current set to QSettings under the per-folder key."""
+        key = self._user_skip_qsettings_key()
+        if key is None:
+            return
+        import json
+
+        self.settings.setValue(key, json.dumps(sorted(self._user_skip_set)))
+
+    def _restore_user_skip_set(self) -> None:
+        """Populate _user_skip_set from QSettings for the current folder.
+
+        Called at the top of _refresh_image_list so the per-row
+        checkState during the population loop already reflects the
+        saved marks. Corruption / missing keys reset to empty.
+        """
+        self._user_skip_set.clear()
+        key = self._user_skip_qsettings_key()
+        if key is None:
+            return
+        raw = self.settings.value(key, "", type=str)
+        if not raw:
+            return
+        import json
+
+        try:
+            names = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if isinstance(names, list):
+            self._user_skip_set.update(str(n) for n in names)
 
     def _revert_in_progress_to_pending(self) -> None:
         """Roll back any rows still showing IN_PROGRESS to PENDING.
@@ -1472,6 +1678,10 @@ class TraceWindow(QMainWindow):
         self._basename_to_row.clear()
         self._row_base_labels.clear()
         self._image_error_text.clear()
+        # User-skip set lives in QSettings under user_skip/<sha1>; the
+        # settings.clear() at the top of this method already drops every
+        # such key. Wipe the in-memory mirror to match.
+        self._user_skip_set.clear()
 
         # Snap every widget back. blockSignals where the slot would re-fire a
         # warning or write back to a no-longer-stale value.
@@ -1738,6 +1948,22 @@ class TraceWindow(QMainWindow):
             )
             return
 
+        # All-skipped guard: if every image is on a skip list (user
+        # untick + resume cache combined), the pipeline would run a
+        # no-op. Surface that intent before launching the worker so
+        # the user doesn't watch an empty progress bar.
+        if self._image_paths:
+            effective_skips = (self._resume_skip_set or set()) | self._user_skip_set
+            if all(p.name in effective_skips for p in self._image_paths):
+                QMessageBox.warning(
+                    self,
+                    "All images skipped",
+                    "Every image in the input folder is either marked to skip or already "
+                    "completed in a prior run — there's nothing to process. Uncheck at "
+                    "least one row (or right-click the list → Unskip all) and try again.",
+                )
+                return
+
         # Warn on JPEG inputs (lossy compression)
         jpg_images = [p for p in self._image_paths if p.suffix.lower() in (".jpg", ".jpeg")]
         if jpg_images:
@@ -1875,11 +2101,21 @@ class TraceWindow(QMainWindow):
         # session's run-finish path cleared self._image_status indirectly
         # via _refresh_image_list), so the SKIPPED initialization paints
         # those rows correctly from a blank starting state.
+        # Precedence: SUCCEEDED/FAILED keep their final color (no reset);
+        # USER_SKIPPED > resume SKIPPED > PENDING for everything else.
+        # User-skips outrank resume-skips because they're explicit user
+        # intent for this run, not just a leftover marker from a prior
+        # session — the difference matters for the post-run review.
         for basename in list(self._basename_to_row):
             current = self._image_status.get(basename)
             if current in (ImageStatus.SUCCEEDED, ImageStatus.FAILED):
                 continue
-            initial = ImageStatus.SKIPPED if basename in self._resume_skip_set else ImageStatus.PENDING
+            if basename in self._user_skip_set:
+                initial = ImageStatus.USER_SKIPPED
+            elif basename in self._resume_skip_set:
+                initial = ImageStatus.SKIPPED
+            else:
+                initial = ImageStatus.PENDING
             self._update_image_status(basename, initial)
 
         # wing_model_dir was resolved above as part of the OOD preflight.
@@ -1923,7 +2159,11 @@ class TraceWindow(QMainWindow):
                 target_um_per_px=target_um_per_px,
                 rescale_tolerance_low=self._rescale_tolerance_low,
                 rescale_tolerance_high=self._rescale_tolerance_high,
-                skip_image_basenames=self._resume_skip_set,
+                # Merge user-driven skips with resume-skip basenames so the
+                # pipeline sees a single union. _resume_skip_set stays
+                # untouched — its lifecycle is tied to the manifest, not
+                # to user UI state.
+                skip_image_basenames=(self._resume_skip_set or set()) | self._user_skip_set,
             )
         )
         self.worker.progress.connect(self._on_progress)
@@ -1935,6 +2175,11 @@ class TraceWindow(QMainWindow):
         self.worker.image_failed_preproc.connect(self._on_image_failed_preproc)
         self.worker.image_failed_analysis.connect(self._on_image_failed_analysis)
         self.worker.error.connect(self._on_error)
+        # Lock per-row check toggles for the duration of the run — the
+        # worker captured the skip set above, so mid-run toggles would
+        # silently no-op until the next run. _on_all_done / _on_paused /
+        # _on_cancelled / _on_error each re-enable.
+        self._set_skip_checkboxes_enabled(False)
         # Initialize the manifest now (after a possible resume merge), so
         # the first image completion already has somewhere to write.
         out_dir = Path(self.output_edit.text())
@@ -2163,6 +2408,8 @@ class TraceWindow(QMainWindow):
         self.eta_label.setText("")
         self._progress_timer.stop()
         self._cancel_requested = False
+        # Un-lock the per-row check toggles now that the run's done.
+        self._set_skip_checkboxes_enabled(True)
 
     def _on_cancelled(self, _results) -> None:
         """Worker exited via TraceWorker.cancelled (user clicked Cancel
@@ -2271,6 +2518,10 @@ class TraceWindow(QMainWindow):
         # the run from the paused state (no worker is running, but the
         # manifest still claims the run is in-progress).
         self.btn_cancel.setEnabled(True)
+        # Un-lock the per-row check toggles while paused — Resume picks
+        # up the merged skip set fresh, so the user can adjust skips
+        # between slices.
+        self._set_skip_checkboxes_enabled(True)
 
     def _resume_paused_run(self) -> None:
         """User clicked Resume after pausing in-session — re-launch the worker
@@ -2833,6 +3084,8 @@ class TraceWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         self._is_paused = False
         self._progress_timer.stop()
+        # Run is over — un-lock the per-row check toggles.
+        self._set_skip_checkboxes_enabled(True)
         # Any image still marked IN_PROGRESS after the worker exits — e.g.
         # the slice ended early via cancel — gets rolled back so the
         # resting state of the list is honest.
@@ -2913,6 +3166,8 @@ class TraceWindow(QMainWindow):
         self.transient_status_label.hide()
         self._progress_timer.stop()
         self.eta_label.setText("")
+        # Un-lock the per-row check toggles after a fatal error too.
+        self._set_skip_checkboxes_enabled(True)
         self._log(f"\nFatal error: {msg}")
         # Write the run-metadata folder even on fatal error so the
         # settings + log capture is preserved for debugging.
