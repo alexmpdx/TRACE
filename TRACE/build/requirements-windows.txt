@@ -17,12 +17,37 @@ torch==2.4.1
 torchvision==0.19.1
 
 # --- Core scientific stack -------------------------------------------------
-numpy
+# numpy / shapely / onnxruntime are pinned as a coupled group because
+# they're the only deps that have a hard numpy-1.x vs numpy-2.x ABI
+# split. The CI build of v0.1.52 (onnxruntime==1.17.3 + unpinned numpy)
+# failed loudly with
+#     A module that was compiled using NumPy 1.x cannot be run in
+#     NumPy 2.4.6 as it may crash.
+#     AttributeError: _ARRAY_API not found
+# at `import onnxruntime` — exactly the same numpy ABI mismatch that
+# manifested at runtime in v0.1.50 as Windows error 1114
+# (ERROR_DLL_INIT_FAILED) inside the frozen bundle. Build-time vs
+# runtime symptoms differ but the root cause is the same.
+#
+# Resolution: align the whole stack on numpy 1.x.
+#   - onnxruntime 1.17.3: last version with a clean PyInstaller bundle
+#     AND built against numpy 1.x. Newer wheels (≥1.19) declare numpy
+#     2 support but trip a different DLL-init issue in PyInstaller's
+#     onedir layout (see prior commits chasing 1114).
+#   - shapely <2.1: the 2.1 line dropped numpy 1.x wheels — its
+#     compiled extension does `from numpy._core import umath` which
+#     only exists in numpy 2.x. The 2.0.x line still ships numpy-1.x-
+#     compatible wheels. v0.1.51 forgot this and produced an installer
+#     that couldn't even open TRACE.
+#   - numpy 1.26.x is the last 1.x release.
+numpy>=1.26,<2
 scipy
 pandas
 scikit-image
 scikit-learn
-shapely
+# See the numpy comment above for why shapely is capped to the 2.0 line:
+# shapely 2.1+ ships numpy-2.x-only wheels.
+shapely>=2.0,<2.1
 networkx
 geojson
 matplotlib
