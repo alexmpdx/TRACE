@@ -305,21 +305,120 @@ def _probe_torch_environment() -> None:
                     log(f"probe: {runtime} -> NOT bundled AND system load FAILED: {e}")
 
 
-def _probe_onnxruntime_environment() -> None:
-    """Eagerly import onnxruntime BEFORE torch so it claims OpenMP first.
+def _add_bundle_dll_dirs() -> None:
+    """Add the PyInstaller bundle's native-DLL homes to Windows' search path.
 
-    Both libraries link against OpenMP — torch via Intel libiomp5md.dll,
-    onnxruntime via Microsoft vcomp140.dll. Whichever loads first
-    initializes the OpenMP runtime; on some Windows configurations
-    (notably PyInstaller-frozen builds shipping both stacks in the same
-    process), the second-loaded OpenMP init returns FALSE from DllMain
-    and surfaces as "DLL initialization routine failed" — exactly the
-    wing-isolation failure mode we're guarding against.
-    KMP_DUPLICATE_LIB_OK=TRUE (set at module top) covers most cases on
-    its own; importing onnxruntime first is belt-and-suspenders, and
-    also lets us log a clear "ort import failed" trail in
-    trace_startup.log when something deeper is wrong.
+    PyInstaller 6.x onedir puts every native dependency under
+    ``_internal/`` (and sub-directories like ``_internal/torch/lib`` and
+    ``_internal/onnxruntime/capi``), then exposes them to Python via
+    ``sys.path`` for module imports. But Windows' DLL loader doesn't
+    consult ``sys.path`` — it consults the directory of the binary
+    being loaded, the directory of the executable, System32, and any
+    directories explicitly registered via ``AddDllDirectory``. So a
+    ``.pyd`` file whose static-import table lists ``vcomp140.dll`` will
+    fail to load with "DLL initialization routine failed" even when
+    ``vcomp140.dll`` is sitting right there in ``_internal/`` — the
+    loader can't see it.
+
+    ``os.add_dll_directory`` (Python 3.8+, Windows-only) is the
+    documented escape hatch: it tells the loader to also search the
+    given directory when resolving implicit imports of subsequently-
+    loaded extensions. Call it for the bundle root and the known
+    native-lib subdirs BEFORE any heavy C extension import, so the
+    paths are registered before the loader caches its first miss.
     """
+    if not getattr(sys, "frozen", False):
+        return
+    if not hasattr(os, "add_dll_directory"):
+        return  # not on Windows / not on Python 3.8+
+    _internal = Path(sys.executable).resolve().parent / "_internal"
+    if not _internal.is_dir():
+        return
+    candidates = [
+        _internal,
+        _internal / "onnxruntime" / "capi",
+        _internal / "torch" / "lib",
+    ]
+    for path in candidates:
+        if not path.is_dir():
+            continue
+        try:
+            os.add_dll_directory(str(path))
+            log(f"probe: add_dll_directory({path}) OK")
+        except Exception as exc:  # noqa: BLE001
+            log(f"probe: add_dll_directory({path}) FAILED: {exc}")
+
+
+def _probe_onnxruntime_direct_load() -> None:
+    """Try LoadLibraryExW on onnxruntime_pybind11_state.pyd directly.
+
+    Mirrors the c10.dll probe — bypasses ctypes.WinDLL (which PyInstaller
+    wraps) so we get the raw Windows GetLastError code. The error code
+    + FormatMessage text tell us which dependency the .pyd couldn't
+    resolve, much more usefully than the generic "DLL initialization
+    routine failed" that the Python import path surfaces.
+    """
+    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        capi_dir = Path(sys.executable).resolve().parent / "_internal" / "onnxruntime" / "capi"
+        pyd = capi_dir / "onnxruntime_pybind11_state.pyd"
+        if not pyd.is_file():
+            log(f"probe: onnxruntime .pyd not found at {pyd}")
+            return
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.LoadLibraryExW.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
+        kernel32.LoadLibraryExW.restype = wintypes.HMODULE
+        kernel32.GetLastError.restype = wintypes.DWORD
+        # LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = 0x1000. Honors anything
+        # already added via os.add_dll_directory above.
+        h = kernel32.LoadLibraryExW(str(pyd), None, 0x1000)
+        if h:
+            log(f"probe: onnxruntime .pyd LoadLibraryExW OK (handle={h:#x})")
+            return
+        err = kernel32.GetLastError()
+        # FormatMessageW for human-readable text
+        kernel32.FormatMessageW.argtypes = [
+            wintypes.DWORD, wintypes.LPCVOID, wintypes.DWORD,
+            wintypes.DWORD, wintypes.LPWSTR, wintypes.DWORD, wintypes.LPVOID,
+        ]
+        buf = ctypes.create_unicode_buffer(1024)
+        kernel32.FormatMessageW(0x1300, None, err, 0, buf, 1024, None)
+        log(f"probe: onnxruntime .pyd LoadLibraryExW FAILED")
+        log(f"    GetLastError = {err} (0x{err:x})")
+        log(f"    message      = {buf.value.strip()!r}")
+        if err == 1114:
+            log("    -> ERROR_DLL_INIT_FAILED: a transitive DLL's DllMain returned FALSE.")
+        elif err == 126:
+            log("    -> ERROR_MOD_NOT_FOUND: a dependency DLL is missing from the search path.")
+        elif err == 127:
+            log("    -> ERROR_PROC_NOT_FOUND: a dependency exports a symbol mismatch.")
+        elif err == 193:
+            log("    -> ERROR_BAD_EXE_FORMAT: 32/64-bit architecture mismatch.")
+    except Exception as exc:  # noqa: BLE001
+        log(f"probe: onnxruntime direct-load probe failed: {exc}")
+
+
+def _probe_onnxruntime_environment() -> None:
+    """Register bundle DLL dirs, then try importing onnxruntime.
+
+    Eagerly imports onnxruntime BEFORE torch so any OpenMP-runtime claim
+    happens in a known order. KMP_DUPLICATE_LIB_OK=TRUE (set at module
+    top) is the secondary defense.
+
+    The key fix for the wing-isolation "DLL load failed" surfaced in
+    v0.1.49: ``_add_bundle_dll_dirs()`` registers ``_internal/`` and its
+    native-lib subdirs with Windows' DLL loader. Without that, the
+    .pyd's static imports of ``vcomp140.dll`` / ``libiomp5md.dll`` can't
+    find the bundled copies (they're not next to the .pyd or next to
+    TRACE.exe — they're in ``_internal/``, which the loader doesn't
+    search by default).
+    """
+    _add_bundle_dll_dirs()
+    _probe_onnxruntime_direct_load()
     log("probe: importing onnxruntime (before torch)")
     try:
         import onnxruntime as _ort
