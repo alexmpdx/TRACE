@@ -136,31 +136,36 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
     # without the user having to recreate it.
     ico_path = cache_dir / "TRACE_app_icon.ico"
 
-    # Render the SVG at every Windows shell size so all explorer / Alt-Tab
-    # / taskbar / file-properties contexts get a crisp pixel-aligned copy
-    # rather than a single scaled bitmap.
-    sizes = [16, 24, 32, 48, 64, 128, 256]
-    pil_images = []
+    # Render the SVG into a single 256×256 RGBA bitmap and let Pillow
+    # build the multi-size ICO from that one source. The earlier
+    # approach (render at each size + append_images) produced a tiny
+    # ~546-byte ICO with garbled pixel data — the combination of
+    # ``sizes`` + ``append_images`` in PIL's ICO writer is ambiguous
+    # across versions and the resulting file was a malformed image
+    # that Windows rendered as colored noise.
+    LARGEST = 256
+    pixmap = QPixmap(LARGEST, LARGEST)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.WriteOnly)
+    if not pixmap.save(buf, "PNG"):
+        return None
+    buf.close()
+
     try:
-        for size in sizes:
-            pixmap = QPixmap(size, size)
-            pixmap.fill(Qt.transparent)
-            painter = QPainter(pixmap)
-            renderer.render(painter)
-            painter.end()
-            ba = QByteArray()
-            buf = QBuffer(ba)
-            buf.open(QIODevice.WriteOnly)
-            pixmap.save(buf, "PNG")
-            buf.close()
-            img = Image.open(io.BytesIO(bytes(ba)))
-            img.load()
-            pil_images.append(img.convert("RGBA"))
-        pil_images[0].save(
+        img = Image.open(io.BytesIO(bytes(ba))).convert("RGBA")
+        # Pillow downsamples the 256 source for each listed size and
+        # embeds the lot as a multi-image ICO. Standard Windows shell
+        # sizes are 16 / 24 / 32 / 48 / 64 / 128 / 256.
+        img.save(
             str(ico_path),
             format="ICO",
-            sizes=[(s, s) for s in sizes],
-            append_images=pil_images[1:],
+            sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
         )
     except Exception:
         return None
