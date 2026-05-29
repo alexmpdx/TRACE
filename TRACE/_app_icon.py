@@ -19,9 +19,11 @@ Two reasons this is its own module instead of inline in gui.py / run_gui.py:
    sidesteps that plugin entirely; we get a valid icon every time.
 
 The OS-theme detection picks the white-circle LogoThick_dark.svg for
-dark-mode Windows and the black-circle LogoThick_light.svg otherwise —
-the chrome behind the icon (title bar, taskbar, alt-tab) is rendered by
-the OS, not Qt, so it follows the OS theme regardless of our palette.
+dark-mode and the black-circle LogoThick_light.svg for light mode —
+the chrome behind the icon (title bar, taskbar, alt-tab) is rendered
+by the OS, not Qt, so it follows the OS theme regardless of our
+palette. macOS, Windows, and Linux are handled via TRACE.theme's
+shared os_is_dark() detector.
 """
 
 from __future__ import annotations
@@ -31,29 +33,19 @@ from pathlib import Path
 from typing import Optional
 
 
-def _is_os_dark_mode() -> bool:
-    """True when Windows is set to apps-use-dark-theme. False otherwise."""
-    if sys.platform == "win32":
-        try:
-            import winreg
-
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            ) as key:
-                return int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0]) == 0
-        except Exception:
-            return False
-    return False
-
-
 def app_logo_path() -> Path:
     """Resolve the OS-theme-appropriate logo SVG path (frozen + dev safe)."""
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         base = Path(sys._MEIPASS) / "TRACE" / "GUI_images"
     else:
         base = Path(__file__).resolve().parent / "GUI_images"
-    variant = "LogoThick_dark.svg" if _is_os_dark_mode() else "LogoThick_light.svg"
+    # Defer to the shared cross-platform detector — it's authoritative
+    # on macOS / Windows and falls back to None on Linux (we treat None
+    # as light, matching the previous behavior on Windows when the
+    # registry read failed).
+    from TRACE.theme import os_is_dark
+
+    variant = "LogoThick_dark.svg" if os_is_dark() is True else "LogoThick_light.svg"
     return base / "logo" / variant
 
 

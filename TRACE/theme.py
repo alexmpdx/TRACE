@@ -303,33 +303,80 @@ def current_theme() -> Theme:
     return manager().active
 
 
-def _detect_system_theme() -> Theme:
-    """Best-effort system color-scheme detection.
+def os_is_dark() -> Optional[bool]:
+    """Detect whether the operating system is in dark mode.
 
-    Qt 6.5+ exposes ``QStyleHints.colorScheme()``; we probe it first.
-    Otherwise fall back to inspecting the default QPalette's window
-    color: if its luminance is below 0.5 we treat the system as dark.
+    Returns True/False on macOS and Windows where the answer is
+    authoritative (native system query, not a Qt palette inference).
+    Returns None on Linux and unknown platforms — the caller should
+    fall back to a heuristic / default.
 
-    Worst case (no QApplication yet, no style hints, palette uninit):
-    return DARK_THEME — TRACE has always shipped dark, and that's the
-    documented default. The user can switch from Settings either way.
+    The PyQt5 (Qt 5.x) palette heuristic in _detect_system_theme()
+    used to be the only path, but it's unreliable: on macOS, Qt 5
+    only adopts the dark Aqua palette when the app's Info.plist
+    declares NSRequiresAquaSystemAppearance=NO, which PyInstaller's
+    default plist doesn't. So a user on macOS dark mode running an
+    unmodified Qt 5 app sees a light palette and the heuristic
+    returns False → LIGHT_THEME, which is wrong.
+
+    Native queries sidestep that: macOS via ``defaults read -g
+    AppleInterfaceStyle`` (the same key the OS uses internally), and
+    Windows via HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\
+    Themes\\Personalize\\AppsUseLightTheme.
     """
+    import sys as _sys
+
+    if _sys.platform == "darwin":
+        try:
+            import subprocess
+
+            r = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            # The key only exists when dark mode is on. Returncode 0 +
+            # stdout "Dark" means dark; non-zero (key missing) means
+            # light. Any other unexpected output falls through to None.
+            if r.returncode == 0:
+                return r.stdout.strip().lower() == "dark"
+            return False  # key missing = light mode
+        except Exception:
+            return None
+    if _sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as key:
+                return int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0]) == 0
+        except Exception:
+            return None
+    return None
+
+
+def _detect_system_theme() -> Theme:
+    """Resolve SYSTEM preference to a concrete Theme.
+
+    Tries ``os_is_dark()`` first (native macOS / Windows query). Falls
+    back to a Qt palette luminance heuristic on Linux / unknown
+    platforms. Last resort: DARK_THEME, matching what TRACE has shipped
+    since before the theme module existed.
+    """
+    is_dark = os_is_dark()
+    if is_dark is True:
+        return DARK_THEME
+    if is_dark is False:
+        return LIGHT_THEME
+    # is_dark is None → unknown platform, try the Qt palette heuristic.
     try:
-        from PyQt5.QtCore import Qt
         from PyQt5.QtGui import QGuiApplication
 
         gapp = QGuiApplication.instance()
         if gapp is not None:
-            hints = gapp.styleHints()
-            color_scheme = getattr(hints, "colorScheme", None)
-            if callable(color_scheme):
-                scheme = color_scheme()
-                # Qt.ColorScheme.Light = 1, Dark = 2, Unknown = 0
-                if int(scheme) == 1:
-                    return LIGHT_THEME
-                if int(scheme) == 2:
-                    return DARK_THEME
-            # Fall through to palette heuristic when scheme is Unknown.
             palette = gapp.palette()
             bg = palette.color(palette.Window)
             r, g, b, _ = bg.getRgb()
@@ -337,7 +384,5 @@ def _detect_system_theme() -> Theme:
             luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
             return LIGHT_THEME if luminance >= 0.5 else DARK_THEME
     except Exception:
-        # Any import / probe failure — bail to dark since that's what
-        # TRACE shipped before the theme module existed.
         pass
     return DARK_THEME
