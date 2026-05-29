@@ -29,24 +29,58 @@ shared os_is_dark() detector.
 from __future__ import annotations
 
 import sys
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 
+class IconPreference(str, Enum):
+    """User-facing preference for the app icon variant.
+
+    Stored in QSettings under ``app_icon/preference``. SYSTEM resolves
+    via ``TRACE.theme.os_is_dark`` (same detector the theme uses) so
+    by default the icon follows the OS color scheme. LIGHT and DARK
+    are explicit overrides — useful for users whose OS chrome theme
+    doesn't match what they want behind the TRACE icon.
+    """
+
+    SYSTEM = "system"
+    LIGHT = "light"
+    DARK = "dark"
+
+
+def _read_preference() -> IconPreference:
+    """Read the saved icon preference from QSettings (defaults to SYSTEM)."""
+    from PyQt5.QtCore import QSettings
+
+    raw = str(QSettings("TRACE", "WingAnalysisPipeline").value("app_icon/preference", IconPreference.SYSTEM.value) or "")
+    try:
+        return IconPreference(raw)
+    except ValueError:
+        return IconPreference.SYSTEM
+
+
+def _resolve_variant(pref: IconPreference) -> str:
+    """Return the SVG filename for an IconPreference value."""
+    if pref is IconPreference.LIGHT:
+        return "LogoThick_light.svg"
+    if pref is IconPreference.DARK:
+        return "LogoThick_dark.svg"
+    # SYSTEM — defer to the shared cross-platform OS-theme detector.
+    # Authoritative on macOS / Windows, None on Linux (we treat None
+    # as light, matching the prior behavior).
+    from TRACE.theme import os_is_dark
+
+    return "LogoThick_dark.svg" if os_is_dark() is True else "LogoThick_light.svg"
+
+
 def app_logo_path() -> Path:
-    """Resolve the OS-theme-appropriate logo SVG path (frozen + dev safe)."""
+    """Resolve the logo SVG path for the active icon preference (frozen + dev safe)."""
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         base = Path(sys._MEIPASS) / "TRACE" / "GUI_images"
     else:
         base = Path(__file__).resolve().parent / "GUI_images"
-    # Defer to the shared cross-platform detector — it's authoritative
-    # on macOS / Windows and falls back to None on Linux (we treat None
-    # as light, matching the previous behavior on Windows when the
-    # registry read failed).
-    from TRACE.theme import os_is_dark
-
-    variant = "LogoThick_dark.svg" if os_is_dark() is True else "LogoThick_light.svg"
-    return base / "logo" / variant
+    return base / "logo" / _resolve_variant(_read_preference())
 
 
 def make_app_icon() -> Optional["object"]:

@@ -1698,6 +1698,52 @@ class InlineHelpPanel(QWidget):
         theme_row.addStretch(1)
         layout.addLayout(theme_row)
 
+        # App icon picker. Independent of the UI theme so a user on a
+        # dark OS can still get a light TRACE icon if they prefer (e.g.
+        # against a dark taskbar background that already provides
+        # contrast against light icons).
+        from TRACE._app_icon import IconPreference
+
+        icon_row = QHBoxLayout()
+        icon_row.setContentsMargins(0, 0, 0, 0)
+        icon_row.addWidget(QLabel("App icon:"))
+        self._icon_combo = QComboBox()
+        self._icon_combo.addItem("Follow system", IconPreference.SYSTEM.value)
+        self._icon_combo.addItem("Light", IconPreference.LIGHT.value)
+        self._icon_combo.addItem("Dark", IconPreference.DARK.value)
+        self._icon_combo.setToolTip(
+            "Choose the TRACE app-icon color. System uses a dark-friendly icon "
+            "when your OS is in dark mode and a light-friendly one otherwise. "
+            "Light and Dark let you override the OS pick."
+        )
+        # Seed the combo with the saved preference.
+        saved_pref = self._window.settings.value("app_icon/preference", IconPreference.SYSTEM.value, type=str)
+        for idx in range(self._icon_combo.count()):
+            if self._icon_combo.itemData(idx) == saved_pref:
+                self._icon_combo.setCurrentIndex(idx)
+                break
+        self._icon_combo.currentIndexChanged.connect(self._on_icon_pref_changed)
+        icon_row.addWidget(self._icon_combo)
+        icon_row.addStretch(1)
+        layout.addLayout(icon_row)
+
+        # Desktop shortcut — Windows-only (uses pywin32's WScript Shell
+        # COM to create a .lnk). Hidden on macOS / Linux / dev-mode so
+        # we don't promise something we can't deliver.
+        if sys.platform == "win32" and getattr(sys, "frozen", False):
+            shortcut_row = QHBoxLayout()
+            shortcut_row.setContentsMargins(0, 0, 0, 0)
+            self.btn_desktop_shortcut = QPushButton("Add desktop shortcut")
+            self.btn_desktop_shortcut.setToolTip(
+                "Create a TRACE shortcut on your Windows Desktop pointing at the "
+                "installed TRACE.exe. Useful if you didn't tick the Desktop-shortcut "
+                "option during install or want to put it back after deleting it."
+            )
+            self.btn_desktop_shortcut.clicked.connect(self._create_desktop_shortcut)
+            shortcut_row.addWidget(self.btn_desktop_shortcut)
+            shortcut_row.addStretch(1)
+            layout.addLayout(shortcut_row)
+
         # Update section — current installed version + button that opens the
         # GitHub Releases page so the user can grab the latest installer.
         # Installing over an existing TRACE upgrades it in place (Inno Setup
@@ -1924,6 +1970,90 @@ class InlineHelpPanel(QWidget):
         except ValueError:
             return
         _theme_manager().set_preference(pref)
+
+    def _on_icon_pref_changed(self, _idx: int) -> None:
+        """Persist + immediately re-apply the new app-icon variant.
+
+        Re-applies on:
+          - QApplication (window-list / Alt-Tab / Dock icon on macOS)
+          - the main TRACE window (window title-bar icon)
+        Per-window icons survive any later QApplication.setWindowIcon
+        override (notably the one napari fires when LandmarkPickerWidget
+        constructs its embedded viewer), so updating the main window is
+        what makes the visible change in most cases.
+        """
+        raw = self._icon_combo.currentData()
+        self._window.settings.setValue("app_icon/preference", str(raw))
+        from PyQt5.QtWidgets import QApplication
+
+        from TRACE._app_icon import make_app_icon
+
+        icon = make_app_icon()
+        if icon is None:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
+        self._window.setWindowIcon(icon)
+
+    def _create_desktop_shortcut(self) -> None:
+        """Create a Windows .lnk shortcut on the user's Desktop.
+
+        Only wired up on a frozen Windows build (button is hidden on
+        macOS / Linux / dev mode). Uses pywin32's WScript.Shell COM
+        adapter — already in the bundle's dependency tree — so no
+        extra runtime install is needed.
+        """
+        from PyQt5.QtCore import QStandardPaths
+        from PyQt5.QtWidgets import QMessageBox
+
+        if sys.platform != "win32" or not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "Desktop shortcut",
+                "Desktop-shortcut creation is currently supported only on the "
+                "Windows installer build of TRACE.",
+            )
+            return
+        target = Path(sys.executable)
+        if not target.is_file():
+            QMessageBox.warning(
+                self,
+                "Desktop shortcut",
+                f"Couldn't locate TRACE.exe at {target}. The shortcut wasn't created.",
+            )
+            return
+        desktop_str = QStandardPaths.writableLocation(QStandardPaths.DesktopLocation)
+        if not desktop_str:
+            QMessageBox.warning(
+                self,
+                "Desktop shortcut",
+                "Couldn't find your Desktop folder. The shortcut wasn't created.",
+            )
+            return
+        shortcut_path = Path(desktop_str) / "TRACE.lnk"
+        try:
+            # pywin32 is already a dependency (see requirements-windows.txt).
+            from win32com.client import Dispatch  # type: ignore[import-not-found]
+
+            shell = Dispatch("WScript.Shell")
+            sc = shell.CreateShortcut(str(shortcut_path))
+            sc.Targetpath = str(target)
+            sc.WorkingDirectory = str(target.parent)
+            sc.IconLocation = str(target)
+            sc.save()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "Desktop shortcut",
+                f"Could not create the shortcut: {type(exc).__name__}: {exc}",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Desktop shortcut",
+            f"Created: {shortcut_path}",
+        )
 
     def _open_releases_page(self) -> None:
         QDesktopServices_open = None
