@@ -1081,12 +1081,12 @@ def _draw_gate_overlay(
     h, w = vis.shape[:2]
     base = min(h, w)
     # Quadratic response matches draw_landmarks_on_image so the ring grows and
-    # shrinks in lockstep with the dot it's framing. Base divisor tuned to keep
-    # 100% clearly visible at fit-to-window display zoom.
+    # shrinks in lockstep with the dot it's framing. Base divisors mirror that
+    # function's so the gate ring stays a fixed proportion bigger than the dot.
     dot_scale = size_scale * size_scale
-    dot_radius = max(3, int(base / 250 * dot_scale))
-    ring_radius = dot_radius + max(2, int(base / 500 * dot_scale))
-    thick = max(2, int(round(base / 800.0 * dot_scale)))
+    dot_radius = max(5, int(base / 125 * dot_scale))
+    ring_radius = dot_radius + max(2, int(base / 250 * dot_scale))
+    thick = max(2, int(round(base / 400.0 * dot_scale)))
 
     color_ok = (0, 220, 0)
     color_fail = (0, 0, 255)

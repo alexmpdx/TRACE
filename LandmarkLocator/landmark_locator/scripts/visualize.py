@@ -137,14 +137,15 @@ def draw_landmarks_on_image(
     h, w = vis.shape[:2]
     # Dot size uses a quadratic response on size_scale so the slider produces
     # visible changes at display zoom — a linear scale on this small base reads
-    # as almost no change when the image is fit to the viewport. Base divisor
-    # tuned so 100% is clearly visible on typical wing images.
+    # as almost no change when the image is fit to the viewport. Base divisors
+    # tuned so 100% is clearly readable on typical wing images at fit-to-view
+    # zoom (smaller divisor = larger overlay).
     dot_scale = size_scale * size_scale
     if radius is None:
-        radius = max(3, int(min(h, w) / 250 * dot_scale))
+        radius = max(5, int(min(h, w) / 125 * dot_scale))
     ring_thick = max(1, radius // 4)
-    font_scale = max(0.25, (min(h, w) / 2200.0) * size_scale)
-    font_thick = max(1, int(round((min(h, w) / 1800.0) * size_scale)))
+    font_scale = max(0.45, (min(h, w) / 1100.0) * size_scale)
+    font_thick = max(1, int(round((min(h, w) / 900.0) * size_scale)))
 
     # Determine which landmarks to draw
     if landmark_order is None:
