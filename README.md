@@ -1,7 +1,7 @@
 # Bug attachment storage
 
 This orphan branch holds image attachments uploaded by TRACE's in-app
-"Report a bug" feature. PNGs land in `bug-attachments/<uuid>.png` and
+Report-a-bug feature. PNGs land in `bug-attachments/<uuid>.png` and
 are linked from the GitHub issue that triggered the upload.
 
 This branch is intentionally separate from `main` — it has no shared
