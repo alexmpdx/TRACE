@@ -1223,13 +1223,98 @@ class InlineCustomDistancesPanel(QWidget):
         _theme_manager().themeChanged.connect(self._apply_theme_styles)
 
     def _apply_theme_styles(self, *_args) -> None:
-        """Re-color the info / error labels for the active theme."""
+        """Re-color the info / error labels for the active theme.
+
+        Also reloads the cartoon wing variant when the picker is
+        currently displaying the cartoon (signalled by an empty
+        image_edit). The bundled wing_cartoon.png is white-on-
+        transparent — readable on dark backgrounds, near-invisible on
+        light. We invert pixel colors (alpha preserved) to a cached
+        ``wing_cartoon_inverted.png`` for light mode.
+        """
         t = _ct()
         if self._info_label is not None:
             self._info_label.setStyleSheet(f"color: {t.text_muted};")
         for err_label in (self._import_err_label, self._napari_err_label):
             if err_label is not None:
                 err_label.setStyleSheet(f"color: {t.error_text}; padding: 12px;")
+        self._reload_cartoon_if_displayed()
+
+    def _cartoon_image_for_theme(self) -> Path:
+        """Path to the cartoon-wing PNG variant matching the active theme.
+
+        Dark mode → the bundled white-line PNG. Light mode → an inverted
+        (black-line) variant generated on first use and cached to the
+        user's writable cache dir. Falls back to the bundled original on
+        any error (a black-on-light cartoon misses an inversion is uglier
+        than a white-on-light cartoon, but losing the cartoon entirely is
+        worse).
+        """
+        from TRACE.theme import current_theme
+
+        if current_theme().name == "dark":
+            return self._CARTOON_IMAGE
+        inverted = self._ensure_inverted_cartoon()
+        return inverted if inverted is not None else self._CARTOON_IMAGE
+
+    def _ensure_inverted_cartoon(self) -> Optional[Path]:
+        """Generate (once) or return the cached inverted cartoon PNG."""
+        from PyQt5.QtCore import QStandardPaths
+        from PyQt5.QtGui import QImage
+
+        cache_base = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+        cache_dir = Path(cache_base) if cache_base else Path.home() / ".cache" / "TRACE"
+        cache_dir = cache_dir / "asset_cache"
+        inverted_path = cache_dir / "wing_cartoon_inverted.png"
+        # Invalidate the cache if the source PNG is newer than the
+        # cached variant — handles the case where a new release ships
+        # a different cartoon image but the user still has an old cache.
+        if inverted_path.is_file():
+            try:
+                if inverted_path.stat().st_mtime >= self._CARTOON_IMAGE.stat().st_mtime:
+                    return inverted_path
+            except OSError:
+                return inverted_path
+        if not self._CARTOON_IMAGE.is_file():
+            return None
+        img = QImage(str(self._CARTOON_IMAGE))
+        if img.isNull():
+            return None
+        # InvertRgb flips R/G/B in place but leaves alpha untouched —
+        # exactly what we want for a white-stroke-on-transparent PNG.
+        img.invertPixels(QImage.InvertRgb)
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            if img.save(str(inverted_path), "PNG"):
+                return inverted_path
+        except OSError:
+            return None
+        return None
+
+    def _reload_cartoon_if_displayed(self) -> None:
+        """Re-load the cartoon at theme-switch IFF it's currently showing.
+
+        Signal: the picker's image_edit text is empty. This convention is
+        established by _restore_cartoon (which explicitly clears the
+        path fields before loading the cartoon) and by the auto-load
+        branches in _build_ui / _rebuild_picker_for_window (which load
+        the cartoon only when no saved user paths were provided).
+
+        Loading a user image via the picker UI populates image_edit
+        with the picked path, so an empty edit reliably means "we're
+        on the cartoon."
+        """
+        if self._picker is None:
+            return
+        try:
+            cur_text = self._picker._image_edit.text()
+        except Exception:
+            return
+        if cur_text:
+            return  # user image is loaded
+        if not self._CARTOON_IMAGE.is_file() or not self._CARTOON_LANDMARKS.is_file():
+            return
+        self._picker.load_into_viewer(self._cartoon_image_for_theme(), self._CARTOON_LANDMARKS)
 
     def _resolve_paths(self) -> tuple[str, str]:
         """Return (image, landmarks) paths to seed the picker.
@@ -1339,7 +1424,9 @@ class InlineCustomDistancesPanel(QWidget):
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
         elif self._CARTOON_IMAGE.is_file() and self._CARTOON_LANDMARKS.is_file():
-            QTimer.singleShot(0, lambda: self._picker.load_into_viewer(self._CARTOON_IMAGE, self._CARTOON_LANDMARKS))
+            QTimer.singleShot(
+                0, lambda: self._picker.load_into_viewer(self._cartoon_image_for_theme(), self._CARTOON_LANDMARKS)
+            )
 
     def _restore_cartoon(self) -> None:
         """Load the bundled cartoon wing into the viewer; clear the path fields."""
@@ -1355,7 +1442,7 @@ class InlineCustomDistancesPanel(QWidget):
             return
         self._picker.set_image_path("")
         self._picker.set_landmarks_path("")
-        self._picker.load_into_viewer(self._CARTOON_IMAGE, self._CARTOON_LANDMARKS)
+        self._picker.load_into_viewer(self._cartoon_image_for_theme(), self._CARTOON_LANDMARKS)
         # Forget any previously-saved user image so next session also
         # opens on the cartoon instead of restoring the prior pick.
         self._window._distance_sample_image = ""
@@ -1412,7 +1499,9 @@ class InlineCustomDistancesPanel(QWidget):
         if img_path and lm_path and Path(img_path).is_file() and Path(lm_path).is_file():
             QTimer.singleShot(0, self._picker.load_initial)
         elif self._CARTOON_IMAGE.is_file() and self._CARTOON_LANDMARKS.is_file():
-            QTimer.singleShot(0, lambda: self._picker.load_into_viewer(self._CARTOON_IMAGE, self._CARTOON_LANDMARKS))
+            QTimer.singleShot(
+                0, lambda: self._picker.load_into_viewer(self._cartoon_image_for_theme(), self._CARTOON_LANDMARKS)
+            )
 
     def _generate_landmarks_for_image(self, image_path: Path) -> Path:
         """Run LandmarkLocator on `image_path` and write a *_landmarks.geojson.
