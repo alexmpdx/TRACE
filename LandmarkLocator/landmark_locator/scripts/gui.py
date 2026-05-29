@@ -1144,6 +1144,33 @@ class GateConfigPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
 
+        # Global "minimum metric failures to reject" knob. 1 = today's behavior
+        # (any single failed gate rejects the landmark). 2 = a landmark must
+        # fail two of its enabled metric gates to be marked unreliable. Lets
+        # users tighten individual thresholds without one overstrict gate
+        # rejecting otherwise-good landmarks.
+        min_fails_row = QHBoxLayout()
+        min_fails_row.setContentsMargins(0, 0, 0, 0)
+        min_fails_lbl = QLabel("Reject landmark after")
+        self._min_fails_spin = QSpinBox()
+        self._min_fails_spin.setRange(1, 3)
+        self._min_fails_spin.setValue(int(self._cfg.get("min_metric_failures_to_reject", 1)))
+        self._min_fails_spin.setToolTip(
+            "How many of a landmark's metric gates (peak / sharp / sp_ratio) must fail "
+            "before the landmark is marked unreliable.\n\n"
+            "1 = any one failure rejects (default, original behavior).\n"
+            "2 = need two independent failures — safer when tightening any one gate.\n"
+            "3 = all three enabled metrics must fail.\n\n"
+            "Disabled gates never count as failures, so setting N higher than the number "
+            "of enabled gates effectively disables rejection for that landmark."
+        )
+        min_fails_suffix = QLabel("failed metric gate(s)")
+        min_fails_row.addWidget(min_fails_lbl)
+        min_fails_row.addWidget(self._min_fails_spin)
+        min_fails_row.addWidget(min_fails_suffix)
+        min_fails_row.addStretch(1)
+        root.addLayout(min_fails_row)
+
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setVerticalSpacing(2)
@@ -1383,6 +1410,7 @@ class GateConfigPanel(QWidget):
             },
             "second_peak_suppression_radius_px": self._cfg.get("second_peak_suppression_radius_px", 30),
             "core_landmarks": sorted(core),
+            "min_metric_failures_to_reject": int(self._min_fails_spin.value()),
         }
 
     def _on_export(self) -> None:
@@ -1465,6 +1493,8 @@ class GateConfigPanel(QWidget):
         self._gate_enabled["second_peak_ratio"].setChecked(
             bool(override.get("second_peak_ratio", {}).get("enabled", True))
         )
+        # min_metric_failures_to_reject defaults to 1 for files written before this field existed.
+        self._min_fails_spin.setValue(int(override.get("min_metric_failures_to_reject", 1)))
         for name, row in self._rows.items():
             if name in peak_pl or name in sharp_pl or name in spr_pl:
                 row["combo"].setCurrentText("Custom")

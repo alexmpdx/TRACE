@@ -206,20 +206,18 @@ _LANDMARK_DISPLAY_NAMES: dict[str, str] = {
 
 
 def _merge_gate_override(base: dict, override: dict) -> dict:
-    """Shallow-merge for the gate-config dict shape used by GateConfigPanel."""
-    import copy
+    """Merge a user gate override onto the sidecar gate config for UI rebuild.
 
-    out = copy.deepcopy(base)
-    for section in ("peak", "sharpness", "second_peak_ratio"):
-        if section in override and "per_landmark" in override[section]:
-            out.setdefault(section, {}).setdefault("per_landmark", {}).update(override[section]["per_landmark"])
-        if section in override and "global" in override[section]:
-            out.setdefault(section, {})["global"] = override[section]["global"]
-    if "core_landmarks" in override:
-        out["core_landmarks"] = list(override["core_landmarks"])
-    if "second_peak_suppression_radius_px" in override:
-        out["second_peak_suppression_radius_px"] = override["second_peak_suppression_radius_px"]
-    return out
+    Delegates to the LandmarkLocator predictor's deep-merge so that every
+    field in the override survives — including per-metric `enabled` flags
+    and `min_metric_failures_to_reject` — and so future gate-config fields
+    don't need a parallel allowlist edit here. Matches the merge the
+    predictor itself performs at runtime, so the UI's initial state stays
+    consistent with what the pipeline will actually apply.
+    """
+    from landmark_locator.inference.predict import _deep_merge
+
+    return _deep_merge(base, override)
 
 
 class PipelineConfigDialog(QDialog):

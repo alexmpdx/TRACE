@@ -21,6 +21,10 @@ DEFAULT_GATE_CONFIG = {
     "second_peak_ratio": {"global": 1.0, "per_landmark": {}},
     "second_peak_suppression_radius_px": 30,
     "core_landmarks": [],
+    # Number of metric gates (peak / sharpness / second_peak_ratio) that must
+    # fail before a landmark is marked unreliable. 1 = current behavior (any
+    # single failure rejects). Disabled gates (`enabled: false`) never count.
+    "min_metric_failures_to_reject": 1,
 }
 
 
@@ -190,27 +194,33 @@ def _gate_landmark(
 ) -> tuple[bool, str]:
     """Return (passed, reason). reason is empty when passed.
 
-    Each metric block may carry an `enabled` flag (default True). When False
-    the gate is short-circuited and that metric cannot reject the landmark —
-    used by the GUI checkboxes to disable a whole gate column without losing
-    the calibrated threshold values.
+    Evaluates all three metric gates (peak / sharpness / second_peak_ratio)
+    and rejects the landmark only when the number of failures meets the
+    `min_metric_failures_to_reject` threshold (default 1). Disabled gates
+    (`enabled: false`) never contribute a failure. When multiple gates fail,
+    the reason string joins them with "; " so the log shows the full picture.
     """
     peak_cfg = gate_cfg["peak"]
     sharp_cfg = gate_cfg["sharpness"]
     sp_cfg = gate_cfg["second_peak_ratio"]
+    reasons: list[str] = []
 
     if peak_cfg.get("enabled", True):
         peak_thr = peak_cfg["per_landmark"].get(name, peak_cfg["global"])
         if metric["peak"] < peak_thr:
-            return False, f"peak={metric['peak']:.3f}<{peak_thr:.3f}"
+            reasons.append(f"peak={metric['peak']:.3f}<{peak_thr:.3f}")
     if sharp_cfg.get("enabled", True):
         sharp_thr = sharp_cfg["per_landmark"].get(name, sharp_cfg["global"])
         if metric["sharpness"] < sharp_thr:
-            return False, f"sharpness={metric['sharpness']:.2f}<{sharp_thr:.2f}"
+            reasons.append(f"sharpness={metric['sharpness']:.2f}<{sharp_thr:.2f}")
     if sp_cfg.get("enabled", True):
         sp_thr = sp_cfg["per_landmark"].get(name, sp_cfg["global"])
         if metric["second_peak_ratio"] > sp_thr:
-            return False, f"second_peak={metric['second_peak_ratio']:.2f}>{sp_thr:.2f}"
+            reasons.append(f"second_peak={metric['second_peak_ratio']:.2f}>{sp_thr:.2f}")
+
+    min_fails = max(1, int(gate_cfg.get("min_metric_failures_to_reject", 1)))
+    if len(reasons) >= min_fails:
+        return False, "; ".join(reasons)
     return True, ""
 
 

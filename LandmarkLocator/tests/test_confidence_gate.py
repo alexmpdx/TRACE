@@ -154,6 +154,104 @@ def test_core_missing_from_model_is_failure():
     assert "not predicted" in exc_info.value.failures["not_predicted_by_model"]
 
 
+def test_min_failures_default_is_one_regression():
+    """N=1 (default) must reproduce the original single-failure-rejects behavior."""
+    hm, names = _make_heatmap_stack()
+    cfg = _gate_cfg()
+    assert cfg["min_metric_failures_to_reject"] == 1
+    result = _assemble_gate_result(
+        hm, scale_x=1.0, scale_y=1.0, landmark_order=names, gate_config=cfg, include_unreliable=True
+    )
+    # bimodal fails only sp_ratio (1 failure) — must still be rejected at N=1
+    assert result["reliable"]["bimodal"] is False
+    assert result["gate_reason"]["bimodal"].startswith("second_peak=")
+
+
+def test_n2_single_failure_passes():
+    """With N=2, a landmark failing only one gate (bimodal: sp_ratio) should be reliable."""
+    hm, names = _make_heatmap_stack()
+    cfg = _gate_cfg()
+    cfg["min_metric_failures_to_reject"] = 2
+    result = _assemble_gate_result(
+        hm, scale_x=1.0, scale_y=1.0, landmark_order=names, gate_config=cfg, include_unreliable=True
+    )
+    assert result["reliable"]["bimodal"] is True
+    assert result["gate_reason"]["bimodal"] == ""
+    # Sharp channel still passes (zero failures)
+    assert result["reliable"]["sharp"] is True
+
+
+def test_n2_two_failures_rejects_with_joined_reason():
+    """Plateau fails sharpness + sp_ratio (2 failures) → unreliable at N=2; reason joins both."""
+    hm, names = _make_heatmap_stack()
+    cfg = _gate_cfg()
+    cfg["min_metric_failures_to_reject"] = 2
+    result = _assemble_gate_result(
+        hm, scale_x=1.0, scale_y=1.0, landmark_order=names, gate_config=cfg, include_unreliable=True
+    )
+    assert result["reliable"]["plateau"] is False
+    reason = result["gate_reason"]["plateau"]
+    assert "sharpness=" in reason
+    assert "second_peak=" in reason
+    assert "; " in reason
+
+
+def test_n3_requires_all_three_failures():
+    """N=3 only rejects when peak + sharpness + sp_ratio all fail (zero channel)."""
+    hm, names = _make_heatmap_stack()
+    cfg = _gate_cfg()
+    cfg["min_metric_failures_to_reject"] = 3
+    result = _assemble_gate_result(
+        hm, scale_x=1.0, scale_y=1.0, landmark_order=names, gate_config=cfg, include_unreliable=True
+    )
+    # zero fails all three — unreliable
+    assert result["reliable"]["zero"] is False
+    # plateau fails two (sharpness + sp_ratio) — N=3 lets it through
+    assert result["reliable"]["plateau"] is True
+    # bimodal fails one — N=3 lets it through
+    assert result["reliable"]["bimodal"] is True
+
+
+def test_n2_with_disabled_gate_counts_only_enabled():
+    """Disabling sp_ratio leaves plateau with only the sharpness failure (1) → passes at N=2."""
+    hm, names = _make_heatmap_stack()
+    cfg = _gate_cfg()
+    cfg["min_metric_failures_to_reject"] = 2
+    cfg["second_peak_ratio"]["enabled"] = False
+    result = _assemble_gate_result(
+        hm, scale_x=1.0, scale_y=1.0, landmark_order=names, gate_config=cfg, include_unreliable=True
+    )
+    # Plateau now has only the sharpness failure → 1 < 2 → reliable
+    assert result["reliable"]["plateau"] is True
+    # bimodal had only the sp_ratio failure; with sp_ratio disabled it's now 0 failures
+    assert result["reliable"]["bimodal"] is True
+
+
+def test_n2_core_landmark_failure_raises():
+    """Core-landmark rejection path still triggers when N-failure threshold is met."""
+    hm, names = _make_heatmap_stack()
+    cfg = _gate_cfg(core=["plateau"])
+    cfg["min_metric_failures_to_reject"] = 2
+    with pytest.raises(LowConfidenceLandmarkError) as exc_info:
+        _assemble_gate_result(
+            hm, scale_x=1.0, scale_y=1.0, landmark_order=names, gate_config=cfg, include_unreliable=True
+        )
+    # plateau crosses N=2 (sharpness + sp_ratio) → it's the core failure
+    assert "plateau" in exc_info.value.failures
+
+
+def test_n2_core_landmark_with_single_failure_does_not_raise():
+    """A core landmark with only 1 failure must NOT raise when N=2."""
+    hm, names = _make_heatmap_stack()
+    cfg = _gate_cfg(core=["bimodal"])
+    cfg["min_metric_failures_to_reject"] = 2
+    # bimodal has 1 failure → with N=2 it's reliable → no raise
+    result = _assemble_gate_result(
+        hm, scale_x=1.0, scale_y=1.0, landmark_order=names, gate_config=cfg, include_unreliable=True
+    )
+    assert result["reliable"]["bimodal"] is True
+
+
 def test_compute_heatmap_metrics_matches_expected_sharpness():
     """Peak / mean of 11x11 window around a sharp Gaussian should be >> 1."""
     hm = _gaussian(64, 64, 32, 32, sigma=2.0, amplitude=1.0)[None, :, :]
