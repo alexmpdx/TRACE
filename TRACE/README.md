@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="GUI_images/logo/flicon.svg" alt="TRACE" width="320"/>
+  <img src="GUI_images/logo/logo_dark.svg" alt="TRACE" width="320"/>
 </p>
 
 # TRACE
