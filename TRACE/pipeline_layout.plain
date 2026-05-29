@@ -1,94 +1,99 @@
-graph 1 65.667 48.671
-node IMG 22 45.206 19.307 4.958 "Wing image\l\l• Standard: tif / tiff / bmp / png / jpg / jpeg\l• Adobe: psd / psb\l• Modern: heic / heif / svg\l• Camera \
+graph 1 108.67 48.671
+node IMG 13.444 45.206 19.307 4.958 "Wing image\l\l• Standard: tif / tiff / bmp / png / jpg / jpeg\l• Adobe: psd / psb\l• Modern: heic / heif / svg\l• Camera \
 RAW: dng / nef / cr2 / cr3 / arw / raf / orf / pef / rw2 / srw / raw\l• Microscopy: czi / nd2 / lif / lsm (→ OME-TIFF)\l" rounded,filled ellipse #c8862a #fde6c4
-node WING_MODEL 37.389 45.206 10.129 2.4242 "Wing isolation model dir\l\l• weights + metadata.json (optional)\l" rounded,filled ellipse #4a6fa5 #e8eef7
-node LMK_MODEL 55.444 45.206 9.6726 2.4242 "Landmark model\l\l• ResNet18 U-Net checkpoint (.pt)\l" rounded,filled ellipse #4a6fa5 #e8eef7
-node SEG_MODEL 46.528 45.206 7.5366 2.4242 "Segmentation model dir\l\l• weights + metadata.json\l" rounded,filled ellipse #4a6fa5 #e8eef7
-node CONFIG 62.903 45.206 4.6345 2.4242 "PipelineConfig\l\l• JSON / GUI\l" rounded,filled ellipse #4a6fa5 #e8eef7
-node P1 42.944 39.799 12.038 2.9954 "Stage 1: Resolution adjust\l\l• Compare input µm/px to model's training µm/px\l• Skip if ratio is inside tolerance band\l• \
+node WING_MODEL 28.833 45.206 10.129 2.4242 "Wing isolation model dir\l\l• weights + metadata.json (optional)\l" rounded,filled ellipse #4a6fa5 #e8eef7
+node LMK_MODEL 39.042 45.206 9.6726 2.4242 "Landmark model\l\l• ResNet18 U-Net checkpoint (.pt)\l" rounded,filled ellipse #4a6fa5 #e8eef7
+node SEG_MODEL 47.958 45.206 7.5366 2.4242 "Segmentation model dir\l\l• weights + metadata.json\l" rounded,filled ellipse #4a6fa5 #e8eef7
+node CONFIG 54.347 45.206 4.6345 2.4242 "PipelineConfig\l\l• JSON / GUI\l" rounded,filled ellipse #4a6fa5 #e8eef7
+node P1 30.639 39.799 12.038 2.9954 "Stage 1: Resolution adjust\l\l• Compare input µm/px to model's training µm/px\l• Skip if ratio is inside tolerance band\l• \
 Otherwise rescale image toward target µm/px\l• Geometry is inverse-rescaled after Stage 2 (identifyFeatures)\l" rounded,filled box #3c8c4f #e6f4ea
-node P2 32.042 39.799 8.5479 3.0788 "Stage 2: Wing isolation (optional)\l\l• Run wing-isolation model → wing polygon\l• Buffer polygon by wing_expand_fraction\l• \
+node P2 19.736 39.799 8.5479 3.0788 "Stage 2: Wing isolation (optional)\l\l• Run wing-isolation model → wing polygon\l• Buffer polygon by wing_expand_fraction\l• \
 Mask non-wing pixels to 0\l• Write isolated image + wing.geojson\l" rounded,filled box #3c8c4f #e6f4ea
-node P3 53.722 34.954 7.1208 3.5058 "Stage 3: Landmark detection\l\l• Load LandmarkPredictor (cached)\l• Heatmap regression inference\l• Extract peak coordinates\l• \
+node P3 28.875 34.954 7.1208 3.5058 "Stage 3: Landmark detection\l\l• Load LandmarkPredictor (cached)\l• Heatmap regression inference\l• Extract peak coordinates\l• \
 Map names → GeoJSON schema\l• Write landmarks.geojson\l" rounded,filled box #3c8c4f #e6f4ea
-node P4 44.917 34.954 9.8708 3.4225 "Stage 4: Hinge chop\l\l• Load landmarks from Stage 3\l• Build hinge polyline from distal-margin landmarks\l• Build proximal \
+node P4 20.069 34.954 9.8708 3.4225 "Stage 4: Hinge chop\l\l• Load landmarks from Stage 3\l• Build hinge polyline from distal-margin landmarks\l• Build proximal \
 mask\l• Black out hinge pixels (in place, no translation)\l• Write chopped image (temp)\l" rounded,filled box #3c8c4f #e6f4ea
-node P5 23.806 34.954 11.183 5.2975 "Stage 5: Segmentation\l\l• Load seg model + metadata (cached)\l• Read RGB uint8\l• Tiled inference w/ center-crop stitch\l• \
+node P5 48.611 34.954 11.183 5.2975 "Stage 5: Segmentation\l\l• Load seg model + metadata (cached)\l• Read RGB uint8\l• Tiled inference w/ center-crop stitch\l• \
 Optional ROI from wing.geojson (skips background tiles)\l• Per-channel normalization\l• Gaussian smooth probabilities\l• Argmax \
 → class mask\l• Polygonize mask → features\l• Save detection.geojson\l" rounded,filled box #3c8c4f #e6f4ea
-node P6 34.694 34.954 9.975 2.9954 "Stage 6: Wing rotation (optional)\l\l• Fit affine from reliable landmarks\l• Rotate un-masked image to canonical orientation\l• \
+node P6 37.722 34.954 9.975 2.9954 "Stage 6: Wing rotation (optional)\l\l• Fit affine from reliable landmarks\l• Rotate un-masked image to canonical orientation\l• \
 Apply same affine to every produced GeoJSON\l• Optional mirror-correct for opposite-chirality wings\l" rounded,filled box #3c8c4f #e6f4ea
-node WING_GJ 16.903 29.562 8.8919 2.4242 "wing.geojson\l\l• single 'wing' feature (Stage 2)\l" rounded,filled ellipse #b38a1b #fff7e0
-node LMK_GJ 44.917 29.562 5.7541 2.4242 "landmarks.geojson\l\l• Point features\l" rounded,filled ellipse #b38a1b #fff7e0
-node CHOPPED 27.708 29.562 12.118 2.4242 "chopped image\l\l• temp; deleted unless --keep-intermediates\l" rounded,filled ellipse #b38a1b #fff7e0
-node SEG_GJ 37.903 29.562 7.6692 2.4242 "detection.geojson\l\l• vein + intervein polygons\l" rounded,filled ellipse #b38a1b #fff7e0
-node I1 44.056 24.781 6.2354 2.9954 "Step 1: Parse inputs\l\l• Load vein / intervein polys\l• Snap raw landmarks\l• Compute wing outline (union)\l• Estimate \
+node WING_GJ 22.069 29.562 8.8919 2.4242 "wing.geojson\l\l• single 'wing' feature (Stage 2)\l" rounded,filled ellipse #b38a1b #fff7e0
+node LMK_GJ 14.444 29.562 5.7541 2.4242 "landmarks.geojson\l\l• Point features\l" rounded,filled ellipse #b38a1b #fff7e0
+node CHOPPED 32.875 29.562 12.118 2.4242 "chopped image\l\l• temp; deleted unless --keep-intermediates\l" rounded,filled ellipse #b38a1b #fff7e0
+node SEG_GJ 43.069 29.562 7.6692 2.4242 "detection.geojson\l\l• vein + intervein polygons\l" rounded,filled ellipse #b38a1b #fff7e0
+node I1 18.167 24.781 6.2354 2.9954 "Step 1: Parse inputs\l\l• Load vein / intervein polys\l• Snap raw landmarks\l• Compute wing outline (union)\l• Estimate \
 image_shape\l" rounded,filled box #8c3c8c #f4e6f4
-node I2 52.083 24.781 7.9125 4.36 "Step 2: Build skeleton graph\l\l• Rasterize vein polys → vein_mask\l• Boundary smoothing (optional)\l• Skeletonize (RIDGE / \
+node I2 26.194 24.781 7.9125 4.36 "Step 2: Build skeleton graph\l\l• Rasterize vein polys → vein_mask\l• Boundary smoothing (optional)\l• Skeletonize (RIDGE / \
 medial-axis / …)\l• Prune (distance-map / multi-scale)\l• Collinear edge merge\l• Gap bridging — pass 1 / 2 / 3\l• Compute \
 median_vein_width_px\l" rounded,filled box #8c3c8c #f4e6f4
-node I3 50.528 18.249 7.6313 2.5683 "Step 3: Anchor landmarks\l\l• Snap each landmark to nearest node\l• Junction vs endpoint preference\l• Store snap_distance\l" rounded,filled box #8c3c8c #f4e6f4
-node I4 40.556 18.249 6.7458 2.1412 "Step 4: Compute wing axis\l\l• Proximal / distal from landmarks\l• Unit vector + length\l" rounded,filled box #8c3c8c #f4e6f4
-node I5 48.694 13.743 7.1521 5.1308 "Step 5: Call veins\l\l• Merge through crossvein junctions\l• Detect costa (margin band)\l• Propagate labels through deg-2\l• \
+node I3 25.208 18.249 7.6313 2.5683 "Step 3: Anchor landmarks\l\l• Snap each landmark to nearest node\l• Junction vs endpoint preference\l• Store snap_distance\l" rounded,filled box #8c3c8c #f4e6f4
+node I4 16.347 18.249 6.7458 2.1412 "Step 4: Compute wing axis\l\l• Proximal / distal from landmarks\l• Unit vector + length\l" rounded,filled box #8c3c8c #f4e6f4
+node I5 25.208 13.743 7.1521 5.1308 "Step 5: Call veins\l\l• Merge through crossvein junctions\l• Detect costa (margin band)\l• Propagate labels through deg-2\l• \
 Extend to distal landmarks\l• Detect L6\l• Detect crossveins (ACV / PCV)\l• Label ectopic veins (EV*)\l• Assign tissue polys (\
 buffer vw)\l• h-maxima split of intervein polys\l" rounded,filled box #8c3c8c #f4e6f4
-node I6 40.444 13.743 6.5167 2.9954 "Step 6: Call intervein regions\l\l• Buffer vein centerlines\l• Match bounding-vein sets\l• Tie-break by wing-axis position\l• \
+node I6 16.958 13.743 6.5167 2.9954 "Step 6: Call intervein regions\l\l• Buffer vein centerlines\l• Match bounding-vein sets\l• Tie-break by wing-axis position\l• \
 Absorb tiny fragments\l" rounded,filled box #8c3c8c #f4e6f4
-node MM 52.708 21.067 11.152 2.5683 "measurementMaker: custom distances\l\l• User-defined landmark-pair distances\l• Augments batch CSV with custom_<label>_um columns\l• \
+node MM 14.792 21.067 11.152 2.5683 "measurementMaker: custom distances\l\l• User-defined landmark-pair distances\l• Augments batch CSV with custom_<label>_um columns\l• \
 Fast path: emits CSV without running identifyFeatures\l" rounded,filled box #8c3c8c #f4e6f4
-node WR 40.444 7.528 14.991 4.2362 "WingResult\l\l• veins: list[VeinIdentification]\l• intervein_regions: list[InterveinRegion]\l• landmarks, wing_outline, warnings\l• \
+node WR 25.208 7.528 14.991 4.2362 "WingResult\l\l• veins: list[VeinIdentification]\l• intervein_regions: list[InterveinRegion]\l• landmarks, wing_outline, warnings\l• \
 Inverse-rescale (Stage 1) back to original-pixel space\l" rounded,filled ellipse #b33c3c #fde7e7
-node OUT_GJ 12.764 2.205 7.021 2.4242 "per-wing GeoJSON\l\l• {stem}_output.geojson\l" rounded,filled ellipse #3078a0 #e0f0f7
-node OUT_OVERLAY 39.833 2.205 6.8442 2.4242 "vein + intervein overlay\l\l• {stem}_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
-node OUT_LMK_OV 21.181 2.205 9.2012 2.4242 "landmarks overlay\l\l• {stem}_landmarks_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
-node OUT_SEG_OV 31.097 2.205 10.011 2.4242 "segmentation overlay\l\l• {stem}_segmentation_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
-node OUT_AP_OV 47.181 2.205 7.242 2.4242 "AP compartment overlay\l\l• {stem}_ap_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
-node OUT_CV_OV 4.6667 2.205 8.553 2.4242 "CV ratio overlay\l\l• {stem}_cv_ratio_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
-node OUT_CSV 58.194 2.205 14.18 3.6322 "measurements csv\l\l• area (wing, intervein regions, A/P compartments)\l• length (wing, veins)\l• custom measurements (from \
+node OUT_GJ 18.375 2.205 7.021 2.4242 "per-wing GeoJSON\l\l• {stem}_output.geojson\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_OVERLAY 88.444 2.205 6.8442 2.4242 "vein + intervein overlay\l\l• {stem}_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_LMK_OV 29.083 2.205 13.797 3.0282 "landmarks output\l\l• {stem}_landmarks_overlay.png (rendered points)\l• {stem}_landmarks.geojson (raw points, optional)\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_SEG_OV 44.347 2.205 16.125 3.0282 "segmentation output\l\l• {stem}_segmentation_overlay.png (vein/intervein classes)\l• {stem}_segmentation.geojson (raw polygons, \
+optional)\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_ISO 60.931 2.205 16.42 3.0282 "isolated wing image\l\l• {stem}_isolated.tif\l• Masked single-wing image (Stage 2 artifact kept as output)\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_CHOP 77.083 2.205 15.271 3.0282 "chopped image\l\l• {stem}_chopped.tif\l• Hinge-removed image (Stage 4 artifact kept as output)\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_AP_OV 95.792 2.205 7.242 2.4242 "AP compartment overlay\l\l• {stem}_ap_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_CV_OV 104 2.205 8.553 2.4242 "CV ratio overlay\l\l• {stem}_cv_ratio_overlay.png\l" rounded,filled ellipse #3078a0 #e0f0f7
+node OUT_CSV 7.4722 2.205 14.18 3.6322 "measurements csv\l\l• area (wing, intervein regions, A/P compartments)\l• length (wing, veins)\l• custom measurements (from \
 measurementMaker)\l" rounded,filled ellipse #3078a0 #e0f0f7
-edge IMG P1 7 28.474 43.361 33.525 43.361 39.69 43.361 39.69 43.361 39.69 43.361 39.69 41.459 39.69 41.459 solid black
-edge WING_MODEL P2 4 34.32 44.239 34.32 44.239 34.32 41.5 34.32 41.5 solid black
-edge LMK_MODEL P3 4 53.945 44.05 53.945 44.05 53.945 36.873 53.945 36.873 solid black
-edge SEG_MODEL P5 7 49.408 44.419 49.408 42.393 49.408 37.153 49.408 37.153 49.408 37.153 29.56 37.153 29.56 37.153 solid black
-edge CONFIG I2 7 61.512 44.234 61.512 40.175 61.512 24.778 61.512 24.778 61.512 24.778 56.201 24.778 56.201 24.778 solid black
-edge CONFIG I5 7 64.293 44.229 64.293 38.918 64.293 13.736 64.293 13.736 64.293 13.736 52.433 13.736 52.433 13.736 solid black
-edge CONFIG I6 10 63.366 44.015 63.366 38.608 63.366 16.639 63.366 16.639 63.366 16.639 40.444 16.639 40.444 16.639 40.444 16.639 40.444 15.406 40.444 15.406 solid black
-edge CONFIG MM 7 62.439 44.013 62.439 39.149 62.439 21.069 62.439 21.069 62.439 21.069 58.448 21.069 58.448 21.069 dashed black
-edge P1 P2 4 36.919 39.792 36.919 39.792 36.481 39.792 36.481 39.792 solid black
-edge P1 P3 7 48.966 39.792 49.73 39.792 50.251 39.792 50.251 39.792 50.251 39.792 50.251 36.867 50.251 36.867 "(when isolation off)" 47.976 37.931 dashed black
-edge P2 P3 10 31.91 38.256 31.91 38.062 31.91 37.931 31.91 37.931 31.91 37.931 50.207 37.931 50.207 37.931 50.207 37.931 50.207 36.871 50.207 36.871 "isolated image" 45.312 37.931 solid black
-edge P2 P4 7 34.113 38.253 34.113 37.418 34.113 36.556 34.113 36.556 34.113 36.556 39.817 36.556 39.817 36.556 solid black
-edge P2 WING_GJ 7 27.761 39.792 22.811 39.792 15.335 39.792 15.335 39.792 15.335 39.792 15.335 30.861 15.335 30.861 solid black
-edge P3 LMK_GJ 7 53.101 33.198 53.101 31.622 53.101 29.556 53.101 29.556 53.101 29.556 47.956 29.556 47.956 29.556 solid black
-edge P4 CHOPPED 7 39.975 33.347 36.48 33.347 32.414 33.347 32.414 33.347 32.414 33.347 32.414 30.488 32.414 30.488 solid black
-edge P5 SEG_GJ 7 29.404 32.75 32.396 32.75 35.472 32.75 35.472 32.75 35.472 32.75 35.472 30.666 35.472 30.666 solid black
-edge WING_GJ P5 4 19.259 30.595 19.259 30.595 19.259 32.14 19.259 32.14 ROI 34.847 31.838 dashed black
-edge WING_GJ P6 10 20.304 30.348 20.304 30.99 20.304 31.792 20.304 31.792 20.304 31.792 31.06 31.792 31.06 31.792 31.06 31.792 31.06 33.292 31.06 33.292 solid black
-edge WING_GJ I1 7 18.964 28.482 18.964 27.071 18.964 24.778 18.964 24.778 18.964 24.778 40.775 24.778 40.775 24.778 dashed black
-edge LMK_GJ P4 4 43.958 30.706 43.958 30.706 43.958 33.078 43.958 33.078 solid black
-edge LMK_GJ P6 10 45.876 30.711 45.876 31.024 45.876 31.278 45.876 31.278 45.876 31.278 38.279 31.278 38.279 31.278 38.279 31.278 38.279 33.294 38.279 33.294 solid black
-edge LMK_GJ I1 4 45.462 28.368 45.462 28.368 45.462 26.445 45.462 26.445 solid black
-edge LMK_GJ MM 4 47.483 29.011 47.483 29.011 47.483 22.515 47.483 22.515 solid black
-edge LMK_GJ OUT_LMK_OV 10 43.751 28.451 43.751 28.142 43.751 27.889 43.751 27.889 43.751 27.889 23.715 27.889 23.715 27.889 23.715 27.889 23.715 3.3796 23.715 3.3796 solid black
-edge CHOPPED P5 4 25.523 30.699 25.523 30.699 25.523 32.144 25.523 32.144 solid black
-edge SEG_GJ P6 4 36.875 30.732 36.875 30.732 36.875 33.293 36.875 33.293 solid black
-edge SEG_GJ I1 4 41.338 29.018 41.338 29.018 41.338 26.443 41.338 26.443 solid black
-edge SEG_GJ OUT_SEG_OV 10 35.625 28.584 35.625 28.023 35.625 27.431 35.625 27.431 35.625 27.431 29.52 27.431 29.52 27.431 29.52 27.431 29.52 3.5185 29.52 3.5185 solid black
-edge I1 I2 4 47.177 24.778 47.177 24.778 47.963 24.778 47.963 24.778 vein_polys 0 0.11111 solid black
-edge I1 I3 4 46.852 23.278 46.852 23.278 46.852 19.695 46.852 19.695 landmarks 45.479 21.067 solid black
-edge I1 I5 4 45.65 23.281 45.65 23.281 45.65 16.475 45.65 16.475 wing_outline 44.917 18.249 solid black
-edge I2 I3 7 48.122 22.833 47.465 22.833 46.992 22.833 46.992 22.833 46.992 22.833 46.992 19.698 46.992 19.698 SkeletonGraph 46.615 21.067 solid black
-edge I2 I5 7 48.122 23.056 47.05 23.056 46.181 23.056 46.181 23.056 46.181 23.056 46.181 16.472 46.181 16.472 skeleton 46.158 18.249 solid black
-edge I3 I4 4 46.708 18.25 46.708 18.25 44.093 18.25 44.093 18.25 anchored 44.514 21.067 solid black
-edge I3 I5 4 49.491 16.963 49.491 16.963 49.491 16.472 49.491 16.472 landmarks 49.924 16.636 solid black
-edge I4 I5 7 43.816 17.172 43.816 16.506 43.816 15.778 43.816 15.778 43.816 15.778 44.957 15.778 44.957 15.778 wing_axis 42.51 16.636 solid black
-edge I5 I6 4 45.112 13.736 45.112 13.736 43.866 13.736 43.866 13.736 "split polys + veins" 0 0.11111 solid black
-edge I5 WR 4 46.529 11.175 46.529 11.175 46.529 8.9274 46.529 8.9274 veins 45.134 10.71 solid black
-edge I6 WR 4 40.444 12.238 40.444 12.238 40.444 9.8126 40.444 9.8126 regions 40.663 10.71 solid black
-edge MM OUT_CSV 4 56.314 19.778 56.314 19.778 56.314 4.12 56.314 4.12 "custom distances" 56.675 13.743 solid black
-edge WR OUT_GJ 7 33.374 6.8194 25.651 6.8194 14.366 6.8194 14.366 6.8194 14.366 6.8194 14.366 3.4468 14.366 3.4468 solid black
-edge WR OUT_OVERLAY 4 39.833 5.4127 39.833 5.4127 39.833 3.5822 39.833 3.5822 solid black
-edge WR OUT_AP_OV 4 45.02 5.8474 45.02 5.8474 45.02 3.3426 45.02 3.3426 solid black
-edge WR OUT_CV_OV 7 33.376 8.2361 22.949 8.2361 4.6667 8.2361 4.6667 8.2361 4.6667 8.2361 4.6667 3.5817 4.6667 3.5817 solid black
-edge WR OUT_CSV 7 46.48 6.266 46.48 5.1582 46.48 3.7222 46.48 3.7222 46.48 3.7222 54.101 3.7222 54.101 3.7222 solid black
+edge IMG P1 7 19.917 43.361 24.286 43.361 29.259 43.361 29.259 43.361 29.259 43.361 29.259 41.459 29.259 41.459 solid black
+edge WING_MODEL P2 4 23.889 44.938 23.889 44.938 23.889 41.499 23.889 41.499 solid black
+edge LMK_MODEL P3 7 39.684 43.998 39.684 41.625 39.684 36.583 39.684 36.583 39.684 36.583 32.6 36.583 32.6 36.583 solid black
+edge SEG_MODEL P5 4 47.958 43.99 47.958 43.99 47.958 37.769 47.958 37.769 solid black
+edge CONFIG I2 7 55.023 44.042 55.023 39.711 55.023 24.778 55.023 24.778 55.023 24.778 30.318 24.778 30.318 24.778 solid black
+edge CONFIG I5 7 56.254 44.512 56.254 39.818 56.254 12.889 56.254 12.889 56.254 12.889 28.949 12.889 28.949 12.889 solid black
+edge CONFIG I6 10 55.844 44.274 55.844 39.678 55.844 19.653 55.844 19.653 55.844 19.653 19.968 19.653 19.968 19.653 19.968 19.653 19.968 15.405 19.968 15.405 solid black
+edge CONFIG MM 7 55.434 44.13 55.434 39.446 55.434 21.069 55.434 21.069 55.434 21.069 20.533 21.069 20.533 21.069 dashed black
+edge P1 P2 4 24.613 39.792 24.613 39.792 24.176 39.792 24.176 39.792 solid black
+edge P1 P3 4 30.062 38.299 30.062 38.299 30.062 36.87 30.062 36.87 "(when isolation off)" 30.962 37.931 dashed black
+edge P2 P3 10 18.881 38.256 18.881 38.062 18.881 37.931 18.881 37.931 18.881 37.931 27.688 37.931 27.688 37.931 27.688 37.931 27.688 36.871 27.688 36.871 "isolated image" 25.104 37.931 solid black
+edge P2 P4 4 22.3 38.252 22.3 38.252 22.3 36.83 22.3 36.83 solid black
+edge P2 WING_GJ 10 17.172 38.256 17.172 37.973 17.172 37.764 17.172 37.764 17.172 37.764 25.16 37.764 25.16 37.764 25.16 37.764 25.16 30.596 25.16 30.596 solid black
+edge P2 OUT_ISO 10 20.591 38.254 20.591 38.157 20.591 38.097 20.591 38.097 20.591 38.097 54.613 38.097 54.613 38.097 54.613 38.097 54.613 3.3342 54.613 3.3342 solid black
+edge P3 LMK_GJ 10 25.915 33.199 25.915 33.093 25.915 33.028 25.915 33.028 25.915 33.028 16.775 33.028 16.775 33.028 16.775 33.028 16.775 30.44 16.775 30.44 solid black
+edge P4 CHOPPED 10 21.314 33.24 21.314 32.819 21.314 32.486 21.314 32.486 21.314 32.486 29.626 32.486 29.626 32.486 29.626 32.486 29.626 30.749 29.626 30.749 solid black
+edge P5 SEG_GJ 4 44.962 32.302 44.962 32.302 44.962 30.781 44.962 30.781 solid black
+edge WING_GJ P5 7 26.215 30.005 26.215 30.902 26.215 32.847 26.215 32.847 26.215 32.847 42.854 32.847 42.854 32.847 ROI 19.583 31.838 dashed black
+edge WING_GJ P6 10 25.615 30.3 25.615 30.765 25.615 31.278 25.615 31.278 25.615 31.278 37.384 31.278 37.384 31.278 37.384 31.278 37.384 33.294 37.384 33.294 solid black
+edge WING_GJ I1 4 18.844 28.724 18.844 28.724 18.844 26.441 18.844 26.441 dashed black
+edge LMK_GJ P4 4 16.228 30.52 16.228 30.52 16.228 33.077 16.228 33.077 solid black
+edge LMK_GJ P6 10 15.681 30.657 15.681 31.221 15.681 31.792 15.681 31.792 15.681 31.792 34.285 31.792 34.285 31.792 34.285 31.792 34.285 33.292 34.285 33.292 solid black
+edge LMK_GJ I1 4 16.564 28.74 16.564 28.74 16.564 26.442 16.564 26.442 solid black
+edge LMK_GJ MM 4 13.308 28.443 13.308 28.443 13.308 22.515 13.308 22.515 solid black
+edge LMK_GJ OUT_LMK_OV 10 15.806 28.49 15.806 28.055 15.806 27.653 15.806 27.653 15.806 27.653 34.343 27.653 34.343 27.653 34.343 27.653 34.343 3.3469 34.343 3.3469 solid black
+edge CHOPPED P5 7 35.834 30.626 35.834 31.525 35.834 32.667 35.834 32.667 35.834 32.667 42.856 32.667 42.856 32.667 solid black
+edge CHOPPED OUT_CHOP 10 37.609 28.804 37.609 28.406 37.609 28 37.609 28 37.609 28 77.083 28 77.083 28 77.083 28 77.083 3.8822 77.083 3.8822 solid black
+edge SEG_GJ P6 4 40.972 30.583 40.972 30.583 40.972 33.294 40.972 33.294 solid black
+edge SEG_GJ I1 10 41.791 28.414 41.791 27.857 41.791 27.306 41.791 27.306 41.791 27.306 20.064 27.306 20.064 27.306 20.064 27.306 20.064 26.442 20.064 26.442 solid black
+edge SEG_GJ OUT_SEG_OV 4 44.348 28.413 44.348 28.413 44.348 3.8819 44.348 3.8819 solid black
+edge I1 I2 4 21.288 24.778 21.288 24.778 22.074 24.778 22.074 24.778 vein_polys 0 0.11111 solid black
+edge I1 I3 7 20.979 23.28 20.979 21.697 20.979 19.431 20.979 19.431 20.979 19.431 21.228 19.431 21.228 19.431 landmarks 23.16 21.067 solid black
+edge I1 I5 7 20.673 23.279 20.673 20.761 20.673 15.958 20.673 15.958 20.673 15.958 21.47 15.958 21.47 15.958 wing_outline 20.708 18.249 solid black
+edge I2 I3 4 25.631 22.597 25.631 22.597 25.631 19.695 25.631 19.695 SkeletonGraph 26.156 21.067 solid black
+edge I2 I5 7 29.587 22.596 29.587 19.604 29.587 14.597 29.587 14.597 29.587 14.597 28.949 14.597 28.949 14.597 skeleton 29.894 18.249 solid black
+edge I3 I4 4 21.386 18.25 21.386 18.25 19.885 18.25 19.885 18.25 anchored 20.806 21.067 solid black
+edge I3 I5 4 25.208 16.963 25.208 16.963 25.208 16.472 25.208 16.472 landmarks 25.521 16.636 solid black
+edge I4 I5 7 16.71 17.174 16.71 16.439 16.71 15.597 16.71 15.597 16.71 15.597 21.469 15.597 21.469 15.597 wing_axis 18.288 16.636 solid black
+edge I5 I6 4 21.626 13.736 21.626 13.736 20.379 13.736 20.379 13.736 "split polys + veins" 0 0.11111 solid black
+edge I5 WR 4 25.208 11.175 25.208 11.175 25.208 9.8127 25.208 9.8127 veins 25.37 10.71 solid black
+edge I6 WR 4 18.965 12.238 18.965 12.238 18.965 8.8626 18.965 8.8626 regions 20.885 10.71 solid black
+edge MM OUT_CSV 4 11.095 19.778 11.095 19.778 11.095 3.926 11.095 3.926 "custom distances" 10.606 13.743 solid black
+edge WR OUT_GJ 4 20.495 5.8766 20.495 5.8766 20.495 3.3339 20.495 3.3339 solid black
+edge WR OUT_OVERLAY 7 31.719 6.4722 47.863 6.4722 88.444 6.4722 88.444 6.4722 88.444 6.4722 88.444 3.582 88.444 3.582 solid black
+edge WR OUT_AP_OV 7 32.708 7.5278 50.881 7.5278 95.792 7.5278 95.792 7.5278 95.792 7.5278 95.792 3.5794 95.792 3.5794 solid black
+edge WR OUT_CV_OV 7 31.719 8.5833 50.593 8.5833 104 8.5833 104 8.5833 104 8.5833 104 3.5834 104 3.5834 solid black
+edge WR OUT_CSV 7 19.104 6.2964 19.104 5.2359 19.104 3.875 19.104 3.875 19.104 3.875 10.478 3.875 10.478 3.875 solid black
 stop

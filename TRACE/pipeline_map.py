@@ -258,8 +258,40 @@ NODES: list[Node] = [
     ),
     Node("OUT_GJ", "per-wing GeoJSON", "output", ["{stem}_output.geojson"], "data"),
     Node("OUT_OVERLAY", "vein + intervein overlay", "output", ["{stem}_overlay.png"], "data"),
-    Node("OUT_LMK_OV", "landmarks overlay", "output", ["{stem}_landmarks_overlay.png"], "data"),
-    Node("OUT_SEG_OV", "segmentation overlay", "output", ["{stem}_segmentation_overlay.png"], "data"),
+    Node(
+        "OUT_LMK_OV",
+        "landmarks output",
+        "output",
+        [
+            "{stem}_landmarks_overlay.png (rendered points)",
+            "{stem}_landmarks.geojson (raw points, optional)",
+        ],
+        "data",
+    ),
+    Node(
+        "OUT_SEG_OV",
+        "segmentation output",
+        "output",
+        [
+            "{stem}_segmentation_overlay.png (vein/intervein classes)",
+            "{stem}_segmentation.geojson (raw polygons, optional)",
+        ],
+        "data",
+    ),
+    Node(
+        "OUT_ISO",
+        "isolated wing image",
+        "output",
+        ["{stem}_isolated.tif", "Masked single-wing image (Stage 2 artifact kept as output)"],
+        "data",
+    ),
+    Node(
+        "OUT_CHOP",
+        "chopped image",
+        "output",
+        ["{stem}_chopped.tif", "Hinge-removed image (Stage 4 artifact kept as output)"],
+        "data",
+    ),
     Node("OUT_AP_OV", "AP compartment overlay", "output", ["{stem}_ap_overlay.png"], "data"),
     Node("OUT_CV_OV", "CV ratio overlay", "output", ["{stem}_cv_ratio_overlay.png"], "data"),
     Node(
@@ -331,12 +363,20 @@ EDGES: list[tuple[str, str, str | None, dict[str, str] | None]] = [
     ("WR", "OUT_AP_OV", None, None),
     ("WR", "OUT_CV_OV", None, None),
     ("WR", "OUT_CSV", None, None),
-    # Landmarks overlay derives from LMK_GJ. constraint=false so dot routes
-    # this as a short side reference instead of stretching the artifact row
-    # down toward outputs.
+    # Landmarks output (overlay PNG + raw GeoJSON) derives from LMK_GJ.
+    # constraint=false so dot routes this as a short side reference instead
+    # of stretching the artifact row down toward outputs.
     ("LMK_GJ", "OUT_LMK_OV", None, {"constraint": "false"}),
-    # Segmentation overlay derives from the raw SEG_GJ — same treatment.
+    # Segmentation output (overlay PNG + raw GeoJSON) derives from SEG_GJ —
+    # same treatment.
     ("SEG_GJ", "OUT_SEG_OV", None, {"constraint": "false"}),
+    # Isolated wing image (Stage 2 byproduct kept as output when requested).
+    # The image itself isn't a separate artifact in the map — it's the
+    # "isolated image" data already flowing P2 → P3. constraint=false to
+    # keep this as a side reference rather than reshaping the preproc spine.
+    ("P2", "OUT_ISO", None, {"constraint": "false"}),
+    # Chopped image (Stage 4 byproduct kept as output when requested).
+    ("CHOPPED", "OUT_CHOP", None, {"constraint": "false"}),
     # measurementMaker: post-CSV augmentation with user-defined landmark distances.
     # Also handles the fast path where identifyFeatures is skipped entirely and
     # the CSV is built directly from landmarks.
@@ -369,7 +409,7 @@ _RANK_PAIRS: dict[str, list[list[str]]] = {
     "artifact": [["WING_GJ", "LMK_GJ", "CHOPPED", "SEG_GJ"]],
     "output": [
         ["OUT_GJ", "OUT_OVERLAY", "OUT_LMK_OV", "OUT_SEG_OV"],
-        ["OUT_AP_OV", "OUT_CV_OV", "OUT_CSV"],
+        ["OUT_ISO", "OUT_CHOP", "OUT_AP_OV", "OUT_CV_OV", "OUT_CSV"],
     ],
     # Bundled inputs (no IMG — that lives in user_input now). Pack into one
     # 4-wide row so the cluster reads as a single horizontal strip.
