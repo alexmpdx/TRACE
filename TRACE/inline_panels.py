@@ -1627,12 +1627,11 @@ class InlineHelpPanel(QWidget):
         outer.addLayout(layout, stretch=1)
 
         # Help-tab fly icon — top-right corner at the same baseline as
-        # the Documentation heading. Two variants ship:
-        #   fliconWhite_real.svg — white strokes, used in dark theme
-        #   flicon.svg            — black strokes, used in light theme
-        # The active theme picks the variant; ThemeManager.themeChanged
-        # rebuilds the pixmap so the icon hot-swaps in sync with the rest
-        # of the UI.
+        # the Documentation heading. We ship one SVG (flicon.svg, the
+        # black-stroke variant the README also embeds) and invert the
+        # rendered pixmap at runtime for dark mode so we don't carry
+        # two source assets. _render_flicon re-runs on every theme
+        # change so the icon hot-swaps in sync with the rest of the UI.
         self._flicon_label = QLabel()
         self._flicon_label.setFixedSize(96, 96)  # placeholder until first render
         icon_col = QVBoxLayout()
@@ -1888,25 +1887,25 @@ class InlineHelpPanel(QWidget):
     def _render_flicon(self, *_args) -> None:
         """Re-render the help-tab fly icon for the active theme.
 
-        Picks the white-stroke variant for dark mode and the black-stroke
-        variant (the one the GitHub README uses) for light mode. Called
-        once at panel construction and again on every theme switch via
-        ThemeManager.themeChanged.
+        Renders flicon.svg (black strokes on transparent) into a
+        QPixmap, then inverts the RGB channels for dark mode so the
+        black strokes become white while the transparent background
+        stays transparent. One source asset, both themes derived.
+        Called once at panel construction and again on every theme
+        switch via ThemeManager.themeChanged.
         """
         from TRACE.theme import current_theme
 
-        t = current_theme()
-        filename = "fliconWhite_real.svg" if t.name == "dark" else "flicon.svg"
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            svg_path = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / filename
+            svg_path = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "flicon.svg"
         else:
-            svg_path = Path(__file__).resolve().parent / "GUI_images" / "logo" / filename
+            svg_path = Path(__file__).resolve().parent / "GUI_images" / "logo" / "flicon.svg"
         if not svg_path.is_file():
             # Missing asset shouldn't break the Help tab. Clear any
             # placeholder pixmap so the slot just renders empty.
             self._flicon_label.clear()
             return
-        from PyQt5.QtGui import QPainter, QPixmap
+        from PyQt5.QtGui import QImage, QPainter, QPixmap
         from PyQt5.QtSvg import QSvgRenderer
 
         renderer = QSvgRenderer(str(svg_path))
@@ -1918,6 +1917,12 @@ class InlineHelpPanel(QWidget):
         painter = QPainter(pixmap)
         renderer.render(painter)
         painter.end()
+        if current_theme().name == "dark":
+            # InvertRgb flips R/G/B in place but leaves alpha untouched
+            # — black strokes become white, transparent stays transparent.
+            img = pixmap.toImage()
+            img.invertPixels(QImage.InvertRgb)
+            pixmap = QPixmap.fromImage(img)
         self._flicon_label.setPixmap(pixmap)
         self._flicon_label.setFixedSize(icon_w, icon_h)
 
