@@ -291,6 +291,23 @@ class PipelineConfigDialog(QDialog):
         if wing_isolation_model_path:
             self._wing_model_edit.setText(wing_isolation_model_path)
 
+        # Live vein-tuning preview (TODO #14). Additive and fully guarded: any
+        # failure leaves the dialog working exactly as before, without a preview.
+        # Implementation lives in the sibling liveSettings/ module so it doesn't
+        # clutter identifyFeatures. The pane is collapsed until the user opts in.
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+
+            _ls_dir = str(_Path(__file__).resolve().parent.parent / "liveSettings")
+            if _ls_dir not in _sys.path:
+                _sys.path.insert(0, _ls_dir)
+            from live_tune.dialog_integration import attach_live_preview as _attach_live_preview
+
+            _attach_live_preview(self)
+        except Exception:  # noqa: BLE001 - preview is optional; never block the dialog
+            logger.debug("Live preview unavailable; continuing without it", exc_info=True)
+
     def done(self, result: int) -> None:  # noqa: N802 — Qt API
         # Persist the dialog geometry (covers OK, Cancel, Esc and the window
         # close button) so it reopens at the size the user last left.
