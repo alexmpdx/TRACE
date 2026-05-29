@@ -1171,6 +1171,31 @@ class GateConfigPanel(QWidget):
         min_fails_row.addStretch(1)
         root.addLayout(min_fails_row)
 
+        # Bulk-tier row: pick a tier and click Apply to set every landmark's
+        # tier at once. Avoids hand-stepping each row's combobox when the user
+        # wants a global sweep (e.g. "try the whole image at Permissive").
+        # "Custom" is intentionally excluded — a global "set everything to
+        # Custom" has no meaning since Custom is per-row hand-tuning.
+        set_all_row = QHBoxLayout()
+        set_all_row.setContentsMargins(0, 0, 0, 0)
+        set_all_lbl = QLabel("Set all landmarks to tier:")
+        self._set_all_combo = QComboBox()
+        self._set_all_combo.addItems(list(_TIER_NAMES))
+        self._set_all_combo.setCurrentText(_DEFAULT_TIER)
+        self._set_all_combo.setToolTip(
+            "Choose a tier to apply to every landmark. Click Apply to overwrite "
+            "all per-landmark tiers and threshold values with the chosen tier's "
+            "calibrated values. Rows currently set to Custom are also overwritten."
+        )
+        btn_apply_all = QPushButton("Apply")
+        btn_apply_all.setToolTip("Apply the chosen tier to every landmark row.")
+        btn_apply_all.clicked.connect(self._on_apply_tier_to_all)
+        set_all_row.addWidget(set_all_lbl)
+        set_all_row.addWidget(self._set_all_combo)
+        set_all_row.addWidget(btn_apply_all)
+        set_all_row.addStretch(1)
+        root.addLayout(set_all_row)
+
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setVerticalSpacing(2)
@@ -1434,6 +1459,17 @@ class GateConfigPanel(QWidget):
             # If the combo was already on the default tier, currentTextChanged didn't
             # fire — force-apply so the spinboxes refresh regardless.
             self._apply_tier_to_row(name, _DEFAULT_TIER)
+
+    def _on_apply_tier_to_all(self) -> None:
+        """Apply the bulk-tier combo's current selection to every landmark row."""
+        tier = self._set_all_combo.currentText()
+        if tier not in _TIER_NAMES:
+            return
+        for name in self._landmark_order:
+            self._rows[name]["combo"].setCurrentText(tier)
+            # currentTextChanged is a no-op when the row was already on `tier`;
+            # force-apply so spinboxes refresh in that case too.
+            self._apply_tier_to_row(name, tier)
 
     def _on_save_as_model_default(self) -> None:
         """Write the current gate to the model's sidecar YAML (auto-loaded on model load).
