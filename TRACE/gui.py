@@ -1765,23 +1765,47 @@ class TraceWindow(QMainWindow):
             existing.raise_()
             existing.activateWindow()
             return
-        dlg = PipelineConfigDialog(
-            self.config,
-            self,
-            include_unreliable_landmarks=self._include_unreliable_landmarks,
-            input_path=self.input_edit.text(),
-            landmark_model_path=self._landmark_model_path,
-            segmentation_model_path=self._segmentation_model_path,
-            gate_override=self._gate_override,
-            wing_expand_fraction=self._wing_expand_fraction,
-            wing_isolation_model_path=self._wing_isolation_model_path,
-            landmark_target_um_per_px=self._landmark_target_um_per_px,
-            segmentation_target_um_per_px=self._segmentation_target_um_per_px,
-            wing_isolation_target_um_per_px=self._wing_isolation_target_um_per_px,
-            active_rescale_target=self._active_rescale_target,
-            rescale_tolerance_low=self._rescale_tolerance_low,
-            rescale_tolerance_high=self._rescale_tolerance_high,
-        )
+        # Trap dialog-construction errors so they land in trace_startup.log
+        # instead of vanishing into Qt's event loop (which on a frozen
+        # Windows build with no console means the user sees nothing
+        # happen at all when they click Advanced Settings, then has no
+        # error trail to point at). Surface as a QMessageBox so the
+        # user gets immediate feedback too.
+        try:
+            dlg = PipelineConfigDialog(
+                self.config,
+                self,
+                include_unreliable_landmarks=self._include_unreliable_landmarks,
+                input_path=self.input_edit.text(),
+                landmark_model_path=self._landmark_model_path,
+                segmentation_model_path=self._segmentation_model_path,
+                gate_override=self._gate_override,
+                wing_expand_fraction=self._wing_expand_fraction,
+                wing_isolation_model_path=self._wing_isolation_model_path,
+                landmark_target_um_per_px=self._landmark_target_um_per_px,
+                segmentation_target_um_per_px=self._segmentation_target_um_per_px,
+                wing_isolation_target_um_per_px=self._wing_isolation_target_um_per_px,
+                active_rescale_target=self._active_rescale_target,
+                rescale_tolerance_low=self._rescale_tolerance_low,
+                rescale_tolerance_high=self._rescale_tolerance_high,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            import traceback as _tb
+
+            tb_text = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+            try:
+                from TRACE.startup_log import log as _slog
+
+                _slog(f"settings_dialog: construction failed\n{tb_text}")
+            except Exception:
+                pass
+            QMessageBox.critical(
+                self,
+                "Settings dialog failed",
+                f"Could not open the settings dialog:\n\n{type(exc).__name__}: {exc}\n\n"
+                "The full traceback is in trace_startup.log (next to TRACE.exe).",
+            )
+            return
         # Window-modal flag stays False (the QDialog default) so show()
         # leaves the parent interactive. setAttribute(WA_DeleteOnClose)
         # would simplify lifetime but we keep the reference around so
@@ -1791,6 +1815,12 @@ class TraceWindow(QMainWindow):
         dlg.accepted.connect(lambda d=dlg: self._apply_settings_dialog_result(d))
         dlg.finished.connect(lambda _r: self._on_settings_dialog_finished())
         dlg.show()
+        # Belt-and-braces: ensure the dialog is actually focused + on top
+        # the moment it's shown, even when called from a non-active
+        # context (Windows occasionally leaves the new window behind the
+        # main one without explicit raise_/activateWindow calls).
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _apply_settings_dialog_result(self, dlg) -> None:
         """Copy settings from the now-accepted dialog back onto self.

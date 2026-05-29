@@ -266,6 +266,27 @@ class PipelineConfigDialog(QDialog):
         _saved_geometry = self._settings.value("settings_dialog_geometry")
         if _saved_geometry is not None:
             self.restoreGeometry(_saved_geometry)
+            # Reported v0.1.60 symptom: clicking Advanced Settings did
+            # nothing visible. Root cause was a saved geometry pointing
+            # at a monitor that no longer existed (laptop user
+            # disconnected an external display), so the dialog was
+            # technically shown but on coordinates outside any current
+            # screen. Drop the restore + fall back to default when the
+            # center point isn't on any available screen.
+            try:
+                from PyQt5.QtWidgets import QApplication
+
+                center = self.frameGeometry().center()
+                screens = QApplication.screens()
+                on_screen = any(s.geometry().contains(center) for s in screens)
+                if not on_screen:
+                    self.resize(720, 640)
+                    self.move(0, 0)  # let WM reposition on first show
+                    self._settings.remove("settings_dialog_geometry")
+            except Exception:
+                # Defensive: don't let geometry validation block the
+                # dialog from constructing.
+                pass
         self._original_config = config
         self._calib_input_path = input_path
         self._calib_lm_path = landmark_model_path
