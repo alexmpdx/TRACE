@@ -1986,15 +1986,22 @@ class InlineHelpPanel(QWidget):
         self._window.settings.setValue("app_icon/preference", str(raw))
         from PyQt5.QtWidgets import QApplication
 
-        from TRACE._app_icon import make_app_icon
+        from TRACE._app_icon import ensure_app_icon_ico, make_app_icon
 
         icon = make_app_icon()
-        if icon is None:
-            return
-        app = QApplication.instance()
-        if app is not None:
-            app.setWindowIcon(icon)
-        self._window.setWindowIcon(icon)
+        if icon is not None:
+            app = QApplication.instance()
+            if app is not None:
+                app.setWindowIcon(icon)
+            self._window.setWindowIcon(icon)
+        # Best-effort: regenerate the cached desktop-shortcut ICO so
+        # an existing TRACE.lnk picks up the new variant the next time
+        # Windows draws it. No-op if a shortcut hasn't been created yet
+        # — the file just sits in the cache until needed.
+        try:
+            ensure_app_icon_ico()
+        except Exception:
+            pass
 
     def _create_desktop_shortcut(self) -> None:
         """Create a Windows .lnk shortcut on the user's Desktop.
@@ -2036,11 +2043,18 @@ class InlineHelpPanel(QWidget):
             # pywin32 is already a dependency (see requirements-windows.txt).
             from win32com.client import Dispatch  # type: ignore[import-not-found]
 
+            from TRACE._app_icon import ensure_app_icon_ico
+
             shell = Dispatch("WScript.Shell")
             sc = shell.CreateShortcut(str(shortcut_path))
             sc.Targetpath = str(target)
             sc.WorkingDirectory = str(target.parent)
-            sc.IconLocation = str(target)
+            # IconLocation prefers the cached ICO matching the user's
+            # IconPreference. Falls back to TRACE.exe (which uses the
+            # icon embedded by PyInstaller at build time) if ICO
+            # generation failed for any reason.
+            ico = ensure_app_icon_ico()
+            sc.IconLocation = str(ico) if ico is not None else str(target)
             sc.save()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(

@@ -4356,6 +4356,19 @@ def main():
     # models aren't yet installed). Constructing a second QApplication in
     # the same process is undefined behavior in PyQt5.
     app = QApplication.instance() or QApplication(sys.argv)
+    # Pin app + org names so QStandardPaths.AppLocalDataLocation /
+    # CacheLocation return TRACE-specific paths instead of falling
+    # back to the bare AppData/Cache root with no app component.
+    # Without this, the cached cartoon-wing inverted PNG and the
+    # cached desktop-shortcut ICO would land at e.g.
+    # ~/Library/Application Support/icons/ rather than
+    # ~/Library/Application Support/TRACE/icons/, polluting the
+    # parent dir with files named like a sibling app.
+    # Mirror QSettings("TRACE", "WingAnalysisPipeline") — org="TRACE",
+    # app="WingAnalysisPipeline" — so QStandardPaths lands at the same
+    # path-shape as the user's persisted settings dir.
+    app.setOrganizationName("TRACE")
+    app.setApplicationName("WingAnalysisPipeline")
     _apply_theme(app)
     # Re-apply the palette + app stylesheet whenever the user switches
     # themes from the Settings tab. Long-lived widgets handle their own

@@ -83,6 +83,90 @@ def app_logo_path() -> Path:
     return base / "logo" / _resolve_variant(_read_preference())
 
 
+def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]:
+    """Render the active LogoThick SVG to a multi-size .ico in the user cache.
+
+    Used by the Add-desktop-shortcut button so the shortcut's icon
+    follows the user's IconPreference rather than the icon embedded
+    in TRACE.exe by PyInstaller (which is baked in at build time and
+    doesn't change with preference).
+
+    The ICO is written to a stable cache path so that existing
+    shortcuts keep working across preference changes: when the user
+    picks a different variant we just overwrite the same file in
+    place, and Windows re-reads it the next time it draws the icon.
+
+    Returns the cached path on success, ``None`` if the SVG was
+    missing or Pillow / Qt couldn't render. Callers should fall back
+    to ``sys.executable`` as the IconLocation in the None case.
+    """
+    if pref is None:
+        pref = _read_preference()
+    svg_name = _resolve_variant(pref)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        svg_path = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / svg_name
+    else:
+        svg_path = Path(__file__).resolve().parent / "GUI_images" / "logo" / svg_name
+    if not svg_path.is_file():
+        return None
+
+    try:
+        import io
+
+        from PIL import Image
+        from PyQt5.QtCore import QBuffer, QByteArray, QIODevice, QStandardPaths, Qt
+        from PyQt5.QtGui import QPainter, QPixmap
+        from PyQt5.QtSvg import QSvgRenderer
+    except Exception:
+        return None
+
+    renderer = QSvgRenderer(str(svg_path))
+    if not renderer.isValid():
+        return None
+
+    base = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
+    cache_dir = Path(base) if base else Path.home() / ".local" / "share" / "TRACE"
+    cache_dir = cache_dir / "icons"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    # Same filename regardless of variant — overwritten on preference
+    # change so a previously-created desktop shortcut auto-updates
+    # without the user having to recreate it.
+    ico_path = cache_dir / "TRACE_app_icon.ico"
+
+    # Render the SVG at every Windows shell size so all explorer / Alt-Tab
+    # / taskbar / file-properties contexts get a crisp pixel-aligned copy
+    # rather than a single scaled bitmap.
+    sizes = [16, 24, 32, 48, 64, 128, 256]
+    pil_images = []
+    try:
+        for size in sizes:
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QIODevice.WriteOnly)
+            pixmap.save(buf, "PNG")
+            buf.close()
+            img = Image.open(io.BytesIO(bytes(ba)))
+            img.load()
+            pil_images.append(img.convert("RGBA"))
+        pil_images[0].save(
+            str(ico_path),
+            format="ICO",
+            sizes=[(s, s) for s in sizes],
+            append_images=pil_images[1:],
+        )
+    except Exception:
+        return None
+    return ico_path
+
+
 def make_app_icon() -> Optional["object"]:
     """Build a multi-size QIcon by rendering the logo SVG via QSvgRenderer.
 
