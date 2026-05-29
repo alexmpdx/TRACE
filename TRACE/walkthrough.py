@@ -98,7 +98,7 @@ class _WalkthroughPopup(QFrame):
     prev_clicked = pyqtSignal()
     skip_clicked = pyqtSignal()
 
-    def __init__(self, parent: QWidget):
+    def __init__(self, parent: QWidget, *, dont_show_label: str = "Don't show this again on launch"):
         super().__init__(parent)
         # QFrame::Box gives us a thin border that we then re-style with a
         # stylesheet for the accent color. setObjectName is required so the
@@ -150,10 +150,13 @@ class _WalkthroughPopup(QFrame):
         self._body.setStyleSheet(f"color: {_t.text_body};")
         layout.addWidget(self._body)
 
-        # "Don't show again" — explicit opt-out from the auto-show on every
-        # launch. Without this checkbox, Skip / Finish / Esc all dismiss the
-        # walkthrough for the current session only.
-        self._dont_show_chk = QCheckBox("Don't show this again on launch")
+        # "Don't show again" — explicit opt-out from future displays.
+        # The label is caller-supplied so the same popup can be used by
+        # the launch-time walkthrough ("...on launch") and by post-run
+        # one-shot hints ("Don't show this again"). Without the user
+        # ticking this box, Skip / Finish / Esc dismiss only for the
+        # current session and the next eligible event re-fires.
+        self._dont_show_chk = QCheckBox(dont_show_label)
         self._dont_show_chk.setStyleSheet(f"color: {_t.text_muted};")
         layout.addWidget(self._dont_show_chk)
 
@@ -236,6 +239,7 @@ class WalkthroughOverlay(QWidget):
         steps: list[WalkthroughStep],
         settings: Optional["QSettings"] = None,
         settings_key: str = "walkthrough_completed",
+        dont_show_label: str = "Don't show this again on launch",
     ):
         # Parent the overlay to the central widget so its rect == central
         # area (excluding menu/status bars). The popup is also parented to
@@ -260,7 +264,7 @@ class WalkthroughOverlay(QWidget):
         self.setMouseTracking(True)
 
         # The instruction popup is a sibling of the overlay, raised above it.
-        self._popup = _WalkthroughPopup(central)
+        self._popup = _WalkthroughPopup(central, dont_show_label=dont_show_label)
         self._popup.next_clicked.connect(self.next_step)
         self._popup.prev_clicked.connect(self.prev_step)
         self._popup.skip_clicked.connect(self.skip)

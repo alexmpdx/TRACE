@@ -2115,38 +2115,46 @@ class TraceWindow(QMainWindow):
         has_gate_failure = any(self._failure_category.get(name) == "gate" for name in failed)
         self.btn_rerun_failed_nogate.setVisible(has_failed and has_gate_failure)
 
-        # First-time hint dispatch — deferred 300ms so the new button's
-        # geometry is settled before the overlay measures it. Each hint
-        # fires at most once per user (QSettings flag).
-        if has_failed and not self.settings.value("rerun_button_walkthrough_seen", False, type=bool):
-            QTimer.singleShot(
-                300,
-                lambda: self._show_button_hint(
-                    self.btn_rerun_failed,
-                    settings_key="rerun_button_walkthrough_seen",
-                    title="New: Rerun failed images",
-                    body=(
-                        "One or more images failed in this run. Click <b>Rerun failed images</b> "
-                        "to re-process only those after adjusting settings. You'll be asked "
-                        "whether to append the new measurements to the existing CSV or write "
-                        "a new one."
-                    ),
-                ),
-            )
-        elif has_failed and has_gate_failure and not self.settings.value(
-            "nogate_rerun_button_walkthrough_seen", False, type=bool
+        # Hint dispatch — deferred 300ms so the new button's geometry is
+        # settled before the overlay measures it. Each hint fires on
+        # every run that left ≥1 failed image UNLESS the user has
+        # explicitly ticked the "Don't show this again" checkbox in the
+        # overlay's popup. _show_button_hint passes the QSettings key
+        # through to the overlay so the checkbox tick is what persists
+        # the dismissal — no checkbox tick → hint fires again next run.
+        # The no-gate hint is prioritized over the plain hint when both
+        # could fire, so the user sees the more specific suggestion.
+        if has_failed and has_gate_failure and not self.settings.value(
+            "nogate_rerun_button_hint_dismissed", False, type=bool
         ):
             QTimer.singleShot(
                 300,
                 lambda: self._show_button_hint(
                     self.btn_rerun_failed_nogate,
-                    settings_key="nogate_rerun_button_walkthrough_seen",
-                    title="New: Rerun without landmark gates",
+                    settings_key="nogate_rerun_button_hint_dismissed",
+                    title="Rerun without landmark gates",
                     body=(
                         "At least one image failed because of a landmark confidence gate "
                         "abort. Click <b>Rerun failed (no gate aborts)</b> to retry those "
                         "images with every gate temporarily disabled. Your saved gate "
                         "settings will not be changed by this rerun."
+                    ),
+                ),
+            )
+        elif has_failed and not self.settings.value(
+            "rerun_button_hint_dismissed", False, type=bool
+        ):
+            QTimer.singleShot(
+                300,
+                lambda: self._show_button_hint(
+                    self.btn_rerun_failed,
+                    settings_key="rerun_button_hint_dismissed",
+                    title="Rerun failed images",
+                    body=(
+                        "One or more images failed in this run. Click <b>Rerun failed images</b> "
+                        "to re-process only those after adjusting settings. You'll be asked "
+                        "whether to append the new measurements to the existing CSV or write "
+                        "a new one."
                     ),
                 ),
             )
@@ -2161,10 +2169,15 @@ class TraceWindow(QMainWindow):
     ) -> None:
         """One-step WalkthroughOverlay highlighting a single button.
 
-        Sets ``settings_key=True`` on the overlay's ``finished`` signal so
-        the hint fires at most once per user. If the main walkthrough is
-        still up, defers itself 500ms — two overlays in the same
-        coordinate space would fight over the dim snapshot.
+        Persistence is driven by the popup's "Don't show this again"
+        checkbox — WalkthroughOverlay sets the QSettings key only when
+        the user ticks the box on close. So a user who dismisses
+        without ticking will see the hint again on the next run that
+        ends with the same failure pattern, and one who ticks it
+        suppresses it permanently.
+
+        If the main walkthrough is still up, defer 500ms — two overlays
+        in the same coordinate space would fight over the dim snapshot.
         """
         if self._walkthrough is not None:
             try:
@@ -2186,16 +2199,19 @@ class TraceWindow(QMainWindow):
             title=title,
             body=body,
         )
-        # No settings_key passed to the overlay — it would only persist
-        # on the "don't show again" checkbox tick, which doesn't exist
-        # for a one-step hint. We persist unconditionally on `finished`.
-        overlay = WalkthroughOverlay(self, [step])
-
-        def _on_done() -> None:
-            self.settings.setValue(settings_key, True)
-            self.settings.sync()
-
-        overlay.finished.connect(_on_done)
+        # Pass settings + settings_key so the overlay's "Don't show this
+        # again" checkbox is what decides whether to suppress on the
+        # next run. Without these, the overlay would just close and
+        # re-fire every time (also acceptable, but no opt-out).
+        # The default label ("...on launch") fits the main walkthrough
+        # but reads wrong for a post-run hint; pass a friendlier one.
+        overlay = WalkthroughOverlay(
+            self,
+            [step],
+            settings=self.settings,
+            settings_key=settings_key,
+            dont_show_label="Don't show this again",
+        )
         overlay.start()
 
     def _on_input_folder_changed(self, _text: str = "") -> None:
