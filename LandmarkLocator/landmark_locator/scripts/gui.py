@@ -44,6 +44,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QProxyStyle,
@@ -59,6 +60,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem,
     QTextEdit,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -2213,10 +2215,24 @@ class LandmarkGUI(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
 
-        act_model = QAction("Load Model", self)
-        act_model.setToolTip("Load a .pt checkpoint, or pick any .pt inside a fold folder to load as an ensemble.")
-        act_model.triggered.connect(self._on_load_model)
-        tb.addAction(act_model)
+        # Load Model is a split-less dropdown: clicking the button shows a menu
+        # with two explicit choices, so the user picks single-fold vs ensemble
+        # upfront instead of being asked after the file dialog.
+        self._load_model_btn = QToolButton(self)
+        self._load_model_btn.setText("Load Model")
+        self._load_model_btn.setToolTip("Load a single fold .pt or an ensemble folder of fold checkpoints.")
+        self._load_model_btn.setPopupMode(QToolButton.InstantPopup)
+        model_menu = QMenu(self._load_model_btn)
+        act_single = model_menu.addAction("Single fold (.pt file)…")
+        act_single.setToolTip("Pick one best_fold*.pt checkpoint. No ensembling.")
+        act_single.triggered.connect(self._on_load_single_fold)
+        act_ensemble = model_menu.addAction("Ensemble folder…")
+        act_ensemble.setToolTip(
+            "Pick a folder containing best_fold*.pt checkpoints. Predictions average all folds."
+        )
+        act_ensemble.triggered.connect(self._on_load_ensemble_folder)
+        self._load_model_btn.setMenu(model_menu)
+        tb.addWidget(self._load_model_btn)
 
         act_images = QAction("Load Images", self)
         act_images.triggered.connect(self._on_load_folder)
@@ -2290,9 +2306,36 @@ class LandmarkGUI(QMainWindow):
         self._search_count_label.setStyleSheet("color: #888; font-size: 10px; padding: 0 2px;")
         left_layout.addWidget(self._search_count_label)
 
+        # "Predict all" populates the per-entry prediction cache in one batch so
+        # the pass-count and failed-image highlighting reflect the whole folder
+        # instead of just the images the user has visited.
+        self._predict_all_btn = QPushButton("Predict all")
+        self._predict_all_btn.setToolTip(
+            "Run the loaded model on every image in the list (batched). "
+            "Populates the pass-count below and lets the highlight toggle "
+            "color failed images. Requires a loaded model."
+        )
+        self._predict_all_btn.clicked.connect(self._on_predict_all)
+        left_layout.addWidget(self._predict_all_btn)
+
         self._image_list = QListWidget()
         self._image_list.currentRowChanged.connect(self._on_image_selected)
         left_layout.addWidget(self._image_list)
+
+        # Highlight-failed toggle and pass-count display sit directly under the
+        # list so the user's eye finds them while scanning the images.
+        self._highlight_failed_chk = QCheckBox("Highlight failed images")
+        self._highlight_failed_chk.setChecked(False)
+        self._highlight_failed_chk.setToolTip(
+            "Color failed images (any core landmark unreliable) in red so they're "
+            "easy to spot. Affects only images that have been predicted."
+        )
+        self._highlight_failed_chk.toggled.connect(self._on_toggle_highlight_failed)
+        left_layout.addWidget(self._highlight_failed_chk)
+
+        self._pass_count_label = QLabel("")
+        self._pass_count_label.setStyleSheet("color: #888; font-size: 10px; padding: 0 2px;")
+        left_layout.addWidget(self._pass_count_label)
 
         self._legend = LegendWidget()
         self._legend.labels_toggled.connect(self._on_labels_toggled)
@@ -2452,6 +2495,7 @@ class LandmarkGUI(QMainWindow):
         # Invalidate cached predictions so they re-run under the new gate
         for entry in self._entries:
             entry.prediction = None
+        self._refresh_image_list_styling()
         if self._current_idx >= 0:
             self._on_image_selected(self._current_idx)
         self.statusBar().showMessage("Gate config updated.")
@@ -2467,45 +2511,51 @@ class LandmarkGUI(QMainWindow):
             self.statusBar().showMessage(f"Training config saved to {config_path.name}.")
 
     # ---- Actions ----
-    def _on_load_model(self) -> None:
-        """Load a model: single .pt checkpoint or, if its folder has fold siblings, an ensemble.
+    def _on_load_single_fold(self) -> None:
+        """Load a single fold checkpoint via file picker (no ensembling)."""
+        start_dir = _project_root / "trained_models"
+        if not start_dir.exists():
+            start_dir = _project_root
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Fold Checkpoint", str(start_dir), "PyTorch (*.pt *.pth)"
+        )
+        if not path:
+            return
+        self._load_predictor_at(Path(path))
 
-        UX: file dialog for a .pt; if the chosen file's folder contains additional
-        `best_fold*.pt` siblings (i.e. the user picked one fold of a CV run), prompt
-        whether to load just that file or the whole folder as an ensemble.
-        """
-        from landmark_locator.inference.predict import _find_fold_checkpoints, make_predictor
+    def _on_load_ensemble_folder(self) -> None:
+        """Load an ensemble from a folder of `best_fold*.pt` checkpoints via folder picker."""
+        from landmark_locator.inference.predict import _find_fold_checkpoints
 
         start_dir = _project_root / "trained_models"
         if not start_dir.exists():
             start_dir = _project_root
-        path, _ = QFileDialog.getOpenFileName(self, "Select Checkpoint", str(start_dir), "PyTorch (*.pt *.pth)")
-        if not path:
+        folder = QFileDialog.getExistingDirectory(self, "Select Ensemble Folder", str(start_dir))
+        if not folder:
             return
-        chosen = Path(path)
-        target: Path = chosen
-        fold_ckpts = _find_fold_checkpoints(chosen.parent)
-
-        # Ambiguous case: the chosen file lives in a folder with multiple fold checkpoints.
-        # Ask whether to use one or all.
-        if len(fold_ckpts) > 1:
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Fold checkpoints detected")
-            msg.setText(
-                f"This folder contains {len(fold_ckpts)} fold checkpoints "
-                f"({', '.join(p.name for p in fold_ckpts[:5])}{'…' if len(fold_ckpts) > 5 else ''})."
+        folder_path = Path(folder)
+        ckpts = _find_fold_checkpoints(folder_path)
+        if not ckpts:
+            QMessageBox.warning(
+                self,
+                "No fold checkpoints",
+                f"No best_fold*.pt files found in:\n{folder_path}\n\n"
+                "Pick a folder containing the cross-validation fold checkpoints, or use "
+                "'Single fold (.pt file)…' to load one checkpoint directly.",
             )
-            msg.setInformativeText("Load as an ensemble (averages all folds) or just the file you selected?")
-            ens_btn = msg.addButton("Load as Ensemble", QMessageBox.AcceptRole)
-            single_btn = msg.addButton("Load Just This One", QMessageBox.AcceptRole)
-            cancel_btn = msg.addButton(QMessageBox.Cancel)
-            msg.setDefaultButton(ens_btn)
-            msg.exec_()
-            clicked = msg.clickedButton()
-            if clicked == cancel_btn:
-                return
-            if clicked == ens_btn:
-                target = chosen.parent
+            return
+        self._load_predictor_at(folder_path)
+
+    def _load_predictor_at(self, target: Path) -> None:
+        """Instantiate the predictor for `target` (file → single, folder → ensemble) and finalize.
+
+        Shared tail for both Load Model menu actions: builds the predictor via
+        make_predictor, updates the model label and status bar, invalidates
+        cached predictions, refreshes the image-list pass-count and styling,
+        and re-runs the currently-selected image so the view reflects the new
+        model.
+        """
+        from landmark_locator.inference.predict import _find_fold_checkpoints, make_predictor
 
         try:
             self._predictor = make_predictor(target)
@@ -2518,7 +2568,7 @@ class LandmarkGUI(QMainWindow):
             self._predictor.geojson_to_landmark,
         )
         if target.is_dir():
-            n = len(fold_ckpts)
+            n = len(_find_fold_checkpoints(target))
             self._model_label.setText(f"Ensemble: {target.name}/ ({n} folds)")
             self.statusBar().showMessage(
                 f"Ensemble loaded from {target.name}: {n} folds — predictions will average all of them"
@@ -2529,6 +2579,7 @@ class LandmarkGUI(QMainWindow):
 
         for entry in self._entries:
             entry.prediction = None
+        self._refresh_image_list_styling()
         if self._current_idx >= 0:
             self._on_image_selected(self._current_idx)
 
@@ -2945,6 +2996,7 @@ class LandmarkGUI(QMainWindow):
         if self._entries:
             # Select the first visible row (respects the search filter).
             self._image_list.setCurrentRow(self._first_visible_row(default=0))
+        self._refresh_image_list_styling()
 
     def _confirm_fuzzy_matches(self, fuzzy_matches: list[tuple[int, str, str]]) -> None:
         """Show a dialog asking the user to accept or reject fuzzy GT matches."""
@@ -3027,6 +3079,9 @@ class LandmarkGUI(QMainWindow):
         # Update info table
         self._update_info_table(entry)
         self._update_wing_status(entry)
+        # Lazy single-image prediction may have just populated entry.prediction —
+        # refresh the list styling so the new pass/fail status is reflected.
+        self._refresh_image_list_styling()
 
         # Update heatmap panel — pass GT coords scaled to model resolution
         pred_hm = entry.prediction["heatmaps"] if entry.prediction else None
@@ -3210,6 +3265,131 @@ class LandmarkGUI(QMainWindow):
                 "padding: 6px; font-weight: bold; font-size: 14px;"
                 "background: #0e4a1a; color: #a0ffb0; border-radius: 4px;"
             )
+
+    # ---- Image-list pass/fail summary ----
+    def _entry_status(self, entry: ImageEntry) -> str:
+        """Return 'pass' / 'fail' / 'unknown' for an entry's cached prediction.
+
+        Mirrors `_update_wing_status`'s rule: pass = no core landmark unreliable.
+        Non-core failures still count as a pass since the gate only aborts the
+        image on core failures. Stub batch results carrying an `error` key (set
+        when raise_on_core_fail=False intercepted a LowConfidenceLandmarkError)
+        also count as fail.
+        """
+        pred = entry.prediction
+        if pred is None:
+            return "unknown"
+        if pred.get("error") is not None:
+            return "fail"
+        reliable = pred.get("reliable") or {}
+        if not reliable:
+            return "unknown"
+        gate_cfg = self._predictor.gate_config if self._predictor else {}
+        core = set(gate_cfg.get("core_landmarks", []) or [])
+        if any(n in reliable and not reliable[n] for n in core):
+            return "fail"
+        return "pass"
+
+    def _refresh_image_list_styling(self) -> None:
+        """Re-color list items per entry status and update the pass-count label.
+
+        Safe to call any time the prediction cache, gate config, or highlight
+        toggle changes. No-op when widgets aren't built yet.
+        """
+        if not hasattr(self, "_image_list") or not hasattr(self, "_pass_count_label"):
+            return
+        highlight = self._highlight_failed_chk.isChecked()
+        # Warm red on the dark list background; default echoes the list's foreground style.
+        fail_brush = QColor("#ff6b6b")
+        default_brush = QColor("#dddddd")
+        n_pass = n_fail = n_unknown = 0
+        for row, entry in enumerate(self._entries):
+            status = self._entry_status(entry)
+            if status == "pass":
+                n_pass += 1
+            elif status == "fail":
+                n_fail += 1
+            else:
+                n_unknown += 1
+            item = self._image_list.item(row)
+            if item is None:
+                continue
+            if highlight and status == "fail":
+                item.setForeground(fail_brush)
+            else:
+                item.setForeground(default_brush)
+        total = len(self._entries)
+        if total == 0:
+            self._pass_count_label.setText("")
+        elif n_unknown == total:
+            self._pass_count_label.setText(f"0 / {total} predicted")
+        elif n_unknown == 0:
+            self._pass_count_label.setText(f"{n_pass} / {total} passed · {n_fail} failed")
+        else:
+            self._pass_count_label.setText(
+                f"{n_pass} passed · {n_fail} failed · {n_unknown} unpredicted"
+            )
+
+    def _on_toggle_highlight_failed(self, _checked: bool) -> None:
+        """Re-apply list styling when the user toggles the highlight checkbox."""
+        self._refresh_image_list_styling()
+
+    def _on_predict_all(self) -> None:
+        """Batch-predict every image lacking a cached prediction.
+
+        Strips core_landmarks for the duration of the batch so that core
+        failures don't drop heatmaps from the result (matches the lazy-path
+        behavior in _predict_for_inspection). Status classification uses the
+        original core set since gate_config is restored before refresh.
+        """
+        if self._predictor is None:
+            self.statusBar().showMessage("Load a model before running Predict all.")
+            return
+        pending = [(i, e) for i, e in enumerate(self._entries) if e.prediction is None]
+        if not pending:
+            self.statusBar().showMessage("All images already predicted.")
+            self._refresh_image_list_styling()
+            return
+
+        from landmark_locator.data.psd_loader import imread_any
+
+        # Keep batches small so UI stays responsive and memory stays bounded
+        # on the high-resolution training images (5440x3648).
+        BATCH = 4
+        saved_core = self._predictor.gate_config.get("core_landmarks", [])
+        self._predictor.gate_config["core_landmarks"] = []
+        try:
+            self._predict_all_btn.setEnabled(False)
+            done = 0
+            for chunk_start in range(0, len(pending), BATCH):
+                chunk = pending[chunk_start : chunk_start + BATCH]
+                images: list[np.ndarray] = []
+                valid: list[tuple[int, ImageEntry]] = []
+                for idx, entry in chunk:
+                    img = imread_any(entry.path)
+                    if img is None:
+                        continue
+                    images.append(img)
+                    valid.append((idx, entry))
+                if images:
+                    try:
+                        results = self._predictor.predict_batch(
+                            images, include_unreliable=True, raise_on_core_fail=False
+                        )
+                    except Exception as exc:
+                        self.statusBar().showMessage(f"Predict all failed: {exc}")
+                        return
+                    for (_idx, entry), res in zip(valid, results):
+                        entry.prediction = res
+                done += len(chunk)
+                self.statusBar().showMessage(f"Predicting… {done} / {len(pending)}")
+                self._refresh_image_list_styling()
+                QApplication.processEvents()
+        finally:
+            self._predictor.gate_config["core_landmarks"] = saved_core
+            self._predict_all_btn.setEnabled(True)
+        self.statusBar().showMessage(f"Predicted {len(pending)} image(s).")
+        self._refresh_image_list_styling()
 
 
 # ---------------------------------------------------------------------------
