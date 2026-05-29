@@ -81,6 +81,13 @@ class _BugReportThread(QThread):
 
     def run(self) -> None:
         try:
+            # Use TRACE's certifi-backed SSL context — the system trust store
+            # can be out of date (especially on PyInstaller bundles and conda
+            # envs), causing "certificate has expired" failures against
+            # Cloudflare even when the cert is in fact valid. Same pattern
+            # the auto-update check uses.
+            from TRACE.fetch_assets import make_ssl_context
+
             data = json.dumps(self._payload).encode("utf-8")
             req = urllib.request.Request(
                 self._worker_url,
@@ -91,7 +98,9 @@ class _BugReportThread(QThread):
                     "User-Agent": "TRACE-bug-reporter",
                 },
             )
-            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_SEC) as resp:
+            with urllib.request.urlopen(
+                req, timeout=_REQUEST_TIMEOUT_SEC, context=make_ssl_context()
+            ) as resp:
                 body = json.load(resp)
         except urllib.error.HTTPError as exc:
             # The Worker returns JSON error bodies with the user-facing message;
