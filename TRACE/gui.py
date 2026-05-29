@@ -2469,26 +2469,36 @@ class TraceWindow(QMainWindow):
         # any settings drift between slices in-place.
         self._log_run_settings()
 
-        # Initialize per-image status. Rules:
-        #   - SUCCEEDED / FAILED rows from an earlier slice in this same
-        #     session keep their glyphs untouched — overwriting them with
-        #     SKIPPED ↷ would erase the result the user just saw.
-        #   - Everything else (PENDING / IN_PROGRESS / SKIPPED / unset)
-        #     is reset based on the resume skip set: in the set → SKIPPED,
-        #     otherwise → PENDING. The pipeline never re-emits signals
-        #     for skipped images, so the SKIPPED label is the truth.
-        # On a cross-session resume the statuses are all unset (the prior
-        # session's run-finish path cleared self._image_status indirectly
-        # via _refresh_image_list), so the SKIPPED initialization paints
-        # those rows correctly from a blank starting state.
-        # Precedence: SUCCEEDED/FAILED keep their final color (no reset);
-        # USER_SKIPPED > resume SKIPPED > PENDING for everything else.
-        # User-skips outrank resume-skips because they're explicit user
-        # intent for this run, not just a leftover marker from a prior
-        # session — the difference matters for the post-run review.
+        # Initialize per-image status. Single rule that covers fresh
+        # runs, resumes, and rerun-failed launches:
+        #   - A SUCCEEDED / FAILED row keeps its final glyph IFF the
+        #     worker is going to skip this image in the upcoming run.
+        #     That way the prior-run result the user just saw isn't
+        #     overwritten with PENDING for an image that won't be
+        #     reprocessed.
+        #   - Otherwise reset based on skip-set membership:
+        #     USER_SKIPPED > resume SKIPPED > PENDING.
+        # Walking through the cases:
+        #   - Fresh Run click: effective_skip_set is just the user-skip
+        #     set. SUCCEEDED/FAILED rows from a prior run within the
+        #     same session reset to PENDING because the worker is
+        #     about to revisit them. (The "image list still shows old
+        #     check marks on rerun" bug came from skipping this reset.)
+        #   - Resume: resume_skip_set contains every previously-
+        #     completed image, so all SUCCEEDED/FAILED rows are
+        #     preserved — same end-state as before.
+        #   - Rerun-failed: rerun_skip_set covers all images EXCEPT the
+        #     failed ones being rerun. Green checks on the successful
+        #     ones stay; the failed ones reset to PENDING because the
+        #     worker is about to reprocess them.
+        effective_skip_set = (
+            rerun_skip_set
+            if rerun_skip_set is not None
+            else (self._resume_skip_set or set()) | self._user_skip_set
+        )
         for basename in list(self._basename_to_row):
             current = self._image_status.get(basename)
-            if current in (ImageStatus.SUCCEEDED, ImageStatus.FAILED):
+            if current in (ImageStatus.SUCCEEDED, ImageStatus.FAILED) and basename in effective_skip_set:
                 continue
             if basename in self._user_skip_set:
                 initial = ImageStatus.USER_SKIPPED
