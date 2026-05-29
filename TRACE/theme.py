@@ -345,46 +345,43 @@ def os_is_dark() -> Optional[bool]:
         except Exception:
             return None
     if _sys.platform == "win32":
+        # Read HKCU\...\Personalize\AppsUseLightTheme (0 = dark, 1 =
+        # light). This is the canonical "what color do apps use" key —
+        # SystemUsesLightTheme covers the Windows shell (taskbar / Start
+        # menu) and can be set independently, but apps follow Apps.
+        # Detailed _slog calls so the next Windows test surfaces every
+        # branch in trace_startup.log; once stable we can prune them.
+        try:
+            from TRACE.startup_log import log as _slog
+        except Exception:
+            def _slog(_msg: str) -> None:
+                return
         try:
             import winreg
-
-            # Windows has TWO related keys under
-            # HKCU\...\Themes\Personalize:
-            #   AppsUseLightTheme    — apps/dialog color
-            #   SystemUsesLightTheme — taskbar / Start menu color
-            # In the Settings UI these are usually slaved together
-            # (the single "Choose your color" dropdown sets both), but
-            # users CAN set them independently via "Custom" mode.
-            # If either key says dark (== 0), we treat the system as
-            # dark — that's the closer match to what a user means by
-            # "Windows is in dark mode". This also covers the case
-            # where AppsUseLightTheme is missing on older builds.
+        except Exception as exc:
+            _slog(f"theme: winreg import failed: {exc!r}")
+            return None
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            )
+        except OSError as exc:
+            _slog(f"theme: Personalize key OpenKey failed: {exc!r}")
+            return None
+        try:
             try:
-                with winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-                ) as key:
-                    try:
-                        apps_light = int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0])
-                    except OSError:
-                        apps_light = None
-                    try:
-                        sys_light = int(winreg.QueryValueEx(key, "SystemUsesLightTheme")[0])
-                    except OSError:
-                        sys_light = None
-            except OSError:
-                # Personalize key missing entirely (very old Windows).
+                raw, val_type = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            except OSError as exc:
+                _slog(f"theme: AppsUseLightTheme QueryValueEx failed: {exc!r}")
                 return None
-            # If either reading is "0" (dark), call it dark mode.
-            if apps_light == 0 or sys_light == 0:
-                return True
-            # Both present and == 1 → light.
-            if apps_light == 1 or sys_light == 1:
-                return False
-            # Neither key readable — unknown.
-            return None
-        except Exception:
-            return None
+            _slog(f"theme: AppsUseLightTheme raw={raw!r} type={val_type}")
+            return int(raw) == 0
+        finally:
+            try:
+                key.Close()
+            except Exception:
+                pass
     return None
 
 
