@@ -1211,6 +1211,31 @@ class GateConfigPanel(QWidget):
             ),
             "Abort": "Check to fail the whole image when this landmark misses.",
         }
+        # Tooltips explaining each metric, shown on hover of the column header.
+        # Surfaces in TRACE's embedded panel as well as the LandmarkLocator GUI.
+        metric_header_tooltips = {
+            "peak ≥": (
+                "Peak — the maximum value of the predicted heatmap at the landmark's "
+                "location (0–1).\n\n"
+                "Higher peak = the model is more confident something is there. Low peak "
+                "means the feature is faint, missing, or occluded.\n\n"
+                "A landmark passes this gate when its peak value is ≥ this threshold."
+            ),
+            "sharp ≥": (
+                "Sharpness — how peaked the heatmap is: peak value divided by the mean "
+                "value of an 11×11 window around it.\n\n"
+                "High sharpness = a single confident spike. Low sharpness = a fuzzy blob "
+                "where the model isn't sure exactly where the landmark sits.\n\n"
+                "A landmark passes this gate when its sharpness ratio is ≥ this threshold."
+            ),
+            "sp_ratio ≤": (
+                "Second-peak ratio — the next-highest heatmap value (outside a suppression "
+                "radius around the main peak) divided by the main peak.\n\n"
+                "High ratio = a comparably strong second candidate exists; the model is "
+                "torn between two locations. Low ratio = the main peak is unambiguous.\n\n"
+                "A landmark passes this gate when its second-peak ratio is ≤ this threshold."
+            ),
+        }
         # Metric columns get a checkbox to the left of the label so the user can
         # disable an entire gate column without losing its threshold values.
         # Default ON. Stored state lives on the panel and is emitted via
@@ -1233,6 +1258,10 @@ class GateConfigPanel(QWidget):
                 cell_layout = QHBoxLayout(cell)
                 cell_layout.setContentsMargins(0, 0, 0, 0)
                 cell_layout.setSpacing(4)
+                # Tooltip on the cell catches hover over empty space; the label
+                # below carries it too so hover over the text itself works
+                # without falling through to the cell (Qt doesn't propagate).
+                cell.setToolTip(metric_header_tooltips[h])
                 chk = QCheckBox()
                 chk.setChecked(bool(self._cfg.get(metric_key, {}).get("enabled", True)))
                 chk.setToolTip(gate_enabled_tooltip)
@@ -1241,6 +1270,7 @@ class GateConfigPanel(QWidget):
                 cell_layout.addWidget(chk)
                 lbl = QLabel(h)
                 lbl.setStyleSheet("font-weight: bold;")
+                lbl.setToolTip(metric_header_tooltips[h])
                 cell_layout.addWidget(lbl)
                 cell_layout.addStretch(1)
                 grid.addWidget(cell, 0, col)
