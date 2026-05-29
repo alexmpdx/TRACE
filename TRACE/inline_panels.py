@@ -1435,14 +1435,25 @@ class InlineHelpPanel(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        # Top-level: a horizontal split with the text/controls column on
+        # the left (takes all leftover width) and the fly icon pinned to
+        # the top-right. The icon column has stretch=0 and the icon is
+        # a fixed-size QLabel, so the text column always reflows into
+        # the remaining width — the icon can never overlap or push into
+        # text content when the window is resized.
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(16)
 
-        # Banner: fliconWhite_real.svg (white-stroke variant of flicon.svg)
-        # rendered as a centered wireframe at the top of the Help tab — the
-        # white strokes show clearly on the dark theme. The README uses the
-        # black-stroke flicon.svg since GitHub renders it on a light page.
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        outer.addLayout(layout, stretch=1)
+
+        # fliconWhite_real.svg (white-stroke variant of flicon.svg) sits
+        # in the top-right corner at the same baseline as the
+        # Documentation heading. The README uses the black-stroke
+        # flicon.svg since GitHub renders it on a light page.
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
             _flicon = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "fliconWhite_real.svg"
         else:
@@ -1453,17 +1464,25 @@ class InlineHelpPanel(QWidget):
 
             renderer = QSvgRenderer(str(_flicon))
             default = renderer.defaultSize()
-            banner_width = 280
-            banner_h = max(1, int(banner_width * default.height() / max(1, default.width())))
-            pixmap = QPixmap(banner_width, banner_h)
+            # Roughly headline-row height. Aspect-preserving.
+            icon_w = 64
+            icon_h = max(1, int(icon_w * default.height() / max(1, default.width())))
+            pixmap = QPixmap(icon_w, icon_h)
             pixmap.fill(Qt.transparent)
             painter = QPainter(pixmap)
             renderer.render(painter)
             painter.end()
-            banner = QLabel()
-            banner.setPixmap(pixmap)
-            banner.setAlignment(Qt.AlignCenter)
-            layout.addWidget(banner)
+            flicon_label = QLabel()
+            flicon_label.setPixmap(pixmap)
+            # Lock the QLabel to the pixmap's size so its sizeHint can't
+            # ever expand and squeeze the text column.
+            flicon_label.setFixedSize(icon_w, icon_h)
+            icon_col = QVBoxLayout()
+            icon_col.setContentsMargins(0, 0, 0, 0)
+            icon_col.setSpacing(0)
+            icon_col.addWidget(flicon_label)
+            icon_col.addStretch(1)  # pin to top
+            outer.addLayout(icon_col)
 
         title = QLabel("Documentation")
         title_font = QFont(title.font())
@@ -1625,6 +1644,18 @@ class InlineHelpPanel(QWidget):
         # with a manual click) don't fire two concurrent requests.
         self._update_thread: Optional[_UpdateCheckThread] = None
 
+        # --- Report a bug ---
+        bug_row = QHBoxLayout()
+        self.btn_report_bug = QPushButton("Report a bug…")
+        self.btn_report_bug.setToolTip(
+            "File a bug report. No GitHub account required — the report goes to "
+            "a maintainer-controlled server that files it as a GitHub issue."
+        )
+        self.btn_report_bug.clicked.connect(self._open_report_bug_dialog)
+        bug_row.addWidget(self.btn_report_bug)
+        bug_row.addStretch(1)
+        layout.addLayout(bug_row)
+
         layout.addStretch(1)
 
         footer = QLabel(
@@ -1653,6 +1684,12 @@ class InlineHelpPanel(QWidget):
             import webbrowser
 
             webbrowser.open(self._RELEASES_PAGE_URL)
+
+    def _open_report_bug_dialog(self) -> None:
+        from TRACE.report_bug_dialog import ReportBugDialog
+
+        dlg = ReportBugDialog(self._window)
+        dlg.exec()
 
     @staticmethod
     def _fetch_latest_release_info(api_url: str) -> dict:
