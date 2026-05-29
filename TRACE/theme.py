@@ -348,11 +348,41 @@ def os_is_dark() -> Optional[bool]:
         try:
             import winreg
 
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            ) as key:
-                return int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0]) == 0
+            # Windows has TWO related keys under
+            # HKCU\...\Themes\Personalize:
+            #   AppsUseLightTheme    — apps/dialog color
+            #   SystemUsesLightTheme — taskbar / Start menu color
+            # In the Settings UI these are usually slaved together
+            # (the single "Choose your color" dropdown sets both), but
+            # users CAN set them independently via "Custom" mode.
+            # If either key says dark (== 0), we treat the system as
+            # dark — that's the closer match to what a user means by
+            # "Windows is in dark mode". This also covers the case
+            # where AppsUseLightTheme is missing on older builds.
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                ) as key:
+                    try:
+                        apps_light = int(winreg.QueryValueEx(key, "AppsUseLightTheme")[0])
+                    except OSError:
+                        apps_light = None
+                    try:
+                        sys_light = int(winreg.QueryValueEx(key, "SystemUsesLightTheme")[0])
+                    except OSError:
+                        sys_light = None
+            except OSError:
+                # Personalize key missing entirely (very old Windows).
+                return None
+            # If either reading is "0" (dark), call it dark mode.
+            if apps_light == 0 or sys_light == 0:
+                return True
+            # Both present and == 1 → light.
+            if apps_light == 1 or sys_light == 1:
+                return False
+            # Neither key readable — unknown.
+            return None
         except Exception:
             return None
     return None

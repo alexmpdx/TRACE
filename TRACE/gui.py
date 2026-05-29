@@ -4273,10 +4273,19 @@ def _apply_theme(app: QApplication, theme=None) -> None:
     the centralized Theme dataclass (TRACE/theme.py) so the same code
     path renders dark or light depending on the user's Settings pick.
     """
-    from TRACE.theme import current_theme
+    from TRACE.theme import current_theme, manager as _theme_mgr, os_is_dark
 
     if theme is None:
         theme = current_theme()
+    # Log the resolved theme + raw OS-detection signal so we can
+    # diagnose "I have system set to dark but TRACE is light"-style
+    # reports from the startup log without needing to re-instrument.
+    try:
+        from TRACE.startup_log import log as _slog
+
+        _slog(f"theme: applying {theme.name} (pref={_theme_mgr().preference.value}, os_is_dark={os_is_dark()})")
+    except Exception:
+        pass
     app.setStyle("Fusion")
     p = QPalette()
     p.setColor(QPalette.Window, QColor(theme.bg))
