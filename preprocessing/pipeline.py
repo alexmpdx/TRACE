@@ -306,6 +306,47 @@ def save_landmarks_geojson(landmarks: dict, output_path: Path, metadata: Optiona
         json.dump(fc, f, indent=2)
 
 
+def load_landmarks_override(path: Path) -> tuple[dict, dict]:
+    """Load a manual landmark override GeoJSON into (landmarks, metadata).
+
+    Written by TRACE's landmark inspector dialog next to the source image as
+    ``<stem>_landmarks_override.geojson``. Tolerant of either the inspector's
+    minimal schema (classification.name + coordinates) or the full Stage-3
+    schema (confidence/sharpness/etc.).
+
+    Returns:
+        landmarks: ``{name: (x, y)}`` in pixel coordinates.
+        metadata:  ``{name: {reliable, gate_reason, confidence, sharpness,
+                   second_peak_ratio}}`` — defaults force the override through
+                   any downstream confidence gate (reliable=True, confidence=1.0).
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    landmarks: dict = {}
+    metadata: dict = {}
+    for feat in data.get("features", []):
+        geom = feat.get("geometry") or {}
+        if geom.get("type") != "Point":
+            continue
+        coords = geom.get("coordinates") or []
+        if len(coords) < 2:
+            continue
+        props = feat.get("properties") or {}
+        cls = props.get("classification") or {}
+        name = cls.get("name") or props.get("name")
+        if not name:
+            continue
+        name = str(name)
+        landmarks[name] = (float(coords[0]), float(coords[1]))
+        metadata[name] = {
+            "reliable": props.get("reliable", True),
+            "gate_reason": props.get("gate_reason", "manual override"),
+            "confidence": props.get("confidence", 1.0),
+            "sharpness": props.get("sharpness", 0.0),
+            "second_peak_ratio": props.get("second_peak_ratio", 0.0),
+        }
+    return landmarks, metadata
+
+
 # ---------------------------------------------------------------------------
 # Stage 6: Wing rotation (runs after segmentation as the last preprocessing step)
 # ---------------------------------------------------------------------------
@@ -629,6 +670,10 @@ def process_single_image(
     """
     do_landmarks, do_hinge, do_segment = stages
     result = PipelineResult(image_path=image_path)
+    # Captured before any stage rebinds image_path (resolution rescale, wing
+    # isolation). The manual landmark override sidecar lives next to the
+    # original input the user picked, keyed on its untouched stem.
+    original_input_path = image_path
 
     if predictor_cache is None:
         predictor_cache = {}
@@ -772,26 +817,38 @@ def process_single_image(
     if do_landmarks:
         if progress_callback:
             progress_callback("landmarks", f"Predicting landmarks for {image_path.name}")
-        cached = None
-        if prefetched_landmarks is not None:
-            # Try the original input path first, then the (post-JPEG-conversion) path.
-            cached = prefetched_landmarks.get(image_path)
-            if cached is None:
-                # Caller may have keyed by the original input before JPEG/PSD conversion.
-                cached = prefetched_landmarks.get(Path(str(image_path).replace(raster_ext, ext)))
-        if cached is not None:
-            if cached.get("error") is not None:
-                raise cached["error"]
-            landmarks = cached["landmarks"]
-            landmark_metadata = cached["metadata"]
+        # Manual override: if the user inspected/corrected this image's landmarks
+        # via TRACE's landmark inspector dialog, a sidecar lives next to the
+        # original input. Trust it and skip the predictor (and its cache)
+        # entirely — the corrected positions are written to the canonical
+        # landmarks_geojson below so Stages 4-6 see the same data.
+        override_path = original_input_path.parent / f"{original_input_path.stem}_landmarks_override.geojson"
+        if override_path.is_file():
+            import logging as _logging
+
+            _logging.getLogger(__name__).info("%s: using manual landmark override from %s", stem, override_path)
+            landmarks, landmark_metadata = load_landmarks_override(override_path)
         else:
-            landmarks, landmark_metadata = run_landmarks(
-                image_path,
-                landmark_checkpoint,
-                predictor_cache,
-                include_unreliable_landmarks=include_unreliable_landmarks,
-                confidence_override=gate_override,
-            )
+            cached = None
+            if prefetched_landmarks is not None:
+                # Try the original input path first, then the (post-JPEG-conversion) path.
+                cached = prefetched_landmarks.get(image_path)
+                if cached is None:
+                    # Caller may have keyed by the original input before JPEG/PSD conversion.
+                    cached = prefetched_landmarks.get(Path(str(image_path).replace(raster_ext, ext)))
+            if cached is not None:
+                if cached.get("error") is not None:
+                    raise cached["error"]
+                landmarks = cached["landmarks"]
+                landmark_metadata = cached["metadata"]
+            else:
+                landmarks, landmark_metadata = run_landmarks(
+                    image_path,
+                    landmark_checkpoint,
+                    predictor_cache,
+                    include_unreliable_landmarks=include_unreliable_landmarks,
+                    confidence_override=gate_override,
+                )
         result.landmarks = landmarks
         result.landmark_metadata = landmark_metadata
         lm_path = output_dir / f"{stem}_landmarks.geojson"

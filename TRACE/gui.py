@@ -508,6 +508,7 @@ _STATUS_GLYPH: dict[ImageStatus, str] = {
     ImageStatus.USER_SKIPPED: "⊘ ",
 }
 
+
 # Row foreground colors resolved from the active Theme. PENDING +
 # IN_PROGRESS pick palette tones that read on both dark and light
 # themes; SUCCEEDED/FAILED reuse the existing green/red palette already
@@ -1019,8 +1020,17 @@ class TraceWindow(QMainWindow):
         )
         self.btn_rerun_failed_nogate.clicked.connect(lambda: self._start_rerun_failed(disable_gates=True))
         self.btn_rerun_failed_nogate.setVisible(False)
+        self.btn_review_failed = QPushButton("Review failed images")
+        self.btn_review_failed.setToolTip(
+            "Open the landmark inspector on each failed image so you can correct "
+            "the landmarks and save per-image overrides. The next run that includes "
+            "these images will use your overrides instead of running LandmarkLocator."
+        )
+        self.btn_review_failed.clicked.connect(self._review_failed_images)
+        self.btn_review_failed.setVisible(False)
         rerun_layout.addWidget(self.btn_rerun_failed)
         rerun_layout.addWidget(self.btn_rerun_failed_nogate)
+        rerun_layout.addWidget(self.btn_review_failed)
         left_layout.addLayout(rerun_layout)
 
         # Tracks whether the worker is currently in a paused state. Drives
@@ -1284,6 +1294,16 @@ class TraceWindow(QMainWindow):
         menu.addSeparator()
         act_skip_all = menu.addAction("Skip all")
         act_unskip_all = menu.addAction("Unskip all")
+
+        # Inspect & Edit landmarks. Label reflects whether a multi-selection
+        # (cohort) or a single clicked row will be opened.
+        menu.addSeparator()
+        n_selected = len(self.image_list.selectedItems())
+        inspect_label = (
+            "Inspect & Edit landmarks…" if n_selected <= 1 else f"Inspect & Edit landmarks ({n_selected} selected)…"
+        )
+        act_inspect = menu.addAction(inspect_label)
+
         chosen = menu.exec_(self.image_list.mapToGlobal(pos))
         if chosen is None:
             return
@@ -1295,6 +1315,31 @@ class TraceWindow(QMainWindow):
             self._apply_skip(range(self.image_list.count()), skip=True)
         elif chosen is act_unskip_all:
             self._apply_skip(range(self.image_list.count()), skip=False)
+        elif chosen is act_inspect:
+            selected = self.image_list.selectedItems()
+            target_item = self.image_list.itemAt(pos)
+            # Cohort only if >=2 selected AND the clicked row is part of the
+            # selection. Right-clicking outside the selection operates on the
+            # clicked row only (matches typical OS behavior).
+            if len(selected) > 1 and target_item in selected:
+                paths = []
+                for item in selected:
+                    row = self.image_list.row(item)
+                    if 0 <= row < len(self._image_paths):
+                        paths.append(self._image_paths[row])
+                if paths:
+                    self._open_landmark_inspector(paths[0], cohort=paths)
+            elif target_item is not None:
+                row = self.image_list.row(target_item)
+                if 0 <= row < len(self._image_paths):
+                    self._open_landmark_inspector(self._image_paths[row])
+
+    def _open_landmark_inspector(self, image_path: Path, cohort: Optional[list] = None) -> None:
+        """Open the modal landmark inspector on one image (or a cohort)."""
+        from TRACE.landmark_inspector_dialog import LandmarkInspectorDialog
+
+        dlg = LandmarkInspectorDialog(self, image_path, cohort=cohort)
+        dlg.exec_()
 
     def _apply_skip(self, rows, *, skip: bool) -> None:
         """Toggle multiple rows at once + persist + repaint glyphs."""
@@ -2114,6 +2159,11 @@ class TraceWindow(QMainWindow):
         # specifically targets LowConfidenceLandmarkError cases.
         has_gate_failure = any(self._failure_category.get(name) == "gate" for name in failed)
         self.btn_rerun_failed_nogate.setVisible(has_failed and has_gate_failure)
+        # Review-failed shares the rerun buttons' visibility — it opens the
+        # landmark inspector on the failed set so the user can hand-correct.
+        self.btn_review_failed.setVisible(has_failed)
+        if has_failed:
+            self.btn_review_failed.setText(f"Review failed images ({len(failed)})")
 
         # Hint dispatch — deferred 300ms so the new button's geometry is
         # settled before the overlay measures it. Each hint fires on
@@ -2124,8 +2174,10 @@ class TraceWindow(QMainWindow):
         # the dismissal — no checkbox tick → hint fires again next run.
         # The no-gate hint is prioritized over the plain hint when both
         # could fire, so the user sees the more specific suggestion.
-        if has_failed and has_gate_failure and not self.settings.value(
-            "nogate_rerun_button_hint_dismissed", False, type=bool
+        if (
+            has_failed
+            and has_gate_failure
+            and not self.settings.value("nogate_rerun_button_hint_dismissed", False, type=bool)
         ):
             QTimer.singleShot(
                 300,
@@ -2141,9 +2193,7 @@ class TraceWindow(QMainWindow):
                     ),
                 ),
             )
-        elif has_failed and not self.settings.value(
-            "rerun_button_hint_dismissed", False, type=bool
-        ):
+        elif has_failed and not self.settings.value("rerun_button_hint_dismissed", False, type=bool):
             QTimer.singleShot(
                 300,
                 lambda: self._show_button_hint(
@@ -2158,6 +2208,44 @@ class TraceWindow(QMainWindow):
                     ),
                 ),
             )
+        elif has_failed and not self.settings.value("review_failed_button_hint_dismissed", False, type=bool):
+            # Shown only once the rerun hints above have been dismissed, so the
+            # user meets these features in a natural progression (one hint per
+            # run). Dismissal is driven by the overlay's "Don't show again" box.
+            QTimer.singleShot(
+                300,
+                lambda: self._show_button_hint(
+                    self.btn_review_failed,
+                    settings_key="review_failed_button_hint_dismissed",
+                    title="Review failed images",
+                    body=(
+                        "You can also open the failed images one at a time in the "
+                        "landmark inspector to drag the landmarks into place manually. "
+                        "Click <b>Review failed images</b> to step through them — saved "
+                        "corrections become per-image overrides that the next run picks "
+                        "up automatically, no model retraining needed."
+                    ),
+                ),
+            )
+
+    def _review_failed_images(self) -> None:
+        """Open the landmark inspector on the last run's failed images (cohort)."""
+        failed_basenames = sorted(self._last_run_failed_set)
+        if not failed_basenames:
+            return
+        failed_paths: list = []
+        for bn in failed_basenames:
+            row = self._basename_to_row.get(bn)
+            if row is not None and 0 <= row < len(self._image_paths):
+                failed_paths.append(self._image_paths[row])
+        if not failed_paths:
+            QMessageBox.warning(
+                self,
+                "Review failed images",
+                "Couldn't locate the failed images. Has the input folder changed " "since the last run?",
+            )
+            return
+        self._open_landmark_inspector(failed_paths[0], cohort=failed_paths)
 
     def _show_button_hint(
         self,
@@ -2188,9 +2276,7 @@ class TraceWindow(QMainWindow):
             if still_visible:
                 QTimer.singleShot(
                     500,
-                    lambda: self._show_button_hint(
-                        target_btn, settings_key=settings_key, title=title, body=body
-                    ),
+                    lambda: self._show_button_hint(target_btn, settings_key=settings_key, title=title, body=body),
                 )
                 return
 
@@ -2283,9 +2369,7 @@ class TraceWindow(QMainWindow):
         if disable_gates:
             import copy as _copy
 
-            self._gate_override_backup = (
-                _copy.deepcopy(self._gate_override) if self._gate_override else None
-            )
+            self._gate_override_backup = _copy.deepcopy(self._gate_override) if self._gate_override else None
             self._gate_override = self._build_all_gates_disabled_override()
         else:
             self._gate_override_backup = None
@@ -2574,9 +2658,7 @@ class TraceWindow(QMainWindow):
         #     ones stay; the failed ones reset to PENDING because the
         #     worker is about to reprocess them.
         effective_skip_set = (
-            rerun_skip_set
-            if rerun_skip_set is not None
-            else (self._resume_skip_set or set()) | self._user_skip_set
+            rerun_skip_set if rerun_skip_set is not None else (self._resume_skip_set or set()) | self._user_skip_set
         )
         for basename in list(self._basename_to_row):
             current = self._image_status.get(basename)
@@ -4102,6 +4184,7 @@ class TraceWindow(QMainWindow):
             f"QPushButton:hover {{ background-color: {_t.surface_alt}; }} "
             f"QPushButton:pressed {{ background-color: {_t.surface_pressed}; }}"
         )
+
         # "Update now" closes the dialog and triggers the actual
         # download + installer launch directly. Previously this was a
         # "View update" button that just switched to the Help tab so
@@ -4289,7 +4372,9 @@ def _apply_theme(app: QApplication, theme=None) -> None:
     the centralized Theme dataclass (TRACE/theme.py) so the same code
     path renders dark or light depending on the user's Settings pick.
     """
-    from TRACE.theme import current_theme, manager as _theme_mgr, os_is_dark
+    from TRACE.theme import current_theme
+    from TRACE.theme import manager as _theme_mgr
+    from TRACE.theme import os_is_dark
 
     if theme is None:
         theme = current_theme()

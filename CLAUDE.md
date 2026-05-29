@@ -61,6 +61,8 @@ python LandmarkLocator/landmark_locator/scripts/predict.py <folder> --batch \
 
 **TRACE stage skipping**: `_required_stages()` in `TRACE/pipeline.py` computes the minimal set of preprocessing stages needed for the user-selected outputs (landmarks / hinge / segmentation). Picking only `chopped_image`, for example, skips segmentation and Stage 2 entirely.
 
+**Manual landmark overrides**: `TRACE/landmark_inspector_dialog.py` (launched from the Main-tab image-list right-click menu or the post-run "Review failed images" button) lets users drag/add/delete landmarks in an embedded napari viewer and save a sidecar `<image_dir>/<stem>_landmarks_override.geojson` next to the *source* image. Stage 3 of `preprocessing/pipeline.py` checks for this sidecar (keyed on the original input path, captured as `original_input_path` before any stage rebinds `image_path`) and, if present, short-circuits LandmarkLocator entirely via `load_landmarks_override()` — overrides are marked `reliable: true` / `confidence: 1.0` so they sail through downstream gates. The inspector is a read-write sibling of `measurementMaker`'s read-only `LandmarkPickerWidget`; mirror that widget's napari API (`border_color`/`border_width`, `features=`, `size=90`) rather than older `edge_color`/`properties=` calls.
+
 ## Key Data Structures
 
 - `identify_features.WingResult` — veins, intervein regions, measurements
