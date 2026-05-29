@@ -2151,14 +2151,39 @@ class InlineHelpPanel(QWidget):
         while a check is in-flight is a no-op (the result slot will
         update the label when the first one lands).
         """
-        if self._update_thread is not None and self._update_thread.isRunning():
-            return
-        if not silent:
-            self._update_status_label.setText(f"<span style='color: {_ct().text_placeholder};'>Checking for updates…</span>")
-        self._update_thread = _UpdateCheckThread(self._LATEST_RELEASE_API, parent=self)
-        self._update_thread.result.connect(lambda payload: self._apply_update_check_result(payload, silent=silent))
-        self._update_thread.finished.connect(self._update_thread.deleteLater)
-        self._update_thread.start()
+        # Defensive: any uncaught exception in this handler — including
+        # the QThread.start() call, the lambda binding, or _ct() blowing
+        # up on a missing theme token — would otherwise make the click
+        # look like a no-op (no label change, no error dialog) in a
+        # frozen build with no console. Surface it instead.
+        from TRACE.startup_log import log as _slog
+        import traceback as _tb
+
+        try:
+            if self._update_thread is not None and self._update_thread.isRunning():
+                _slog(f"update_check: click ignored — previous check still running (silent={silent})")
+                return
+            _slog(f"update_check: starting (silent={silent}, api={self._LATEST_RELEASE_API})")
+            if not silent:
+                self._update_status_label.setText(
+                    f"<span style='color: {_ct().text_placeholder};'>Checking for updates…</span>"
+                )
+            self._update_thread = _UpdateCheckThread(self._LATEST_RELEASE_API, parent=self)
+            self._update_thread.result.connect(lambda payload: self._apply_update_check_result(payload, silent=silent))
+            self._update_thread.finished.connect(self._update_thread.deleteLater)
+            self._update_thread.start()
+            _slog("update_check: background thread started")
+        except BaseException as exc:  # noqa: BLE001 — log absolutely everything
+            tb_text = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+            _slog(f"update_check: handler raised {type(exc).__name__}\n{tb_text}")
+            if not silent:
+                try:
+                    self._update_status_label.setText(
+                        f"<span style='color: {_ct().error_text};'>Update check failed to start: "
+                        f"{type(exc).__name__}: {exc}</span>"
+                    )
+                except Exception:
+                    pass
 
     def _apply_update_check_result(self, payload: dict, *, silent: bool) -> None:
         """GUI-thread slot for _UpdateCheckThread.result. Updates the label,
@@ -2169,6 +2194,13 @@ class InlineHelpPanel(QWidget):
         was manual or automatic.
         """
         import time
+
+        from TRACE.startup_log import log as _slog
+
+        _slog(
+            "update_check: result received (ok=%s, error=%s)"
+            % (payload.get("ok"), payload.get("error", ""))
+        )
 
         self._window.settings.setValue("last_update_check_time", int(time.time()))
 
