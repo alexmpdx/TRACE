@@ -4193,40 +4193,63 @@ class TraceWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 # Dark Fusion theme + entry point
 # ---------------------------------------------------------------------------
-def _apply_dark_palette(app: QApplication):
+def _apply_theme(app: QApplication, theme=None) -> None:
+    """Apply the active Theme's palette + app-wide stylesheet.
+
+    Replaces the original _apply_dark_palette: pulls every color from
+    the centralized Theme dataclass (TRACE/theme.py) so the same code
+    path renders dark or light depending on the user's Settings pick.
+    """
+    from TRACE.theme import current_theme
+
+    if theme is None:
+        theme = current_theme()
     app.setStyle("Fusion")
     p = QPalette()
-    p.setColor(QPalette.Window, QColor(45, 45, 45))
-    p.setColor(QPalette.WindowText, QColor(208, 208, 208))
-    p.setColor(QPalette.Base, QColor(30, 30, 30))
-    p.setColor(QPalette.AlternateBase, QColor(45, 45, 45))
-    p.setColor(QPalette.ToolTipBase, QColor(45, 45, 45))
-    p.setColor(QPalette.ToolTipText, QColor(208, 208, 208))
-    p.setColor(QPalette.Text, QColor(208, 208, 208))
-    p.setColor(QPalette.Button, QColor(55, 55, 55))
-    p.setColor(QPalette.ButtonText, QColor(208, 208, 208))
-    p.setColor(QPalette.BrightText, QColor(255, 51, 51))
-    p.setColor(QPalette.Link, QColor(66, 133, 244))
-    p.setColor(QPalette.Highlight, QColor(66, 133, 244))
-    p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
-    p.setColor(QPalette.Disabled, QPalette.Text, QColor(128, 128, 128))
-    p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(128, 128, 128))
+    p.setColor(QPalette.Window, QColor(theme.bg))
+    p.setColor(QPalette.WindowText, QColor(theme.text))
+    # Base is the input-area background (line edits, list widgets, text
+    # edits). Slightly darker than Window in dark mode; pure white in
+    # light mode for a clean editor surface.
+    p.setColor(QPalette.Base, QColor(theme.surface if theme.name == "light" else "#1e1e1e"))
+    p.setColor(QPalette.AlternateBase, QColor(theme.bg))
+    p.setColor(QPalette.ToolTipBase, QColor(theme.bg))
+    p.setColor(QPalette.ToolTipText, QColor(theme.text))
+    p.setColor(QPalette.Text, QColor(theme.text))
+    p.setColor(QPalette.Button, QColor(theme.surface))
+    p.setColor(QPalette.ButtonText, QColor(theme.text))
+    p.setColor(QPalette.BrightText, QColor(theme.error))
+    p.setColor(QPalette.Link, QColor(theme.link))
+    p.setColor(QPalette.Highlight, QColor(theme.accent))
+    # Highlighted text reads cleanly on a saturated accent fill in both
+    # themes — keep it white rather than theme.text (which would be dark
+    # in light mode and disappear into the highlight).
+    p.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    p.setColor(QPalette.Disabled, QPalette.Text, QColor(theme.text_disabled))
+    p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(theme.text_disabled))
     app.setPalette(p)
-    # Force tooltips to match the dark dialog look — without this, on macOS
+    # Force tooltips to match the active theme — without this, on macOS
     # they fall back to the unstyled native popup and ignore the palette.
-    # QGroupBox border is bumped to a lighter shade (#7a7a7a) so the section
-    # bounding boxes on the main window stand out against the dark background;
-    # the title needs an explicit margin/padding so it doesn't overlap the
-    # border line when we set an explicit border.
+    # QGroupBox gets an explicit border so the section bounding boxes on
+    # the main window stand out against the window background; the title
+    # needs an explicit margin/padding so it doesn't overlap the border
+    # line when we set an explicit border.
+    groupbox_border = "#7a7a7a" if theme.name == "dark" else theme.border
     app.setStyleSheet(
-        "QToolTip { background-color: #2d2d2d; color: #d0d0d0;"
-        " border: 1px solid #555555; padding: 4px; }"
-        " QGroupBox { border: 1px solid #7a7a7a; border-radius: 4px;"
-        " margin-top: 10px; padding-top: 6px; }"
-        " QGroupBox::title { subcontrol-origin: margin;"
-        " subcontrol-position: top left; left: 8px; padding: 0 4px;"
-        " color: #d0d0d0; }"
+        f"QToolTip {{ background-color: {theme.bg}; color: {theme.text};"
+        f" border: 1px solid {theme.border}; padding: 4px; }}"
+        f" QGroupBox {{ border: 1px solid {groupbox_border}; border-radius: 4px;"
+        f" margin-top: 10px; padding-top: 6px; }}"
+        f" QGroupBox::title {{ subcontrol-origin: margin;"
+        f" subcontrol-position: top left; left: 8px; padding: 0 4px;"
+        f" color: {theme.text}; }}"
     )
+
+
+# Back-compat alias — kept so external entry points / tests that import
+# _apply_dark_palette by name still work. Calls through to the
+# theme-aware path with no theme override, so the user's preference wins.
+_apply_dark_palette = _apply_theme
 
 
 def main():
@@ -4235,7 +4258,14 @@ def main():
     # models aren't yet installed). Constructing a second QApplication in
     # the same process is undefined behavior in PyQt5.
     app = QApplication.instance() or QApplication(sys.argv)
-    _apply_dark_palette(app)
+    _apply_theme(app)
+    # Re-apply the palette + app stylesheet whenever the user switches
+    # themes from the Settings tab. Long-lived widgets handle their own
+    # inline-stylesheet re-styling by connecting to the same signal in
+    # their constructors.
+    from TRACE.theme import manager as _theme_manager
+
+    _theme_manager().themeChanged.connect(lambda t: _apply_theme(app, t))
     from TRACE._app_icon import make_app_icon
 
     icon = make_app_icon()

@@ -246,6 +246,7 @@ class InlineGeneralPanel(QWidget):
         self._build_intermediate_outputs_group(layout)
         self._build_output_options_group(layout)
         self._build_parallel_processing_group(layout)
+        self._build_appearance_group(layout)
         layout.addStretch(1)
 
         # Bottom row: Advanced Settings, then the Restore Defaults + wipe my
@@ -594,6 +595,54 @@ class InlineGeneralPanel(QWidget):
         v.addLayout(row)
 
         parent_layout.addWidget(gb)
+
+    def _build_appearance_group(self, parent_layout: QVBoxLayout) -> None:
+        """Theme picker (System / Light / Dark).
+
+        Stores the choice in QSettings under ``theme/preference`` (via the
+        ThemeManager) and emits ``themeChanged`` so connected long-lived
+        widgets re-style themselves without a restart. Short-lived modal
+        dialogs (Update notification, walkthrough overlay popup) read the
+        active theme at construction time.
+        """
+        from TRACE.theme import ThemePreference, manager as _theme_manager
+
+        gb = QGroupBox("Appearance")
+        v = QVBoxLayout(gb)
+        v.setContentsMargins(8, 6, 8, 6)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel("Theme:"))
+        self._theme_combo = QComboBox()
+        self._theme_combo.addItem("Follow system", ThemePreference.SYSTEM.value)
+        self._theme_combo.addItem("Light", ThemePreference.LIGHT.value)
+        self._theme_combo.addItem("Dark", ThemePreference.DARK.value)
+        self._theme_combo.setToolTip(
+            "Switch the TRACE color scheme. System matches the operating system's "
+            "dark / light setting (and updates live when it changes). Light and "
+            "Dark are explicit picks that override the system setting."
+        )
+        mgr = _theme_manager()
+        for idx in range(self._theme_combo.count()):
+            if self._theme_combo.itemData(idx) == mgr.preference.value:
+                self._theme_combo.setCurrentIndex(idx)
+                break
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        row.addWidget(self._theme_combo)
+        row.addStretch(1)
+        v.addLayout(row)
+        parent_layout.addWidget(gb)
+
+    def _on_theme_changed(self, _idx: int) -> None:
+        """User picked a new theme from the combo — apply via ThemeManager."""
+        from TRACE.theme import ThemePreference, manager as _theme_manager
+
+        raw = self._theme_combo.currentData()
+        try:
+            pref = ThemePreference(str(raw))
+        except ValueError:
+            return
+        _theme_manager().set_preference(pref)
 
     def _refresh_calibrate_paths(self) -> None:
         """Re-seed the CalibrateWidget with the window's current input + model paths."""
