@@ -753,6 +753,13 @@ class TraceWindow(QMainWindow):
         t = current_theme()
         self.eta_label.setStyleSheet(f"color: {t.text_placeholder};")
         self.transient_status_label.setStyleSheet(f"color: {t.warning};")
+        # Re-color the "requires Measurements CSV" hint labels stashed
+        # in _pulse_dependencies. They're hidden most of the time but
+        # become visible during the pulse animation; without this they'd
+        # show with the old theme's link color after a live switch.
+        for _parent, hint in self._pulse_dependencies.values():
+            if hint is not None:
+                hint.setStyleSheet(f"color: {t.link};")
         # The update-available "●" badge pixmap is cached on first use;
         # invalidate so the next request rebuilds with the new accent.
         self._cached_update_badge_icon = None

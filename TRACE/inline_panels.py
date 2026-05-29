@@ -216,6 +216,21 @@ class InlineGeneralPanel(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
+        # Theme live-switch wiring. _apply_theme_styles re-colors the
+        # dependent-row hint labels stored in _pulse_dependencies — they
+        # show during the pulse animation, so their build-time link
+        # color would otherwise survive a theme switch.
+        self._apply_theme_styles()
+        from TRACE.theme import manager as _theme_manager
+
+        _theme_manager().themeChanged.connect(self._apply_theme_styles)
+
+    def _apply_theme_styles(self, *_args) -> None:
+        """Re-color theme-dependent inline stylesheets."""
+        t = _ct()
+        for _parent, hint in self._pulse_dependencies.values():
+            if hint is not None:
+                hint.setStyleSheet(f"color: {t.link};")
 
     # -----------------------------------------------------------------------
     # App-level event filter for dependent-checkbox pulse
@@ -1194,7 +1209,27 @@ class InlineCustomDistancesPanel(QWidget):
         super().__init__()
         self._window = window
         self._picker = None  # type: ignore[assignment]
+        # Long-lived labels stored on self for live theme re-styling.
+        # Set inside _build_ui depending on which branch (info-only,
+        # missing-import error, napari-construction error) the panel
+        # took at startup.
+        self._info_label: Optional[QLabel] = None
+        self._import_err_label: Optional[QLabel] = None
+        self._napari_err_label: Optional[QLabel] = None
         self._build_ui()
+        self._apply_theme_styles()
+        from TRACE.theme import manager as _theme_manager
+
+        _theme_manager().themeChanged.connect(self._apply_theme_styles)
+
+    def _apply_theme_styles(self, *_args) -> None:
+        """Re-color the info / error labels for the active theme."""
+        t = _ct()
+        if self._info_label is not None:
+            self._info_label.setStyleSheet(f"color: {t.text_muted};")
+        for err_label in (self._import_err_label, self._napari_err_label):
+            if err_label is not None:
+                err_label.setStyleSheet(f"color: {t.error_text}; padding: 12px;")
 
     def _resolve_paths(self) -> tuple[str, str]:
         """Return (image, landmarks) paths to seed the picker.
@@ -1234,6 +1269,7 @@ class InlineCustomDistancesPanel(QWidget):
             )
             err.setWordWrap(True)
             err.setStyleSheet(f"color: {_ct().error_text}; padding: 12px;")
+            self._import_err_label = err
             layout.addWidget(err)
             layout.addStretch()
             self._picker = None
@@ -1271,6 +1307,7 @@ class InlineCustomDistancesPanel(QWidget):
             )
             err.setWordWrap(True)
             err.setStyleSheet(f"color: {_ct().error_text}; padding: 12px;")
+            self._napari_err_label = err
             layout.addWidget(err)
             layout.addStretch()
             self._picker = None
@@ -1527,30 +1564,35 @@ class InlineHelpPanel(QWidget):
         title.setFont(title_font)
         layout.addWidget(title)
 
-        readme_path = Path(__file__).resolve().parent / "README.md"
-        if readme_path.is_file():
-            url = QUrl.fromLocalFile(str(readme_path)).toString()
-            link = QLabel(f'<a href="{url}" style="color: {_ct().link};">Open README.md in your default app</a>')
-            link.setOpenExternalLinks(True)
-            link.setTextInteractionFlags(Qt.TextBrowserInteraction)
-            layout.addWidget(link)
+        # Static labels are stored on self so _apply_theme_styles can
+        # re-set their HTML when the user switches theme — colors like
+        # text_muted and error_text resolve to very different shades per
+        # theme (e.g. #aaa in dark vs #666 in light), so a build-time
+        # capture would leave low-contrast text after a live switch.
+        self._readme_path = Path(__file__).resolve().parent / "README.md"
+        self._doc_link = None
+        self._doc_path_label = None
+        self._doc_missing_label = None
+        if self._readme_path.is_file():
+            self._doc_link = QLabel("")
+            self._doc_link.setOpenExternalLinks(True)
+            self._doc_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            layout.addWidget(self._doc_link)
 
-            path_label = QLabel(f"<span style='color: {_ct().text_placeholder};'>Location:</span> {readme_path}")
-            path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            path_label.setWordWrap(True)
-            layout.addWidget(path_label)
+            self._doc_path_label = QLabel("")
+            self._doc_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self._doc_path_label.setWordWrap(True)
+            layout.addWidget(self._doc_path_label)
         else:
-            missing = QLabel(f"<span style='color: {_ct().error_text};'>README.md not found at:</span><br>{readme_path}")
-            missing.setWordWrap(True)
-            layout.addWidget(missing)
+            self._doc_missing_label = QLabel("")
+            self._doc_missing_label.setWordWrap(True)
+            layout.addWidget(self._doc_missing_label)
 
         # GitHub repo link — for source, issues, and contributions.
-        github_link = QLabel(
-            f'<a href="https://github.com/alexmpdx/TRACE" style="color: {_ct().link};">View TRACE on GitHub</a>'
-        )
-        github_link.setOpenExternalLinks(True)
-        github_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        layout.addWidget(github_link)
+        self._github_link = QLabel("")
+        self._github_link.setOpenExternalLinks(True)
+        self._github_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        layout.addWidget(self._github_link)
 
         # Walkthrough replay — re-runs the same first-launch tour the user
         # saw on initial startup. Sits in its own labeled section so it's
@@ -1563,13 +1605,12 @@ class InlineHelpPanel(QWidget):
         tour_title.setFont(tour_title_font)
         layout.addWidget(tour_title)
 
-        tour_blurb = QLabel(
+        self._tour_blurb = QLabel(
             "Re-run the guided tour of the main controls — the same one that "
             "appeared the first time you opened TRACE."
         )
-        tour_blurb.setWordWrap(True)
-        tour_blurb.setStyleSheet(f"color: {_ct().text_muted};")
-        layout.addWidget(tour_blurb)
+        self._tour_blurb.setWordWrap(True)
+        layout.addWidget(self._tour_blurb)
 
         replay_row = QHBoxLayout()
         self.btn_replay_walkthrough = QPushButton("Replay walkthrough")
@@ -1593,25 +1634,17 @@ class InlineHelpPanel(QWidget):
         update_title.setFont(update_title_font)
         layout.addWidget(update_title)
 
-        try:
-            from TRACE import __version__ as _trace_version
-        except Exception:
-            _trace_version = "unknown"
-        self._version_label = QLabel(
-            f"<span style='color: {_ct().text_muted};'>Installed version:</span> "
-            f"<span style='color: {_ct().text};'>{_trace_version}</span>"
-        )
+        self._version_label = QLabel("")
         layout.addWidget(self._version_label)
 
-        update_blurb = QLabel(
+        self._update_blurb = QLabel(
             "Get the latest TRACE installer from the project's Releases page. "
             "Running the new installer upgrades your existing TRACE in place — "
             "no need to uninstall first. Your settings and downloaded models "
             "are preserved."
         )
-        update_blurb.setWordWrap(True)
-        update_blurb.setStyleSheet(f"color: {_ct().text_muted};")
-        layout.addWidget(update_blurb)
+        self._update_blurb.setWordWrap(True)
+        layout.addWidget(self._update_blurb)
 
         self._update_status_label = QLabel("")
         self._update_status_label.setWordWrap(True)
@@ -1694,18 +1727,74 @@ class InlineHelpPanel(QWidget):
 
         layout.addStretch(1)
 
-        footer = QLabel(
-            f"<span style='color: {_ct().text_placeholder};'>For pipeline-internal docs, see the comments in "
-            "<code>TRACE/pipeline.py</code> and <code>TRACE/gui.py</code>.</span>"
-        )
-        footer.setWordWrap(True)
-        layout.addWidget(footer)
+        self._footer = QLabel("")
+        self._footer.setWordWrap(True)
+        layout.addWidget(self._footer)
+
+        # Initial render + wire the theme signal so static labels stay
+        # in sync with the user's pick. _apply_theme_styles must come
+        # after every label has been instantiated (we reference them
+        # all by attribute name).
+        self._apply_theme_styles()
+        from TRACE.theme import manager as _theme_manager
+
+        _theme_manager().themeChanged.connect(self._apply_theme_styles)
 
     # -----------------------------------------------------------------------
     # Update check
     # -----------------------------------------------------------------------
     _RELEASES_PAGE_URL = "https://github.com/alexmpdx/TRACE/releases"
     _LATEST_RELEASE_API = "https://api.github.com/repos/alexmpdx/TRACE/releases/latest"
+
+    def _apply_theme_styles(self, *_args) -> None:
+        """Re-render every static label's HTML / stylesheet from the
+        active theme.
+
+        Called once at panel construction and again on every
+        ThemeManager.themeChanged so that text_muted / link / error_text
+        colors (which differ substantially between themes — e.g.
+        #aaaaaa in dark vs #666666 in light) follow the live switch
+        instead of staying at their build-time captures.
+
+        The dynamic ``_update_status_label`` is deliberately not
+        rebuilt here — its text is rewritten on every auto/manual
+        update check, so the next check refreshes it in the new theme.
+        Touching it here would either need to track the last-rendered
+        "state" or risk overwriting an in-flight "Checking…" message.
+        """
+        from TRACE.theme import current_theme
+
+        t = current_theme()
+        if self._doc_link is not None:
+            url = QUrl.fromLocalFile(str(self._readme_path)).toString()
+            self._doc_link.setText(
+                f'<a href="{url}" style="color: {t.link};">Open README.md in your default app</a>'
+            )
+        if self._doc_path_label is not None:
+            self._doc_path_label.setText(
+                f"<span style='color: {t.text_placeholder};'>Location:</span> {self._readme_path}"
+            )
+        if self._doc_missing_label is not None:
+            self._doc_missing_label.setText(
+                f"<span style='color: {t.error_text};'>README.md not found at:</span><br>{self._readme_path}"
+            )
+        self._github_link.setText(
+            f'<a href="https://github.com/alexmpdx/TRACE" style="color: {t.link};">View TRACE on GitHub</a>'
+        )
+        self._tour_blurb.setStyleSheet(f"color: {t.text_muted};")
+        try:
+            from TRACE import __version__ as _trace_version
+        except Exception:
+            _trace_version = "unknown"
+        self._version_label.setText(
+            f"<span style='color: {t.text_muted};'>Installed version:</span> "
+            f"<span style='color: {t.text};'>{_trace_version}</span>"
+        )
+        self._update_blurb.setStyleSheet(f"color: {t.text_muted};")
+        self._footer.setText(
+            f"<span style='color: {t.text_placeholder};'>For pipeline-internal docs, see the comments in "
+            "<code>TRACE/pipeline.py</code> and <code>TRACE/gui.py</code>.</span>"
+        )
 
     def _render_flicon(self, *_args) -> None:
         """Re-render the help-tab fly icon for the active theme.
