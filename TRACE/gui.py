@@ -3498,6 +3498,17 @@ class TraceWindow(QMainWindow):
             self.worker = None
             self._finalize_cancel(results)
             return
+        # Clear the worker handle so the next Run click is treated as
+        # "start fresh" by _on_run_button_clicked (which dispatches on
+        # `self.worker is not None` → Pause). The cancel / pause / error
+        # paths all do this; the natural-completion branch was missing
+        # it, so a second run within the same session triggered a
+        # "Pause requested" against an already-exited thread instead of
+        # kicking off a new pipeline. Reported after a fresh-completion
+        # session: 2 hours after a 24-image run, clicking Run produced
+        # only the "Pause requested — finishing the current image
+        # first." status with no actual second run starting.
+        self.worker = None
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
@@ -3587,6 +3598,10 @@ class TraceWindow(QMainWindow):
             # still captures preproc failures from the manifest.
             self._finalize_cancel()
             return
+        # Same fix as _on_all_done's natural-completion branch: clear
+        # the worker handle so a follow-up Run click isn't dispatched
+        # as Pause.
+        self.worker = None
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
