@@ -31,6 +31,7 @@ from PyQt5.QtCore import (
     Qt,
     pyqtSignal,
 )
+from TRACE.theme import current_theme as _ct
 from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -459,7 +460,7 @@ class ReportBugDialog(QDialog):
         attach_layout.addWidget(self.chk_screenshot)
 
         self.lbl_screenshot_warn = QLabel(
-            "<span style='color:#cc8;'>⚠ The image list (filenames) is NOT "
+            f"<span style='color:{_ct().warning_text};'>⚠ The image list (filenames) is NOT "
             "redacted — check the preview before sending.</span>"
         )
         self.lbl_screenshot_warn.setWordWrap(True)
@@ -504,7 +505,7 @@ class ReportBugDialog(QDialog):
         layout.addWidget(attach_box)
 
         info = QLabel(
-            "<span style='color:#aaa;'>No GitHub account required. The report "
+            f"<span style='color:{_ct().text_muted};'>No GitHub account required. The report "
             "goes to a maintainer-controlled server that files it as a GitHub "
             "issue on your behalf.</span>"
         )
@@ -592,8 +593,8 @@ class ReportBugDialog(QDialog):
             url = payload.get("issue_url") or ""
             num = payload.get("issue_number")
             self._status_label.setText(
-                f"<span style='color: #6c6;'>✓ Submitted as issue #{num}.</span><br>"
-                f"<a href='{url}' style='color: #4aa3ff;'>{url}</a>"
+                f"<span style='color: {_ct().success_text};'>✓ Submitted as issue #{num}.</span><br>"
+                f"<a href='{url}' style='color: {_ct().link};'>{url}</a>"
             )
             confirm = QMessageBox(self)
             confirm.setWindowTitle("Thanks!")
@@ -644,7 +645,7 @@ class ReportBugDialog(QDialog):
         self.btn_submit.setText("Submitting…" if busy else "Submit")
 
     def _show_inline_status(self, text: str) -> None:
-        self._status_label.setText(f"<span style='color: #888;'>{text}</span>")
+        self._status_label.setText(f"<span style='color: {_ct().text_placeholder};'>{text}</span>")
 
     def _show_inline_error(self, text: str) -> None:
-        self._status_label.setText(f"<span style='color: #f88;'>{text}</span>")
+        self._status_label.setText(f"<span style='color: {_ct().error_text};'>{text}</span>")

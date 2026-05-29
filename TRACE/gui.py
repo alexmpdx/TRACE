@@ -508,19 +508,27 @@ _STATUS_GLYPH: dict[ImageStatus, str] = {
     ImageStatus.USER_SKIPPED: "⊘ ",
 }
 
-# Row foreground colors. PENDING + IN_PROGRESS pick palette tones that
-# read on both dark and light themes; SUCCEEDED/FAILED reuse the
-# existing green/red palette already used by the progress bar fills.
-# USER_SKIPPED is a warmer gray than the resume SKIPPED so the two
-# are visually distinguishable on the same screen.
-_STATUS_COLOR: dict[ImageStatus, QColor] = {
-    ImageStatus.PENDING: QColor("#d0d0d0"),
-    ImageStatus.IN_PROGRESS: QColor("#0d6efd"),
-    ImageStatus.SUCCEEDED: QColor("#5cb85c"),
-    ImageStatus.FAILED: QColor("#ff3333"),
-    ImageStatus.SKIPPED: QColor("#808080"),
-    ImageStatus.USER_SKIPPED: QColor("#a08070"),
-}
+# Row foreground colors resolved from the active Theme. PENDING +
+# IN_PROGRESS pick palette tones that read on both dark and light
+# themes; SUCCEEDED/FAILED reuse the existing green/red palette already
+# used by the progress bar fills. USER_SKIPPED is a warmer gray than
+# the resume SKIPPED so the two are visually distinguishable on the
+# same screen. Implemented as a function (not a module-level dict) so
+# the colors track the live theme — switching from dark to light at
+# runtime re-resolves each row's foreground on the next
+# _update_image_status call without needing to rebuild the dict.
+def _status_color(status: "ImageStatus") -> QColor:
+    from TRACE.theme import current_theme
+
+    t = current_theme()
+    return {
+        ImageStatus.PENDING: QColor(t.text),
+        ImageStatus.IN_PROGRESS: QColor(t.accent),
+        ImageStatus.SUCCEEDED: QColor(t.success),
+        ImageStatus.FAILED: QColor(t.error),
+        ImageStatus.SKIPPED: QColor(t.skip_gray),
+        ImageStatus.USER_SKIPPED: QColor(t.user_skip),
+    }[status]
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +729,39 @@ class TraceWindow(QMainWindow):
         if self.settings.value("auto_update_check_enabled", True, type=bool):
             QTimer.singleShot(0, self._maybe_auto_check_updates)
 
+        # Theme live-switch wiring. _apply_theme_styles re-runs every
+        # inline stylesheet that depends on theme tokens (eta_label,
+        # transient_status_label, etc.) and invalidates cached resources
+        # like the update-badge icon. Called once now so widgets get
+        # their initial styling, and again on every Settings → Theme
+        # change via the manager's themeChanged signal.
+        from TRACE.theme import manager as _theme_manager
+
+        self._apply_theme_styles()
+        _theme_manager().themeChanged.connect(self._apply_theme_styles)
+
+    def _apply_theme_styles(self, *_args) -> None:
+        """Re-apply every inline stylesheet that depends on theme tokens.
+
+        Called at end of __init__ and on every ThemeManager.themeChanged.
+        Order: small inline styles first, then invalidate cached
+        resources, finally repaint any visible image-list rows so the
+        per-row foreground colors pick up the new theme.
+        """
+        from TRACE.theme import current_theme
+
+        t = current_theme()
+        self.eta_label.setStyleSheet(f"color: {t.text_placeholder};")
+        self.transient_status_label.setStyleSheet(f"color: {t.warning};")
+        # The update-available "●" badge pixmap is cached on first use;
+        # invalidate so the next request rebuilds with the new accent.
+        self._cached_update_badge_icon = None
+        # Repaint image-list row foregrounds. _update_image_status pulls
+        # _status_color (which already reads current_theme), so we just
+        # re-trigger it for every row that has a current status.
+        for basename, status in list(self._image_status.items()):
+            self._update_image_status(basename, status)
+
     # -----------------------------------------------------------------------
     # App-level event filter for the CSV-child dependent-checkbox pulse
     # -----------------------------------------------------------------------
@@ -896,7 +937,14 @@ class TraceWindow(QMainWindow):
                 cd_h.addWidget(self.include_custom_measurements_chk)
                 cd_h.addWidget(self.btn_edit_custom_distances)
                 cd_hint = QLabel("requires Measurements CSV")
-                cd_hint.setStyleSheet("color: #4aa3ff;")
+                # Hint label is only briefly visible (during the pulse
+                # animation when the user clicks a disabled child). Reads
+                # the theme at construction; live theme-switch while the
+                # hint is mid-pulse would keep the old color until the
+                # next pulse rebuilds it — acceptable.
+                from TRACE.theme import current_theme as _ct
+
+                cd_hint.setStyleSheet(f"color: {_ct().link};")
                 cd_hint.hide()
                 cd_row_widget.set_hint(cd_hint)
                 cd_h.addWidget(cd_hint)
@@ -1054,7 +1102,7 @@ class TraceWindow(QMainWindow):
         self._progress_default_highlight = self.progress.palette().color(QPalette.Highlight)
         right_layout.addWidget(self.progress)
         self.eta_label = QLabel("")
-        self.eta_label.setStyleSheet("color: #888;")
+        # Styled in _apply_theme_styles so live theme switches update it.
         right_layout.addWidget(self.eta_label)
         # Transient one-line status under the ETA. Used to surface the
         # "Pause requested — finishing the current image first." and
@@ -1063,7 +1111,7 @@ class TraceWindow(QMainWindow):
         # while the worker finishes its in-flight image. Cleared once
         # the worker actually pauses / cancels / completes.
         self.transient_status_label = QLabel("")
-        self.transient_status_label.setStyleSheet("color: #ffc107;")
+        # Styled in _apply_theme_styles so live theme switches update it.
         self.transient_status_label.hide()
         right_layout.addWidget(self.transient_status_label)
 
@@ -1093,7 +1141,11 @@ class TraceWindow(QMainWindow):
         h.setSpacing(8)
         h.addWidget(child_chk)
         hint = QLabel("requires Measurements CSV")
-        hint.setStyleSheet("color: #4aa3ff;")
+        # Short-lived: only visible during the pulse animation when the
+        # user clicks the disabled child. Reads the theme at construction.
+        from TRACE.theme import current_theme as _ct
+
+        hint.setStyleSheet(f"color: {_ct().link};")
         hint.hide()
         row.set_hint(hint)
         h.addWidget(hint)
@@ -1392,7 +1444,7 @@ class TraceWindow(QMainWindow):
             if err:
                 label = f"{label} — {err}"
         item.setText(label)
-        item.setForeground(_STATUS_COLOR[status])
+        item.setForeground(_status_color(status))
 
     def _select_output(self):
         folder = QFileDialog.getExistingDirectory(
@@ -2819,8 +2871,10 @@ class TraceWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         # Recolor the progress-bar fill red as a visual cue. _run_pipeline
         # resets it to the default highlight at the start of the next run.
+        from TRACE.theme import current_theme as _ct
+
         pal = self.progress.palette()
-        pal.setColor(QPalette.Highlight, QColor("#d9534f"))
+        pal.setColor(QPalette.Highlight, QColor(_ct().cancel_highlight))
         self.progress.setPalette(pal)
         self.statusBar().showMessage("Cancelled")
         self.eta_label.setText("")
@@ -2943,8 +2997,10 @@ class TraceWindow(QMainWindow):
         self.btn_run.setEnabled(True)
         # Recolor the progress-bar fill yellow as a visual cue. Reset back
         # to the default highlight color happens in _run_pipeline on Resume.
+        from TRACE.theme import current_theme as _ct
+
         pal = self.progress.palette()
-        pal.setColor(QPalette.Highlight, QColor("#f0ad4e"))
+        pal.setColor(QPalette.Highlight, QColor(_ct().warning))
         self.progress.setPalette(pal)
         # Cancel stays enabled while paused so the user can fully abandon
         # the run from the paused state (no worker is running, but the
@@ -3571,8 +3627,10 @@ class TraceWindow(QMainWindow):
         # native rendering path stays in place — only the chunk color shifts,
         # no indentation/border/text changes. Reverted at the start of the
         # next run by _run_pipeline.
+        from TRACE.theme import current_theme as _ct
+
         pal = self.progress.palette()
-        pal.setColor(QPalette.Highlight, QColor("#5cb85c"))
+        pal.setColor(QPalette.Highlight, QColor(_ct().success))
         self.progress.setPalette(pal)
         self.eta_label.setText("Done")
 
@@ -3884,12 +3942,14 @@ class TraceWindow(QMainWindow):
         from PyQt5.QtGui import QIcon, QPainter, QPixmap
 
         if getattr(self, "_cached_update_badge_icon", None) is None:
+            from TRACE.theme import current_theme as _ct
+
             size = 12
             pix = QPixmap(size, size)
             pix.fill(_Qt.transparent)
             painter = QPainter(pix)
             painter.setRenderHint(QPainter.Antialiasing)
-            painter.setBrush(QColor("#0d6efd"))
+            painter.setBrush(QColor(_ct().accent))
             painter.setPen(_Qt.NoPen)
             painter.drawEllipse(0, 0, size, size)
             painter.end()
@@ -3959,15 +4019,21 @@ class TraceWindow(QMainWindow):
         # + WindowStaysOnTop make it float over the main window like the
         # walkthrough popup. The blue accent border (matching the badge
         # dot) makes it visually distinct from system dialogs.
+        # Read the active theme once at construction — the dialog is
+        # short-lived (created, exec'd, deleted per launch fire) so it
+        # doesn't need to re-style on theme change.
+        from TRACE.theme import current_theme as _ct
+
+        _t = _ct()
         dlg = QDialog(self, _Qt.Dialog | _Qt.FramelessWindowHint | _Qt.WindowStaysOnTopHint)
         dlg.setWindowTitle("Update available")
         dlg.setObjectName("UpdateAvailableDialog")
         dlg.setStyleSheet(
-            "#UpdateAvailableDialog { "
-            "background-color: #2d2d2d; "
-            "border: 2px solid #0d6efd; "
-            "border-radius: 6px; "
-            "}"
+            f"#UpdateAvailableDialog {{ "
+            f"background-color: {_t.dialog_bg}; "
+            f"border: 2px solid {_t.dialog_border}; "
+            f"border-radius: 6px; "
+            f"}}"
         )
         dlg.setMinimumWidth(380)
         dlg.setMaximumWidth(480)
@@ -3981,7 +4047,7 @@ class TraceWindow(QMainWindow):
         title_font.setBold(True)
         title_font.setPointSize(title_font.pointSize() + 1)
         title.setFont(title_font)
-        title.setStyleSheet("color: #d0d0d0;")
+        title.setStyleSheet(f"color: {_t.text};")
         layout.addWidget(title)
 
         body = QLabel(
@@ -3990,7 +4056,7 @@ class TraceWindow(QMainWindow):
             "Your settings and downloaded models are preserved."
         )
         body.setWordWrap(True)
-        body.setStyleSheet("color: #c0c0c0;")
+        body.setStyleSheet(f"color: {_t.text_body};")
         layout.addWidget(body)
 
         footer = QHBoxLayout()
@@ -3998,20 +4064,20 @@ class TraceWindow(QMainWindow):
         footer.addStretch(1)
         btn_dismiss = QPushButton("Dismiss")
         btn_dismiss.setStyleSheet(
-            "QPushButton { color: #999; background-color: transparent; "
-            "border: 1px solid #5a5a5a; border-radius: 4px; padding: 4px 10px; } "
-            "QPushButton:hover { border-color: #0d6efd; color: #c0c0c0; } "
-            "QPushButton:pressed { background-color: #3a3a3a; }"
+            f"QPushButton {{ color: {_t.text_muted}; background-color: transparent; "
+            f"border: 1px solid {_t.border_subtle}; border-radius: 4px; padding: 4px 10px; }} "
+            f"QPushButton:hover {{ border-color: {_t.accent}; color: {_t.text_body}; }} "
+            f"QPushButton:pressed {{ background-color: {_t.surface}; }}"
         )
         btn_dismiss.clicked.connect(dlg.reject)
         footer.addWidget(btn_dismiss)
         btn_update = QPushButton("Update now")
         btn_update.setDefault(True)
         btn_update.setStyleSheet(
-            "QPushButton { color: #d0d0d0; background-color: #3a3a3a; "
-            "border: 1px solid #0d6efd; border-radius: 4px; padding: 4px 12px; } "
-            "QPushButton:hover { background-color: #454545; } "
-            "QPushButton:pressed { background-color: #2f2f2f; }"
+            f"QPushButton {{ color: {_t.text}; background-color: {_t.surface}; "
+            f"border: 1px solid {_t.accent}; border-radius: 4px; padding: 4px 12px; }} "
+            f"QPushButton:hover {{ background-color: {_t.surface_alt}; }} "
+            f"QPushButton:pressed {{ background-color: {_t.surface_pressed}; }}"
         )
         # "Update now" closes the dialog and triggers the actual
         # download + installer launch directly. Previously this was a

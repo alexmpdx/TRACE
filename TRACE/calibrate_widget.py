@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from TRACE.theme import current_theme as _ct
 
 
 class _CalibrationThread(QThread):
@@ -88,7 +89,7 @@ class CalibrateWidget(QWidget):
         self._calibrate_btn.clicked.connect(self._start_calibration)
         header.addWidget(self._calibrate_btn)
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #555;")
+        self._status.setStyleSheet(f"color: {_ct().text_disabled};")
         header.addWidget(self._status, stretch=1)
         outer.addLayout(header)
 
@@ -99,7 +100,7 @@ class CalibrateWidget(QWidget):
         self._progress.setFormat("%p%")
         outer.addWidget(self._progress)
         self._eta = QLabel("")
-        self._eta.setStyleSheet("color: #555;")
+        self._eta.setStyleSheet(f"color: {_ct().text_disabled};")
         self._eta.setVisible(False)
         outer.addWidget(self._eta)
 

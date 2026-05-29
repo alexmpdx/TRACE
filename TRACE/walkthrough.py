@@ -105,14 +105,22 @@ class _WalkthroughPopup(QFrame):
         # stylesheet selector matches the QFrame instance rather than every
         # QFrame in the parent's tree.
         self.setObjectName("WalkthroughPopup")
+        # All theme-significant colors below read from the active Theme
+        # at construction time. The walkthrough popup is short-lived
+        # (built per walkthrough launch) so reading once is enough — a
+        # mid-tutorial theme switch would keep the old colors until the
+        # tutorial closes and is reopened. Acceptable trade-off.
+        from TRACE.theme import current_theme as _ct
+
+        _t = _ct()
         # Orange border so the popup reads as distinct from the blue
         # highlight ring drawn around the target widget.
         self.setStyleSheet(
-            "#WalkthroughPopup { "
-            "background-color: #2d2d2d; "
-            "border: 2px solid #ff9d4a; "
-            "border-radius: 6px; "
-            "}"
+            f"#WalkthroughPopup {{ "
+            f"background-color: {_t.dialog_bg}; "
+            f"border: 2px solid {_t.walkthrough_accent}; "
+            f"border-radius: 6px; "
+            f"}}"
         )
         # Min width has to cover the footer at its natural size (counter +
         # Skip tutorial + Previous + Next buttons) — at 280 the buttons
@@ -131,7 +139,7 @@ class _WalkthroughPopup(QFrame):
         title_font.setBold(True)
         title_font.setPointSize(title_font.pointSize() + 1)
         self._title.setFont(title_font)
-        self._title.setStyleSheet("color: #d0d0d0;")
+        self._title.setStyleSheet(f"color: {_t.text};")
         # Wrap long headers onto a second line instead of clipping them at
         # the popup's max width.
         self._title.setWordWrap(True)
@@ -139,31 +147,31 @@ class _WalkthroughPopup(QFrame):
 
         self._body = QLabel("")
         self._body.setWordWrap(True)
-        self._body.setStyleSheet("color: #c0c0c0;")
+        self._body.setStyleSheet(f"color: {_t.text_body};")
         layout.addWidget(self._body)
 
         # "Don't show again" — explicit opt-out from the auto-show on every
         # launch. Without this checkbox, Skip / Finish / Esc all dismiss the
         # walkthrough for the current session only.
         self._dont_show_chk = QCheckBox("Don't show this again on launch")
-        self._dont_show_chk.setStyleSheet("color: #aaa;")
+        self._dont_show_chk.setStyleSheet(f"color: {_t.text_muted};")
         layout.addWidget(self._dont_show_chk)
 
         # Footer row: step counter on the left, Skip + Next on the right.
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
         self._counter = QLabel("")
-        self._counter.setStyleSheet("color: #888;")
+        self._counter.setStyleSheet(f"color: {_t.text_placeholder};")
         footer.addWidget(self._counter)
         footer.addStretch(1)
         self._skip_btn = QPushButton("Skip tutorial")
         # Outlined (not flat) so it clearly reads as a clickable button
         # rather than plain label text.
         self._skip_btn.setStyleSheet(
-            "QPushButton { color: #999; background-color: transparent; "
-            "border: 1px solid #5a5a5a; border-radius: 4px; padding: 4px 10px; } "
-            "QPushButton:hover { border-color: #ff9d4a; color: #c0c0c0; } "
-            "QPushButton:pressed { background-color: #3a3a3a; }"
+            f"QPushButton {{ color: {_t.text_muted}; background-color: transparent; "
+            f"border: 1px solid {_t.border_subtle}; border-radius: 4px; padding: 4px 10px; }} "
+            f"QPushButton:hover {{ border-color: {_t.walkthrough_accent}; color: {_t.text_body}; }} "
+            f"QPushButton:pressed {{ background-color: {_t.surface}; }}"
         )
         self._skip_btn.clicked.connect(self.skip_clicked)
         footer.addWidget(self._skip_btn)
@@ -175,10 +183,10 @@ class _WalkthroughPopup(QFrame):
         # Orange outline to match the popup border — and to override the
         # Fusion default-button's blue highlight ring.
         self._next_btn.setStyleSheet(
-            "QPushButton { color: #d0d0d0; background-color: #3a3a3a; "
-            "border: 1px solid #ff9d4a; border-radius: 4px; padding: 4px 12px; } "
-            "QPushButton:hover { background-color: #454545; } "
-            "QPushButton:pressed { background-color: #2f2f2f; }"
+            f"QPushButton {{ color: {_t.text}; background-color: {_t.surface}; "
+            f"border: 1px solid {_t.walkthrough_accent}; border-radius: 4px; padding: 4px 12px; }} "
+            f"QPushButton:hover {{ background-color: {_t.surface_alt}; }} "
+            f"QPushButton:pressed {{ background-color: {_t.surface_pressed}; }}"
         )
         self._next_btn.clicked.connect(self.next_clicked)
         footer.addWidget(self._next_btn)
@@ -542,13 +550,18 @@ class WalkthroughOverlay(QWidget):
         # also fully overwrites the backing each frame, so nothing from a
         # previous step (old dim, old ring) can survive. (See
         # _capture_dim_snapshot for why a snapshot is used at all.)
+        from TRACE.theme import current_theme as _ct
+
+        _t = _ct()
         if self._dim_pixmap is not None:
             painter.drawPixmap(0, 0, self._dim_pixmap)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
+        painter.fillRect(self.rect(), QColor(*_t.dim_overlay_rgba))
         # Accent ring fully outside the hole so all four sides of the
         # stroke land in the dim region and none of it gets mask-clipped.
+        # Reads the theme each paint so live theme switches re-color
+        # the ring without needing to rebuild the overlay.
         if not self._hole_rect.isEmpty():
-            pen = QPen(QColor("#4aa3ff"))
+            pen = QPen(QColor(_t.link))
             pen.setWidth(self._ACCENT_RING_WIDTH)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)

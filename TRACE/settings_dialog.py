@@ -46,6 +46,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from TRACE.theme import current_theme as _ct
 
 from TRACE.presets_loader import load_presets
 
@@ -582,7 +583,7 @@ class PipelineConfigDialog(QDialog):
                 "then reopen this dialog to edit per-landmark gate thresholds."
             )
             msg.setWordWrap(True)
-            msg.setStyleSheet("color: #aaa; padding: 12px;")
+            msg.setStyleSheet(f"color: {_ct().text_muted}; padding: 12px;")
             layout.addWidget(msg)
             layout.addStretch()
             return w
@@ -610,7 +611,7 @@ class PipelineConfigDialog(QDialog):
                 _log_exc("Landmarks tab: read_gate_config failed", exc)
             err = QLabel(f"Could not read gate config from {self._calib_lm_path}: {exc}")
             err.setWordWrap(True)
-            err.setStyleSheet("color: #f88; padding: 12px;")
+            err.setStyleSheet(f"color: {_ct().error_text}; padding: 12px;")
             layout.addWidget(err)
             layout.addStretch()
             return w
@@ -627,7 +628,7 @@ class PipelineConfigDialog(QDialog):
                 "reset the landmark-model path to the bundled default."
             )
             msg.setWordWrap(True)
-            msg.setStyleSheet("color: #c8862a; padding: 12px;")
+            msg.setStyleSheet(f"color: {_ct().warning}; padding: 12px;")
             layout.addWidget(msg)
             layout.addStretch()
             return w
@@ -853,14 +854,14 @@ class PipelineConfigDialog(QDialog):
         low_row = QHBoxLayout()
         low_row.addWidget(self._ra_tol_low_spin)
         self._ra_tol_low_label = QLabel("")
-        self._ra_tol_low_label.setStyleSheet("color: #888;")
+        self._ra_tol_low_label.setStyleSheet(f"color: {_ct().text_placeholder};")
         low_row.addWidget(self._ra_tol_low_label, stretch=1)
         low_container = QWidget()
         low_container.setLayout(low_row)
         high_row = QHBoxLayout()
         high_row.addWidget(self._ra_tol_high_spin)
         self._ra_tol_high_label = QLabel("")
-        self._ra_tol_high_label.setStyleSheet("color: #888;")
+        self._ra_tol_high_label.setStyleSheet(f"color: {_ct().text_placeholder};")
         high_row.addWidget(self._ra_tol_high_label, stretch=1)
         high_container = QWidget()
         high_container.setLayout(high_row)

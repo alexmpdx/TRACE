@@ -99,7 +99,7 @@ class Theme:
     walkthrough_accent: str  # orange highlight ring + popup border
     dialog_bg: str  # custom modal dialog background
     dialog_border: str  # custom modal dialog border (usually = accent)
-    dim_overlay_rgba: str  # walkthrough dim layer — "rgba(...)" string
+    dim_overlay_rgba: tuple  # walkthrough dim layer — (r, g, b, a) for QColor(*tup)
 
     # --- Pipeline map (stage stroke + pastel fill pairs) ---
     pipe_ifeat_stroke: str
@@ -144,7 +144,7 @@ DARK_THEME = Theme(
     walkthrough_accent="#ff9d4a",
     dialog_bg="#2d2d2d",
     dialog_border="#0d6efd",
-    dim_overlay_rgba="rgba(0, 0, 0, 160)",
+    dim_overlay_rgba=(0, 0, 0, 160),
     # Pipeline map: pastel fills + saturated strokes. These already
     # read fine on both dark and light window backgrounds because the
     # nodes are filled (not transparent), so they keep their own
@@ -192,7 +192,7 @@ LIGHT_THEME = Theme(
     walkthrough_accent="#e8852a",  # orange that still pops on white
     dialog_bg="#ffffff",
     dialog_border="#0d6efd",
-    dim_overlay_rgba="rgba(40, 40, 40, 120)",
+    dim_overlay_rgba=(40, 40, 40, 120),
     # Same pipeline-map colors — pastel fills read on both backgrounds.
     pipe_ifeat_stroke="#8c3c8c",
     pipe_ifeat_fill="#f4e6f4",

@@ -52,6 +52,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from TRACE.theme import current_theme as _ct
 
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
 
@@ -107,7 +108,7 @@ def _pulse_text(chk: QCheckBox) -> None:
         return
     saved = chk.styleSheet()
     chk.setProperty("_pulse_active", True)
-    chk.setStyleSheet("QCheckBox { color: #4aa3ff; }")
+    chk.setStyleSheet(f"QCheckBox {{ color: {_ct().link}; }}")
 
     def _restore() -> None:
         chk.setStyleSheet(saved)
@@ -669,7 +670,7 @@ class InlineGeneralPanel(QWidget):
         h.setSpacing(8)
         h.addWidget(chk)
         hint = QLabel(hint_text)
-        hint.setStyleSheet("color: #4aa3ff;")
+        hint.setStyleSheet(f"color: {_ct().link};")
         hint.hide()
         row.set_hint(hint)
         h.addWidget(hint)
@@ -1219,7 +1220,7 @@ class InlineCustomDistancesPanel(QWidget):
             "in the final measurements CSV."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #aaa;")
+        info.setStyleSheet(f"color: {_ct().text_muted};")
         self._info_label = info
         layout.addWidget(info)
 
@@ -1232,7 +1233,7 @@ class InlineCustomDistancesPanel(QWidget):
                 f"Import error: {exc}"
             )
             err.setWordWrap(True)
-            err.setStyleSheet("color: #f88; padding: 12px;")
+            err.setStyleSheet(f"color: {_ct().error_text}; padding: 12px;")
             layout.addWidget(err)
             layout.addStretch()
             self._picker = None
@@ -1269,7 +1270,7 @@ class InlineCustomDistancesPanel(QWidget):
                 "See trace_startup.log next to TRACE.exe for the full traceback."
             )
             err.setWordWrap(True)
-            err.setStyleSheet("color: #f88; padding: 12px;")
+            err.setStyleSheet(f"color: {_ct().error_text}; padding: 12px;")
             layout.addWidget(err)
             layout.addStretch()
             self._picker = None
@@ -1499,40 +1500,25 @@ class InlineHelpPanel(QWidget):
         layout.setSpacing(12)
         outer.addLayout(layout, stretch=1)
 
-        # fliconWhite_real.svg (white-stroke variant of flicon.svg) sits
-        # in the top-right corner at the same baseline as the
-        # Documentation heading. The README uses the black-stroke
-        # flicon.svg since GitHub renders it on a light page.
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            _flicon = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / "fliconWhite_real.svg"
-        else:
-            _flicon = Path(__file__).resolve().parent / "GUI_images" / "logo" / "fliconWhite_real.svg"
-        if _flicon.is_file():
-            from PyQt5.QtGui import QPainter, QPixmap
-            from PyQt5.QtSvg import QSvgRenderer
+        # Help-tab fly icon — top-right corner at the same baseline as
+        # the Documentation heading. Two variants ship:
+        #   fliconWhite_real.svg — white strokes, used in dark theme
+        #   flicon.svg            — black strokes, used in light theme
+        # The active theme picks the variant; ThemeManager.themeChanged
+        # rebuilds the pixmap so the icon hot-swaps in sync with the rest
+        # of the UI.
+        self._flicon_label = QLabel()
+        self._flicon_label.setFixedSize(96, 96)  # placeholder until first render
+        icon_col = QVBoxLayout()
+        icon_col.setContentsMargins(0, 0, 0, 0)
+        icon_col.setSpacing(0)
+        icon_col.addWidget(self._flicon_label)
+        icon_col.addStretch(1)  # pin to top
+        outer.addLayout(icon_col)
+        self._render_flicon()
+        from TRACE.theme import manager as _theme_manager
 
-            renderer = QSvgRenderer(str(_flicon))
-            default = renderer.defaultSize()
-            # Aspect-preserving width. Sized to read as a small mascot
-            # without dominating the heading row.
-            icon_w = 96
-            icon_h = max(1, int(icon_w * default.height() / max(1, default.width())))
-            pixmap = QPixmap(icon_w, icon_h)
-            pixmap.fill(Qt.transparent)
-            painter = QPainter(pixmap)
-            renderer.render(painter)
-            painter.end()
-            flicon_label = QLabel()
-            flicon_label.setPixmap(pixmap)
-            # Lock the QLabel to the pixmap's size so its sizeHint can't
-            # ever expand and squeeze the text column.
-            flicon_label.setFixedSize(icon_w, icon_h)
-            icon_col = QVBoxLayout()
-            icon_col.setContentsMargins(0, 0, 0, 0)
-            icon_col.setSpacing(0)
-            icon_col.addWidget(flicon_label)
-            icon_col.addStretch(1)  # pin to top
-            outer.addLayout(icon_col)
+        _theme_manager().themeChanged.connect(self._render_flicon)
 
         title = QLabel("Documentation")
         title_font = QFont(title.font())
@@ -1544,23 +1530,23 @@ class InlineHelpPanel(QWidget):
         readme_path = Path(__file__).resolve().parent / "README.md"
         if readme_path.is_file():
             url = QUrl.fromLocalFile(str(readme_path)).toString()
-            link = QLabel(f'<a href="{url}" style="color: #4aa3ff;">Open README.md in your default app</a>')
+            link = QLabel(f'<a href="{url}" style="color: {_ct().link};">Open README.md in your default app</a>')
             link.setOpenExternalLinks(True)
             link.setTextInteractionFlags(Qt.TextBrowserInteraction)
             layout.addWidget(link)
 
-            path_label = QLabel(f"<span style='color: #888;'>Location:</span> {readme_path}")
+            path_label = QLabel(f"<span style='color: {_ct().text_placeholder};'>Location:</span> {readme_path}")
             path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             path_label.setWordWrap(True)
             layout.addWidget(path_label)
         else:
-            missing = QLabel(f"<span style='color: #f88;'>README.md not found at:</span><br>{readme_path}")
+            missing = QLabel(f"<span style='color: {_ct().error_text};'>README.md not found at:</span><br>{readme_path}")
             missing.setWordWrap(True)
             layout.addWidget(missing)
 
         # GitHub repo link — for source, issues, and contributions.
         github_link = QLabel(
-            '<a href="https://github.com/alexmpdx/TRACE" style="color: #4aa3ff;">' "View TRACE on GitHub</a>"
+            f'<a href="https://github.com/alexmpdx/TRACE" style="color: {_ct().link};">View TRACE on GitHub</a>'
         )
         github_link.setOpenExternalLinks(True)
         github_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -1582,7 +1568,7 @@ class InlineHelpPanel(QWidget):
             "appeared the first time you opened TRACE."
         )
         tour_blurb.setWordWrap(True)
-        tour_blurb.setStyleSheet("color: #aaa;")
+        tour_blurb.setStyleSheet(f"color: {_ct().text_muted};")
         layout.addWidget(tour_blurb)
 
         replay_row = QHBoxLayout()
@@ -1612,8 +1598,8 @@ class InlineHelpPanel(QWidget):
         except Exception:
             _trace_version = "unknown"
         self._version_label = QLabel(
-            f"<span style='color: #aaa;'>Installed version:</span> "
-            f"<span style='color: #d0d0d0;'>{_trace_version}</span>"
+            f"<span style='color: {_ct().text_muted};'>Installed version:</span> "
+            f"<span style='color: {_ct().text};'>{_trace_version}</span>"
         )
         layout.addWidget(self._version_label)
 
@@ -1624,7 +1610,7 @@ class InlineHelpPanel(QWidget):
             "are preserved."
         )
         update_blurb.setWordWrap(True)
-        update_blurb.setStyleSheet("color: #aaa;")
+        update_blurb.setStyleSheet(f"color: {_ct().text_muted};")
         layout.addWidget(update_blurb)
 
         self._update_status_label = QLabel("")
@@ -1709,7 +1695,7 @@ class InlineHelpPanel(QWidget):
         layout.addStretch(1)
 
         footer = QLabel(
-            "<span style='color: #888;'>For pipeline-internal docs, see the comments in "
+            f"<span style='color: {_ct().text_placeholder};'>For pipeline-internal docs, see the comments in "
             "<code>TRACE/pipeline.py</code> and <code>TRACE/gui.py</code>.</span>"
         )
         footer.setWordWrap(True)
@@ -1720,6 +1706,42 @@ class InlineHelpPanel(QWidget):
     # -----------------------------------------------------------------------
     _RELEASES_PAGE_URL = "https://github.com/alexmpdx/TRACE/releases"
     _LATEST_RELEASE_API = "https://api.github.com/repos/alexmpdx/TRACE/releases/latest"
+
+    def _render_flicon(self, *_args) -> None:
+        """Re-render the help-tab fly icon for the active theme.
+
+        Picks the white-stroke variant for dark mode and the black-stroke
+        variant (the one the GitHub README uses) for light mode. Called
+        once at panel construction and again on every theme switch via
+        ThemeManager.themeChanged.
+        """
+        from TRACE.theme import current_theme
+
+        t = current_theme()
+        filename = "fliconWhite_real.svg" if t.name == "dark" else "flicon.svg"
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            svg_path = Path(sys._MEIPASS) / "TRACE" / "GUI_images" / "logo" / filename
+        else:
+            svg_path = Path(__file__).resolve().parent / "GUI_images" / "logo" / filename
+        if not svg_path.is_file():
+            # Missing asset shouldn't break the Help tab. Clear any
+            # placeholder pixmap so the slot just renders empty.
+            self._flicon_label.clear()
+            return
+        from PyQt5.QtGui import QPainter, QPixmap
+        from PyQt5.QtSvg import QSvgRenderer
+
+        renderer = QSvgRenderer(str(svg_path))
+        default = renderer.defaultSize()
+        icon_w = 96
+        icon_h = max(1, int(icon_w * default.height() / max(1, default.width())))
+        pixmap = QPixmap(icon_w, icon_h)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        self._flicon_label.setPixmap(pixmap)
+        self._flicon_label.setFixedSize(icon_w, icon_h)
 
     def _open_releases_page(self) -> None:
         QDesktopServices_open = None
@@ -1806,7 +1828,7 @@ class InlineHelpPanel(QWidget):
         if self._update_thread is not None and self._update_thread.isRunning():
             return
         if not silent:
-            self._update_status_label.setText("<span style='color: #888;'>Checking for updates…</span>")
+            self._update_status_label.setText(f"<span style='color: {_ct().text_placeholder};'>Checking for updates…</span>")
         self._update_thread = _UpdateCheckThread(self._LATEST_RELEASE_API, parent=self)
         self._update_thread.result.connect(lambda payload: self._apply_update_check_result(payload, silent=silent))
         self._update_thread.finished.connect(self._update_thread.deleteLater)
@@ -1831,8 +1853,8 @@ class InlineHelpPanel(QWidget):
             if not silent:
                 err = payload.get("error", "")
                 self._update_status_label.setText(
-                    f"<span style='color: #f88;'>Could not check for updates: {err}</span><br>"
-                    f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>"
+                    f"<span style='color: {_ct().error_text};'>Could not check for updates: {err}</span><br>"
+                    f"<a href='{self._RELEASES_PAGE_URL}' style='color: {_ct().link};'>"
                     f"Open the Releases page manually</a>"
                 )
             return
@@ -1846,8 +1868,8 @@ class InlineHelpPanel(QWidget):
         if not latest_version:
             if not silent:
                 self._update_status_label.setText(
-                    f"<span style='color: #aaa;'>No releases found on GitHub yet. "
-                    f"<a href='{self._RELEASES_PAGE_URL}' style='color: #4aa3ff;'>"
+                    f"<span style='color: {_ct().text_muted};'>No releases found on GitHub yet. "
+                    f"<a href='{self._RELEASES_PAGE_URL}' style='color: {_ct().link};'>"
                     f"Check the Releases page</a>.</span>"
                 )
             return
@@ -1865,7 +1887,7 @@ class InlineHelpPanel(QWidget):
         latest_is_newer = _version_is_newer(latest_version, installed_version)
         if not latest_is_newer:
             self._update_status_label.setText(
-                f"<span style='color: #6c6;'>✓ You're up to date (installed: {installed_version}).</span>"
+                f"<span style='color: {_ct().success_text};'>✓ You're up to date (installed: {installed_version}).</span>"
             )
             self.btn_install_update.setVisible(False)
             self._latest_update_url = None
@@ -1889,17 +1911,17 @@ class InlineHelpPanel(QWidget):
             size_mb = (payload["asset_size"] or 0) // (1024 * 1024)
             size_blurb = f" ({size_mb} MB)" if size_mb else ""
             self._update_status_label.setText(
-                f"<span style='color: #ffb05a;'>Update available: "
+                f"<span style='color: {_ct().warning_text};'>Update available: "
                 f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
-                f"<span style='color: #aaa;'>Click <b>Install update {latest_version}</b> "
+                f"<span style='color: {_ct().text_muted};'>Click <b>Install update {latest_version}</b> "
                 f"to download{size_blurb} and launch the new installer.</span>"
             )
         else:
             self.btn_install_update.setVisible(False)
             self._update_status_label.setText(
-                f"<span style='color: #ffb05a;'>A different version is available: "
+                f"<span style='color: {_ct().warning_text};'>A different version is available: "
                 f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
-                f"<a href='{payload['html_url']}' style='color: #4aa3ff;'>"
+                f"<a href='{payload['html_url']}' style='color: {_ct().link};'>"
                 f"Open the release page and download TRACE-Setup.exe</a>"
             )
         self._window.show_update_available_indicator(latest_version)
@@ -1933,7 +1955,7 @@ class InlineHelpPanel(QWidget):
         version = self._latest_update_version or "?"
         if not url:
             self._update_status_label.setText(
-                "<span style='color: #f88;'>No installer URL — run Check for updates first.</span>"
+                f"<span style='color: {_ct().error_text};'>No installer URL — run Check for updates first.</span>"
             )
             return
 
@@ -2028,7 +2050,7 @@ class InlineHelpPanel(QWidget):
                 dst.unlink(missing_ok=True)
             except Exception:
                 pass
-            self._update_status_label.setText("<span style='color: #aaa;'>Update download cancelled.</span>")
+            self._update_status_label.setText(f"<span style='color: {_ct().text_muted};'>Update download cancelled.</span>")
             return
 
         # Sanity check on file size — guards against a truncated download
