@@ -111,11 +111,9 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
         return None
 
     try:
-        import io
-
         from PIL import Image
-        from PyQt5.QtCore import QBuffer, QByteArray, QIODevice, QStandardPaths, Qt
-        from PyQt5.QtGui import QPainter, QPixmap
+        from PyQt5.QtCore import QStandardPaths, Qt
+        from PyQt5.QtGui import QImage, QPainter
         from PyQt5.QtSvg import QSvgRenderer
     except Exception:
         return None
@@ -136,36 +134,50 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
     # without the user having to recreate it.
     ico_path = cache_dir / "TRACE_app_icon.ico"
 
-    # Render the SVG into a single 256×256 RGBA bitmap and let Pillow
-    # build the multi-size ICO from that one source. The earlier
-    # approach (render at each size + append_images) produced a tiny
-    # ~546-byte ICO with garbled pixel data — the combination of
-    # ``sizes`` + ``append_images`` in PIL's ICO writer is ambiguous
-    # across versions and the resulting file was a malformed image
-    # that Windows rendered as colored noise.
-    LARGEST = 256
-    pixmap = QPixmap(LARGEST, LARGEST)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.end()
+    # Render the SVG separately at every Windows shell size. Doing it
+    # this way (vector → bitmap once per size) keeps each frame crisp
+    # at its native resolution; the previous approach (render at 256,
+    # let Pillow BICUBIC-downsample) blurred the thin logo strokes at
+    # 16/24/32 px, which is what Windows actually shows on the desktop
+    # and taskbar.
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 
-    ba = QByteArray()
-    buf = QBuffer(ba)
-    buf.open(QIODevice.WriteOnly)
-    if not pixmap.save(buf, "PNG"):
-        return None
-    buf.close()
+    def _render_pil(size_px: int) -> "Image.Image":
+        # QImage with Format_ARGB32 lets us extract straight RGBA bytes
+        # without going through a PNG round-trip.
+        qimg = QImage(size_px, size_px, QImage.Format_ARGB32)
+        qimg.fill(Qt.transparent)
+        painter = QPainter(qimg)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            renderer.render(painter)
+        finally:
+            painter.end()
+        # QImage byte order is BGRA on little-endian systems for
+        # Format_ARGB32; convert to RGBA for Pillow. constBits() needs
+        # a fixed-size buffer for Pillow's frombuffer to be safe.
+        ptr = qimg.constBits()
+        ptr.setsize(qimg.byteCount())
+        rgba_bytes = bytes(memoryview(ptr).cast("B"))
+        bgra = Image.frombuffer("RGBA", (size_px, size_px), rgba_bytes, "raw", "BGRA", 0, 1)
+        return bgra.copy()  # detach from the Qt-owned buffer
 
     try:
-        img = Image.open(io.BytesIO(bytes(ba))).convert("RGBA")
-        # Pillow downsamples the 256 source for each listed size and
-        # embeds the lot as a multi-image ICO. Standard Windows shell
-        # sizes are 16 / 24 / 32 / 48 / 64 / 128 / 256.
-        img.save(
+        # Render each size from the vector source. Order matters: the
+        # base image passed to .save() must be the LARGEST, because
+        # Pillow's ICO writer silently skips any requested ``sizes``
+        # entry whose dimensions exceed the base image's. That bug is
+        # what produced the previous 546-byte single-frame ICO — the
+        # base was 16×16, so 24/32/48/64/128/256 were all dropped.
+        frames = [_render_pil(w) for (w, _h) in sizes]
+        frames_largest_first = list(reversed(frames))
+        base_frame = frames_largest_first[0]  # 256×256
+        base_frame.save(
             str(ico_path),
             format="ICO",
-            sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+            sizes=sizes,
+            append_images=frames_largest_first[1:],
         )
     except Exception:
         return None
