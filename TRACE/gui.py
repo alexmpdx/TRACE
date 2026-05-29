@@ -1028,9 +1028,16 @@ class TraceWindow(QMainWindow):
         self.inline_custom_distances_panel = InlineCustomDistancesPanel(self)
         self.right_tabs.addTab(self.inline_custom_distances_panel, "Custom Measurements")
 
-        # Tab 3 — Help
+        # Tab 3 — Help. Wrapped in _wrap_scroll so the panel scrolls
+        # instead of clipping when the window is too narrow or short
+        # to fit the heading-blurb-button rows at their natural size.
+        # Stash the scroll wrapper as self._help_tab_widget because the
+        # tab indexOf / widget lookups below need to compare against the
+        # widget actually inserted into right_tabs (the QScrollArea),
+        # not the inline panel inside it.
         self.inline_help_panel = InlineHelpPanel(self)
-        self.right_tabs.addTab(self.inline_help_panel, "Help")
+        self._help_tab_widget = _wrap_scroll(self.inline_help_panel)
+        self.right_tabs.addTab(self._help_tab_widget, "Help")
 
         # Clear the update-available "●" badge whenever the user lands
         # on the Help tab. Connection lives here so the signal exists
@@ -3906,7 +3913,7 @@ class TraceWindow(QMainWindow):
         restore path can re-apply the badge without re-popping the
         dialog the user already dismissed.
         """
-        help_index = self.right_tabs.indexOf(self.inline_help_panel)
+        help_index = self.right_tabs.indexOf(self._help_tab_widget)
         if help_index < 0:
             return
         self.right_tabs.setTabIcon(help_index, self._update_badge_icon())
@@ -4091,7 +4098,7 @@ class TraceWindow(QMainWindow):
         """
         from PyQt5.QtGui import QIcon
 
-        help_index = self.right_tabs.indexOf(self.inline_help_panel)
+        help_index = self.right_tabs.indexOf(self._help_tab_widget)
         if help_index >= 0:
             self.right_tabs.setTabIcon(help_index, QIcon())
         if clear_cache:
@@ -4144,7 +4151,7 @@ class TraceWindow(QMainWindow):
 
     def _on_right_tab_changed(self, index: int) -> None:
         """Tab-change hook: clear the update-available badge on Help visit."""
-        if self.right_tabs.widget(index) is self.inline_help_panel:
+        if self.right_tabs.widget(index) is self._help_tab_widget:
             self.clear_update_available_indicator()
 
     def _show_walkthrough(self) -> None:

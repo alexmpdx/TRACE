@@ -1464,8 +1464,9 @@ class InlineHelpPanel(QWidget):
 
             renderer = QSvgRenderer(str(_flicon))
             default = renderer.defaultSize()
-            # Roughly headline-row height. Aspect-preserving.
-            icon_w = 64
+            # Aspect-preserving width. Sized to read as a small mascot
+            # without dominating the heading row.
+            icon_w = 96
             icon_h = max(1, int(icon_w * default.height() / max(1, default.width())))
             pixmap = QPixmap(icon_w, icon_h)
             pixmap.fill(Qt.transparent)
