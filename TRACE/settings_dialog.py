@@ -1,7 +1,9 @@
 """Modal dialog for editing an identifyFeatures PipelineConfig.
 
-Hosts the advanced-only tabs: Landmarks, Models, Skeletonization & Pruning,
-Bridging, Tracing, Intervein. The user-facing General + Custom Distances
+Hosts the advanced-only tabs: Landmarks, Models, Wing Graph (skeleton +
+pruning + bridging — all the steps that build the vein graph from the
+segmentation mask), Tracing, Intervein. The user-facing General + Custom
+Distances
 panels live on the main window's right-panel tab bar (InlineGeneralPanel /
 InlineCustomDistancesPanel) and auto-apply edits — they never pass through
 this dialog.
@@ -393,8 +395,7 @@ class PipelineConfigDialog(QDialog):
         self._landmarks_tab_index = self._tabs.count()
         self._tabs.addTab(self._wrap_scrollable(self._build_landmarks_tab()), "Landmarks")
         self._tabs.addTab(self._wrap_scrollable(self._build_models_tab()), "Models")
-        self._tabs.addTab(self._wrap_scrollable(self._build_skel_pruning_tab()), "Skeletonization && Pruning")
-        self._tabs.addTab(self._wrap_scrollable(self._build_bridging_tab()), "Bridging")
+        self._tabs.addTab(self._wrap_scrollable(self._build_wing_graph_tab()), "Wing Graph")
         self._tabs.addTab(self._wrap_scrollable(self._build_tracing_tab()), "Tracing")
         self._tabs.addTab(self._wrap_scrollable(self._build_intervein_tab()), "Intervein")
 
@@ -1020,7 +1021,16 @@ class PipelineConfigDialog(QDialog):
         if folder:
             self._seg_model_edit.setText(folder)
 
-    def _build_skel_pruning_tab(self) -> QWidget:
+    def _build_wing_graph_tab(self) -> QWidget:
+        """All the steps that build the vein graph from the segmentation mask.
+
+        Order of GroupBoxes follows the actual pipeline order:
+        skeletonize → prune branches → merge collinear runs → 3 bridging
+        passes to reconnect over gaps. Previously split across two tabs
+        (Skeletonization & Pruning + Bridging) but they're really one
+        concept — turning the binary vein mask into a clean topological
+        graph — so merging them removes a needless navigation hop.
+        """
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -1062,14 +1072,7 @@ class PipelineConfigDialog(QDialog):
         self._add_float(form, "collinear_min_angle", "Min collinear angle (deg)", 0.0, 180.0, 1, 1.0)
         layout.addWidget(gb)
 
-        layout.addStretch()
-        return w
-
-    def _build_bridging_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-
-        gb = QGroupBox("Pass 1 — initial")
+        gb = QGroupBox("Bridging — pass 1 (initial)")
         form = QFormLayout(gb)
         self._add_float(form, "bridge_max_gap_um", "Max gap (µm)", 0.0, 10000.0, 1, 10.0)
         self._add_float(form, "bridge_gap_fraction", "Gap fraction", 0.0, 1.0, 3, 0.01)
@@ -1083,7 +1086,7 @@ class PipelineConfigDialog(QDialog):
         )
         layout.addWidget(gb)
 
-        gb = QGroupBox("Pass 2 — after cleanup")
+        gb = QGroupBox("Bridging — pass 2 (after cleanup)")
         form = QFormLayout(gb)
         self._add_float(form, "bridge2_max_gap_um", "Max gap (µm)", 0.0, 10000.0, 1, 10.0)
         self._add_float(form, "bridge2_gap_fraction", "Gap fraction", 0.0, 1.0, 3, 0.01)
@@ -1098,7 +1101,7 @@ class PipelineConfigDialog(QDialog):
         self._add_float(form, "bridge2_min_facing_angle", "Min facing angle (deg)", 0.0, 180.0, 1, 1.0)
         layout.addWidget(gb)
 
-        gb = QGroupBox("Pass 3 — short-stub relaxed")
+        gb = QGroupBox("Bridging — pass 3 (short-stub relaxed)")
         form = QFormLayout(gb)
         self._add_float(form, "bridge3_max_gap_vw", "Max gap (× vein width)", 0.0, 100.0, 2, 0.1)
         self._add_float(form, "bridge3_short_edge_vw", "Short edge threshold (× vein width)", 0.0, 100.0, 2, 0.1)

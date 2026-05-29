@@ -1702,8 +1702,8 @@ class TraceWindow(QMainWindow):
         self.inline_custom_distances_panel.refresh_from_state()
 
     def _open_settings_dialog(self):
-        """Open the advanced settings dialog (6 tabs: Landmarks, Models,
-        Skeletonization & Pruning, Bridging, Tracing, Intervein).
+        """Open the advanced settings dialog (5 tabs: Landmarks, Models,
+        Wing Graph, Tracing, Intervein).
 
         Non-modal: the user can still interact with the main window (run
         the pipeline, change inputs, etc.) while the dialog is open.
