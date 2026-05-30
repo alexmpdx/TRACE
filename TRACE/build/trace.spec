@@ -39,6 +39,12 @@ _SIBLINGS = [
     # CPU_RAM_tester hosts recommend_workers.py — the Calibrate Workers
     # button on the Settings tab adds this dir to sys.path at runtime.
     "CPU_RAM_tester",
+    # liveSettings exports the live_tune package. settings_dialog.py adds
+    # this dir to sys.path at dialog-construction time and imports
+    # live_tune.dialog_integration. Missing this dir is what caused
+    # issue #15 — Advanced Settings raised ModuleNotFoundError inside
+    # __init__ and the dialog never opened.
+    "liveSettings",
 ]
 _pathex = [str(ROOT / s) for s in _SIBLINGS]
 
@@ -63,6 +69,12 @@ hiddenimports = [
     "resolutionAdjust",
     "landmark_locator",
     "preprocessing",
+    # live_tune is reached via a runtime sys.path injection in
+    # settings_dialog.py, so PyInstaller's static analysis can't see
+    # the import chain rooted at live_tune.dialog_integration. Pin
+    # both the top-level package and the submodule we actually call.
+    "live_tune",
+    "live_tune.dialog_integration",
     # Heavy native deps with sub-modules PyInstaller misses
     "torch",
     "torchvision",

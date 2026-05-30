@@ -326,8 +326,22 @@ class PipelineConfigDialog(QDialog):
             from live_tune.dialog_integration import attach_live_preview as _attach_live_preview
 
             _attach_live_preview(self)
-        except Exception:  # noqa: BLE001 - preview is optional; never block the dialog
-            logger.debug("Live preview unavailable; continuing without it", exc_info=True)
+        except Exception as _live_preview_exc:  # noqa: BLE001 - preview is optional; never block the dialog
+            # IMPORTANT: this branch must not raise. The previous code
+            # referenced ``logger`` which was never defined/imported in
+            # this module, so any failure here (e.g. liveSettings/ not
+            # bundled in the Windows installer → ModuleNotFoundError on
+            # ``live_tune``) raised NameError instead of being swallowed,
+            # which bubbled out of __init__ and prevented the entire
+            # Advanced Settings dialog from opening (issue #15).
+            import traceback as _tb_lp
+
+            from TRACE.startup_log import log as _slog_lp
+
+            _slog_lp(
+                "settings_dialog: live preview unavailable, continuing without it\n"
+                + "".join(_tb_lp.format_exception(type(_live_preview_exc), _live_preview_exc, _live_preview_exc.__traceback__))
+            )
 
     def done(self, result: int) -> None:  # noqa: N802 — Qt API
         # Persist the dialog geometry (covers OK, Cancel, Esc and the window
