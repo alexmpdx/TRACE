@@ -111,9 +111,11 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
         return None
 
     try:
+        import io
+
         from PIL import Image
-        from PyQt5.QtCore import QStandardPaths, Qt
-        from PyQt5.QtGui import QImage, QPainter
+        from PyQt5.QtCore import QBuffer, QByteArray, QIODevice, QStandardPaths, Qt
+        from PyQt5.QtGui import QPainter, QPixmap
         from PyQt5.QtSvg import QSvgRenderer
     except Exception:
         return None
@@ -143,25 +145,29 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
     sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 
     def _render_pil(size_px: int) -> "Image.Image":
-        # QImage with Format_ARGB32 lets us extract straight RGBA bytes
-        # without going through a PNG round-trip.
-        qimg = QImage(size_px, size_px, QImage.Format_ARGB32)
-        qimg.fill(Qt.transparent)
-        painter = QPainter(qimg)
+        # Render to QPixmap → encode to PNG bytes → decode in Pillow.
+        # The earlier QImage.constBits()/memoryview path worked in dev
+        # but produced garbled frames in the frozen Windows bundle
+        # (sip's voidptr behaviour varies by version). The PNG round-
+        # trip is slower but uses only stable Qt APIs (QPixmap.save +
+        # PIL.Image.open) that behave identically dev-vs-frozen.
+        pixmap = QPixmap(size_px, size_px)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
             renderer.render(painter)
         finally:
             painter.end()
-        # QImage byte order is BGRA on little-endian systems for
-        # Format_ARGB32; convert to RGBA for Pillow. constBits() needs
-        # a fixed-size buffer for Pillow's frombuffer to be safe.
-        ptr = qimg.constBits()
-        ptr.setsize(qimg.byteCount())
-        rgba_bytes = bytes(memoryview(ptr).cast("B"))
-        bgra = Image.frombuffer("RGBA", (size_px, size_px), rgba_bytes, "raw", "BGRA", 0, 1)
-        return bgra.copy()  # detach from the Qt-owned buffer
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.WriteOnly)
+        ok = pixmap.save(buf, "PNG")
+        buf.close()
+        if not ok:
+            raise RuntimeError(f"QPixmap.save(PNG) failed at size {size_px}")
+        return Image.open(io.BytesIO(bytes(ba))).convert("RGBA")
 
     try:
         # Render each size from the vector source. Order matters: the
@@ -181,6 +187,22 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
         )
     except Exception:
         return None
+
+    # Windows Explorer caches icons aggressively keyed on file path —
+    # overwriting the ICO doesn't always nudge the cache to re-read it,
+    # so a user who clicks "Add desktop shortcut" after upgrading TRACE
+    # would keep seeing the previously-rendered (blurry) icon. Touch
+    # the parent .lnk's mtime via SHChangeNotify so Explorer re-reads
+    # it; harmless on first creation.
+    try:
+        from win32com.shell import shell, shellcon  # type: ignore[import-not-found]
+
+        shell.SHChangeNotify(shellcon.SHCNE_ASSOCCHANGED, shellcon.SHCNF_IDLIST, None, None)
+    except Exception:
+        # Not on Windows / pywin32 missing / call failed — the worst
+        # case is the cached icon lingers until next reboot, which is
+        # the pre-fix behaviour. No need to surface the error.
+        pass
     return ico_path
 
 
