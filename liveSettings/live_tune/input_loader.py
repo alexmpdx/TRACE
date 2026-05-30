@@ -147,6 +147,7 @@ def load_from_raw_image(
     do_rotation: bool = False,
     rotation_mirror_correct: bool = False,
     target_um_per_px: Optional[float] = None,
+    include_unreliable_landmarks: bool = True,
 ) -> InputBundle:
     """Run preprocessing ONCE on a raw image, then build an InputBundle.
 
@@ -157,6 +158,13 @@ def load_from_raw_image(
     image reflects them: ``wing_model_dir`` (None disables wing isolation),
     ``wing_expand_fraction``, ``do_rotation`` / ``rotation_mirror_correct``
     (wingRotator), and ``target_um_per_px`` (Stage-1 rescale target).
+
+    ``include_unreliable_landmarks`` defaults to True for the live preview
+    so the tuning loop doesn't dead-end on borderline-confidence landmarks
+    (issue #17). The user is in Advanced Settings adjusting parameters —
+    raising LowConfidenceLandmarkError makes the preview unusable on the
+    very images most worth tuning for. The production pipeline keeps the
+    strict default.
 
     Raises RuntimeError if preprocessing reports an error.
     """
@@ -182,6 +190,7 @@ def load_from_raw_image(
         do_rotation=do_rotation,
         rotation_mirror_correct=rotation_mirror_correct,
         target_um_per_px=target_um_per_px,
+        include_unreliable_landmarks=include_unreliable_landmarks,
     )
 
     if result.error:
