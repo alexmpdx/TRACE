@@ -120,10 +120,6 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
     except Exception:
         return None
 
-    renderer = QSvgRenderer(str(svg_path))
-    if not renderer.isValid():
-        return None
-
     base = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
     cache_dir = Path(base) if base else Path.home() / ".local" / "share" / "TRACE"
     cache_dir = cache_dir / "icons"
@@ -135,6 +131,35 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
     # change so a previously-created desktop shortcut auto-updates
     # without the user having to recreate it.
     ico_path = cache_dir / "TRACE_app_icon.ico"
+
+    # Frozen-Windows fast path: just copy the pre-built ICO bundled by
+    # the installer (which uses cairosvg under the hood and renders the
+    # SVG's <clipPath> correctly, giving the circular outline). Doing
+    # this here matches the installer's own desktop-shortcut variant
+    # exactly. PyQt5's QtSvg is SVG Tiny 1.2 and ignores <clipPath>, so
+    # the Qt-rendered fallback below shows the full square (no ring).
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        try:
+            import shutil
+
+            bundled_name = "trace_icon_dark.ico" if pref is IconPreference.DARK else "trace_icon_light.ico"
+            if pref is IconPreference.SYSTEM:
+                from TRACE.theme import os_is_dark
+
+                bundled_name = "trace_icon_dark.ico" if os_is_dark() is True else "trace_icon_light.ico"
+            bundled = Path(sys.executable).resolve().parent / bundled_name
+            if bundled.is_file():
+                shutil.copyfile(bundled, ico_path)
+                _notify_shell_icon_changed()
+                return ico_path
+        except Exception:
+            # Fall through to the Qt-rendered path below — worse-looking
+            # icon (no ring) but at least the shortcut still works.
+            pass
+
+    renderer = QSvgRenderer(str(svg_path))
+    if not renderer.isValid():
+        return None
 
     # Render the SVG separately at every Windows shell size. Doing it
     # this way (vector → bitmap once per size) keeps each frame crisp
@@ -188,22 +213,27 @@ def ensure_app_icon_ico(pref: Optional[IconPreference] = None) -> Optional[Path]
     except Exception:
         return None
 
-    # Windows Explorer caches icons aggressively keyed on file path —
-    # overwriting the ICO doesn't always nudge the cache to re-read it,
-    # so a user who clicks "Add desktop shortcut" after upgrading TRACE
-    # would keep seeing the previously-rendered (blurry) icon. Touch
-    # the parent .lnk's mtime via SHChangeNotify so Explorer re-reads
-    # it; harmless on first creation.
+    _notify_shell_icon_changed()
+    return ico_path
+
+
+def _notify_shell_icon_changed() -> None:
+    """Tell Explorer the icon-association cache is stale.
+
+    Windows Explorer caches icons keyed on file path; overwriting the
+    ICO doesn't always nudge the cache to re-read it, so a user who
+    clicks "Add desktop shortcut" after upgrading TRACE would keep
+    seeing the previously-rendered icon. Harmless on first creation.
+    Best-effort: silently swallow failures (non-Windows, pywin32
+    missing, call failed). The worst case is the cached icon lingers
+    until next reboot — pre-fix behaviour.
+    """
     try:
         from win32com.shell import shell, shellcon  # type: ignore[import-not-found]
 
         shell.SHChangeNotify(shellcon.SHCNE_ASSOCCHANGED, shellcon.SHCNF_IDLIST, None, None)
     except Exception:
-        # Not on Windows / pywin32 missing / call failed — the worst
-        # case is the cached icon lingers until next reboot, which is
-        # the pre-fix behaviour. No need to surface the error.
         pass
-    return ico_path
 
 
 def make_app_icon() -> Optional["object"]:

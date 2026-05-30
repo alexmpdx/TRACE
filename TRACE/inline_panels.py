@@ -2160,7 +2160,22 @@ class InlineHelpPanel(QWidget):
         import traceback as _tb
 
         try:
-            if self._update_thread is not None and self._update_thread.isRunning():
+            # PyQt5 dangling-reference guard. After the previous thread
+            # finished, deleteLater destroyed the C++ QThread but the
+            # Python attribute kept pointing at the (now invalid) sip
+            # wrapper. Calling isRunning() on a deleted C++ object
+            # raises "RuntimeError: wrapped C/C++ object of type
+            # _UpdateCheckThread has been deleted" — issue #16.
+            # Treat the RuntimeError as "no live thread" and proceed
+            # to start a fresh one. The new finished-slot below also
+            # clears self._update_thread back to None so future clicks
+            # never see a stale wrapper in the first place.
+            try:
+                prior_running = self._update_thread is not None and self._update_thread.isRunning()
+            except RuntimeError:
+                prior_running = False
+                self._update_thread = None
+            if prior_running:
                 _slog(f"update_check: click ignored — previous check still running (silent={silent})")
                 return
             _slog(f"update_check: starting (silent={silent}, api={self._LATEST_RELEASE_API})")
@@ -2171,6 +2186,11 @@ class InlineHelpPanel(QWidget):
             self._update_thread = _UpdateCheckThread(self._LATEST_RELEASE_API, parent=self)
             self._update_thread.result.connect(lambda payload: self._apply_update_check_result(payload, silent=silent))
             self._update_thread.finished.connect(self._update_thread.deleteLater)
+            # Clear the Python-side reference once the thread finishes,
+            # before deleteLater destroys the C++ object. Without this
+            # the attribute keeps pointing at a sip wrapper whose C++
+            # backing has been freed.
+            self._update_thread.finished.connect(self._clear_update_thread_ref)
             self._update_thread.start()
             _slog("update_check: background thread started")
         except BaseException as exc:  # noqa: BLE001 — log absolutely everything
@@ -2184,6 +2204,16 @@ class InlineHelpPanel(QWidget):
                     )
                 except Exception:
                     pass
+
+    def _clear_update_thread_ref(self) -> None:
+        """Drop the Python reference to the finished _UpdateCheckThread.
+
+        Without this, the attribute keeps pointing at a sip wrapper
+        whose C++ backing is about to be freed by deleteLater, and the
+        next click on Check-for-updates hits ``isRunning()`` on a dead
+        object → RuntimeError (issue #16).
+        """
+        self._update_thread = None
 
     def _apply_update_check_result(self, payload: dict, *, silent: bool) -> None:
         """GUI-thread slot for _UpdateCheckThread.result. Updates the label,
