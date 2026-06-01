@@ -76,6 +76,13 @@ def calibrate_for_trace(
 
         if progress_callback:
             progress_callback("preprocessing", f"Running Stage 1 on {image_path.name}")
+        # Calibration cares about timing + peak RAM, not landmark accuracy.
+        # Without disabling the gate, a borderline wing whose core landmarks
+        # fail confidence checks aborts with LowConfidenceLandmarkError and
+        # the user can't calibrate against their own images. Match the live-
+        # preview pattern: include unreliable landmarks AND empty the core-
+        # landmark set so the hard abort can't fire. The production pipeline
+        # is untouched.
         preproc = process_single_image(
             image_path=image_path,
             output_dir=tmp_dir,
@@ -83,6 +90,8 @@ def calibrate_for_trace(
             segmentation_model_dir=segmentation_model_dir,
             stages=(True, True, True),
             device=device,
+            include_unreliable_landmarks=True,
+            gate_override={"core_landmarks": []},
         )
         if preproc.error is not None:
             raise RuntimeError(f"Stage 1 failed: {preproc.error}")
