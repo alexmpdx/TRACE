@@ -698,8 +698,25 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         # CRITICAL DIFFERENCE from LandmarkPickerWidget: select mode stays on
         # and NO snap-back callback is installed. The user is here to edit.
         self._points_layer.mode = "select"
+        # Selected landmarks turn orange (matches the Custom Measurements tab).
+        try:
+            self._points_layer.events.highlight.connect(self._update_face_colors)
+        except Exception:
+            pass
+        self._update_face_colors()
         try:
             self._viewer.layers.selection.active = self._points_layer
+        except Exception:
+            pass
+
+    def _update_face_colors(self, _event=None) -> None:
+        """Recolor the selected landmark(s) orange; unselected stay cyan."""
+        if self._points_layer is None:
+            return
+        try:
+            sel = self._points_layer.selected_data
+            n = len(self._points_layer.data)
+            self._points_layer.face_color = ["orange" if i in sel else "cyan" for i in range(n)]
         except Exception:
             pass
 
@@ -731,6 +748,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         labels.append(landmark_display_name(raw_name))
         self._points_layer.data = new_coords
         self._points_layer.features = {"name": current, "label": labels}
+        self._update_face_colors()
 
     def _on_delete_selected(self) -> None:
         if self._points_layer is None:
@@ -743,6 +761,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             return
         # napari keeps features in lockstep with data on removal.
         self._points_layer.remove_selected()
+        self._update_face_colors()
 
     def restore_predictions(self) -> None:
         if self._points_layer is None:
@@ -759,6 +778,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             "name": list(raw_names),
             "label": [landmark_display_name(n) for n in raw_names],
         }
+        self._update_face_colors()
 
     # -- saving -----------------------------------------------------------
     def save_override(self) -> Optional[Path]:
