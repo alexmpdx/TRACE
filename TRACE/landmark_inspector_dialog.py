@@ -512,8 +512,15 @@ class LandmarkEditorWidget(QWidget):
             self.layout().addWidget(qt_viewer, stretch=1)
             self._canvas_embedded = True
 
+        # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
+        # Without this flip, warm-toned brightfield images render with a blue tint.
+        if image.ndim == 3 and image.shape[2] == 3:
+            image = np.ascontiguousarray(image[..., ::-1])
+        elif image.ndim == 3 and image.shape[2] == 4:
+            image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
+
         self._viewer.layers.clear()
-        self._viewer.add_image(image, name=self._image_path.name)
+        self._viewer.add_image(image, name=self._image_path.name, rgb=image.ndim == 3)
 
         raw_names = list(landmarks_dict.keys())
         # napari expects (row, col) = (y, x) ordering for point coordinates.
@@ -901,8 +908,15 @@ class SegmentationEditorWidget(QWidget):
             self._viewer_placeholder.hide()
             self.layout().addWidget(qt_viewer, stretch=1)
 
+        # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
+        # Without this flip, warm-toned brightfield images render with a blue tint.
+        if image.ndim == 3 and image.shape[2] == 3:
+            image = np.ascontiguousarray(image[..., ::-1])
+        elif image.ndim == 3 and image.shape[2] == 4:
+            image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
+
         self._viewer.layers.clear()
-        self._viewer.add_image(image, name=self._image_path.name)
+        self._viewer.add_image(image, name=self._image_path.name, rgb=image.ndim == 3)
 
         data: list = []
         classes: list = []

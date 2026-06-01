@@ -409,10 +409,17 @@ class LandmarkPickerWidget(QWidget):
         if image is None:
             raise ValueError(f"Could not load image: {image_path}")
 
-        names = list(landmarks.keys())
         # napari expects (row, col) = (y, x) ordering for point coordinates.
         import numpy as np
 
+        # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
+        # Without this flip, warm-toned brightfield images render with a blue tint.
+        if image.ndim == 3 and image.shape[2] == 3:
+            image = np.ascontiguousarray(image[..., ::-1])
+        elif image.ndim == 3 and image.shape[2] == 4:
+            image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
+
+        names = list(landmarks.keys())
         coords_yx = np.array([[y, x] for (x, y) in landmarks.values()], dtype=float)
 
         if self._viewer is None:
@@ -421,7 +428,7 @@ class LandmarkPickerWidget(QWidget):
         # Replace any existing layers; this lets the user re-load a different
         # wing without tearing down the embedded canvas.
         self._viewer.layers.clear()
-        self._viewer.add_image(image, name="wing")
+        self._viewer.add_image(image, name="wing", rgb=image.ndim == 3)
         self._points_layer = self._viewer.add_points(
             coords_yx,
             name="landmarks",
