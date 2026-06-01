@@ -2461,6 +2461,55 @@ class TraceWindow(QMainWindow):
             bucket["enabled"] = False
         return base
 
+    def run_single_image_preprocessing_for_segmentation(self, image_path, output_dir, *, with_segmentation: bool):
+        """Preprocess ONE image with the current GUI settings for the inspector.
+
+        The vein/intervein model only works on the fully-preprocessed image
+        (wing-isolated + hinge-removed, rescaled if a scale is set), so the
+        Veins/Interveins tab calls this to run that exact chain on demand
+        instead of segmenting the raw input. Mirrors the batch run's
+        preprocessing config EXCEPT:
+          - rotation is forced OFF, so the segmentation + chopped image stay in
+            the pre-rotation pixel space the Stage-5 override is consumed in;
+          - landmark gates are disabled, so a borderline wing doesn't abort
+            before segmentation. Any saved landmark override is still honored by
+            Stage 3, so the hinge chop uses the user's corrected landmarks.
+
+        Returns a preprocessing PipelineResult; the inspector reads
+        ``segmentation_geojson_path`` and ``rescale_factor`` from it (the
+        polygons are mapped into original-image space and shown over the
+        original image).
+        """
+        from preprocessing.pipeline import process_single_image
+
+        wing_model_dir = None
+        if self._wing_isolation_enabled and str(self._wing_isolation_model_path or "").strip():
+            wing_model_dir = Path(self._wing_isolation_model_path)
+
+        if self._active_rescale_target == "landmark":
+            target_um_per_px = self._landmark_target_um_per_px
+        elif self._active_rescale_target == "wing_isolation":
+            target_um_per_px = self._wing_isolation_target_um_per_px
+        else:
+            target_um_per_px = self._segmentation_target_um_per_px
+
+        return process_single_image(
+            image_path=Path(image_path),
+            output_dir=Path(output_dir),
+            landmark_checkpoint=Path(self._landmark_model_path) if self._landmark_model_path else None,
+            segmentation_model_dir=Path(self._segmentation_model_path) if self._segmentation_model_path else None,
+            stages=(True, True, bool(with_segmentation)),
+            include_unreliable_landmarks=self._include_unreliable_landmarks,
+            wing_model_dir=wing_model_dir,
+            wing_expand_fraction=self._wing_expand_fraction,
+            do_rotation=False,
+            gate_override=self._build_all_gates_disabled_override(),
+            input_um_per_px=self.config.um_per_px,
+            target_um_per_px=target_um_per_px,
+            rescale_tolerance_low=self._rescale_tolerance_low,
+            rescale_tolerance_high=self._rescale_tolerance_high,
+        )
+
     def _finalize_rerun(self) -> None:
         """End-of-run hook: restore the user's gate_override after a no-gate rerun.
 

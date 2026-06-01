@@ -27,11 +27,15 @@ napari API (``border_color``/``border_width``, ``features=``, ``size=90``).
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -41,22 +45,23 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QShortcut,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-# Canonical vein/intervein vocabulary + colors (from the segmentation model's
-# metadata.json). The editor only offers the editable tissue classes; "wing"
-# and "hinge junk" are passthrough/ignored by identifyFeatures.
-SEG_EDIT_CLASSES = ["vein", "intervein", "hinge junk"]
+# Vein/intervein vocabulary + colors (class indices from the segmentation
+# model's metadata.json). Only vein and intervein are user-editable: "hinge
+# junk" is stripped from the pipeline's output entirely and is covered by the
+# Erase tool, so it's never offered as a class.
+SEG_EDIT_CLASSES = ["vein", "intervein"]
 SEG_CLASS_COLORS = {
     "vein": "#00BBFF",
     "intervein": "#FF5E00",
-    "hinge junk": "#7B460A",
-    "wing": "#888888",
 }
-SEG_CLASS_INDEX = {"hinge junk": 1, "intervein": 2, "vein": 3}
+SEG_CLASS_INDEX = {"intervein": 2, "vein": 3}
 
 
 def _parse_landmarks_geojson(path: Path) -> dict:
@@ -166,6 +171,21 @@ class LandmarkInspectorDialog(QDialog):
 
     def _on_restore(self) -> None:
         self._active_editor().restore()
+
+    def persist_landmark_edits_for_pipeline(self) -> None:
+        """Flush unsaved landmark edits to the override sidecar so on-demand
+        segmentation preprocessing (Stage 3) uses the user's corrected
+        landmarks for the hinge chop.
+
+        Only deliberate edits are persisted — an untouched Landmarks tab is
+        left alone so we never fabricate an override out of raw predictions.
+        """
+        ed = self._landmark_editor
+        if ed.is_loaded() and ed.has_unsaved_changes():
+            try:
+                ed.persist_override_for_pipeline()
+            except Exception:
+                pass  # best-effort; preprocessing falls back to a fresh prediction
 
     # -- image list (cohort sidebar) -------------------------------------
     def _build_image_list(self, content_layout) -> None:
@@ -649,6 +669,14 @@ class LandmarkEditorWidget(QWidget):
         self._last_saved_snapshot = self._snapshot_current()
         return override_path
 
+    def persist_override_for_pipeline(self) -> Optional[Path]:
+        """Write current landmarks to the override sidecar with no dialogs, so
+        on-demand segmentation preprocessing picks them up. Skips writing when
+        there are no landmarks (an empty override would break the hinge chop)."""
+        if self._points_layer is None or len(self._points_layer.data) == 0:
+            return None
+        return self.save_override()
+
     # -- dirty state / lifecycle -----------------------------------------
     def has_unsaved_changes(self) -> bool:
         if self._points_layer is None or self._last_saved_snapshot is None:
@@ -670,24 +698,6 @@ class LandmarkEditorWidget(QWidget):
             except Exception:
                 pass
             self._viewer = None
-
-
-def _iter_polygons(geom: dict):
-    """Yield ``(polygon_geojson, exterior_ring_xy)`` for a Polygon/MultiPolygon.
-
-    MultiPolygons are exploded into independent single-Polygon parts (each
-    keeping its own interior rings/holes), so each part becomes one editable
-    napari shape.
-    """
-    t = geom.get("type")
-    coords = geom.get("coordinates") or []
-    if t == "Polygon":
-        if coords:
-            yield {"type": "Polygon", "coordinates": coords}, coords[0]
-    elif t == "MultiPolygon":
-        for poly in coords:
-            if poly:
-                yield {"type": "Polygon", "coordinates": poly}, poly[0]
 
 
 def _parse_segmentation_fc(data: dict) -> list:
@@ -719,29 +729,50 @@ def _hex_to_rgb(hex_color: str) -> list:
     return [int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0]
 
 
+def _scale_geom(geom: dict, factor: float) -> dict:
+    """Return a copy of a Polygon/MultiPolygon geometry with all coords scaled."""
+
+    def _ring(ring):
+        return [[c[0] * factor, c[1] * factor] for c in ring]
+
+    t = geom.get("type")
+    coords = geom.get("coordinates") or []
+    if t == "Polygon":
+        return {"type": "Polygon", "coordinates": [_ring(r) for r in coords]}
+    if t == "MultiPolygon":
+        return {"type": "MultiPolygon", "coordinates": [[_ring(r) for r in poly] for poly in coords]}
+    return geom
+
+
 class SegmentationEditorWidget(QWidget):
-    """Napari Shapes editor for vein / intervein polygons.
+    """Napari Labels (paint-mask) editor for vein / intervein segmentation.
 
     Public API mirrors LandmarkEditorWidget so the dialog can drive either:
       - is_loaded() / set_image() / ensure_loaded()  — lazy cohort swap
       - load_or_generate()                            — initial load
       - save_override() -> Optional[Path]             — write sidecar GeoJSON
-      - restore()                                     — revert to loaded baseline
+      - restore()                                     — revert to the loaded mask
       - has_unsaved_changes()                         — dirty-state prompts
       - shutdown()                                    — close the viewer
 
-    The editable operations are reclassify (vein↔intervein), delete spurious
-    polygons, and draw new ones — NOT vertex-nudging mask boundaries. Polygon
-    holes can't be represented in a napari Shapes layer, so each shape's full
-    original geometry (holes included) is kept keyed by a stable ``fid``; on
-    save, a shape whose outer ring is unchanged is written back with its
-    ORIGINAL geometry (holes preserved) and only its (possibly new) class.
-    Only shapes that were actually vertex-edited or freshly drawn are saved as
-    the napari single-ring polygon.
+    A vein traces a thin branching network whose *holes* are the enclosed
+    intervein regions — and a napari Shapes polygon can't represent holes (it
+    would fill them in and bury the whole wing). So the segmentation is shown as
+    a per-class label *mask* over the ORIGINAL image, where holes are inherent.
+    Editing is paint / fill / erase (napari Labels), the natural model for
+    segmentation. On save the mask is re-vectorized to vein/intervein polygons
+    via modelTOjson's ``mask_to_geojson`` — the exact converter the pipeline
+    uses — so the override matches the pipeline's own output format.
 
-    Coordinates: the override is written in original-input pixel space (what
-    Stage 5 consumes — Stage 2/4 only mask pixels, never crop/translate), and
-    rendered over the original input image, so they align.
+    Coordinates: the model only works on the fully-preprocessed image, so
+    first-time generation runs the configured chain (wing isolation + hinge
+    chop, rescale if set) with rotation OFF, then maps the polygons into
+    ORIGINAL-image pixel space (wing isolation / hinge chop only mask pixels —
+    no coord change — so only the rescale factor matters). The mask is
+    rasterized at the original image's resolution and the override is saved in
+    original space; the Stage-5 short-circuit scales it back by the rescale
+    factor on the next run. A saved override is already in original space, so
+    reopening it skips preprocessing entirely.
     """
 
     def __init__(self, parent_dialog, image_path):
@@ -750,12 +781,9 @@ class SegmentationEditorWidget(QWidget):
         self._image_path = Path(image_path)
         self._window = parent_dialog._window
         self._viewer = None
-        self._shapes_layer = None
-        self._baseline: Optional[list] = None  # parsed [{class, geometry}]
-        self._orig_geoms: dict = {}  # fid -> original polygon geojson (xy, holes)
-        self._orig_outer_yx: dict = {}  # fid -> outer ring as (y, x) ndarray
-        self._next_fid = 0
-        self._last_saved_snapshot: Optional[tuple] = None
+        self._labels_layer = None
+        self._baseline_mask = None  # mask as loaded (for Restore)
+        self._last_saved_mask = None  # mask at last save (for dirty-state)
         self._loaded = False
         self._build_ui()
 
@@ -765,12 +793,9 @@ class SegmentationEditorWidget(QWidget):
 
     def set_image(self, new_image_path) -> None:
         self._image_path = Path(new_image_path)
-        self._shapes_layer = None
-        self._baseline = None
-        self._orig_geoms = {}
-        self._orig_outer_yx = {}
-        self._next_fid = 0
-        self._last_saved_snapshot = None
+        self._labels_layer = None
+        self._baseline_mask = None
+        self._last_saved_mask = None
         self._loaded = False
 
     def ensure_loaded(self) -> None:
@@ -787,112 +812,157 @@ class SegmentationEditorWidget(QWidget):
         self.cmb_class = QComboBox()
         for c in SEG_EDIT_CLASSES:
             self.cmb_class.addItem(c, c)
-        self.cmb_class.setToolTip("Class applied to reclassified selections and newly drawn polygons.")
+        self.cmb_class.setToolTip("The class that Paint and Fill apply.")
+        self.cmb_class.currentIndexChanged.connect(self._on_class_changed)
         controls.addWidget(self.cmb_class)
 
-        self.btn_set_class = QPushButton("Set class of selected")
-        self.btn_set_class.setToolTip("Reassign the selected polygon(s) to the class chosen on the left.")
-        self.btn_set_class.clicked.connect(self._on_set_class)
-        controls.addWidget(self.btn_set_class)
+        self.btn_paint = QPushButton("Paint")
+        self.btn_paint.setToolTip("Brush the chosen class onto the mask (set Brush size at right).")
+        self.btn_paint.clicked.connect(lambda: self._set_mode("paint"))
+        controls.addWidget(self.btn_paint)
 
-        self.btn_delete = QPushButton("Delete selected")
-        self.btn_delete.setToolTip("Remove the selected polygon(s).")
-        self.btn_delete.clicked.connect(self._on_delete_selected)
-        controls.addWidget(self.btn_delete)
+        self.btn_fill = QPushButton("Fill")
+        self.btn_fill.setToolTip("Flood-fill the contiguous region you click with the chosen class.")
+        self.btn_fill.clicked.connect(lambda: self._set_mode("fill"))
+        controls.addWidget(self.btn_fill)
 
-        self.btn_draw = QPushButton("Draw new polygon")
-        self.btn_draw.setToolTip(
-            "Click to place vertices; double-click or Esc to finish. The new "
-            "polygon takes the class chosen on the left."
-        )
-        self.btn_draw.clicked.connect(self._on_draw_mode)
-        controls.addWidget(self.btn_draw)
+        self.btn_erase = QPushButton("Erase")
+        self.btn_erase.setToolTip("Brush a region back to background — e.g. remove spurious tissue.")
+        self.btn_erase.clicked.connect(lambda: self._set_mode("erase"))
+        controls.addWidget(self.btn_erase)
 
-        self.btn_select = QPushButton("Select / move")
-        self.btn_select.setToolTip("Return to selection mode (select, move, or pick polygons to reclassify).")
-        self.btn_select.clicked.connect(self._on_select_mode)
-        controls.addWidget(self.btn_select)
+        self.btn_pan = QPushButton("Pan / zoom")
+        self.btn_pan.setToolTip("Stop editing; drag to pan and scroll to zoom.")
+        self.btn_pan.clicked.connect(lambda: self._set_mode("pan_zoom"))
+        controls.addWidget(self.btn_pan)
+
+        self.btn_undo = QPushButton("Undo")
+        self.btn_undo.setToolTip("Undo the last paint / fill / erase stroke (Ctrl+Z).")
+        self.btn_undo.clicked.connect(self._on_undo)
+        controls.addWidget(self.btn_undo)
+
+        self.btn_redo = QPushButton("Redo")
+        self.btn_redo.setToolTip("Redo the last undone stroke (Ctrl+Shift+Z).")
+        self.btn_redo.clicked.connect(self._on_redo)
+        controls.addWidget(self.btn_redo)
+
+        controls.addWidget(QLabel("Brush:"))
+        self.spin_brush = QSpinBox()
+        self.spin_brush.setRange(1, 2000)
+        self.spin_brush.setValue(60)
+        self.spin_brush.setToolTip("Paint / erase brush diameter, in pixels.")
+        self.spin_brush.valueChanged.connect(self._on_brush_changed)
+        controls.addWidget(self.spin_brush)
         controls.addStretch(1)
         layout.addLayout(controls)
 
         self._viewer_placeholder = QLabel(
-            "Loading vein / intervein polygons…\n\n" "First open may take a few seconds while the segmentation loads."
+            "Preprocessing this image for vein / intervein inference…\n\n"
+            "This runs wing isolation + hinge removal + segmentation, so it can "
+            "take a little while (the window may be unresponsive meanwhile)."
         )
         self._viewer_placeholder.setAlignment(Qt.AlignCenter)
         self._viewer_placeholder.setStyleSheet("color: #888; padding: 40px;")
         layout.addWidget(self._viewer_placeholder, stretch=1)
 
-    # -- colors ----------------------------------------------------------
-    @staticmethod
-    def _face_rgba(cls: str) -> list:
-        return _hex_to_rgb(SEG_CLASS_COLORS.get(cls, "#888888")) + [0.35]
-
-    @staticmethod
-    def _edge_rgba(cls: str) -> list:
-        return _hex_to_rgb(SEG_CLASS_COLORS.get(cls, "#888888")) + [1.0]
+        # Ctrl+Z / Ctrl+Shift+Z work over the editor + its embedded canvas. We
+        # register them ourselves because only the napari canvas is embedded
+        # (not napari's own window), so napari's built-in keybindings don't fire.
+        sc_undo = QShortcut(QKeySequence.Undo, self)
+        sc_undo.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_undo.activated.connect(self._on_undo)
+        sc_redo = QShortcut(QKeySequence.Redo, self)
+        sc_redo.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_redo.activated.connect(self._on_redo)
 
     # -- loading ---------------------------------------------------------
     def load_or_generate(self) -> None:
-        """Locate the segmentation for self._image_path and render it.
+        """Obtain the segmentation for this image and render it as a paint mask.
 
-        Search order (all in original-input pixel space):
-          1. <image_dir>/<stem>_segmentation_override.geojson  ← prior corrections
-          2. <output_folder>/<stem>_segmentation.geojson       ← post-run output
-          3. Generate via the configured segmentation model     ← on-demand
+        A prior ``<stem>_segmentation_override.geojson`` (already in original
+        space) is loaded directly. Otherwise the configured preprocessing chain
+        is run on demand (rotation OFF, gates OFF) and its segmentation mapped
+        into original space. Any unsaved landmark edits are flushed first so
+        Stage 3 picks them up and the hinge chop uses the corrected landmarks.
         """
-        stem = self._image_path.stem
-        image_dir = self._image_path.parent
-        candidates = [image_dir / f"{stem}_segmentation_override.geojson", None]
-        try:
-            out_text = self._window.output_edit.text().strip()
-            if out_text:
-                candidates[1] = Path(out_text) / f"{stem}_segmentation.geojson"
-        except Exception:
-            pass
+        self._dialog.persist_landmark_edits_for_pipeline()
 
-        parsed = None
-        for cand in candidates:
-            if cand is None or not cand.is_file():
-                continue
-            try:
-                parsed = _parse_segmentation_geojson(cand)
-                break
-            except Exception:
-                continue
+        override_path = self._image_path.parent / f"{self._image_path.stem}_segmentation_override.geojson"
 
-        if parsed is None:
+        # Let the placeholder paint before the (possibly blocking) work.
+        QApplication.processEvents()
+
+        if override_path.is_file():
+            # Saved overrides are already in original-image pixel space — no
+            # preprocessing needed, just re-rasterize them.
             try:
-                fc = self._generate_segmentation(self._image_path)
-                parsed = _parse_segmentation_fc(fc)
+                parsed = _parse_segmentation_geojson(override_path)
             except Exception as exc:  # noqa: BLE001
-                self._fail_load(
-                    f"No segmentation found and on-demand generation failed:\n\n{exc}\n\n"
-                    "Run the pipeline with the 'Vein/intervein inference GeoJSON' output "
-                    "enabled first, or configure a segmentation model in Settings → Models."
-                )
+                self._fail_load(f"Could not read the saved segmentation override:\n\n{exc}")
                 return
+        else:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="trace_seg_inspect_"))
+            try:
+                try:
+                    result = self._window.run_single_image_preprocessing_for_segmentation(
+                        self._image_path, tmp_dir, with_segmentation=True
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._fail_load(
+                        f"Could not preprocess this image for vein/intervein inference:\n\n{exc}\n\n"
+                        "Check that a landmark model and a segmentation model are configured "
+                        "in Settings → Models."
+                    )
+                    return
+                seg_path = getattr(result, "segmentation_geojson_path", None)
+                parsed = _parse_segmentation_geojson(seg_path) if seg_path and Path(seg_path).is_file() else []
+                # Map preprocessed-space polygons into original-image space.
+                # Wing isolation / hinge chop don't move coords; only rescale does.
+                rf = getattr(result, "rescale_factor", 1.0) or 1.0
+                if rf != 1.0:
+                    parsed = [{"class": p["class"], "geometry": _scale_geom(p["geometry"], 1.0 / rf)} for p in parsed]
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        self._baseline = parsed
         self._render(parsed)
-        self._last_saved_snapshot = self._snapshot_current()
-
-    def _generate_segmentation(self, image_path) -> dict:
-        seg_model = (getattr(self._window, "_segmentation_model_path", "") or "").strip()
-        if not seg_model:
-            raise RuntimeError("No segmentation model is configured. Set one in Settings → Models.")
-        from preprocessing.pipeline import _auto_device, run_segmentation
-
-        device = _auto_device()
-        return run_segmentation(Path(image_path), Path(seg_model), device, {})
 
     def _fail_load(self, message: str) -> None:
         QMessageBox.critical(self, "Could not load segmentation", message)
         # Don't tear the whole dialog down — the Landmarks tab may still be
         # usable, and in cohort mode the user can step to another image.
 
+    def _color_dict(self) -> dict:
+        d = {None: (0.0, 0.0, 0.0, 0.0), 0: (0.0, 0.0, 0.0, 0.0)}
+        for cls, idx in SEG_CLASS_INDEX.items():
+            r, g, b = _hex_to_rgb(SEG_CLASS_COLORS[cls])
+            d[idx] = (r, g, b, 1.0)
+        return d
+
+    def _rasterize(self, parsed: list, shape: tuple):
+        """Burn vein/intervein polygons (holes respected) into a label mask."""
+        import numpy as np
+        from rasterio.features import rasterize as rio_rasterize
+
+        shapes = []
+        for feat in parsed:
+            val = SEG_CLASS_INDEX.get(feat.get("class"), 0)
+            geom = feat.get("geometry")
+            if not val or not geom or not geom.get("coordinates"):
+                continue
+            shapes.append((geom, val))
+        if not shapes:
+            return np.zeros(shape, dtype=np.uint8)
+        # Burn lower class indices first so veins (3) win at shared borders.
+        shapes.sort(key=lambda s: s[1])
+        try:
+            return rio_rasterize(shapes, out_shape=shape, fill=0, dtype="uint8")
+        except Exception:
+            return np.zeros(shape, dtype=np.uint8)
+
     def _render(self, parsed: list) -> None:
         import napari
         import numpy as np
+        from napari.utils.colormaps import DirectLabelColormap
 
         from TRACE.psd_loader import imread_any
 
@@ -909,181 +979,98 @@ class SegmentationEditorWidget(QWidget):
             self.layout().addWidget(qt_viewer, stretch=1)
 
         # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
-        # Without this flip, warm-toned brightfield images render with a blue tint.
         if image.ndim == 3 and image.shape[2] == 3:
             image = np.ascontiguousarray(image[..., ::-1])
         elif image.ndim == 3 and image.shape[2] == 4:
             image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
 
+        mask = self._rasterize(parsed, image.shape[:2])
+
         self._viewer.layers.clear()
         self._viewer.add_image(image, name=self._image_path.name, rgb=image.ndim == 3)
-
-        data: list = []
-        classes: list = []
-        fids: list = []
-        self._orig_geoms = {}
-        self._orig_outer_yx = {}
-        fid = 0
-        for feat in parsed:
-            cls = feat["class"]
-            for poly_geom, exterior in _iter_polygons(feat["geometry"]):
-                ring_yx = self._ring_xy_to_yx(exterior)
-                if len(ring_yx) < 3:
-                    continue
-                data.append(ring_yx)
-                classes.append(cls)
-                fids.append(fid)
-                self._orig_geoms[fid] = poly_geom
-                self._orig_outer_yx[fid] = ring_yx
-                fid += 1
-        self._next_fid = fid
-
-        if data:
-            self._shapes_layer = self._viewer.add_shapes(
-                data,
-                shape_type="polygon",
-                name="vein / intervein",
-                edge_width=3,
-                edge_color=[self._edge_rgba(c) for c in classes],
-                face_color=[self._face_rgba(c) for c in classes],
-                features={"class": list(classes), "fid": list(fids)},
-            )
-        else:
-            self._shapes_layer = self._viewer.add_shapes(
-                name="vein / intervein",
-                shape_type="polygon",
-                edge_width=3,
-                features={"class": [], "fid": []},
-            )
-        self._shapes_layer.mode = "select"
-        self._set_draw_defaults()
+        self._labels_layer = self._viewer.add_labels(
+            mask,
+            name="vein / intervein",
+            colormap=DirectLabelColormap(color_dict=self._color_dict()),
+            opacity=0.5,
+        )
+        self._labels_layer.selected_label = self._current_class_value()
+        self._labels_layer.brush_size = self.spin_brush.value()
+        self._labels_layer.mode = "paint"
         try:
-            self._viewer.layers.selection.active = self._shapes_layer
+            self._viewer.layers.selection.active = self._labels_layer
         except Exception:
             pass
-
-    @staticmethod
-    def _ring_xy_to_yx(ring: list):
-        import numpy as np
-
-        arr = np.array([[float(pt[1]), float(pt[0])] for pt in ring if len(pt) >= 2], dtype=float)
-        # Drop the GeoJSON closing vertex (first == last); napari polygons are implicitly closed.
-        if len(arr) >= 2 and np.allclose(arr[0], arr[-1]):
-            arr = arr[:-1]
-        return arr
-
-    def _set_draw_defaults(self) -> None:
-        """Make newly drawn polygons adopt the dropdown's class + colors."""
-        if self._shapes_layer is None:
-            return
-        cls = self.cmb_class.currentData() or self.cmb_class.currentText()
-        try:
-            self._shapes_layer.feature_defaults["class"] = cls
-            self._shapes_layer.feature_defaults["fid"] = -1
-        except Exception:
-            pass
-        try:
-            self._shapes_layer.current_edge_color = self._edge_rgba(cls)
-            self._shapes_layer.current_face_color = self._face_rgba(cls)
-        except Exception:
-            pass
+        self._baseline_mask = mask.copy()
+        self._last_saved_mask = mask.copy()
 
     # -- editing actions -------------------------------------------------
-    def _on_set_class(self) -> None:
-        if self._shapes_layer is None:
-            return
-        sel = list(self._shapes_layer.selected_data)
-        if not sel:
-            QMessageBox.information(self, "Nothing selected", "Select polygon(s) on the canvas first.")
-            return
-        target = self.cmb_class.currentData() or self.cmb_class.currentText()
-        classes = list(self._shapes_layer.features["class"])
-        fids = list(self._shapes_layer.features["fid"])
-        for i in sel:
-            if 0 <= i < len(classes):
-                classes[i] = target
-        self._apply_classes(classes, fids)
+    def _current_class_value(self) -> int:
+        return SEG_CLASS_INDEX.get(self.cmb_class.currentData() or self.cmb_class.currentText(), 3)
 
-    def _apply_classes(self, classes: list, fids: list) -> None:
-        import numpy as np
+    def _on_class_changed(self, *_args) -> None:
+        if self._labels_layer is not None:
+            self._labels_layer.selected_label = self._current_class_value()
 
-        self._shapes_layer.features = {"class": list(classes), "fid": list(fids)}
+    def _on_brush_changed(self, value: int) -> None:
+        if self._labels_layer is not None:
+            self._labels_layer.brush_size = value
+
+    def _set_mode(self, mode: str) -> None:
+        if self._labels_layer is None:
+            return
+        if mode in ("paint", "fill"):
+            self._labels_layer.selected_label = self._current_class_value()
         try:
-            self._shapes_layer.face_color = np.array([self._face_rgba(c) for c in classes])
-            self._shapes_layer.edge_color = np.array([self._edge_rgba(c) for c in classes])
+            self._labels_layer.mode = mode
         except Exception:
             pass
-        self._shapes_layer.refresh()
 
-    def _on_delete_selected(self) -> None:
-        if self._shapes_layer is None:
-            return
-        if not list(self._shapes_layer.selected_data):
-            QMessageBox.information(self, "Nothing selected", "Select polygon(s) on the canvas first.")
-            return
-        self._shapes_layer.remove_selected()
+    def _on_undo(self) -> None:
+        if self._labels_layer is not None:
+            try:
+                self._labels_layer.undo()
+            except Exception:
+                pass
 
-    def _on_draw_mode(self) -> None:
-        if self._shapes_layer is None:
-            return
-        self._set_draw_defaults()
-        self._shapes_layer.mode = "add_polygon"
-
-    def _on_select_mode(self) -> None:
-        if self._shapes_layer is None:
-            return
-        self._shapes_layer.mode = "select"
+    def _on_redo(self) -> None:
+        if self._labels_layer is not None:
+            try:
+                self._labels_layer.redo()
+            except Exception:
+                pass
 
     def restore(self) -> None:
-        if self._baseline is None:
+        if self._labels_layer is None or self._baseline_mask is None:
             return
-        self._render(self._baseline)
-        self._last_saved_snapshot = self._snapshot_current()
+        self._labels_layer.data = self._baseline_mask.copy()
 
     # -- saving ----------------------------------------------------------
     def save_override(self) -> Optional[Path]:
         import numpy as np
 
-        if self._shapes_layer is None:
+        if self._labels_layer is None:
             raise RuntimeError("Viewer not initialized; nothing to save.")
-        data = list(self._shapes_layer.data)
-        classes = list(self._shapes_layer.features["class"])
-        fids = list(self._shapes_layer.features["fid"])
+        mask = np.asarray(self._labels_layer.data)
 
-        features_out = []
-        for i, ring_yx in enumerate(data):
-            cls = classes[i] if i < len(classes) else None
-            if not isinstance(cls, str) or not cls:
-                cls = self.cmb_class.currentData() or self.cmb_class.currentText()
-            try:
-                fid = int(fids[i])
-            except (ValueError, TypeError):
-                fid = -1
-            ring = np.asarray(ring_yx, dtype=float)
-            if fid in self._orig_geoms and self._outer_unchanged(fid, ring):
-                geom = self._orig_geoms[fid]  # original geometry, holes preserved
-            else:
-                geom = self._ring_to_polygon_geojson(ring)
-            if geom is None:
-                continue
-            features_out.append(
-                {
-                    "type": "Feature",
-                    "geometry": geom,
-                    "properties": {
-                        "class": cls,
-                        "class_index": SEG_CLASS_INDEX.get(cls, 0),
-                        "color": SEG_CLASS_COLORS.get(cls, "#888888"),
-                        "gate_reason": "manual override",
-                    },
-                }
-            )
+        # Re-vectorize the painted mask with the SAME converter the pipeline
+        # uses, so the override is byte-for-byte the format Stage 5 produces.
+        from modeltojson import mask_to_geojson
+
+        classes_meta = [
+            {"index": idx, "name": name, "color": SEG_CLASS_COLORS.get(name, "#888888")}
+            for name, idx in SEG_CLASS_INDEX.items()
+        ]
+        fc = mask_to_geojson(mask, classes_meta, str(self._image_path))
+        features_out = list(fc.get("features", [])) if isinstance(fc, dict) else []
+        for f in features_out:
+            f.setdefault("properties", {})["gate_reason"] = "manual override"
 
         if not features_out:
             reply = QMessageBox.question(
                 self,
                 "Save with no polygons?",
-                "There are no vein/intervein polygons to save. An empty override "
+                "There are no vein/intervein regions to save. An empty override "
                 "means the next run finds no veins for this image.\n\nSave anyway?",
                 QMessageBox.Save | QMessageBox.Cancel,
             )
@@ -1093,44 +1080,16 @@ class SegmentationEditorWidget(QWidget):
         payload = {"type": "FeatureCollection", "features": features_out}
         override_path = self._image_path.parent / f"{self._image_path.stem}_segmentation_override.geojson"
         override_path.write_text(json.dumps(payload), encoding="utf-8")
-        self._last_saved_snapshot = self._snapshot_current()
+        self._last_saved_mask = mask.copy()
         return override_path
-
-    def _outer_unchanged(self, fid: int, ring_yx) -> bool:
-        import numpy as np
-
-        orig = self._orig_outer_yx.get(fid)
-        if orig is None:
-            return False
-        cur = np.asarray(ring_yx, dtype=float)
-        if cur.shape != orig.shape:
-            return False
-        return bool(np.allclose(cur, orig, atol=0.5))
-
-    @staticmethod
-    def _ring_to_polygon_geojson(ring_yx) -> Optional[dict]:
-        xy = [[float(x), float(y)] for (y, x) in ring_yx]
-        if len(xy) < 3:
-            return None
-        if xy[0] != xy[-1]:
-            xy.append(xy[0])  # close the ring per GeoJSON spec
-        return {"type": "Polygon", "coordinates": [xy]}
 
     # -- dirty state / lifecycle -----------------------------------------
     def has_unsaved_changes(self) -> bool:
-        if self._shapes_layer is None or self._last_saved_snapshot is None:
-            return False
-        return self._snapshot_current() != self._last_saved_snapshot
+        import numpy as np
 
-    def _snapshot_current(self) -> tuple:
-        if self._shapes_layer is None:
-            return ((), ())
-        try:
-            classes = tuple(self._shapes_layer.features["class"])
-        except Exception:
-            classes = ()
-        coords = tuple(tuple(round(float(v), 2) for pt in ring for v in pt) for ring in self._shapes_layer.data)
-        return (classes, coords)
+        if self._labels_layer is None or self._last_saved_mask is None:
+            return False
+        return not np.array_equal(np.asarray(self._labels_layer.data), self._last_saved_mask)
 
     def shutdown(self) -> None:
         if self._viewer is not None:

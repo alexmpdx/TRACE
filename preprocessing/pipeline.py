@@ -587,6 +587,28 @@ def load_segmentation_override(path: Path) -> dict:
     return data
 
 
+def _scale_geojson_coords(fc: dict, factor: float) -> dict:
+    """Scale every Polygon/MultiPolygon coordinate in a FeatureCollection.
+
+    The inspector writes the segmentation override in original-input pixel
+    space; when Stage 1 rescaled the image, the rest of the pipeline works in
+    rescaled space, so the override is scaled by the same factor here before use.
+    """
+
+    def _ring(ring):
+        return [[c[0] * factor, c[1] * factor] for c in ring]
+
+    for feat in fc.get("features", []):
+        geom = feat.get("geometry") or {}
+        t = geom.get("type")
+        coords = geom.get("coordinates") or []
+        if t == "Polygon":
+            geom["coordinates"] = [_ring(r) for r in coords]
+        elif t == "MultiPolygon":
+            geom["coordinates"] = [[_ring(r) for r in poly] for poly in coords]
+    return fc
+
+
 # ---------------------------------------------------------------------------
 # Pipeline result and orchestration
 # ---------------------------------------------------------------------------
@@ -908,6 +930,11 @@ def process_single_image(
 
             _logging.getLogger(__name__).info("%s: using manual segmentation override from %s", stem, seg_override_path)
             fc = load_segmentation_override(seg_override_path)
+            # The override is in original-input pixel space; if Stage 1 rescaled
+            # the image, bring it into the rescaled space the rest of the run uses.
+            rf = result.rescale_factor or 1.0
+            if rf != 1.0:
+                fc = _scale_geojson_coords(fc, rf)
         else:
             # Use chopped image if available, otherwise original
             seg_input = chopped_path if chopped_path and chopped_path.exists() else image_path
