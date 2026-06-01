@@ -1008,7 +1008,17 @@ class TraceWindow(QMainWindow):
         # variant only shows when at least one of those failures was a
         # landmark confidence-gate abort. Both stay hidden during a run
         # and on first launch.
-        rerun_layout = QHBoxLayout()
+        #
+        # Stacked vertically rather than in a row because the combined
+        # widths ("Rerun failed images", "Rerun failed (no gate aborts)",
+        # "Review failed images (N)") far exceed the left column at its
+        # default width — Windows truncates the middle of each label
+        # without showing ellipses, so the user sees garbled text like
+        # "un failed (no gate abo". Vertical stacking gives each button
+        # its full label width regardless of the splitter position.
+        rerun_layout = QVBoxLayout()
+        rerun_layout.setContentsMargins(0, 0, 0, 0)
+        rerun_layout.setSpacing(4)
         self.btn_rerun_failed = QPushButton("Rerun failed images")
         self.btn_rerun_failed.setToolTip(
             "Re-process only the images that failed in the last run, using current "
