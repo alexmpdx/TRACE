@@ -1,4 +1,4 @@
-"""Per-image landmark inspector + editor.
+"""Per-image inspector + editor for landmarks and vein/intervein segmentation.
 
 Three entry points (Main tab), all converging on
 ``TraceWindow._open_landmark_inspector(image_path, cohort=...)``:
@@ -6,21 +6,22 @@ Three entry points (Main tab), all converging on
   - Right-click on a multi-selection      → "Inspect & Edit landmarks (N selected)…"
   - Post-run "Review failed images" button alongside the rerun-failed buttons
 
-Cohort mode (>=2 images) shows prev/next navigation in the dialog footer and
-reuses a single napari Viewer across images (construction is expensive).
+The dialog hosts two tabs in a ``QTabWidget``:
+  - **Landmarks** — drag/add/delete landmark points, save
+    ``<image_dir>/<stem>_landmarks_override.geojson`` (Stage-3 short-circuit).
+  - **Veins / Interveins** — reclassify / delete / draw vein & intervein
+    polygons, save ``<image_dir>/<stem>_segmentation_override.geojson``
+    (Stage-5 short-circuit). Both short-circuits live in preprocessing/pipeline.py.
 
-The user drags predicted landmarks to corrected positions, optionally adds a
-missing landmark from the canonical name list, hits Save → writes
-``<image_dir>/<stem>_landmarks_override.geojson``. The next batch run picks up
-the override automatically (Stage-3 short-circuit in preprocessing/pipeline.py).
+Cohort mode (>=2 images) shows prev/next navigation + a clickable image list so
+images can be edited in any order. Each tab owns one napari Viewer, created
+lazily (the segmentation viewer only when its tab is first shown) and reused
+across cohort images (construction is expensive).
 
-This is a sibling of measurementMaker's ``LandmarkPickerWidget`` — it shares the
-napari setup pattern (image + Points layer + text labels) but deliberately does
-NOT install the snap-back guard that makes the picker read-only. Drag-to-correct
-is the whole point here.
-
-v1 scope: landmarks only. Vein/intervein editing is parked for v2; the dialog
-structure leaves room for a future QTabWidget with a "Segmentation" tab.
+The editors are read-write siblings of measurementMaker's read-only
+``LandmarkPickerWidget`` — they share its napari setup pattern but omit the
+snap-back guard, because editing is the whole point. Mirror that widget's
+napari API (``border_color``/``border_width``, ``features=``, ``size=90``).
 """
 
 from __future__ import annotations
@@ -40,9 +41,22 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
+# Canonical vein/intervein vocabulary + colors (from the segmentation model's
+# metadata.json). The editor only offers the editable tissue classes; "wing"
+# and "hinge junk" are passthrough/ignored by identifyFeatures.
+SEG_EDIT_CLASSES = ["vein", "intervein", "hinge junk"]
+SEG_CLASS_COLORS = {
+    "vein": "#00BBFF",
+    "intervein": "#FF5E00",
+    "hinge junk": "#7B460A",
+    "wing": "#888888",
+}
+SEG_CLASS_INDEX = {"hinge junk": 1, "intervein": 2, "vein": 3}
 
 
 def _parse_landmarks_geojson(path: Path) -> dict:
@@ -70,7 +84,7 @@ def _parse_landmarks_geojson(path: Path) -> dict:
 
 
 class LandmarkInspectorDialog(QDialog):
-    """Modal wrapper: holds the editor widget + (cohort) navigation + buttons."""
+    """Modal wrapper: tabbed editors + (cohort) navigation + buttons."""
 
     def __init__(self, window, image_path, cohort: Optional[list] = None):
         """
@@ -88,8 +102,8 @@ class LandmarkInspectorDialog(QDialog):
         self._cohort_index = (
             self._cohort.index(self._image_path) if self._cohort is not None and self._image_path in self._cohort else 0
         )
-        self.setWindowTitle(f"Inspect & Edit landmarks — {self._image_path.name}")
-        self.resize(1320, 800)
+        self.setWindowTitle(f"Inspect & Edit — {self._image_path.name}")
+        self.resize(1320, 820)
 
         # Cohort bookkeeping: which images already have a saved override this
         # session (shown with a ✓ in the list), and a guard so programmatic
@@ -102,27 +116,56 @@ class LandmarkInspectorDialog(QDialog):
         # Left sidebar: clickable list of cohort images, so the user can jump
         # to any image in any order instead of only stepping prev/next.
         self._build_image_list(content)
-        self._editor = LandmarkEditorWidget(self, self._image_path)
-        content.addWidget(self._editor, stretch=1)
+
+        # Two tabs, one editor each. Each editor owns a napari viewer, created
+        # lazily on first show — opening the dialog only pays for the Landmarks
+        # viewer; the segmentation viewer is built when its tab is first opened.
+        self._tabs = QTabWidget()
+        self._landmark_editor = LandmarkEditorWidget(self, self._image_path)
+        self._seg_editor = SegmentationEditorWidget(self, self._image_path)
+        self._tabs.addTab(self._landmark_editor, "Landmarks")
+        self._tabs.addTab(self._seg_editor, "Veins / Interveins")
+        self._editors = [self._landmark_editor, self._seg_editor]
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        content.addWidget(self._tabs, stretch=1)
         layout.addLayout(content, stretch=1)
 
         # Navigation row (cohort mode only).
         self._build_navigation()
 
-        # Save / Restore / Cancel buttons.
+        # Save / Restore / Cancel buttons (act on the active tab's editor).
         btns = QDialogButtonBox(self)
         self.btn_save = btns.addButton("Save override", QDialogButtonBox.AcceptRole)
         self.btn_restore = btns.addButton("Restore predictions", QDialogButtonBox.ResetRole)
         self.btn_cancel = btns.addButton(QDialogButtonBox.Cancel)
         btns.accepted.connect(self._on_save)
         btns.rejected.connect(self.reject)
-        self.btn_restore.clicked.connect(self._editor.restore_predictions)
+        self.btn_restore.clicked.connect(self._on_restore)
         layout.addWidget(btns)
 
         # Defer the heavy load until after the dialog paints. napari Viewer
-        # construction + LandmarkLocator first-call init together can take
-        # several seconds; showing the dialog first gives the user feedback.
-        QTimer.singleShot(0, self._editor.load_or_generate)
+        # construction + model first-call init together can take several
+        # seconds; showing the dialog first gives the user feedback.
+        QTimer.singleShot(0, self._ensure_active_loaded)
+
+    # -- tab + editor plumbing -------------------------------------------
+    def _active_editor(self):
+        return self._editors[self._tabs.currentIndex()]
+
+    def _ensure_active_loaded(self) -> None:
+        self._active_editor().ensure_loaded()
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._ensure_active_loaded()
+
+    def _loaded_editors(self):
+        return [e for e in self._editors if e.is_loaded()]
+
+    def _dirty_editors(self):
+        return [e for e in self._loaded_editors() if e.has_unsaved_changes()]
+
+    def _on_restore(self) -> None:
+        self._active_editor().restore()
 
     # -- image list (cohort sidebar) -------------------------------------
     def _build_image_list(self, content_layout) -> None:
@@ -218,13 +261,14 @@ class LandmarkInspectorDialog(QDialog):
         """Switch to cohort image ``new_idx``. Returns False if aborted.
 
         Shared by prev/next, Save & Next, and the sidebar list. Prompts to
-        save unsaved edits before leaving the current image.
+        save unsaved edits on ANY loaded tab before leaving the current image.
         """
         if self._cohort is None:
             return False
         if not (0 <= new_idx < len(self._cohort)) or new_idx == self._cohort_index:
             return False
-        if self._editor.has_unsaved_changes():
+        dirty = self._dirty_editors()
+        if dirty:
             reply = QMessageBox.question(
                 self,
                 "Unsaved changes",
@@ -234,54 +278,67 @@ class LandmarkInspectorDialog(QDialog):
             if reply == QMessageBox.Cancel:
                 return False
             if reply == QMessageBox.Save:
-                try:
-                    self._editor.save_override()
-                except Exception as exc:  # noqa: BLE001
-                    QMessageBox.critical(self, "Save failed", f"{exc}")
-                    return False
+                for ed in dirty:
+                    try:
+                        ed.save_override()
+                    except Exception as exc:  # noqa: BLE001
+                        QMessageBox.critical(self, "Save failed", f"{exc}")
+                        return False
                 self._saved_indices.add(self._cohort_index)
         self._cohort_index = new_idx
         self._image_path = self._cohort[new_idx]
-        self.setWindowTitle(f"Inspect & Edit landmarks — {self._image_path.name}")
+        self.setWindowTitle(f"Inspect & Edit — {self._image_path.name}")
+        # Point every editor at the new image; only the active tab reloads now,
+        # the others reload lazily when next shown.
+        for ed in self._editors:
+            ed.set_image(self._image_path)
         self._refresh_nav_state()
-        self._editor.swap_image(self._image_path)
+        self._ensure_active_loaded()
         return True
 
     def _on_save_and_next(self) -> None:
-        try:
-            self._editor.save_override()
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Save failed", f"{exc}")
-            return
-        self._saved_indices.add(self._cohort_index)
-        self._refresh_image_list()
+        result = self._save_active()
+        if result is None or result is False:
+            return  # save failed or user declined an empty-save
         self._navigate(+1)
 
     def _on_save(self) -> None:
-        try:
-            override_path = self._editor.save_override()
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Save failed", f"Could not write override: {exc}")
-            return
-        if override_path is None:
-            return  # user declined the empty-landmark confirm
-        if self._cohort is not None:
-            self._saved_indices.add(self._cohort_index)
-            self._refresh_image_list()
+        result = self._save_active()
+        if result is None or result is False:
+            return  # nothing saved (declined confirm) or save failed
         QMessageBox.information(
             self,
             "Saved",
-            f"Landmark override saved to:\n\n{override_path}\n\n"
+            f"Override saved to:\n\n{result}\n\n"
             "The next run that includes this image will use the override "
-            "instead of running LandmarkLocator on it.",
+            "instead of running the model for that stage.",
         )
         # In cohort mode plain "Save" should NOT close the dialog — the user
-        # may want to keep reviewing. Only single-image mode auto-closes.
-        if self._cohort is None:
+        # may want to keep reviewing. In single-image mode it auto-closes, but
+        # only once the OTHER tab has no unsaved edits, so a two-tab session
+        # isn't cut short after saving just one tab.
+        if self._cohort is None and not self._dirty_editors():
             self.accept()
 
+    def _save_active(self):
+        """Save the active tab's editor. Returns the Path, None (declined), or
+        False (error already reported)."""
+        editor = self._active_editor()
+        try:
+            override_path = editor.save_override()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save failed", f"Could not write override: {exc}")
+            return False
+        if override_path is None:
+            return None  # user declined an empty-save confirm
+        if self._cohort is not None:
+            self._saved_indices.add(self._cohort_index)
+            self._refresh_image_list()
+        return override_path
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
-        self._editor.shutdown()
+        for ed in self._editors:
+            ed.shutdown()
         super().closeEvent(event)
 
 
@@ -312,7 +369,29 @@ class LandmarkEditorWidget(QWidget):
         self._points_layer = None
         self._predicted_positions: dict = {}  # {raw_name: (x, y)} for Restore
         self._last_saved_snapshot: Optional[tuple] = None
+        self._loaded = False
         self._build_ui()
+
+    # -- lazy load protocol (shared shape with SegmentationEditorWidget) ---
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def set_image(self, new_image_path) -> None:
+        """Point the editor at a new image WITHOUT loading (cohort swap)."""
+        self._image_path = Path(new_image_path)
+        self._points_layer = None
+        self._predicted_positions = {}
+        self._last_saved_snapshot = None
+        self._loaded = False
+
+    def ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self.load_or_generate()
+        self._loaded = True
+
+    def restore(self) -> None:
+        self.restore_predictions()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -574,13 +653,467 @@ class LandmarkEditorWidget(QWidget):
         coords = tuple(tuple(round(float(v), 3) for v in row) for row in self._points_layer.data)
         return (names, coords)
 
-    def swap_image(self, new_image_path) -> None:
-        """Replace the current image + landmarks, reusing self._viewer."""
+    def shutdown(self) -> None:
+        if self._viewer is not None:
+            try:
+                self._viewer.close()
+            except Exception:
+                pass
+            self._viewer = None
+
+
+def _iter_polygons(geom: dict):
+    """Yield ``(polygon_geojson, exterior_ring_xy)`` for a Polygon/MultiPolygon.
+
+    MultiPolygons are exploded into independent single-Polygon parts (each
+    keeping its own interior rings/holes), so each part becomes one editable
+    napari shape.
+    """
+    t = geom.get("type")
+    coords = geom.get("coordinates") or []
+    if t == "Polygon":
+        if coords:
+            yield {"type": "Polygon", "coordinates": coords}, coords[0]
+    elif t == "MultiPolygon":
+        for poly in coords:
+            if poly:
+                yield {"type": "Polygon", "coordinates": poly}, poly[0]
+
+
+def _parse_segmentation_fc(data: dict) -> list:
+    """Parse a segmentation FeatureCollection into ``[{class, geometry}, ...]``.
+
+    Reads ``properties.class`` and falls back to ``properties.classification.name``.
+    """
+    out: list = []
+    for feat in data.get("features", []):
+        geom = feat.get("geometry") or {}
+        if geom.get("type") not in ("Polygon", "MultiPolygon") or not geom.get("coordinates"):
+            continue
+        props = feat.get("properties") or {}
+        cls = props.get("class")
+        if cls is None:
+            cls = (props.get("classification") or {}).get("name")
+        out.append({"class": str(cls) if cls else "intervein", "geometry": geom})
+    return out
+
+
+def _parse_segmentation_geojson(path: Path) -> list:
+    return _parse_segmentation_fc(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def _hex_to_rgb(hex_color: str) -> list:
+    h = (hex_color or "#888888").lstrip("#")
+    if len(h) != 6:
+        h = "888888"
+    return [int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0]
+
+
+class SegmentationEditorWidget(QWidget):
+    """Napari Shapes editor for vein / intervein polygons.
+
+    Public API mirrors LandmarkEditorWidget so the dialog can drive either:
+      - is_loaded() / set_image() / ensure_loaded()  — lazy cohort swap
+      - load_or_generate()                            — initial load
+      - save_override() -> Optional[Path]             — write sidecar GeoJSON
+      - restore()                                     — revert to loaded baseline
+      - has_unsaved_changes()                         — dirty-state prompts
+      - shutdown()                                    — close the viewer
+
+    The editable operations are reclassify (vein↔intervein), delete spurious
+    polygons, and draw new ones — NOT vertex-nudging mask boundaries. Polygon
+    holes can't be represented in a napari Shapes layer, so each shape's full
+    original geometry (holes included) is kept keyed by a stable ``fid``; on
+    save, a shape whose outer ring is unchanged is written back with its
+    ORIGINAL geometry (holes preserved) and only its (possibly new) class.
+    Only shapes that were actually vertex-edited or freshly drawn are saved as
+    the napari single-ring polygon.
+
+    Coordinates: the override is written in original-input pixel space (what
+    Stage 5 consumes — Stage 2/4 only mask pixels, never crop/translate), and
+    rendered over the original input image, so they align.
+    """
+
+    def __init__(self, parent_dialog, image_path):
+        super().__init__(parent_dialog)
+        self._dialog = parent_dialog
+        self._image_path = Path(image_path)
+        self._window = parent_dialog._window
+        self._viewer = None
+        self._shapes_layer = None
+        self._baseline: Optional[list] = None  # parsed [{class, geometry}]
+        self._orig_geoms: dict = {}  # fid -> original polygon geojson (xy, holes)
+        self._orig_outer_yx: dict = {}  # fid -> outer ring as (y, x) ndarray
+        self._next_fid = 0
+        self._last_saved_snapshot: Optional[tuple] = None
+        self._loaded = False
+        self._build_ui()
+
+    # -- lazy load protocol ----------------------------------------------
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def set_image(self, new_image_path) -> None:
         self._image_path = Path(new_image_path)
-        self._points_layer = None
-        self._predicted_positions = {}
+        self._shapes_layer = None
+        self._baseline = None
+        self._orig_geoms = {}
+        self._orig_outer_yx = {}
+        self._next_fid = 0
         self._last_saved_snapshot = None
+        self._loaded = False
+
+    def ensure_loaded(self) -> None:
+        if self._loaded:
+            return
         self.load_or_generate()
+        self._loaded = True
+
+    # -- ui --------------------------------------------------------------
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Class:"))
+        self.cmb_class = QComboBox()
+        for c in SEG_EDIT_CLASSES:
+            self.cmb_class.addItem(c, c)
+        self.cmb_class.setToolTip("Class applied to reclassified selections and newly drawn polygons.")
+        controls.addWidget(self.cmb_class)
+
+        self.btn_set_class = QPushButton("Set class of selected")
+        self.btn_set_class.setToolTip("Reassign the selected polygon(s) to the class chosen on the left.")
+        self.btn_set_class.clicked.connect(self._on_set_class)
+        controls.addWidget(self.btn_set_class)
+
+        self.btn_delete = QPushButton("Delete selected")
+        self.btn_delete.setToolTip("Remove the selected polygon(s).")
+        self.btn_delete.clicked.connect(self._on_delete_selected)
+        controls.addWidget(self.btn_delete)
+
+        self.btn_draw = QPushButton("Draw new polygon")
+        self.btn_draw.setToolTip(
+            "Click to place vertices; double-click or Esc to finish. The new "
+            "polygon takes the class chosen on the left."
+        )
+        self.btn_draw.clicked.connect(self._on_draw_mode)
+        controls.addWidget(self.btn_draw)
+
+        self.btn_select = QPushButton("Select / move")
+        self.btn_select.setToolTip("Return to selection mode (select, move, or pick polygons to reclassify).")
+        self.btn_select.clicked.connect(self._on_select_mode)
+        controls.addWidget(self.btn_select)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self._viewer_placeholder = QLabel(
+            "Loading vein / intervein polygons…\n\n" "First open may take a few seconds while the segmentation loads."
+        )
+        self._viewer_placeholder.setAlignment(Qt.AlignCenter)
+        self._viewer_placeholder.setStyleSheet("color: #888; padding: 40px;")
+        layout.addWidget(self._viewer_placeholder, stretch=1)
+
+    # -- colors ----------------------------------------------------------
+    @staticmethod
+    def _face_rgba(cls: str) -> list:
+        return _hex_to_rgb(SEG_CLASS_COLORS.get(cls, "#888888")) + [0.35]
+
+    @staticmethod
+    def _edge_rgba(cls: str) -> list:
+        return _hex_to_rgb(SEG_CLASS_COLORS.get(cls, "#888888")) + [1.0]
+
+    # -- loading ---------------------------------------------------------
+    def load_or_generate(self) -> None:
+        """Locate the segmentation for self._image_path and render it.
+
+        Search order (all in original-input pixel space):
+          1. <image_dir>/<stem>_segmentation_override.geojson  ← prior corrections
+          2. <output_folder>/<stem>_segmentation.geojson       ← post-run output
+          3. Generate via the configured segmentation model     ← on-demand
+        """
+        stem = self._image_path.stem
+        image_dir = self._image_path.parent
+        candidates = [image_dir / f"{stem}_segmentation_override.geojson", None]
+        try:
+            out_text = self._window.output_edit.text().strip()
+            if out_text:
+                candidates[1] = Path(out_text) / f"{stem}_segmentation.geojson"
+        except Exception:
+            pass
+
+        parsed = None
+        for cand in candidates:
+            if cand is None or not cand.is_file():
+                continue
+            try:
+                parsed = _parse_segmentation_geojson(cand)
+                break
+            except Exception:
+                continue
+
+        if parsed is None:
+            try:
+                fc = self._generate_segmentation(self._image_path)
+                parsed = _parse_segmentation_fc(fc)
+            except Exception as exc:  # noqa: BLE001
+                self._fail_load(
+                    f"No segmentation found and on-demand generation failed:\n\n{exc}\n\n"
+                    "Run the pipeline with the 'Vein/intervein inference GeoJSON' output "
+                    "enabled first, or configure a segmentation model in Settings → Models."
+                )
+                return
+
+        self._baseline = parsed
+        self._render(parsed)
+        self._last_saved_snapshot = self._snapshot_current()
+
+    def _generate_segmentation(self, image_path) -> dict:
+        seg_model = (getattr(self._window, "_segmentation_model_path", "") or "").strip()
+        if not seg_model:
+            raise RuntimeError("No segmentation model is configured. Set one in Settings → Models.")
+        from preprocessing.pipeline import _auto_device, run_segmentation
+
+        device = _auto_device()
+        return run_segmentation(Path(image_path), Path(seg_model), device, {})
+
+    def _fail_load(self, message: str) -> None:
+        QMessageBox.critical(self, "Could not load segmentation", message)
+        # Don't tear the whole dialog down — the Landmarks tab may still be
+        # usable, and in cohort mode the user can step to another image.
+
+    def _render(self, parsed: list) -> None:
+        import napari
+        import numpy as np
+
+        from TRACE.psd_loader import imread_any
+
+        image = imread_any(self._image_path)
+        if image is None:
+            self._fail_load(f"Could not load image: {self._image_path}")
+            return
+
+        if self._viewer is None:
+            self._viewer = napari.Viewer(show=False)
+            qt_viewer = self._viewer.window.qt_viewer
+            self.layout().removeWidget(self._viewer_placeholder)
+            self._viewer_placeholder.hide()
+            self.layout().addWidget(qt_viewer, stretch=1)
+
+        self._viewer.layers.clear()
+        self._viewer.add_image(image, name=self._image_path.name)
+
+        data: list = []
+        classes: list = []
+        fids: list = []
+        self._orig_geoms = {}
+        self._orig_outer_yx = {}
+        fid = 0
+        for feat in parsed:
+            cls = feat["class"]
+            for poly_geom, exterior in _iter_polygons(feat["geometry"]):
+                ring_yx = self._ring_xy_to_yx(exterior)
+                if len(ring_yx) < 3:
+                    continue
+                data.append(ring_yx)
+                classes.append(cls)
+                fids.append(fid)
+                self._orig_geoms[fid] = poly_geom
+                self._orig_outer_yx[fid] = ring_yx
+                fid += 1
+        self._next_fid = fid
+
+        if data:
+            self._shapes_layer = self._viewer.add_shapes(
+                data,
+                shape_type="polygon",
+                name="vein / intervein",
+                edge_width=3,
+                edge_color=[self._edge_rgba(c) for c in classes],
+                face_color=[self._face_rgba(c) for c in classes],
+                features={"class": list(classes), "fid": list(fids)},
+            )
+        else:
+            self._shapes_layer = self._viewer.add_shapes(
+                name="vein / intervein",
+                shape_type="polygon",
+                edge_width=3,
+                features={"class": [], "fid": []},
+            )
+        self._shapes_layer.mode = "select"
+        self._set_draw_defaults()
+        try:
+            self._viewer.layers.selection.active = self._shapes_layer
+        except Exception:
+            pass
+
+    @staticmethod
+    def _ring_xy_to_yx(ring: list):
+        import numpy as np
+
+        arr = np.array([[float(pt[1]), float(pt[0])] for pt in ring if len(pt) >= 2], dtype=float)
+        # Drop the GeoJSON closing vertex (first == last); napari polygons are implicitly closed.
+        if len(arr) >= 2 and np.allclose(arr[0], arr[-1]):
+            arr = arr[:-1]
+        return arr
+
+    def _set_draw_defaults(self) -> None:
+        """Make newly drawn polygons adopt the dropdown's class + colors."""
+        if self._shapes_layer is None:
+            return
+        cls = self.cmb_class.currentData() or self.cmb_class.currentText()
+        try:
+            self._shapes_layer.feature_defaults["class"] = cls
+            self._shapes_layer.feature_defaults["fid"] = -1
+        except Exception:
+            pass
+        try:
+            self._shapes_layer.current_edge_color = self._edge_rgba(cls)
+            self._shapes_layer.current_face_color = self._face_rgba(cls)
+        except Exception:
+            pass
+
+    # -- editing actions -------------------------------------------------
+    def _on_set_class(self) -> None:
+        if self._shapes_layer is None:
+            return
+        sel = list(self._shapes_layer.selected_data)
+        if not sel:
+            QMessageBox.information(self, "Nothing selected", "Select polygon(s) on the canvas first.")
+            return
+        target = self.cmb_class.currentData() or self.cmb_class.currentText()
+        classes = list(self._shapes_layer.features["class"])
+        fids = list(self._shapes_layer.features["fid"])
+        for i in sel:
+            if 0 <= i < len(classes):
+                classes[i] = target
+        self._apply_classes(classes, fids)
+
+    def _apply_classes(self, classes: list, fids: list) -> None:
+        import numpy as np
+
+        self._shapes_layer.features = {"class": list(classes), "fid": list(fids)}
+        try:
+            self._shapes_layer.face_color = np.array([self._face_rgba(c) for c in classes])
+            self._shapes_layer.edge_color = np.array([self._edge_rgba(c) for c in classes])
+        except Exception:
+            pass
+        self._shapes_layer.refresh()
+
+    def _on_delete_selected(self) -> None:
+        if self._shapes_layer is None:
+            return
+        if not list(self._shapes_layer.selected_data):
+            QMessageBox.information(self, "Nothing selected", "Select polygon(s) on the canvas first.")
+            return
+        self._shapes_layer.remove_selected()
+
+    def _on_draw_mode(self) -> None:
+        if self._shapes_layer is None:
+            return
+        self._set_draw_defaults()
+        self._shapes_layer.mode = "add_polygon"
+
+    def _on_select_mode(self) -> None:
+        if self._shapes_layer is None:
+            return
+        self._shapes_layer.mode = "select"
+
+    def restore(self) -> None:
+        if self._baseline is None:
+            return
+        self._render(self._baseline)
+        self._last_saved_snapshot = self._snapshot_current()
+
+    # -- saving ----------------------------------------------------------
+    def save_override(self) -> Optional[Path]:
+        import numpy as np
+
+        if self._shapes_layer is None:
+            raise RuntimeError("Viewer not initialized; nothing to save.")
+        data = list(self._shapes_layer.data)
+        classes = list(self._shapes_layer.features["class"])
+        fids = list(self._shapes_layer.features["fid"])
+
+        features_out = []
+        for i, ring_yx in enumerate(data):
+            cls = classes[i] if i < len(classes) else None
+            if not isinstance(cls, str) or not cls:
+                cls = self.cmb_class.currentData() or self.cmb_class.currentText()
+            try:
+                fid = int(fids[i])
+            except (ValueError, TypeError):
+                fid = -1
+            ring = np.asarray(ring_yx, dtype=float)
+            if fid in self._orig_geoms and self._outer_unchanged(fid, ring):
+                geom = self._orig_geoms[fid]  # original geometry, holes preserved
+            else:
+                geom = self._ring_to_polygon_geojson(ring)
+            if geom is None:
+                continue
+            features_out.append(
+                {
+                    "type": "Feature",
+                    "geometry": geom,
+                    "properties": {
+                        "class": cls,
+                        "class_index": SEG_CLASS_INDEX.get(cls, 0),
+                        "color": SEG_CLASS_COLORS.get(cls, "#888888"),
+                        "gate_reason": "manual override",
+                    },
+                }
+            )
+
+        if not features_out:
+            reply = QMessageBox.question(
+                self,
+                "Save with no polygons?",
+                "There are no vein/intervein polygons to save. An empty override "
+                "means the next run finds no veins for this image.\n\nSave anyway?",
+                QMessageBox.Save | QMessageBox.Cancel,
+            )
+            if reply != QMessageBox.Save:
+                return None
+
+        payload = {"type": "FeatureCollection", "features": features_out}
+        override_path = self._image_path.parent / f"{self._image_path.stem}_segmentation_override.geojson"
+        override_path.write_text(json.dumps(payload), encoding="utf-8")
+        self._last_saved_snapshot = self._snapshot_current()
+        return override_path
+
+    def _outer_unchanged(self, fid: int, ring_yx) -> bool:
+        import numpy as np
+
+        orig = self._orig_outer_yx.get(fid)
+        if orig is None:
+            return False
+        cur = np.asarray(ring_yx, dtype=float)
+        if cur.shape != orig.shape:
+            return False
+        return bool(np.allclose(cur, orig, atol=0.5))
+
+    @staticmethod
+    def _ring_to_polygon_geojson(ring_yx) -> Optional[dict]:
+        xy = [[float(x), float(y)] for (y, x) in ring_yx]
+        if len(xy) < 3:
+            return None
+        if xy[0] != xy[-1]:
+            xy.append(xy[0])  # close the ring per GeoJSON spec
+        return {"type": "Polygon", "coordinates": [xy]}
+
+    # -- dirty state / lifecycle -----------------------------------------
+    def has_unsaved_changes(self) -> bool:
+        if self._shapes_layer is None or self._last_saved_snapshot is None:
+            return False
+        return self._snapshot_current() != self._last_saved_snapshot
+
+    def _snapshot_current(self) -> tuple:
+        if self._shapes_layer is None:
+            return ((), ())
+        try:
+            classes = tuple(self._shapes_layer.features["class"])
+        except Exception:
+            classes = ()
+        coords = tuple(tuple(round(float(v), 2) for pt in ring for v in pt) for ring in self._shapes_layer.data)
+        return (classes, coords)
 
     def shutdown(self) -> None:
         if self._viewer is not None:

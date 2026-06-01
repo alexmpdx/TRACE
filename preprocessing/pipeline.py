@@ -573,6 +573,20 @@ def save_segmentation_geojson(geojson_fc: dict, output_path: Path) -> None:
     save_geojson(geojson_fc, str(output_path))
 
 
+def load_segmentation_override(path: Path) -> dict:
+    """Load a manual vein/intervein override GeoJSON as a FeatureCollection dict.
+
+    Written by TRACE's inspector dialog next to the source image as
+    ``<stem>_segmentation_override.geojson``. The file is already a valid
+    segmentation FeatureCollection (Polygon features with ``properties.class``),
+    so it is returned verbatim for Stage 5 to write to the canonical location.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("type") != "FeatureCollection":
+        raise ValueError(f"{path} is not a GeoJSON FeatureCollection")
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Pipeline result and orchestration
 # ---------------------------------------------------------------------------
@@ -883,22 +897,34 @@ def process_single_image(
 
     # Stage 5: Segmentation
     if do_segment:
-        # Use chopped image if available, otherwise original
-        seg_input = chopped_path if chopped_path and chopped_path.exists() else image_path
-        # Wing isolation (Stage 2) and hinge chop both modify pixel values in place —
-        # neither crops nor translates — so the wing polygon coords are valid against
-        # any combination of (isolated, chopped, neither). Always pass the ROI when
-        # wing isolation produced a polygon so modelTOjson can skip background tiles.
-        roi_geojson_path = result.wing_geojson_path
-        if progress_callback:
-            progress_callback("segmentation", f"Segmenting {image_path.name}")
-        fc = run_segmentation(
-            seg_input,
-            segmentation_model_dir,
-            device,
-            model_cache,
-            roi_geojson_path=roi_geojson_path,
-        )
+        # Manual override: if the user corrected this image's vein/intervein
+        # polygons via TRACE's inspector dialog, a sidecar lives next to the
+        # original input (in original-image pixel space, which is what seg_input
+        # is too — Stage 2/4 only mask pixels, never crop/translate). Trust it
+        # and skip the segmentation model.
+        seg_override_path = original_input_path.parent / f"{original_input_path.stem}_segmentation_override.geojson"
+        if seg_override_path.is_file():
+            import logging as _logging
+
+            _logging.getLogger(__name__).info("%s: using manual segmentation override from %s", stem, seg_override_path)
+            fc = load_segmentation_override(seg_override_path)
+        else:
+            # Use chopped image if available, otherwise original
+            seg_input = chopped_path if chopped_path and chopped_path.exists() else image_path
+            # Wing isolation (Stage 2) and hinge chop both modify pixel values in place —
+            # neither crops nor translates — so the wing polygon coords are valid against
+            # any combination of (isolated, chopped, neither). Always pass the ROI when
+            # wing isolation produced a polygon so modelTOjson can skip background tiles.
+            roi_geojson_path = result.wing_geojson_path
+            if progress_callback:
+                progress_callback("segmentation", f"Segmenting {image_path.name}")
+            fc = run_segmentation(
+                seg_input,
+                segmentation_model_dir,
+                device,
+                model_cache,
+                roi_geojson_path=roi_geojson_path,
+            )
         seg_path = output_dir / f"{stem}.geojson"
         save_segmentation_geojson(fc, seg_path)
         result.segmentation_geojson_path = seg_path
