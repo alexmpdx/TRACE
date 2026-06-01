@@ -953,6 +953,11 @@ class TraceWindow(QMainWindow):
                 from TRACE.theme import current_theme as _ct
 
                 cd_hint.setStyleSheet(f"color: {_ct().link};")
+                # Reserve enough width that the hint never truncates when it
+                # pops in, even if the user drags the splitter narrow. Hidden
+                # widgets don't count in layout sizing, so this only kicks in
+                # while the pulse animation is visible.
+                cd_hint.setMinimumWidth(cd_hint.sizeHint().width())
                 cd_hint.hide()
                 cd_row_widget.set_hint(cd_hint)
                 cd_h.addWidget(cd_hint)
@@ -1139,6 +1144,20 @@ class TraceWindow(QMainWindow):
         self._splitter.addWidget(left)
         self._splitter.addWidget(right)
         self._splitter.setStretchFactor(1, 1)
+        # Windows-Qt's native splitter handle is ~1 px wide, which is nearly
+        # impossible to grab — users (correctly) report the left column is
+        # "not adjustable" there. Force a wider handle (matches the macOS
+        # rendering width) and an explicit hover cursor so the handle is
+        # both visible and grabbable on every platform.
+        self._splitter.setHandleWidth(6)
+        self._splitter.setChildrenCollapsible(False)
+        # Start the left column wide enough to fit the "requires Measurements
+        # CSV" pulse hint without clipping. The hint sits in a horizontal row
+        # inside the Outputs frame and pops in when the user clicks a
+        # disabled child checkbox; with the previous default ratio (~33/67)
+        # the row got squeezed and the hint truncated on Windows where
+        # font-metrics for the system UI font are wider than on macOS.
+        self._splitter.setSizes([340, 860])
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
         main_layout.addWidget(self._splitter)
 
@@ -1163,6 +1182,11 @@ class TraceWindow(QMainWindow):
         from TRACE.theme import current_theme as _ct
 
         hint.setStyleSheet(f"color: {_ct().link};")
+        # Reserve enough width that the hint never truncates when it pops in,
+        # even if the user drags the splitter narrow. Hidden widgets don't
+        # count in layout sizing, so this only kicks in while the pulse
+        # animation is visible.
+        hint.setMinimumWidth(hint.sizeHint().width())
         hint.hide()
         row.set_hint(hint)
         h.addWidget(hint)
