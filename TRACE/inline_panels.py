@@ -52,9 +52,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from TRACE.theme import current_theme as _ct
 
 from TRACE.pipeline import DEFAULT_MAX_WORKERS, INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
+from TRACE.theme import current_theme as _ct
 
 if TYPE_CHECKING:
     from TRACE.gui import TraceWindow
@@ -1454,13 +1454,19 @@ class InlineCustomDistancesPanel(QWidget):
                 0, lambda: self._picker.load_into_viewer(self._cartoon_image_for_theme(), self._CARTOON_LANDMARKS)
             )
 
-    def _generate_landmarks_for_image(self, image_path: Path) -> Path:
+    def _generate_landmarks_for_image(self, image_path: Path, *, disable_gates: bool = False) -> Path:
         """Run LandmarkLocator on `image_path` and write a *_landmarks.geojson.
 
         Used as LandmarkPickerWidget.landmarks_generator: lets the user pick
         only a sample image in the Custom Measurements tab and have its
         landmarks detected automatically instead of having to also pick a
         matching GeoJSON. Returns the path to the freshly-written file.
+
+        ``disable_gates``: when True, every confidence gate is turned off so the
+        model's best-guess landmarks are returned even on a borderline wing
+        instead of raising ``LowConfidenceLandmarkError``. The landmark
+        inspector uses this — an image you open to hand-correct is exactly the
+        one likely to fail the gate, and you still need points to drag.
         """
         lm_path = (getattr(self._window, "_landmark_model_path", "") or "").strip()
         if not lm_path:
@@ -1476,7 +1482,15 @@ class InlineCustomDistancesPanel(QWidget):
         image = imread_any(image_path)
         if image is None:
             raise IOError(f"Could not load image: {image_path}")
-        predictor = make_predictor(Path(lm_path))
+        # Disabling each metric's ``enabled`` flag is enough — _gate_landmark
+        # skips disabled metrics, so no landmark is rejected and no core
+        # failure is raised. (Same mechanism as "Rerun failed, no gate aborts".)
+        confidence_override = (
+            {metric: {"enabled": False} for metric in ("peak", "sharpness", "second_peak_ratio")}
+            if disable_gates
+            else None
+        )
+        predictor = make_predictor(Path(lm_path), confidence_override=confidence_override)
         result = predictor.predict(image, include_unreliable=True)
         internal_to_geojson = {v: k for k, v in (predictor.geojson_to_landmark or {}).items()}
         geojson = _result_to_geojson(result, internal_to_geojson)
@@ -1674,7 +1688,8 @@ class InlineHelpPanel(QWidget):
         appearance_title.setFont(appearance_title_font)
         layout.addWidget(appearance_title)
 
-        from TRACE.theme import ThemePreference, manager as _theme_manager
+        from TRACE.theme import ThemePreference
+        from TRACE.theme import manager as _theme_manager
 
         theme_row = QHBoxLayout()
         theme_row.setContentsMargins(0, 0, 0, 0)
@@ -1889,9 +1904,7 @@ class InlineHelpPanel(QWidget):
         t = current_theme()
         if self._doc_link is not None:
             url = QUrl.fromLocalFile(str(self._readme_path)).toString()
-            self._doc_link.setText(
-                f'<a href="{url}" style="color: {t.link};">Open README.md in your default app</a>'
-            )
+            self._doc_link.setText(f'<a href="{url}" style="color: {t.link};">Open README.md in your default app</a>')
         if self._doc_path_label is not None:
             self._doc_path_label.setText(
                 f"<span style='color: {t.text_placeholder};'>Location:</span> {self._readme_path}"
@@ -1962,7 +1975,8 @@ class InlineHelpPanel(QWidget):
 
     def _on_theme_changed(self, _idx: int) -> None:
         """User picked a new theme from the Help-tab combo — apply via ThemeManager."""
-        from TRACE.theme import ThemePreference, manager as _theme_manager
+        from TRACE.theme import ThemePreference
+        from TRACE.theme import manager as _theme_manager
 
         raw = self._theme_combo.currentData()
         try:
@@ -2018,8 +2032,7 @@ class InlineHelpPanel(QWidget):
             QMessageBox.information(
                 self,
                 "Desktop shortcut",
-                "Desktop-shortcut creation is currently supported only on the "
-                "Windows installer build of TRACE.",
+                "Desktop-shortcut creation is currently supported only on the " "Windows installer build of TRACE.",
             )
             return
         target = Path(sys.executable)
@@ -2156,8 +2169,9 @@ class InlineHelpPanel(QWidget):
         # up on a missing theme token — would otherwise make the click
         # look like a no-op (no label change, no error dialog) in a
         # frozen build with no console. Surface it instead.
-        from TRACE.startup_log import log as _slog
         import traceback as _tb
+
+        from TRACE.startup_log import log as _slog
 
         try:
             # PyQt5 dangling-reference guard. After the previous thread
@@ -2227,10 +2241,7 @@ class InlineHelpPanel(QWidget):
 
         from TRACE.startup_log import log as _slog
 
-        _slog(
-            "update_check: result received (ok=%s, error=%s)"
-            % (payload.get("ok"), payload.get("error", ""))
-        )
+        _slog("update_check: result received (ok=%s, error=%s)" % (payload.get("ok"), payload.get("error", "")))
 
         self._window.settings.setValue("last_update_check_time", int(time.time()))
 
@@ -2438,7 +2449,9 @@ class InlineHelpPanel(QWidget):
                 dst.unlink(missing_ok=True)
             except Exception:
                 pass
-            self._update_status_label.setText(f"<span style='color: {_ct().text_muted};'>Update download cancelled.</span>")
+            self._update_status_label.setText(
+                f"<span style='color: {_ct().text_muted};'>Update download cancelled.</span>"
+            )
             return
 
         # Sanity check on file size — guards against a truncated download

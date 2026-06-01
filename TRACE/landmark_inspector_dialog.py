@@ -465,7 +465,10 @@ class LandmarkEditorWidget(QWidget):
                 self._fail_load("Internal: landmark generation panel is unavailable.")
                 return
             try:
-                generated = panel._generate_landmarks_for_image(self._image_path)
+                # disable_gates: this image likely has no override BECAUSE its
+                # landmarks failed the confidence gate — generate the model's
+                # best guess anyway so the user has points to drag into place.
+                generated = panel._generate_landmarks_for_image(self._image_path, disable_gates=True)
                 landmarks_dict = _parse_landmarks_geojson(generated)
             except Exception as exc:  # noqa: BLE001
                 self._fail_load(
