@@ -174,6 +174,16 @@ def load_from_raw_image(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # include_unreliable alone does NOT stop the gate from raising
+    # LowConfidenceLandmarkError — that abort fires whenever a *core* landmark
+    # fails, independent of include_unreliable (predict.py _assemble_gate_result).
+    # For the live preview we additionally empty the core-landmark set via the
+    # gate override (deep-merge replaces the list wholesale), so no landmark can
+    # trigger the hard abort. Combined with include_unreliable=True, every
+    # detected landmark still flows through to tracing, even low-confidence ones.
+    # The production pipeline is untouched and keeps its strict gate.
+    gate_override = {"core_landmarks": []} if include_unreliable_landmarks else None
+
     result = process_single_image(
         image_path=image_path,
         output_dir=output_dir,
@@ -191,6 +201,7 @@ def load_from_raw_image(
         rotation_mirror_correct=rotation_mirror_correct,
         target_um_per_px=target_um_per_px,
         include_unreliable_landmarks=include_unreliable_landmarks,
+        gate_override=gate_override,
     )
 
     if result.error:
