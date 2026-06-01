@@ -186,12 +186,25 @@ class LivePreviewPane(QWidget):
             self.cmb_res.addItem(_label, _val)
         self.cmb_res.setCurrentIndex(1)  # Half — matches self._preview_scale default
         self.cmb_res.setToolTip(
-            "Resolution the live preview computes at. Lower = faster, coarser updates.\n"
-            "The real batch run always uses full resolution, so this only affects the preview."
+            "Resolution the live preview computes at. Lower = faster, but the skeleton "
+            "and vein tracing run on a coarser raster, so the predicted veins/regions may "
+            "differ from the full-resolution result.\n"
+            "Use Full to judge a setting's true effect; the real batch run always uses "
+            "full resolution regardless of this choice."
         )
         self.cmb_res.currentIndexChanged.connect(self._on_res_changed)
         load_row.addWidget(self.cmb_res)
         sv.addLayout(load_row)
+
+        # Persistent accuracy warning, shown whenever the preview is below full
+        # res. A tooltip alone is too easy to miss for something that changes the
+        # predicted result; this keeps it in view while a reduced res is active.
+        self.res_warning = QLabel()
+        self.res_warning.setWordWrap(True)
+        self.res_warning.setStyleSheet("color: #b8860b;")  # dark goldenrod — reads on light+dark
+        sv.addWidget(self.res_warning)
+        self._update_res_warning()
+
         root.addWidget(src)
 
         # Preview
@@ -388,12 +401,26 @@ class LivePreviewPane(QWidget):
 
     def _on_res_changed(self) -> None:
         self._preview_scale = float(self.cmb_res.currentData())
+        self._update_res_warning()
         # Resolution changes the geometry the stages run on, so the whole sample
         # is re-scaled and recomputed from tier A. Cheap if a downscale; the
         # full bundle is cached on the worker so no reload/preprocess happens.
         if self._loaded:
             self.progress.show()
             self._worker.request_rescale(self._preview_scale, self._get_config(), self._appearance)
+
+    def _update_res_warning(self) -> None:
+        """Show/hide the reduced-resolution accuracy warning."""
+        if self._preview_scale >= 0.999:
+            self.res_warning.clear()
+            self.res_warning.hide()
+        else:
+            self.res_warning.setText(
+                "⚠ Reduced-resolution preview: veins/regions are computed on a coarser "
+                "image and may differ from the full-resolution result. Switch to Full "
+                "before judging a setting's final effect."
+            )
+            self.res_warning.show()
 
     def _on_appearance_changed(self) -> None:
         self._appearance = Appearance(
