@@ -32,10 +32,9 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
-    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -44,6 +43,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QShortcut,
     QSpinBox,
@@ -86,6 +86,105 @@ def _parse_landmarks_geojson(path: Path) -> dict:
             continue
         out[str(name)] = (float(coords[0]), float(coords[1]))
     return out
+
+
+class _TaskSignals(QObject):
+    # Carry the load token through the signal so the (main-thread) handler can
+    # discard results from a superseded load.
+    done = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str)
+
+
+class _AsyncTask(QRunnable):
+    """Run a no-Qt callable on the global thread pool and emit its result.
+
+    Keeps the inspector responsive (so the busy progress bar actually animates)
+    while heavy, non-Qt work runs — model inference, preprocessing, image decode,
+    rasterization. The result is rendered into napari back on the GUI thread.
+    """
+
+    def __init__(self, fn, token):
+        super().__init__()
+        self._fn = fn
+        self._token = token
+        self.signals = _TaskSignals()
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception as exc:  # noqa: BLE001
+            self.signals.failed.emit(self._token, str(exc))
+            return
+        self.signals.done.emit(self._token, result)
+
+
+class _AsyncLoadMixin:
+    """Shared async-load plumbing for the two editor widgets.
+
+    The subclass supplies a ``_progress`` QProgressBar, an ``_loaded`` flag, a
+    ``_fail_load(msg)``, and a ``_render_payload(payload)`` that builds the
+    napari layers from the worker's result. ``_begin_load`` runs ``work_fn``
+    off-thread (busy bar visible) and renders on the GUI thread when it
+    finishes. The handlers are bound methods of the editor (a QObject living on
+    the GUI thread), so Qt invokes them via a queued connection — the napari
+    calls never run on the worker thread. A token discards results from a load
+    that was superseded (cohort swap) or whose dialog has closed.
+    """
+
+    def _init_async(self) -> None:
+        self._loading = False
+        self._load_token = 0
+        self._task = None
+
+    def _settings(self):
+        """The window's QSettings, used to persist toolbar choices."""
+        return getattr(self._window, "settings", None)
+
+    def _begin_load(self, work_fn) -> None:
+        if self._loading:
+            return
+        self._loading = True
+        self._load_token += 1
+        self._set_loading(True)
+        task = _AsyncTask(work_fn, self._load_token)
+        task.signals.done.connect(self._on_async_done)
+        task.signals.failed.connect(self._on_async_failed)
+        self._task = task  # keep a ref until the run completes
+        QThreadPool.globalInstance().start(task)
+
+    def _on_async_done(self, token, payload) -> None:
+        if token != self._load_token:
+            return  # superseded by a newer load, or the dialog closed
+        try:
+            self._render_payload(payload)
+            self._loaded = True
+        except RuntimeError:
+            return  # widget/viewer was torn down mid-flight
+        finally:
+            self._set_loading(False)
+            self._loading = False
+
+    def _on_async_failed(self, token, msg) -> None:
+        if token != self._load_token:
+            return
+        self._loading = False
+        self._loaded = True  # don't auto-retry on every tab switch
+        try:
+            self._set_loading(False)
+        except RuntimeError:
+            return
+        self._fail_load(msg)
+
+    def _set_loading(self, on: bool) -> None:
+        try:
+            self._progress.setVisible(on)
+        except RuntimeError:
+            pass
+
+    def _bump_load_token(self) -> None:
+        self._load_token += 1
+        self._loading = False
 
 
 class LandmarkInspectorDialog(QDialog):
@@ -362,7 +461,7 @@ class LandmarkInspectorDialog(QDialog):
         super().closeEvent(event)
 
 
-class LandmarkEditorWidget(QWidget):
+class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
     """Napari embed + landmark editing controls.
 
     Public API used by the dialog:
@@ -390,6 +489,7 @@ class LandmarkEditorWidget(QWidget):
         self._predicted_positions: dict = {}  # {raw_name: (x, y)} for Restore
         self._last_saved_snapshot: Optional[tuple] = None
         self._loaded = False
+        self._init_async()
         self._build_ui()
 
     # -- lazy load protocol (shared shape with SegmentationEditorWidget) ---
@@ -403,12 +503,12 @@ class LandmarkEditorWidget(QWidget):
         self._predicted_positions = {}
         self._last_saved_snapshot = None
         self._loaded = False
+        self._bump_load_token()  # discard any in-flight load for the old image
 
     def ensure_loaded(self) -> None:
-        if self._loaded:
+        if self._loaded or self._loading:
             return
         self.load_or_generate()
-        self._loaded = True
 
     def restore(self) -> None:
         self.restore_predictions()
@@ -443,10 +543,38 @@ class LandmarkEditorWidget(QWidget):
         layout.addWidget(self._viewer_placeholder, stretch=1)
         self._canvas_embedded = False
 
+        # Indeterminate (busy) bar shown while a load runs off-thread.
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)
+        self._progress.setTextVisible(False)
+        self._progress.setFixedHeight(6)
+        self._progress.setVisible(False)
+        layout.addWidget(self._progress)
+
+        # Restore the last-used "Add landmark" choice, then persist on change.
+        s = self._settings()
+        if s is not None:
+            saved = s.value("inspector/landmark_add_class", "", type=str)
+            if saved:
+                i = self.cmb_add_name.findData(saved)
+                if i >= 0:
+                    self.cmb_add_name.setCurrentIndex(i)
+        self.cmb_add_name.currentIndexChanged.connect(self._save_toolbar_settings)
+
+    def _save_toolbar_settings(self, *_args) -> None:
+        s = self._settings()
+        if s is None:
+            return
+        data = self.cmb_add_name.currentData()
+        if data:
+            s.setValue("inspector/landmark_add_class", data)
+
     # -- loading ----------------------------------------------------------
     def load_or_generate(self) -> None:
-        """Locate predictions for self._image_path and (re)render the viewer.
+        """Find (or generate) predictions for self._image_path, then render.
 
+        File search + image decode + any on-demand generation run off-thread
+        (busy progress bar), then the napari layers are built on the GUI thread.
         Search order — reopening a previously-edited image starts from the
         override so iterative refinement works:
           1. <image_dir>/<stem>_landmarks_override.geojson  ← prior corrections
@@ -454,51 +582,67 @@ class LandmarkEditorWidget(QWidget):
           3. <image_dir>/<stem>_landmarks.geojson           ← Stage-3 sidecar
           4. Generate via _generate_landmarks_for_image()    ← on-demand model
         """
-        stem = self._image_path.stem
-        image_dir = self._image_path.parent
-        candidates = [
-            image_dir / f"{stem}_landmarks_override.geojson",
-            None,  # filled below if an output folder is set
-            image_dir / f"{stem}_landmarks.geojson",
-        ]
+        image_path = self._image_path
+        window = self._window
+        # Read the Qt widget here (GUI thread); the worker must not touch it.
         try:
-            out_text = self._window.output_edit.text().strip()
-            if out_text:
-                candidates[1] = Path(out_text) / f"{stem}_landmarks.geojson"
+            out_text = window.output_edit.text().strip()
         except Exception:
-            pass
+            out_text = ""
 
-        landmarks_dict = None
-        for cand in candidates:
-            if cand is None or not cand.is_file():
-                continue
-            try:
-                landmarks_dict = _parse_landmarks_geojson(cand)
-                break
-            except Exception:
-                continue
+        def work():
+            import numpy as np
 
-        if not landmarks_dict:
-            # No usable file found — regenerate via LandmarkLocator on demand.
-            panel = getattr(self._window, "inline_custom_distances_panel", None)
-            if panel is None:
-                self._fail_load("Internal: landmark generation panel is unavailable.")
-                return
-            try:
-                # disable_gates: this image likely has no override BECAUSE its
-                # landmarks failed the confidence gate — generate the model's
-                # best guess anyway so the user has points to drag into place.
-                generated = panel._generate_landmarks_for_image(self._image_path, disable_gates=True)
-                landmarks_dict = _parse_landmarks_geojson(generated)
-            except Exception as exc:  # noqa: BLE001
-                self._fail_load(
-                    f"No landmarks file found and on-demand generation failed:\n\n{exc}\n\n"
-                    "Configure a landmark model in Settings → Models and try again."
-                )
-                return
+            from TRACE.psd_loader import imread_any
 
-        self._predicted_positions = dict(landmarks_dict)
-        self._render(landmarks_dict)
+            stem = image_path.stem
+            image_dir = image_path.parent
+            candidates = [
+                image_dir / f"{stem}_landmarks_override.geojson",
+                (Path(out_text) / f"{stem}_landmarks.geojson") if out_text else None,
+                image_dir / f"{stem}_landmarks.geojson",
+            ]
+            landmarks_dict = None
+            for cand in candidates:
+                if cand is None or not cand.is_file():
+                    continue
+                try:
+                    landmarks_dict = _parse_landmarks_geojson(cand)
+                    break
+                except Exception:
+                    continue
+
+            if not landmarks_dict:
+                panel = getattr(window, "inline_custom_distances_panel", None)
+                if panel is None:
+                    raise RuntimeError("Internal: landmark generation panel is unavailable.")
+                try:
+                    # disable_gates: this image likely has no override BECAUSE its
+                    # landmarks failed the confidence gate — generate the model's
+                    # best guess anyway so the user has points to drag into place.
+                    generated = panel._generate_landmarks_for_image(image_path, disable_gates=True)
+                    landmarks_dict = _parse_landmarks_geojson(generated)
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"No landmarks file found and on-demand generation failed:\n\n{exc}\n\n"
+                        "Configure a landmark model in Settings → Models and try again."
+                    )
+
+            image = imread_any(image_path)
+            if image is None:
+                raise IOError(f"Could not load image: {image_path}")
+            # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
+            if image.ndim == 3 and image.shape[2] == 3:
+                image = np.ascontiguousarray(image[..., ::-1])
+            elif image.ndim == 3 and image.shape[2] == 4:
+                image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
+            return {"image": image, "landmarks": landmarks_dict}
+
+        self._begin_load(work)
+
+    def _render_payload(self, payload: dict) -> None:
+        self._predicted_positions = dict(payload["landmarks"])
+        self._render(payload["image"], payload["landmarks"])
         self._last_saved_snapshot = self._snapshot_current()
 
     def _fail_load(self, message: str) -> None:
@@ -508,18 +652,11 @@ class LandmarkEditorWidget(QWidget):
         if self._dialog._cohort is None:
             self._dialog.reject()
 
-    def _render(self, landmarks_dict: dict) -> None:
-        """Create/clear the viewer and (re)populate image + points layers."""
+    def _render(self, image, landmarks_dict: dict) -> None:
+        """Build image + points layers from a preloaded (RGB) image array."""
         import napari
         import numpy as np
         from measurement_maker.landmark_names import landmark_display_name
-
-        from TRACE.psd_loader import imread_any
-
-        image = imread_any(self._image_path)
-        if image is None:
-            self._fail_load(f"Could not load image: {self._image_path}")
-            return
 
         if self._viewer is None:
             # show=False keeps napari's own QMainWindow hidden — we embed only
@@ -531,13 +668,6 @@ class LandmarkEditorWidget(QWidget):
             self._viewer_placeholder.hide()
             self.layout().addWidget(qt_viewer, stretch=1)
             self._canvas_embedded = True
-
-        # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
-        # Without this flip, warm-toned brightfield images render with a blue tint.
-        if image.ndim == 3 and image.shape[2] == 3:
-            image = np.ascontiguousarray(image[..., ::-1])
-        elif image.ndim == 3 and image.shape[2] == 4:
-            image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
 
         self._viewer.layers.clear()
         self._viewer.add_image(image, name=self._image_path.name, rgb=image.ndim == 3)
@@ -692,6 +822,7 @@ class LandmarkEditorWidget(QWidget):
         return (names, coords)
 
     def shutdown(self) -> None:
+        self._bump_load_token()  # discard any in-flight load result
         if self._viewer is not None:
             try:
                 self._viewer.close()
@@ -744,7 +875,7 @@ def _scale_geom(geom: dict, factor: float) -> dict:
     return geom
 
 
-class SegmentationEditorWidget(QWidget):
+class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
     """Napari Labels (paint-mask) editor for vein / intervein segmentation.
 
     Public API mirrors LandmarkEditorWidget so the dialog can drive either:
@@ -785,6 +916,7 @@ class SegmentationEditorWidget(QWidget):
         self._baseline_mask = None  # mask as loaded (for Restore)
         self._last_saved_mask = None  # mask at last save (for dirty-state)
         self._loaded = False
+        self._init_async()
         self._build_ui()
 
     # -- lazy load protocol ----------------------------------------------
@@ -797,12 +929,12 @@ class SegmentationEditorWidget(QWidget):
         self._baseline_mask = None
         self._last_saved_mask = None
         self._loaded = False
+        self._bump_load_token()  # discard any in-flight load for the old image
 
     def ensure_loaded(self) -> None:
-        if self._loaded:
+        if self._loaded or self._loading:
             return
         self.load_or_generate()
-        self._loaded = True
 
     # -- ui --------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -875,6 +1007,24 @@ class SegmentationEditorWidget(QWidget):
         sc_redo.setContext(Qt.WidgetWithChildrenShortcut)
         sc_redo.activated.connect(self._on_redo)
 
+        # Indeterminate (busy) bar shown while preprocessing / segmentation runs.
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)
+        self._progress.setTextVisible(False)
+        self._progress.setFixedHeight(6)
+        self._progress.setVisible(False)
+        layout.addWidget(self._progress)
+
+        # Restore the last-used class + brush size (persisted in the change
+        # handlers below). setCurrentIndex / setValue here re-fire those handlers,
+        # which simply re-save the same values — harmless.
+        s = self._settings()
+        if s is not None:
+            i = self.cmb_class.findData(s.value("inspector/seg_class", "vein", type=str))
+            if i >= 0:
+                self.cmb_class.setCurrentIndex(i)
+            self.spin_brush.setValue(int(s.value("inspector/seg_brush_size", 60, type=int)))
+
     # -- loading ---------------------------------------------------------
     def load_or_generate(self) -> None:
         """Obtain the segmentation for this image and render it as a paint mask.
@@ -885,46 +1035,62 @@ class SegmentationEditorWidget(QWidget):
         into original space. Any unsaved landmark edits are flushed first so
         Stage 3 picks them up and the hinge chop uses the corrected landmarks.
         """
+        # Flush landmark edits on the GUI thread BEFORE the worker starts, so
+        # Stage 3 picks them up (touches the landmark layer — must be main-thread).
         self._dialog.persist_landmark_edits_for_pipeline()
 
-        override_path = self._image_path.parent / f"{self._image_path.stem}_segmentation_override.geojson"
+        image_path = self._image_path
+        window = self._window
+        override_path = image_path.parent / f"{image_path.stem}_segmentation_override.geojson"
 
-        # Let the placeholder paint before the (possibly blocking) work.
-        QApplication.processEvents()
+        def work():
+            import numpy as np
 
-        if override_path.is_file():
-            # Saved overrides are already in original-image pixel space — no
-            # preprocessing needed, just re-rasterize them.
-            try:
+            from TRACE.psd_loader import imread_any
+
+            if override_path.is_file():
+                # Saved overrides are already in original-image pixel space.
                 parsed = _parse_segmentation_geojson(override_path)
-            except Exception as exc:  # noqa: BLE001
-                self._fail_load(f"Could not read the saved segmentation override:\n\n{exc}")
-                return
-        else:
-            tmp_dir = Path(tempfile.mkdtemp(prefix="trace_seg_inspect_"))
-            try:
+            else:
+                tmp_dir = Path(tempfile.mkdtemp(prefix="trace_seg_inspect_"))
                 try:
-                    result = self._window.run_single_image_preprocessing_for_segmentation(
-                        self._image_path, tmp_dir, with_segmentation=True
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self._fail_load(
-                        f"Could not preprocess this image for vein/intervein inference:\n\n{exc}\n\n"
-                        "Check that a landmark model and a segmentation model are configured "
-                        "in Settings → Models."
-                    )
-                    return
-                seg_path = getattr(result, "segmentation_geojson_path", None)
-                parsed = _parse_segmentation_geojson(seg_path) if seg_path and Path(seg_path).is_file() else []
-                # Map preprocessed-space polygons into original-image space.
-                # Wing isolation / hinge chop don't move coords; only rescale does.
-                rf = getattr(result, "rescale_factor", 1.0) or 1.0
-                if rf != 1.0:
-                    parsed = [{"class": p["class"], "geometry": _scale_geom(p["geometry"], 1.0 / rf)} for p in parsed]
-            finally:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+                    try:
+                        result = window.run_single_image_preprocessing_for_segmentation(
+                            image_path, tmp_dir, with_segmentation=True
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        raise RuntimeError(
+                            f"Could not preprocess this image for vein/intervein inference:\n\n{exc}\n\n"
+                            "Check that a landmark model and a segmentation model are configured "
+                            "in Settings → Models."
+                        )
+                    seg_path = getattr(result, "segmentation_geojson_path", None)
+                    parsed = _parse_segmentation_geojson(seg_path) if seg_path and Path(seg_path).is_file() else []
+                    # Map preprocessed-space polygons into original-image space.
+                    # Wing isolation / hinge chop don't move coords; only rescale does.
+                    rf = getattr(result, "rescale_factor", 1.0) or 1.0
+                    if rf != 1.0:
+                        parsed = [
+                            {"class": p["class"], "geometry": _scale_geom(p["geometry"], 1.0 / rf)} for p in parsed
+                        ]
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        self._render(parsed)
+            image = imread_any(image_path)
+            if image is None:
+                raise IOError(f"Could not load image: {image_path}")
+            # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
+            if image.ndim == 3 and image.shape[2] == 3:
+                image = np.ascontiguousarray(image[..., ::-1])
+            elif image.ndim == 3 and image.shape[2] == 4:
+                image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
+            mask = self._rasterize(parsed, image.shape[:2])
+            return {"image": image, "mask": mask}
+
+        self._begin_load(work)
+
+    def _render_payload(self, payload: dict) -> None:
+        self._render(payload["image"], payload["mask"])
 
     def _fail_load(self, message: str) -> None:
         QMessageBox.critical(self, "Could not load segmentation", message)
@@ -959,17 +1125,10 @@ class SegmentationEditorWidget(QWidget):
         except Exception:
             return np.zeros(shape, dtype=np.uint8)
 
-    def _render(self, parsed: list) -> None:
+    def _render(self, image, mask) -> None:
+        """Build the image + Labels layers from a preloaded (RGB) image + mask."""
         import napari
-        import numpy as np
         from napari.utils.colormaps import DirectLabelColormap
-
-        from TRACE.psd_loader import imread_any
-
-        image = imread_any(self._image_path)
-        if image is None:
-            self._fail_load(f"Could not load image: {self._image_path}")
-            return
 
         if self._viewer is None:
             self._viewer = napari.Viewer(show=False)
@@ -977,14 +1136,6 @@ class SegmentationEditorWidget(QWidget):
             self.layout().removeWidget(self._viewer_placeholder)
             self._viewer_placeholder.hide()
             self.layout().addWidget(qt_viewer, stretch=1)
-
-        # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
-        if image.ndim == 3 and image.shape[2] == 3:
-            image = np.ascontiguousarray(image[..., ::-1])
-        elif image.ndim == 3 and image.shape[2] == 4:
-            image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
-
-        mask = self._rasterize(parsed, image.shape[:2])
 
         self._viewer.layers.clear()
         self._viewer.add_image(image, name=self._image_path.name, rgb=image.ndim == 3)
@@ -1011,10 +1162,18 @@ class SegmentationEditorWidget(QWidget):
     def _on_class_changed(self, *_args) -> None:
         if self._labels_layer is not None:
             self._labels_layer.selected_label = self._current_class_value()
+        s = self._settings()
+        if s is not None:
+            data = self.cmb_class.currentData()
+            if data:
+                s.setValue("inspector/seg_class", data)
 
     def _on_brush_changed(self, value: int) -> None:
         if self._labels_layer is not None:
             self._labels_layer.brush_size = value
+        s = self._settings()
+        if s is not None:
+            s.setValue("inspector/seg_brush_size", int(value))
 
     def _set_mode(self, mode: str) -> None:
         if self._labels_layer is None:
@@ -1092,6 +1251,7 @@ class SegmentationEditorWidget(QWidget):
         return not np.array_equal(np.asarray(self._labels_layer.data), self._last_saved_mask)
 
     def shutdown(self) -> None:
+        self._bump_load_token()  # discard any in-flight load result
         if self._viewer is not None:
             try:
                 self._viewer.close()
