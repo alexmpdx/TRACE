@@ -1295,12 +1295,12 @@ class TraceWindow(QMainWindow):
         act_skip_all = menu.addAction("Skip all")
         act_unskip_all = menu.addAction("Unskip all")
 
-        # Inspect & Edit landmarks. Label reflects whether a multi-selection
+        # Edit model predictions. Label reflects whether a multi-selection
         # (cohort) or a single clicked row will be opened.
         menu.addSeparator()
         n_selected = len(self.image_list.selectedItems())
         inspect_label = (
-            "Inspect & Edit landmarks…" if n_selected <= 1 else f"Inspect & Edit landmarks ({n_selected} selected)…"
+            "Edit model predictions…" if n_selected <= 1 else f"Edit model predictions ({n_selected} selected)…"
         )
         act_inspect = menu.addAction(inspect_label)
 
