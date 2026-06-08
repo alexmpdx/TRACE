@@ -176,17 +176,66 @@ class _AsyncLoadMixin:
             return
         self._fail_load(msg)
 
+    def _build_loading_overlay(self) -> None:
+        """Translucent overlay that dims + blocks the editor while a load runs.
+
+        Covers the whole editor (controls + viewer), so the stale image can't be
+        clicked and the wait reads clearly. Shows a centered "Loading <image>…"
+        label and an indeterminate bar. Created once; positioned on show/resize.
+        """
+        self._overlay = QWidget(self)
+        self._overlay.setStyleSheet("background-color: rgba(20, 20, 20, 150);")
+        self._overlay.setVisible(False)
+        ov = QVBoxLayout(self._overlay)
+        ov.addStretch(1)
+        self._loading_label = QLabel("Loading…", self._overlay)
+        self._loading_label.setAlignment(Qt.AlignCenter)
+        self._loading_label.setStyleSheet("color: #eee; font-size: 15px; background: transparent;")
+        ov.addWidget(self._loading_label)
+        self._progress = QProgressBar(self._overlay)
+        self._progress.setRange(0, 0)
+        self._progress.setTextVisible(False)
+        self._progress.setMaximumWidth(320)
+        bar_row = QHBoxLayout()
+        bar_row.addStretch(1)
+        bar_row.addWidget(self._progress)
+        bar_row.addStretch(1)
+        ov.addLayout(bar_row)
+        ov.addStretch(1)
+
+    def _position_overlay(self) -> None:
+        ov = getattr(self, "_overlay", None)
+        if ov is not None:
+            ov.setGeometry(self.rect())
+
+    def _set_canvas_enabled(self, enabled: bool) -> None:
+        viewer = getattr(self, "_viewer", None)
+        if viewer is None:
+            return
+        try:
+            viewer.window.qt_viewer.setEnabled(enabled)
+        except Exception:
+            pass
+
     def _set_loading(self, on: bool) -> None:
         try:
             label = getattr(self, "_loading_label", None)
-            if label is not None:
+            if on and label is not None:
+                try:
+                    label.setText(f"Loading {self._image_path.name}…")
+                except Exception:
+                    label.setText("Loading…")
+            ov = getattr(self, "_overlay", None)
+            if ov is not None:
                 if on:
-                    try:
-                        label.setText(f"Loading {self._image_path.name}…")
-                    except Exception:
-                        label.setText("Loading…")
-                label.setVisible(on)
-            self._progress.setVisible(on)
+                    self._position_overlay()
+                    ov.setVisible(True)
+                    ov.raise_()
+                else:
+                    ov.setVisible(False)
+            # Belt-and-suspenders: block canvas interaction even if the overlay
+            # can't paint over napari's GL surface on some platforms.
+            self._set_canvas_enabled(not on)
         except RuntimeError:
             pass
 
@@ -561,20 +610,8 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         layout.addWidget(self._viewer_placeholder, stretch=1)
         self._canvas_embedded = False
 
-        # "Loading <image>…" label + indeterminate bar, shown while a load runs
-        # off-thread so tab/image switches clearly read as "working". (A busy
-        # QProgressBar won't paint its own text, hence the separate label.)
-        loading_row = QHBoxLayout()
-        self._loading_label = QLabel("Loading…")
-        self._loading_label.setStyleSheet("color: #aaa;")
-        self._loading_label.setVisible(False)
-        loading_row.addWidget(self._loading_label)
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)
-        self._progress.setTextVisible(False)
-        self._progress.setVisible(False)
-        loading_row.addWidget(self._progress, stretch=1)
-        layout.addLayout(loading_row)
+        # Dimming "Loading…" overlay shown while a load runs off-thread.
+        self._build_loading_overlay()
 
         # Restore the last-used "Add landmark" choice, then persist on change.
         s = self._settings()
@@ -593,6 +630,10 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         data = self.cmb_add_name.currentData()
         if data:
             s.setValue("inspector/landmark_add_class", data)
+
+    def resizeEvent(self, event):  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._position_overlay()
 
     # -- loading ----------------------------------------------------------
     def load_or_generate(self) -> None:
@@ -1060,20 +1101,8 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
         sc_redo.setContext(Qt.WidgetWithChildrenShortcut)
         sc_redo.activated.connect(self._on_redo)
 
-        # "Loading <image>…" label + indeterminate bar, shown while preprocessing
-        # / segmentation runs off-thread. (A busy QProgressBar won't paint its
-        # own text, hence the separate label.)
-        loading_row = QHBoxLayout()
-        self._loading_label = QLabel("Loading…")
-        self._loading_label.setStyleSheet("color: #aaa;")
-        self._loading_label.setVisible(False)
-        loading_row.addWidget(self._loading_label)
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)
-        self._progress.setTextVisible(False)
-        self._progress.setVisible(False)
-        loading_row.addWidget(self._progress, stretch=1)
-        layout.addLayout(loading_row)
+        # Dimming "Loading…" overlay shown while preprocessing / segmentation runs.
+        self._build_loading_overlay()
 
         # Restore the last-used class + brush size (persisted in the change
         # handlers below). setCurrentIndex / setValue here re-fire those handlers,
@@ -1084,6 +1113,10 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
             if i >= 0:
                 self.cmb_class.setCurrentIndex(i)
             self.spin_brush.setValue(int(s.value("inspector/seg_brush_size", 60, type=int)))
+
+    def resizeEvent(self, event):  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._position_overlay()
 
     # -- loading ---------------------------------------------------------
     def load_or_generate(self) -> None:
