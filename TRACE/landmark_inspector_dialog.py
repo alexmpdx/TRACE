@@ -531,6 +531,16 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         self.btn_delete.setToolTip("Remove the landmark(s) currently selected on the canvas.")
         self.btn_delete.clicked.connect(self._on_delete_selected)
         controls.addWidget(self.btn_delete)
+
+        self.btn_select = QPushButton("Select / move")
+        self.btn_select.setToolTip("Click a landmark to select it, or drag to reposition it.")
+        self.btn_select.clicked.connect(lambda: self._set_points_mode("select"))
+        controls.addWidget(self.btn_select)
+
+        self.btn_pan = QPushButton("Pan / zoom")
+        self.btn_pan.setToolTip("Stop editing; drag to pan and scroll to zoom.")
+        self.btn_pan.clicked.connect(lambda: self._set_points_mode("pan_zoom"))
+        controls.addWidget(self.btn_pan)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -717,6 +727,14 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             sel = self._points_layer.selected_data
             n = len(self._points_layer.data)
             self._points_layer.face_color = ["orange" if i in sel else "cyan" for i in range(n)]
+        except Exception:
+            pass
+
+    def _set_points_mode(self, mode: str) -> None:
+        if self._points_layer is None:
+            return
+        try:
+            self._points_layer.mode = mode
         except Exception:
             pass
 
