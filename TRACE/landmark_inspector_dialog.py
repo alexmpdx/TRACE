@@ -178,6 +178,14 @@ class _AsyncLoadMixin:
 
     def _set_loading(self, on: bool) -> None:
         try:
+            label = getattr(self, "_loading_label", None)
+            if label is not None:
+                if on:
+                    try:
+                        label.setText(f"Loading {self._image_path.name}…")
+                    except Exception:
+                        label.setText("Loading…")
+                label.setVisible(on)
             self._progress.setVisible(on)
         except RuntimeError:
             pass
@@ -553,13 +561,20 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         layout.addWidget(self._viewer_placeholder, stretch=1)
         self._canvas_embedded = False
 
-        # Indeterminate (busy) bar shown while a load runs off-thread.
+        # "Loading <image>…" label + indeterminate bar, shown while a load runs
+        # off-thread so tab/image switches clearly read as "working". (A busy
+        # QProgressBar won't paint its own text, hence the separate label.)
+        loading_row = QHBoxLayout()
+        self._loading_label = QLabel("Loading…")
+        self._loading_label.setStyleSheet("color: #aaa;")
+        self._loading_label.setVisible(False)
+        loading_row.addWidget(self._loading_label)
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)
         self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(6)
         self._progress.setVisible(False)
-        layout.addWidget(self._progress)
+        loading_row.addWidget(self._progress, stretch=1)
+        layout.addLayout(loading_row)
 
         # Restore the last-used "Add landmark" choice, then persist on change.
         s = self._settings()
@@ -1045,13 +1060,20 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
         sc_redo.setContext(Qt.WidgetWithChildrenShortcut)
         sc_redo.activated.connect(self._on_redo)
 
-        # Indeterminate (busy) bar shown while preprocessing / segmentation runs.
+        # "Loading <image>…" label + indeterminate bar, shown while preprocessing
+        # / segmentation runs off-thread. (A busy QProgressBar won't paint its
+        # own text, hence the separate label.)
+        loading_row = QHBoxLayout()
+        self._loading_label = QLabel("Loading…")
+        self._loading_label.setStyleSheet("color: #aaa;")
+        self._loading_label.setVisible(False)
+        loading_row.addWidget(self._loading_label)
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)
         self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(6)
         self._progress.setVisible(False)
-        layout.addWidget(self._progress)
+        loading_row.addWidget(self._progress, stretch=1)
+        layout.addLayout(loading_row)
 
         # Restore the last-used class + brush size (persisted in the change
         # handlers below). setCurrentIndex / setValue here re-fire those handlers,
