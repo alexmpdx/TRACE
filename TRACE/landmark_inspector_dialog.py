@@ -225,6 +225,14 @@ class _AsyncLoadMixin:
                     label.setText(f"Loading {self._image_path.name}…")
                 except Exception:
                     label.setText("Loading…")
+            # Hide the pre-first-load placeholder so its text doesn't show
+            # through the translucent overlay and overlap the "Loading…" label.
+            ph = getattr(self, "_viewer_placeholder", None)
+            if on and ph is not None:
+                try:
+                    ph.setVisible(False)
+                except RuntimeError:
+                    pass
             ov = getattr(self, "_overlay", None)
             if ov is not None:
                 if on:
