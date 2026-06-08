@@ -80,7 +80,7 @@ def build_hinge_line(landmarks):
     """Construct ordered hinge line: subcostal_break → [L1-Rs] → [L4-L5] → alula_notch.
 
     When both L1-Rs and L4-L5 are present, the segment between them is shifted
-    proximally (away from a distal-side reference point) by 25% of the distance
+    proximally (away from a distal-side reference point) by 30% of the distance
     between them, perpendicular to their connecting line. DTip is the preferred
     reference but any distal-margin landmark in `_DISTAL_REFERENCE_PRIORITY` works.
     """
