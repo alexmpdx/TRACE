@@ -44,6 +44,8 @@ from identify_features.models.wing_axis import compute_wing_axis
 from identify_features.views.overlay import render_overlay
 from shapely.geometry import MultiPolygon, Polygon
 
+from .preview_render import render_skeleton, render_traced
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -56,6 +58,24 @@ TIER_C = "C"  # intervein (~1.8s, manual refresh only)
 TIER_D = "D"  # render    (~25ms, instant)
 
 _LIVE_ORDER = {TIER_A: 0, TIER_B: 1, TIER_D: 2}
+
+# ---------------------------------------------------------------------------
+# View modes. Each names an intermediate (or final) pipeline product to show,
+# and — crucially — the deepest tier its render needs:
+#   SKELETON  needs only Tier A (no tracing) → Wing Graph tuning skips Tier B.
+#   TRACED    needs Tier B (veins + snapped landmarks), no intervein.
+#   FINAL     needs Tier B (+ on-demand Tier C intervein), the original overlay.
+# ---------------------------------------------------------------------------
+VIEW_SKELETON = "skeleton"
+VIEW_TRACED = "traced"
+VIEW_FINAL = "final"
+
+# Deepest live tier each view needs to recompute through.
+_VIEW_MAX_TIER = {
+    VIEW_SKELETON: _LIVE_ORDER[TIER_A],
+    VIEW_TRACED: _LIVE_ORDER[TIER_B],
+    VIEW_FINAL: _LIVE_ORDER[TIER_B],
+}
 
 # ---------------------------------------------------------------------------
 # FIELD_TIER: every PipelineConfig field -> the lowest tier it invalidates.
@@ -180,11 +200,16 @@ class LiveTuneSession:
 
         # Tier caches.
         self._pristine_skel = None  # Tier A output; NEVER anchored in place
+        self._anchored_skel = None  # Tier B working copy (landmark nodes inserted)
         self._veins: list[VeinIdentification] = []
         self._anchored_landmarks: dict[str, Landmark] = {}
         self._wing_axis = None
         self._regions: list[InterveinRegion] = []
         self._regions_stale: bool = True
+        # Veins are stale relative to the current config — set when a Tier-A/B
+        # param changed but the active view didn't need tracing (skeleton view),
+        # so the work was deferred. Switching to a tracing view recomputes them.
+        self._veins_dirty: bool = True
 
         self._last_config: Optional[PipelineConfig] = None
         self._last_appearance: Optional[Appearance] = None
@@ -225,11 +250,13 @@ class LiveTuneSession:
 
     def _invalidate_all(self) -> None:
         self._pristine_skel = None
+        self._anchored_skel = None
         self._veins = []
         self._anchored_landmarks = {}
         self._wing_axis = None
         self._regions = []
         self._regions_stale = True
+        self._veins_dirty = True
         self._last_config = None
         self._last_appearance = None
         self._last_overlay = None
@@ -259,10 +286,20 @@ class LiveTuneSession:
         return replace(config, um_per_px=config.um_per_px / self._preview_scale)
 
     # -- live update (tiers A/B/D) ---------------------------------------
-    def update(self, config: PipelineConfig, appearance: Optional[Appearance] = None) -> RenderResult:
-        """Recompute from the lowest invalidated tier (A/B/D) and re-render.
+    def update(
+        self,
+        config: PipelineConfig,
+        appearance: Optional[Appearance] = None,
+        view: str = VIEW_FINAL,
+    ) -> RenderResult:
+        """Recompute the minimal tiers the ``view`` needs and render it.
 
-        Tier C (intervein) is never run here. On any tier A/B recompute the
+        ``view`` caps how deep recomputation goes: the skeleton view stops at
+        Tier A (no tracing), so Wing-Graph tuning never pays the Tier-B cost.
+        A Tier-B parameter change while a skeleton view is active is *deferred*
+        (veins marked dirty) and applied lazily when a tracing view is shown.
+
+        Tier C (intervein) is never run here. On any Tier A/B recompute the
         cached intervein regions become stale; the result flags that so the UI
         can prompt for a manual refresh. On a stage exception the previous
         caches and overlay are preserved and the error is returned.
@@ -271,13 +308,14 @@ class LiveTuneSession:
             return RenderResult(overlay_bgr=None, tier_ran="none", error="No input loaded")
         if appearance is None:
             appearance = self._last_appearance or Appearance()
+        view_cap = _VIEW_MAX_TIER.get(view, _LIVE_ORDER[TIER_B])
 
         changed = _changed_fields(self._last_config, config)
         live_changed = [c for c in changed if FIELD_TIER[c] in _LIVE_ORDER]
         c_changed = [c for c in changed if FIELD_TIER[c] == TIER_C]
         appearance_changed = appearance != self._last_appearance
 
-        # Decide the lowest live tier to recompute from.
+        # Decide the lowest live tier the changes invalidate.
         need: Optional[int] = None
         if self._pristine_skel is None:
             need = _LIVE_ORDER[TIER_A]  # first run
@@ -290,19 +328,28 @@ class LiveTuneSession:
         timings: dict = {}
         try:
             cfg = self._effective(config)
+            # Skeleton (Tier A) recompute — needed by every view when the graph
+            # is invalid. A new skeleton also invalidates the veins built on it.
             if need is not None and need <= _LIVE_ORDER[TIER_A]:
                 self._recompute_skeleton(cfg, timings)
-                self._recompute_veins(cfg, timings)
+                self._veins_dirty = True
                 self._regions_stale = True
             elif need is not None and need <= _LIVE_ORDER[TIER_B]:
-                self._recompute_veins(cfg, timings)
+                # A Tier-B param changed: veins are stale regardless of view.
+                self._veins_dirty = True
                 self._regions_stale = True
             elif c_changed:
-                # Only intervein params moved: veins unchanged, just mark stale.
+                self._regions_stale = True
+
+            # Run the deferred Tier-B trace only if this view needs it AND the
+            # veins are dirty. The skeleton view skips this entirely.
+            if view_cap >= _LIVE_ORDER[TIER_B] and self._veins_dirty and self._pristine_skel is not None:
+                self._recompute_veins(cfg, timings)
+                self._veins_dirty = False
                 self._regions_stale = True
 
             tier_ran = self._tier_label(need, c_changed)
-            overlay = self._render(cfg, appearance, timings)
+            overlay = self._render(cfg, appearance, view, timings)
             self._last_config = deepcopy(config)
             self._last_appearance = deepcopy(appearance)
             self._last_overlay = overlay
@@ -354,27 +401,44 @@ class LiveTuneSession:
         self._veins = veins
         self._anchored_landmarks = lms
         self._wing_axis = axis
+        # Keep the anchored graph: landmark snapped_node indexes into THIS graph
+        # (not the pristine one), so the traced view needs it to mark landmarks.
+        self._anchored_skel = skel
         timings["B_trace"] = (time.perf_counter() - t0) * 1000
 
-    def _render(self, cfg: PipelineConfig, appearance: Appearance, timings: dict) -> np.ndarray:
+    def _render(
+        self, cfg: PipelineConfig, appearance: Appearance, view: str, timings: dict
+    ) -> np.ndarray:
         t0 = time.perf_counter()
-        regions = self._regions if (appearance.show_regions and not self._regions_stale) else []
-        overlay = render_overlay(
-            self._base_image,
-            self._veins,
-            regions,
-            show_vein_tissue=appearance.show_vein_tissue,
-            show_veins=appearance.show_veins,
-            show_regions=appearance.show_regions,
-            vein_color_overrides=cfg.vein_colors,
-            region_color_overrides=cfg.region_colors,
-            vein_opacity=cfg.vein_opacity,
-            intervein_opacity=cfg.intervein_opacity,
-            # The live preview shows a static UI-side legend beside the image,
-            # so suppress the in-image key (it would occlude the wing and waste
-            # the limited preview canvas). Batch output keeps its baked-in key.
-            show_color_key=False,
-        )
+        if view == VIEW_SKELETON:
+            overlay = render_skeleton(self._base_image, self._pristine_skel)
+        elif view == VIEW_TRACED:
+            overlay = render_traced(
+                self._base_image,
+                self._veins,
+                self._anchored_landmarks,
+                self._anchored_skel,
+                vein_color_overrides=cfg.vein_colors,
+                vein_opacity=cfg.vein_opacity,
+            )
+        else:  # VIEW_FINAL
+            regions = self._regions if (appearance.show_regions and not self._regions_stale) else []
+            overlay = render_overlay(
+                self._base_image,
+                self._veins,
+                regions,
+                show_vein_tissue=appearance.show_vein_tissue,
+                show_veins=appearance.show_veins,
+                show_regions=appearance.show_regions,
+                vein_color_overrides=cfg.vein_colors,
+                region_color_overrides=cfg.region_colors,
+                vein_opacity=cfg.vein_opacity,
+                intervein_opacity=cfg.intervein_opacity,
+                # The live preview shows a static UI-side legend beside the image,
+                # so suppress the in-image key (it would occlude the wing and waste
+                # the limited preview canvas). Batch output keeps its baked-in key.
+                show_color_key=False,
+            )
         timings["D_render"] = (time.perf_counter() - t0) * 1000
         return overlay
 
@@ -415,6 +479,8 @@ class LiveTuneSession:
         self._regions_stale = False
         return regions
 
-    def render_current(self, config: PipelineConfig, appearance: Appearance) -> np.ndarray:
+    def render_current(
+        self, config: PipelineConfig, appearance: Appearance, view: str = VIEW_FINAL
+    ) -> np.ndarray:
         """Re-render with current caches (used after compute_intervein)."""
-        return self._render(config, appearance, {})
+        return self._render(self._effective(config), appearance, view, {})

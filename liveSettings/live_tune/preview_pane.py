@@ -51,7 +51,18 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .session import FIELD_TIER, TIER_A, TIER_B, TIER_C, TIER_D, Appearance, LiveTuneSession
+from .session import (
+    FIELD_TIER,
+    TIER_A,
+    TIER_B,
+    TIER_C,
+    TIER_D,
+    VIEW_FINAL,
+    VIEW_SKELETON,
+    VIEW_TRACED,
+    Appearance,
+    LiveTuneSession,
+)
 from .worker import LiveTuneWorker
 
 logger = logging.getLogger(__name__)
@@ -138,6 +149,9 @@ class LivePreviewPane(QWidget):
         # preview feels live on large wings out of the box; the user can pick
         # Full for a final check. The real batch run is always full resolution.
         self._preview_scale: float = 0.5
+        # Active view mode (which pipeline product to show). Default Final
+        # preserves the original behavior.
+        self._view: str = VIEW_FINAL
         # Long-lived model caches so DL models load only once across samples.
         self._predictor_cache: dict = {}
         self._model_cache: dict = {}
@@ -206,6 +220,30 @@ class LivePreviewPane(QWidget):
         self._update_res_warning()
 
         root.addWidget(src)
+
+        # View selector — which pipeline product to show. The skeleton view
+        # needs only Tier A, so it skips the ~1s trace entirely; great for
+        # tuning Wing Graph settings fast or pinpointing where the pipeline
+        # goes wrong.
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("View:"))
+        self.cmb_view = QComboBox()
+        for _label, _val, _tip in (
+            ("Wing graph (skeleton)", VIEW_SKELETON,
+             "End of skeletonization: graph edges + nodes. No tracing — fastest; "
+             "Tracing/Intervein settings don't affect this view."),
+            ("Traced veins + landmarks", VIEW_TRACED,
+             "End of vein tracing: labeled vein centerlines + snapped landmarks. "
+             "No intervein regions."),
+            ("Final output", VIEW_FINAL,
+             "The full overlay: veins + intervein regions (regions via Refresh)."),
+        ):
+            self.cmb_view.addItem(_label, _val)
+            self.cmb_view.setItemData(self.cmb_view.count() - 1, _tip, Qt.ToolTipRole)
+        self.cmb_view.setCurrentIndex(2)  # Final — matches prior default behavior
+        self.cmb_view.currentIndexChanged.connect(self._on_view_changed)
+        view_row.addWidget(self.cmb_view, 1)
+        root.addLayout(view_row)
 
         # Preview + static color key. The key is drawn here (UI-side) rather
         # than baked into the overlay image, so it never occludes the wing and
@@ -411,15 +449,41 @@ class LivePreviewPane(QWidget):
         self.status.setText(f"Loaded {info} — tuning is live.")
         self._set_params_enabled(True)
 
+    # -- view selection ---------------------------------------------------
+    def _on_view_changed(self) -> None:
+        self._view = self.cmb_view.currentData()
+        self._worker.set_view(self._view)
+        # Display checkboxes / intervein refresh only matter for the final view.
+        self._sync_view_controls()
+        if self._loaded:
+            # Re-render in the new view. If switching to a tracing view after
+            # tuning on skeleton, the session runs the deferred trace now.
+            self.progress.show()
+            self._worker.request_update(self._get_config(), self._appearance)
+
+    def _sync_view_controls(self) -> None:
+        """Enable only the controls meaningful for the active view."""
+        final = self._view == VIEW_FINAL
+        for w in (self.cb_veins, self.cb_tissue, self.cb_regions, self.btn_intervein):
+            w.setEnabled(self._loaded and final)
+
     # -- config change plumbing (called by the host dialog) --------------
     def on_config_changed(self, field_name: Optional[str] = None) -> None:
         """Host calls this whenever a parameter widget changes."""
         if not self._loaded:
             return
         tier = FIELD_TIER.get(field_name, TIER_A) if field_name else TIER_A
+        # View-aware skip: a change the active view can't show needs no work.
+        # Skeleton view shows only Tier A, so Tier-B/C/D changes are no-ops for
+        # it (the session still defers the Tier-B recompute until a tracing
+        # view asks for it). Traced view ignores Tier-C (intervein) changes.
+        if self._view == VIEW_SKELETON and tier != TIER_A:
+            return
         if tier == TIER_C:
-            # Intervein params don't affect veins; flag and wait for Refresh.
-            self._mark_intervein_stale()
+            # Intervein params don't affect veins; flag and wait for Refresh
+            # (only the final view shows regions).
+            if self._view == VIEW_FINAL:
+                self._mark_intervein_stale()
             return
         # Track the lowest (most-invalidating) pending tier; use its debounce.
         self._pending_tier = self._lowest_tier(self._pending_tier, tier)
@@ -514,9 +578,11 @@ class LivePreviewPane(QWidget):
 
     # -- misc -------------------------------------------------------------
     def _set_params_enabled(self, enabled: bool) -> None:
-        for w in (self.btn_intervein, self.btn_preset, self.cb_veins, self.cb_tissue,
-                  self.cb_regions, self.btn_fit):
+        for w in (self.btn_preset, self.btn_fit):
             w.setEnabled(enabled)
+        # View-dependent controls (vein/region display, intervein) are gated by
+        # both load-state and the active view.
+        self._sync_view_controls()
 
     def shutdown(self) -> None:
         """Stop the worker thread. Call from the host's closeEvent/accept/reject."""

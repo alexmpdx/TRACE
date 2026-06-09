@@ -95,6 +95,28 @@ def main() -> int:
     assert ri.tier_ran in ("C", "error")
     print(f"[intervein] tier={ri.tier_ran} stale={ri.regions_stale} err={ri.error}")
 
+    # View switch: select the skeleton view via the combo (index 0). The pane
+    # must push the view to the worker and re-render without a trace.
+    from live_tune.session import VIEW_SKELETON, VIEW_TRACED
+    n3 = len(results)
+    idx_skel = pane.cmb_view.findData(VIEW_SKELETON)
+    pane.cmb_view.setCurrentIndex(idx_skel)
+    ok = _pump(app, lambda: len(results) > n3)
+    assert ok, "skeleton view switch produced no render"
+    rs = results[-1]
+    assert "B_trace" not in rs.timings_ms, "skeleton view should not trace"
+    assert pane._worker._view == VIEW_SKELETON
+    # Display controls disabled in skeleton view.
+    assert not pane.cb_veins.isEnabled()
+    print("[view:skeleton] no trace, controls gated ok")
+
+    # Switch to traced view → deferred trace runs.
+    n4 = len(results)
+    pane.cmb_view.setCurrentIndex(pane.cmb_view.findData(VIEW_TRACED))
+    ok = _pump(app, lambda: len(results) > n4)
+    assert ok, "traced view switch produced no render"
+    print(f"[view:traced] veins={results[-1].n_veins} ok")
+
     # pixmap conversion sanity
     pm = _bgr_to_qpixmap(first.overlay_bgr)
     assert not pm.isNull() and pm.width() > 0

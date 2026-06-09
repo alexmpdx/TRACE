@@ -16,7 +16,7 @@ from typing import Callable, Optional
 
 from PyQt5.QtCore import QMutex, QThread, QWaitCondition, pyqtSignal
 
-from .session import Appearance, LiveTuneSession, RenderResult
+from .session import VIEW_FINAL, Appearance, LiveTuneSession, RenderResult
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,13 @@ class LiveTuneWorker(QThread):
         # Most recently loaded FULL-resolution bundle, kept so a resolution
         # change can re-scale without re-running the (slow) loader/preprocessing.
         self._full_bundle = None
+        # Active view mode (skeleton / traced / final). Set from the GUI thread
+        # via set_view; read by every job so the session renders that product.
+        self._view = VIEW_FINAL
+
+    def set_view(self, view: str) -> None:
+        """Set the view rendered by subsequent jobs (call from GUI thread)."""
+        self._view = view
 
     # -- request API (call from GUI thread) ------------------------------
     def request_load(self, loader: Callable[[], object], scale: float, config, appearance: Appearance) -> None:
@@ -106,7 +113,7 @@ class LiveTuneWorker(QThread):
                 return
             # Auto-run the first overlay after a successful load.
             self.job_started.emit("Building skeleton…")
-            self.result_ready.emit(self._session.update(config, appearance))
+            self.result_ready.emit(self._session.update(config, appearance, view=self._view))
             return
 
         if kind == "rescale":
@@ -128,13 +135,13 @@ class LiveTuneWorker(QThread):
                     )
                 )
                 return
-            self.result_ready.emit(self._session.update(config, appearance))
+            self.result_ready.emit(self._session.update(config, appearance, view=self._view))
             return
 
         if kind == "update":
             _, config, appearance = job
             self.job_started.emit("Recomputing…")
-            self.result_ready.emit(self._session.update(config, appearance))
+            self.result_ready.emit(self._session.update(config, appearance, view=self._view))
             return
 
         if kind == "intervein":
@@ -143,7 +150,7 @@ class LiveTuneWorker(QThread):
             result: RenderResult
             try:
                 self._session.compute_intervein(config)
-                overlay = self._session.render_current(config, appearance)
+                overlay = self._session.render_current(config, appearance, view=self._view)
                 result = RenderResult(
                     overlay_bgr=overlay,
                     tier_ran="C",
