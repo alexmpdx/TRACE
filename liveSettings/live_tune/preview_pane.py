@@ -47,6 +47,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -295,27 +296,56 @@ class LivePreviewPane(QWidget):
         self._set_params_enabled(False)
 
     def _build_legend(self) -> QWidget:
-        """Static vein color key, drawn UI-side (not baked into the overlay).
+        """Static color key whose contents switch with the active view.
 
-        Lists every canonical vein plus the shared ectopic (EV) bucket in
-        anterior→posterior order, honoring any vein-color overrides in the
-        current config. Built once; colors only change if the user edits the
-        color overrides, which is rare and not worth live-rebuilding.
+        The vein-color key is meaningful for the traced + final views, but the
+        skeleton view draws graph primitives (edges + degree-colored nodes), so
+        it gets its own key. Both are built once into a QStackedWidget; the view
+        selector flips between them via :meth:`_sync_legend`.
         """
+        self._legend_stack = QStackedWidget()
+        self._legend_stack.setSizePolicy(
+            self._legend_stack.sizePolicy().Fixed, self._legend_stack.sizePolicy().Preferred
+        )
+        self._legend_vein = self._make_legend_box(self._vein_legend_entries())
+        self._legend_skeleton = self._make_legend_box(self._skeleton_legend_entries())
+        self._legend_stack.addWidget(self._legend_vein)      # index 0
+        self._legend_stack.addWidget(self._legend_skeleton)  # index 1
+        return self._legend_stack
+
+    def _vein_legend_entries(self) -> list:
+        """(label, rgb) rows for the vein-color key (traced / final views)."""
         from identify_features.models.topology import VEIN_AP_ORDER, VEIN_COLORS
 
         overrides = getattr(self._get_config(), "vein_colors", None) or {}
+        entries = []
+        for vid in list(VEIN_AP_ORDER) + ["EV"]:
+            rgb = overrides.get(vid) or VEIN_COLORS.get(vid)
+            if rgb is None:
+                continue
+            entries.append(("ectopic (EV)" if vid == "EV" else vid, rgb))
+        return entries
 
+    @staticmethod
+    def _skeleton_legend_entries() -> list:
+        """(label, rgb) rows matching render_skeleton's drawn colors.
+
+        render_skeleton uses cv2 BGR tuples; the RGB equivalents are: edges
+        (255,255,0), path nodes deg<=2 (255,128,0), junctions deg>=3
+        (255,80,255). Kept in sync with preview_render.render_skeleton.
+        """
+        return [
+            ("vein edge", [255, 255, 0]),
+            ("node (path, deg ≤ 2)", [255, 128, 0]),
+            ("junction (deg ≥ 3)", [255, 80, 255]),
+        ]
+
+    def _make_legend_box(self, entries: list) -> QWidget:
         box = QGroupBox("Key")
         box.setSizePolicy(box.sizePolicy().Fixed, box.sizePolicy().Preferred)
         v = QVBoxLayout(box)
         v.setSpacing(3)
-
-        order = list(VEIN_AP_ORDER) + ["EV"]
-        for vid in order:
-            rgb = overrides.get(vid) or VEIN_COLORS.get(vid)
-            if rgb is None:
-                continue
+        for label_text, rgb in entries:
             row = QHBoxLayout()
             row.setSpacing(6)
             swatch = QLabel()
@@ -324,13 +354,16 @@ class LivePreviewPane(QWidget):
                 f"background-color: rgb({int(rgb[0])},{int(rgb[1])},{int(rgb[2])}); "
                 "border: 1px solid #888;"
             )
-            label = QLabel("ectopic (EV)" if vid == "EV" else vid)
             row.addWidget(swatch)
-            row.addWidget(label)
+            row.addWidget(QLabel(label_text))
             row.addStretch(1)
             v.addLayout(row)
         v.addStretch(1)
         return box
+
+    def _sync_legend(self) -> None:
+        """Show the key matching the active view (skeleton vs vein)."""
+        self._legend_stack.setCurrentIndex(1 if self._view == VIEW_SKELETON else 0)
 
     def _file_row(self, layout: QVBoxLayout, label: str, pick: Callable) -> QLineEdit:
         row = QHBoxLayout()
@@ -455,6 +488,8 @@ class LivePreviewPane(QWidget):
         self._worker.set_view(self._view)
         # Display checkboxes / intervein refresh only matter for the final view.
         self._sync_view_controls()
+        # Swap the color key to match what this view draws.
+        self._sync_legend()
         if self._loaded:
             # Re-render in the new view. If switching to a tracing view after
             # tuning on skeleton, the session runs the deferred trace now.
