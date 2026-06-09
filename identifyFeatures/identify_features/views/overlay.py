@@ -134,6 +134,7 @@ def render_overlay(
     vein_opacity: float = 1.0,
     intervein_opacity: float = _REGION_FILL_OPACITY,
     show_color_key: bool = True,
+    show_ectopic_labels: bool = True,
 ) -> np.ndarray:
     """Render veins and regions as a color overlay on the wing image.
 
@@ -141,7 +142,7 @@ def render_overlay(
     1. Light-opacity colored fills inside intervein regions  (skipped if not show_regions)
     2. (optional) Vein tissue polygon fills if ``show_vein_tissue``  (skipped if not show_veins)
     3. Vein centerline strokes  (skipped if not show_veins)
-    4. Ectopic vein ID labels  (skipped if not show_veins)
+    4. Ectopic vein ID labels  (skipped if not show_veins or not show_ectopic_labels)
     5. Region name labels (with [M]/[I] status suffixes)  (skipped if not show_regions)
     6. Color-key legend in the upper-left corner  (skipped if not show_veins or not show_color_key)
 
@@ -157,6 +158,9 @@ def render_overlay(
         show_color_key: If True (default), draw the vein color legend baked into the
             image. Set False when a separate (e.g. UI-side) legend is shown so the
             key doesn't occlude the wing — the batch pipeline keeps it True.
+        show_ectopic_labels: If True (default), draw the "EV1"/"EV2"… text labels
+            next to ectopic veins. Set False to draw ectopic centerlines without
+            their text (e.g. an intermediate preview where the labels add clutter).
 
     Returns:
         BGR overlay image (same dimensions as base_image).
@@ -209,7 +213,7 @@ def render_overlay(
 
     # Layer 4: ectopic vein labels — also gated by vein_opacity so a fully
     # transparent "vein" channel leaves no EV text either.
-    if show_veins and vein_opacity > 0:
+    if show_veins and show_ectopic_labels and vein_opacity > 0:
         ev_text_color = _vein_bgr("EV", vein_color_overrides)
         text_target = img.copy() if vein_opacity < 1.0 else img
         for v in veins:
