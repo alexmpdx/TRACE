@@ -42,7 +42,7 @@ NOT_IDENTIFIED = "not identified"
 MEASUREMENT_GROUPS: "OrderedDict[str, str]" = OrderedDict(
     [
         ("wing_area", "Wing area"),
-        ("wing_circularity", "Wing circularity"),
+        ("wing_shape", "Wing shape (aspect ratio, solidity)"),
         ("vein_lengths", "Vein lengths"),
         ("intervein_areas", "Intervein region areas"),
         ("cv_ratio", "CV ratio (CV distance, wing length)"),
@@ -191,7 +191,8 @@ def _wing_measurements(
     vals: dict[str, str] = {
         "wing_area_px": "",
         "wing_area_um2": "",
-        "wing_circularity": "",
+        "wing_aspect_ratio": "",
+        "wing_solidity": "",
         "wing_length_px": "",
         "wing_length_um": "",
         "crossvein_distance_px": "",
@@ -212,15 +213,19 @@ def _wing_measurements(
             vals["wing_area_px"] = f"{outline.area:.1f}"
             vals["wing_area_um2"] = f"{outline.area * scale**2:.1f}" if scale else ""
 
-    # Wing circularity (Polsby-Popper isoperimetric ratio: 4π·A / P²,
-    # dimensionless; 1.0 for a perfect circle, lower for elongated shapes).
-    if "wing_circularity" in g:
+    # Wing shape: aspect ratio (elongation) + solidity (notch / missing-area).
+    if "wing_shape" in g:
         outline = wing_result.wing_outline if wing_result else None
-        if outline is not None:
-            perimeter = outline.length
-            if perimeter > 0:
-                circularity = 4.0 * math.pi * outline.area / (perimeter * perimeter)
-                vals["wing_circularity"] = f"{circularity:.4f}"
+        if outline is not None and not outline.is_empty:
+            coords = np.asarray(outline.exterior.coords)[:-1]
+            if len(coords) >= 3:
+                centered = coords - coords.mean(axis=0)
+                eigvals = np.linalg.eigvalsh(np.cov(centered, rowvar=False))
+                if eigvals[0] > 0:
+                    vals["wing_aspect_ratio"] = f"{float(np.sqrt(eigvals[1] / eigvals[0])):.4f}"
+            hull_area = outline.convex_hull.area
+            if hull_area > 0:
+                vals["wing_solidity"] = f"{outline.area / hull_area:.4f}"
 
     # CV ratio block: wing length + crossvein distance + CV ratio
     if "cv_ratio" in g:
@@ -314,11 +319,11 @@ def export_csv(
                 "length_um": "",
             }
         )
-    if "wing_circularity" in g:
+    if "wing_shape" in g:
         rows.append(
             {
                 "specimen": sid,
-                "feature": "wing circularity",
+                "feature": "wing aspect ratio",
                 "category": "wing",
                 "type": "",
                 "status": "",
@@ -326,7 +331,21 @@ def export_csv(
                 "area_um2": "",
                 "length_px": "",
                 "length_um": "",
-                "ratio": wm["wing_circularity"],
+                "ratio": wm["wing_aspect_ratio"],
+            }
+        )
+        rows.append(
+            {
+                "specimen": sid,
+                "feature": "wing solidity",
+                "category": "wing",
+                "type": "",
+                "status": "",
+                "area_px": "",
+                "area_um2": "",
+                "length_px": "",
+                "length_um": "",
+                "ratio": wm["wing_solidity"],
             }
         )
     if "cv_ratio" in g:
@@ -460,8 +479,9 @@ def _build_fieldnames(include_um: bool, groups: Optional[set[str]] = None) -> li
         fields.append("wing area_px")
         if include_um:
             fields.append("wing area_um2")
-    if "wing_circularity" in g:
-        fields.append("wing circularity")
+    if "wing_shape" in g:
+        fields.append("wing aspect ratio")
+        fields.append("wing solidity")
     if "cv_ratio" in g:
         fields.append("wing length_px")
         if include_um:
@@ -512,8 +532,9 @@ def _build_row(
         row["wing area_px"] = wm["wing_area_px"]
         if include_um:
             row["wing area_um2"] = wm["wing_area_um2"]
-    if "wing_circularity" in g:
-        row["wing circularity"] = wm["wing_circularity"]
+    if "wing_shape" in g:
+        row["wing aspect ratio"] = wm["wing_aspect_ratio"]
+        row["wing solidity"] = wm["wing_solidity"]
     if "cv_ratio" in g:
         row["wing length_px"] = wm["wing_length_px"]
         if include_um:
