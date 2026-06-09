@@ -119,18 +119,28 @@ def _compute_wing_outline(
     polygons: list[Polygon | MultiPolygon],
     buffer_px: float = 20.0,
 ) -> Polygon | None:
-    """Compute wing outline as the union of all polygons, buffered."""
+    """Compute wing outline as the symmetrically-closed union of all polygons.
+
+    Returns a single hole-free Polygon, or None when the input is empty /
+    degenerate. Interior rings are dropped because holes in the union are
+    always segmentation artefacts in this pipeline — never biological signal.
+    """
     if not polygons:
         return None
     from shapely.ops import unary_union
 
-    union = unary_union(polygons).buffer(buffer_px).buffer(-buffer_px / 2)
+    union = unary_union(polygons).buffer(buffer_px).buffer(-buffer_px)
+
     if isinstance(union, MultiPolygon):
-        # Take the largest polygon
         union = max(union.geoms, key=lambda g: g.area)
-    if isinstance(union, Polygon) and not union.is_empty:
-        return union
-    return None
+
+    if not isinstance(union, Polygon) or union.is_empty:
+        return None
+
+    if union.interiors:
+        union = Polygon(union.exterior)
+
+    return union
 
 
 def _read_geojson(path: Path) -> dict[str, Any]:
