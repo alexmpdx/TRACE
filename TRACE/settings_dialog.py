@@ -156,6 +156,19 @@ _FIELD_TOOLTIPS: dict[str, str] = {
         "Phase 5b: when graph detection can't find ACV/PCV, synthesize them from landmark "
         "positions. Disable to preserve the fused-region output."
     ),
+    # -- Mutant phenotype reporting (Phase 5c — absent / partial assignment) --
+    "assign_absent_partial_status": (
+        "When on, canonical veins with no labelled path are emitted as explicit "
+        "status=absent rows (length 0), and any traced vein that is gapped or doesn't "
+        "reach its expected endpoints is downgraded to status=partial. Turn off to "
+        "restore the legacy behaviour where only identified / inferred / ectopic statuses "
+        "are written."
+    ),
+    "partial_endpoint_search_vw": (
+        "Distance (× median vein width) a vein may fall short of its expected endpoint "
+        "before it's flagged status=partial. Larger = more forgiving (fewer partials); "
+        "smaller = stricter. Only affects the partial/absent check above, not tracing."
+    ),
     # -- Ectopic detection --
     "ectopic_min_length_um": "Minimum length (µm) for a detected ectopic vein to be kept.",
     "ectopic_min_length_vw": "Fallback minimum ectopic length as × median vein width — used when no µm-per-pixel scale is set.",
@@ -1210,6 +1223,14 @@ class PipelineConfigDialog(QDialog):
         form = QFormLayout(gb)
         self._add_float(form, "ectopic_min_length_um", "Min length (µm)", 0.0, 10000.0, 1, 1.0)
         self._add_float(form, "ectopic_min_length_vw", "Min length fallback (× vein width)", 0.0, 100.0, 2, 0.1)
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Mutant phenotype reporting")
+        form = QFormLayout(gb)
+        self._add_bool(form, "assign_absent_partial_status", "Emit absent / partial vein statuses")
+        self._add_float(
+            form, "partial_endpoint_search_vw", "Endpoint reach tolerance (× vein width)", 0.0, 100.0, 2, 0.1
+        )
         layout.addWidget(gb)
 
         layout.addStretch()

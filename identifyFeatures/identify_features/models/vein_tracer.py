@@ -31,7 +31,12 @@ from identify_features.models.datatypes import (
     VeinType,
     WingAxis,
 )
-from identify_features.models.topology import VEIN_COLORS
+from identify_features.models.topology import (
+    ALL_CANONICAL_VEINS,
+    CROSSVEIN_CONNECTIONS,
+    LONGITUDINAL_ENDPOINTS,
+    VEIN_COLORS,
+)
 from identify_features.utils.geometry_utils import (
     angle_between_vectors,
     direction_toward,
@@ -122,6 +127,20 @@ class _TracerDumper:
         logger.info("Tracer debug dump: %s", path)
 
 
+class _TracerHook:
+    """Lightweight debug sink: forwards (G, edge_labels, name) to a callback
+    after each tracer phase instead of writing a PNG. Used for programmatic
+    per-phase capture (e.g. thesis figures). Backward-compatible — only active
+    when ``debug_hook`` is passed to ``trace_veins_from_landmarks``.
+    """
+
+    def __init__(self, fn) -> None:
+        self.fn = fn
+
+    def dump(self, G: nx.Graph, edge_labels: dict, name: str) -> None:
+        self.fn(G, edge_labels, name)
+
+
 def trace_veins_from_landmarks(
     skel_graph: SkeletonGraph,
     landmarks: dict[str, Landmark],
@@ -129,6 +148,7 @@ def trace_veins_from_landmarks(
     config: PipelineConfig | None = None,
     wing_axis: Optional[WingAxis] = None,
     debug_dir: Path | None = None,
+    debug_hook=None,
 ) -> list[VeinIdentification]:
     """Identify veins in the skeleton graph using landmarks.
 
@@ -141,6 +161,11 @@ def trace_veins_from_landmarks(
             detection uses the axis's AP vector for rotation-invariant
             "posterior heading" checks instead of assuming positive-Y is
             posterior.
+        debug_dir: If set, write a labelled PNG of the graph after each phase.
+        debug_hook: If set (and debug_dir is None), call ``debug_hook(G,
+            edge_labels, name)`` after each phase for in-memory per-phase
+            capture (e.g. figure generation). Backward-compatible no-op when
+            None.
     """
     if config is None:
         config = PipelineConfig()
@@ -148,7 +173,12 @@ def trace_veins_from_landmarks(
     G = skel_graph.graph
     edge_labels: dict[tuple, str] = {}
 
-    dbg = _TracerDumper(debug_dir, skel_graph.image_shape, landmarks) if debug_dir is not None else None
+    if debug_dir is not None:
+        dbg = _TracerDumper(debug_dir, skel_graph.image_shape, landmarks)
+    elif debug_hook is not None:
+        dbg = _TracerHook(debug_hook)
+    else:
+        dbg = None
     if dbg:
         dbg.dump(G, edge_labels, "initial")
 
@@ -375,6 +405,22 @@ def trace_veins_from_landmarks(
     # output is preferred (e.g. specimens with genuinely absent crossveins).
     if config.synthesize_missing_crossveins:
         _synthesize_crossveins_from_landmarks(G, edge_labels, landmarks, veins)
+
+    # Phase 5c: Promote present-but-incomplete veins to PARTIAL and append
+    # placeholders for canonical veins with no labelled path (ABSENT). Runs
+    # last so a Phase-5b synthesised crossvein counts as present, not absent,
+    # and so any earlier-phase IDENTIFIED vein has its final edge set fixed
+    # before connectedness / endpoint tests fire. The flag exists so legacy
+    # output (only IDENTIFIED / INFERRED / ECTOPIC ever appear) is recoverable.
+    if config.assign_absent_partial_status:
+        _assign_absent_and_partial(
+            veins,
+            G,
+            edge_labels,
+            landmarks,
+            skel_graph.median_vein_width_px,
+            config,
+        )
 
     return veins
 
@@ -2710,6 +2756,110 @@ def _vein_type(vein_id: str) -> VeinType:
         return VeinType.COSTA
     else:
         return VeinType.LONGITUDINAL
+
+
+def _assign_absent_and_partial(
+    veins: list[VeinIdentification],
+    G: nx.Graph,
+    edge_labels: dict[tuple, str],
+    landmarks: dict[str, Landmark],
+    median_vein_width_px: float,
+    config: PipelineConfig,
+) -> None:
+    """Mark canonical veins entirely missing ABSENT (appended as
+    centerline-None placeholders) and present-but-incomplete veins PARTIAL —
+    longitudinals AND crossveins. Never touches ECTOPIC / INFERRED veins.
+
+    Two PARTIAL signals are evaluated for each IDENTIFIED vein:
+
+    * **gapped** — its labelled edges form more than one connected component
+      in the skeleton graph. Applied to every vein type, including costa and
+      L6 (which have no clean endpoint definition).
+    * **truncated** — for longitudinals listed in ``LONGITUDINAL_ENDPOINTS``,
+      at least one *reliable* anchor landmark is not reached by any of the
+      vein's labelled edges (line-to-point distance > ``search_radius``).
+      For crossveins listed in ``CROSSVEIN_CONNECTIONS``, the vein's
+      centerline doesn't reach a *present* bounding longitudinal (centerline-
+      to-centerline distance > ``search_radius``). A bounding vein that is
+      itself absent is skipped — that side simply can't be judged.
+
+    ``search_radius`` is ``median_vein_width_px * partial_endpoint_search_vw``,
+    a dedicated knob (default 3.0) separate from Phase 2c's
+    ``distal_landmark_search_vw`` (default 2.0) so the partial/absent
+    sensitivity can be tuned in Advanced Settings without changing tracing
+    behaviour upstream.
+
+    ABSENT veins are then appended as explicit placeholders: any name in
+    ``ALL_CANONICAL_VEINS`` with no surviving ``VeinIdentification`` gets a
+    fresh entry with ``centerline=None`` and ``length_px=0.0``. Downstream
+    consumers (overlays, GeoJSON, AP split, intervein tissue assignment, CSV)
+    already guard ``centerline is None`` so the new rows pass straight through
+    to the long-format CSV's ``status`` column.
+    """
+    veins_by_id = {v.vein_id: v for v in veins}
+    present = set(veins_by_id)
+    search_radius = median_vein_width_px * config.partial_endpoint_search_vw
+
+    def _edges_for(vid: str) -> list[tuple]:
+        return [
+            (u, w) for (u, w), lbl in edge_labels.items() if lbl == vid and G.has_edge(u, w)
+        ]
+
+    # ---- PARTIAL: downgrade IDENTIFIED veins that are truncated or gapped ----
+    for v in veins:
+        if v.status != VeinStatus.IDENTIFIED:
+            continue  # leave ECTOPIC / INFERRED alone
+        edges = _edges_for(v.vein_id)
+
+        # (a) gapped: labelled edges form >1 connected component (every vein type).
+        sub = nx.Graph()
+        sub.add_edges_from(edges)
+        gapped = sub.number_of_nodes() > 0 and nx.number_connected_components(sub) > 1
+
+        # (b) truncated: doesn't reach its expected endpoints.
+        truncated = False
+        if v.vein_id in LONGITUDINAL_ENDPOINTS:
+            for lm_name in LONGITUDINAL_ENDPOINTS[v.vein_id]:  # (proximal, distal)
+                lm = landmarks.get(lm_name)
+                if lm is None or not getattr(lm, "reliable", False):
+                    continue  # can't judge this endpoint
+                reaches = any(
+                    G[u][w].get("line") is not None
+                    and G[u][w]["line"].distance(lm.point) <= search_radius
+                    for u, w in edges
+                )
+                if not reaches:
+                    truncated = True
+                    break
+        elif v.vein_id in CROSSVEIN_CONNECTIONS and v.centerline is not None:
+            for bounding_id in CROSSVEIN_CONNECTIONS[v.vein_id]:  # e.g. ACV -> (L3, L4)
+                b = veins_by_id.get(bounding_id)
+                if b is None or b.centerline is None:
+                    continue  # bounding vein absent / not yet present -> skip this side
+                if v.centerline.distance(b.centerline) > search_radius:
+                    truncated = True
+                    break
+
+        if gapped or truncated:
+            v.status = VeinStatus.PARTIAL
+            v.evidence.append("gapped" if gapped else "truncated (endpoint not reached)")
+
+    # ---- ABSENT: canonical veins with no VeinIdentification at all ----
+    # Always emitted as explicit rows (project decision — makes "is L4 present?"
+    # a direct CSV column query rather than an inference from a missing row).
+    for vein_id in ALL_CANONICAL_VEINS:
+        if vein_id in present:
+            continue
+        veins.append(
+            VeinIdentification(
+                vein_id=vein_id,
+                vein_type=_vein_type(vein_id),
+                status=VeinStatus.ABSENT,
+                centerline=None,
+                length_px=0.0,
+                evidence=["no labelled path"],
+            )
+        )
 
 
 def _synthesize_crossveins_from_landmarks(

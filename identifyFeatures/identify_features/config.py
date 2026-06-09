@@ -117,6 +117,30 @@ class PipelineConfig:
         False  # Phase 5b: draw ACV/PCV centerlines from landmarks when graph detection fails; disable to preserve fused-region output
     )
 
+    # -- Mutant phenotype reporting --
+    # Master switch for ABSENT / PARTIAL vein status assignment (vein_tracer.py
+    # _assign_absent_and_partial). When True (default), canonical veins with no
+    # labelled path are emitted as explicit ``status=absent`` rows (centerline
+    # None, length 0), and any IDENTIFIED vein that is gapped (labelled edges
+    # form ≥2 components) or truncated (longitudinal doesn't reach its reliable
+    # landmark endpoint, or crossvein doesn't reach both bounding longitudinals)
+    # is downgraded to ``status=partial``. ECTOPIC / INFERRED are never touched.
+    # When False, output is byte-identical to the pre-feature behaviour — only
+    # IDENTIFIED / INFERRED / ECTOPIC ever appear and absent veins are implicit
+    # (missing rows). Provided as an escape hatch for legacy / golden-test runs.
+    assign_absent_partial_status: bool = True
+    # Distance (× median vein width) a labelled edge / crossvein centerline
+    # may fall short of its expected endpoint before it counts as truncated.
+    # Used ONLY by ``_assign_absent_and_partial`` — kept separate from
+    # ``distal_landmark_search_vw`` (used by Phase 2c) so tuning the
+    # mutant-detection sensitivity here doesn't accidentally change tracing
+    # behaviour upstream. Default 3.0 is looser than the 2.0 reuse the spec
+    # started with: on wild-type figure specimens L1's most-proximal segment
+    # is sometimes pruned and the labelled edge stops 2-3 px past the 2× cutoff,
+    # producing spurious PARTIALs. Bump higher to be more permissive (fewer
+    # PARTIALs); drop toward distal_landmark_search_vw to be stricter.
+    partial_endpoint_search_vw: float = 3.0
+
     # -- Intervein labeling --
     skip_intervein_regions: bool = (
         False  # When True, skip §6.1 polygon splitting and §6.2 region naming (saves resources when only vein outputs are needed). §6.3 vein tissue assignment still runs so overlays and exports retain vein tissue polygons.
