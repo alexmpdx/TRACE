@@ -207,10 +207,16 @@ class LivePreviewPane(QWidget):
 
         root.addWidget(src)
 
-        # Preview
+        # Preview + static color key. The key is drawn here (UI-side) rather
+        # than baked into the overlay image, so it never occludes the wing and
+        # doesn't waste the limited preview canvas.
+        preview_row = QHBoxLayout()
         self.view = _ZoomView(self)
         self.view.setMinimumSize(420, 360)
-        root.addWidget(self.view, 1)
+        preview_row.addWidget(self.view, 1)
+        self.legend = self._build_legend()
+        preview_row.addWidget(self.legend, 0)
+        root.addLayout(preview_row, 1)
 
         # Status
         self.status = QLabel("Pick a sample and click Load to start the live preview.")
@@ -249,6 +255,44 @@ class LivePreviewPane(QWidget):
         root.addLayout(actions)
 
         self._set_params_enabled(False)
+
+    def _build_legend(self) -> QWidget:
+        """Static vein color key, drawn UI-side (not baked into the overlay).
+
+        Lists every canonical vein plus the shared ectopic (EV) bucket in
+        anterior→posterior order, honoring any vein-color overrides in the
+        current config. Built once; colors only change if the user edits the
+        color overrides, which is rare and not worth live-rebuilding.
+        """
+        from identify_features.models.topology import VEIN_AP_ORDER, VEIN_COLORS
+
+        overrides = getattr(self._get_config(), "vein_colors", None) or {}
+
+        box = QGroupBox("Key")
+        box.setSizePolicy(box.sizePolicy().Fixed, box.sizePolicy().Preferred)
+        v = QVBoxLayout(box)
+        v.setSpacing(3)
+
+        order = list(VEIN_AP_ORDER) + ["EV"]
+        for vid in order:
+            rgb = overrides.get(vid) or VEIN_COLORS.get(vid)
+            if rgb is None:
+                continue
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            swatch = QLabel()
+            swatch.setFixedSize(16, 16)
+            swatch.setStyleSheet(
+                f"background-color: rgb({int(rgb[0])},{int(rgb[1])},{int(rgb[2])}); "
+                "border: 1px solid #888;"
+            )
+            label = QLabel("ectopic (EV)" if vid == "EV" else vid)
+            row.addWidget(swatch)
+            row.addWidget(label)
+            row.addStretch(1)
+            v.addLayout(row)
+        v.addStretch(1)
+        return box
 
     def _file_row(self, layout: QVBoxLayout, label: str, pick: Callable) -> QLineEdit:
         row = QHBoxLayout()

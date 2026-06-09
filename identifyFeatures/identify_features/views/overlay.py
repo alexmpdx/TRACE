@@ -133,6 +133,7 @@ def render_overlay(
     region_color_overrides: Optional[dict[str, list[int]]] = None,
     vein_opacity: float = 1.0,
     intervein_opacity: float = _REGION_FILL_OPACITY,
+    show_color_key: bool = True,
 ) -> np.ndarray:
     """Render veins and regions as a color overlay on the wing image.
 
@@ -142,7 +143,7 @@ def render_overlay(
     3. Vein centerline strokes  (skipped if not show_veins)
     4. Ectopic vein ID labels  (skipped if not show_veins)
     5. Region name labels (with [M]/[I] status suffixes)  (skipped if not show_regions)
-    6. Color-key legend in the upper-left corner  (skipped if not show_veins; only veins are keyed)
+    6. Color-key legend in the upper-left corner  (skipped if not show_veins or not show_color_key)
 
     Args:
         base_image: BGR base image (e.g. original wing photo).
@@ -153,6 +154,9 @@ def render_overlay(
         show_veins: If True, draw vein-related layers (tissue fills, centerlines,
             ectopic labels, legend). Default True.
         show_regions: If True, draw intervein region fills and labels. Default True.
+        show_color_key: If True (default), draw the vein color legend baked into the
+            image. Set False when a separate (e.g. UI-side) legend is shown so the
+            key doesn't occlude the wing — the batch pipeline keeps it True.
 
     Returns:
         BGR overlay image (same dimensions as base_image).
@@ -237,8 +241,10 @@ def render_overlay(
             cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness_bg)
             cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness_fg)
 
-    # Layer 6: color key (vein swatches; only meaningful when veins are drawn)
-    if show_veins:
+    # Layer 6: color key (vein swatches; only meaningful when veins are drawn).
+    # Suppressed when show_color_key is False so a UI-side static legend can
+    # stand in without the key occluding the wing.
+    if show_veins and show_color_key:
         _draw_color_key(img, veins, vein_color_overrides)
 
     return img

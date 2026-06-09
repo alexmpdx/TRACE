@@ -370,6 +370,10 @@ class LiveTuneSession:
             region_color_overrides=cfg.region_colors,
             vein_opacity=cfg.vein_opacity,
             intervein_opacity=cfg.intervein_opacity,
+            # The live preview shows a static UI-side legend beside the image,
+            # so suppress the in-image key (it would occlude the wing and waste
+            # the limited preview canvas). Batch output keeps its baked-in key.
+            show_color_key=False,
         )
         timings["D_render"] = (time.perf_counter() - t0) * 1000
         return overlay
