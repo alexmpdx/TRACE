@@ -122,6 +122,27 @@ Measured (specimen 0003): Tier B `anchor+trace+tissue` drops from **~5.3 s
 matching the prediction. Quarter-res is ~0.3 s. Verified end-to-end in
 `test_dialog_integration.py` (real dialog widget edit → tier B at 1026 ms).
 
+## View modes (skeleton / traced / final)
+
+A "View" selector chooses which pipeline product the preview shows:
+- **Wing graph (skeleton)** — end of skeletonization (Tier A). Graph edges +
+  degree-colored nodes. **Needs no tracing**, so Wing-Graph tuning skips the
+  ~1–5s Tier B entirely; Tracing/Intervein changes are no-ops in this view
+  (the trace is *deferred*, run lazily when a tracing view is next shown).
+- **Traced veins + landmarks** — end of vein tracing (Tier B). Labeled vein
+  centerlines (reusing `render_overlay`, veins only) + snapped landmarks. The
+  landmark marker uses the anchored graph node (`lm.snapped_node`), not the
+  raw `lm.point`, with a thin tie-line when they differ.
+- **Final output** — the original full overlay (veins + intervein regions).
+
+Implemented as a per-view recompute cap in `LiveTuneSession.update(view=...)`
+(`_VIEW_MAX_TIER`); a `_veins_dirty` flag defers Tier-B work the active view
+doesn't need. Renderers live in `live_tune/preview_render.py` (drawing patterns
+lifted from skeleton.py `_DebugDumper` / vein_tracer.py `_TracerDumper`). The
+worker carries the active view (`set_view`); the pane gates the display
+checkboxes + intervein refresh to the final view only. Tests:
+`test_views.py` (7, headless) + a view-switch segment in `test_pane_smoke.py`.
+
 ## Not done / deferred
 
 - Smaller test wings would make `test_session.py` much faster; left on 0003 for

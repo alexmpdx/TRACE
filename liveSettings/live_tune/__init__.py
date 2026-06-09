@@ -15,6 +15,9 @@ from .session import (
     TIER_B,
     TIER_C,
     TIER_D,
+    VIEW_FINAL,
+    VIEW_SKELETON,
+    VIEW_TRACED,
     Appearance,
     LiveTuneSession,
     RenderResult,
@@ -30,4 +33,7 @@ __all__ = [
     "TIER_B",
     "TIER_C",
     "TIER_D",
+    "VIEW_SKELETON",
+    "VIEW_TRACED",
+    "VIEW_FINAL",
 ]

@@ -83,12 +83,14 @@ def test_session_render_suppresses_key(monkeypatch):
     from identify_features.config import PipelineConfig
     from live_tune.session import Appearance, LiveTuneSession
 
+    from live_tune.session import VIEW_FINAL
+
     sess = LiveTuneSession()
     sess._base_image = _img()
     sess._veins = _one_vein()
     sess._regions = []
     sess._regions_stale = True
-    sess._render(PipelineConfig(), Appearance(), {})
+    sess._render(PipelineConfig(), Appearance(), VIEW_FINAL, {})
     assert captured.get("show_color_key") is False
 
 
