@@ -47,6 +47,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -178,7 +179,13 @@ class LivePreviewPane(QWidget):
 
     # -- UI construction --------------------------------------------------
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        # Build the body into an inner widget hosted by a QScrollArea. If the
+        # dialog squeezes the pane shorter than the body's natural height, the
+        # area scrolls — without it, the QVBoxLayout overflows and the zoomable
+        # view widget extends down over the controls below it (the Display box
+        # overlap seen when the image is zoomed in).
+        content = QWidget()
+        root = QVBoxLayout(content)
 
         # Input source group — raw image only. Preprocessing (wing isolation,
         # rotation, rescale) runs on the image, so a pre-made GeoJSON can't
@@ -292,6 +299,16 @@ class LivePreviewPane(QWidget):
         actions.addStretch(1)
         actions.addWidget(self.btn_preset)
         root.addLayout(actions)
+
+        # Host the body in a scroll area so a short pane scrolls rather than
+        # overlapping its own controls.
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
 
         self._set_params_enabled(False)
 
