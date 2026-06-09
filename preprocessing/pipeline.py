@@ -186,6 +186,7 @@ def predict_landmarks_for_paths(
     include_unreliable_landmarks: bool = False,
     batch_size: Optional[int] = None,
     confidence_override: Optional[dict] = None,
+    pause_event: Optional[threading.Event] = None,
 ) -> dict:
     """Predict landmarks for many images in batches.
 
@@ -197,20 +198,37 @@ def predict_landmarks_for_paths(
       - None → auto-pick via `landmark_locator.auto_batch_size`.
       - 1    → process one image at a time (matches single-fold predict() semantics).
       - >1   → batch model forward passes.
+
+    ``pause_event``: when set, the loop stops between mini-batches and returns
+    the partial result dict. Paths past the pause point simply have no entry
+    (the caller's per-image fallback handles them — but if the caller is also
+    pause-aware it'll skip those images entirely instead).
     """
     from landmark_locator import LowConfidenceLandmarkError, auto_batch_size
     from landmark_locator.data.psd_loader import imread_any
+
+    out: dict = {}
+    # Honor pause before the (potentially seconds-long) model load on the
+    # first call — otherwise a user who clicks Pause immediately on launch
+    # still waits through the checkpoint deserialization + warm-up.
+    if pause_event is not None and pause_event.is_set():
+        return out
 
     if predictor_cache is None:
         predictor_cache = {}
     predictor = _predictor_from_cache(checkpoint_path, predictor_cache, confidence_override=confidence_override)
 
-    out: dict = {}
     if not paths:
         return out
 
     bs = batch_size if batch_size and batch_size > 0 else auto_batch_size(len(paths))
     for chunk_start in range(0, len(paths), bs):
+        # Pause check is between mini-batches — a forward pass on the GPU
+        # can't be cleanly interrupted mid-flight, but each mini-batch is
+        # sized to ``max_workers`` (typically 1-8 images) so worst-case
+        # latency is a sub-second batch's worth of work.
+        if pause_event is not None and pause_event.is_set():
+            return out
         chunk_paths = paths[chunk_start : chunk_start + bs]
         chunk_images = []
         valid_paths = []
@@ -639,6 +657,11 @@ class PipelineResult:
     error: Optional[str] = None
     error_stage: Optional[str] = None
     stages_completed: list[str] = field(default_factory=list)
+    # Set True when ``process_folder`` skipped this image because the caller's
+    # pause_event fired before its turn. Distinct from ``error`` so the
+    # orchestrator (TRACE/pipeline.py) can drop these from both the success
+    # AND failure lists — the image was never attempted, not failed.
+    paused: bool = False
 
 
 def _auto_device():
@@ -1045,6 +1068,7 @@ def process_folder(
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
     skip_image_basenames: Optional[set[str]] = None,
+    pause_event: Optional[threading.Event] = None,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -1124,6 +1148,7 @@ def process_folder(
                 include_unreliable_landmarks=include_unreliable_landmarks,
                 batch_size=landmark_batch_size,
                 confidence_override=gate_override,
+                pause_event=pause_event,
             )
         except Exception as e:
             # Fail soft — fall back to per-image predict in process_single_image.
@@ -1155,6 +1180,14 @@ def process_folder(
             progress_callback(idx, len(images), name, msg)
 
     def _process_one(i: int, img_path: Path) -> PipelineResult:
+        # Pause: bail out at image-boundaries so the user's click takes
+        # effect within seconds. In-flight workers finish the image they
+        # started — that's what keeps per-image artifacts consistent on
+        # disk — but no new image work begins. The orchestrator
+        # (TRACE/pipeline.py) filters paused entries out of the result
+        # list so they aren't mistaken for failures.
+        if pause_event is not None and pause_event.is_set():
+            return PipelineResult(image_path=img_path, paused=True)
         _emit(i, img_path.name, "starting")
         try:
             result = process_single_image(
@@ -1202,6 +1235,11 @@ def process_folder(
     workers = max(1, int(max_workers))
     if workers <= 1:
         for i, img_path in enumerate(images):
+            # Stop submitting new image work once the user has paused —
+            # matches the ThreadPoolExecutor path where the per-task pause
+            # check in _process_one short-circuits not-yet-started workers.
+            if pause_event is not None and pause_event.is_set():
+                break
             results.append(_process_one(i, img_path))
     else:
         # Pre-allocate so we can fill by original index → preserves input order.
@@ -1211,5 +1249,13 @@ def process_folder(
             for fut in as_completed(futures):
                 i = futures[fut]
                 results[i] = fut.result()
+
+    # Drop paused entries — images whose turn never came because the user
+    # clicked Pause. Keeping them in the list would force the orchestrator
+    # to special-case them everywhere; filtering once here means every
+    # downstream consumer sees only "really attempted" results. The
+    # sequential loop's early-break already omits them; this normalizes
+    # the parallel branch (which fills paused slots from _process_one).
+    results = [r for r in results if r is not None and not r.paused]
 
     return results

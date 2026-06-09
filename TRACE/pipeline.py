@@ -698,6 +698,12 @@ def _run(
         # already-processed (or previously-failed-on-same-settings)
         # images don't even go through landmark / hinge / segmentation.
         skip_image_basenames=skip_image_basenames,
+        # Stage 1 now polls pause_event between images (and between
+        # landmark mini-batches), so a Pause click takes effect within
+        # seconds even on a 100+ image folder. The Stage 1→2 boundary
+        # check further down skips Stage 2 entirely when pause caught us
+        # here, so the user doesn't have to wait through analysis too.
+        pause_event=pause_event,
     )
 
     results: list[TraceResult] = []
@@ -744,6 +750,23 @@ def _run(
             successful_preproc.append(r)
 
     logger.info("Preprocessed %d/%d images successfully", len(successful_preproc), len(preproc_results))
+
+    # Stage 1 → Stage 2 boundary: if pause caught us inside or right after
+    # Stage 1, do NOT start identifyFeatures. The successful_preproc list
+    # may already be short (Stage 1 paused partway), but even the images
+    # that did finish Stage 1 here will be re-discovered on resume — they
+    # aren't in the manifest's completed_images yet, so the next run will
+    # re-preprocess them and analyze them in one pass. Honor the pause
+    # straight away so the user sees the button flip to "Resume" within
+    # seconds rather than after a Stage 2 sweep over whatever happened to
+    # finish Stage 1.
+    if pause_event is not None and pause_event.is_set():
+        logger.info(
+            "Pipeline paused after Stage 1: %d image(s) finished preprocessing this slice "
+            "but Stage 2 was skipped; they will be re-processed on resume",
+            len(successful_preproc),
+        )
+        return results
 
     if not successful_preproc:
         return results

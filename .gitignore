@@ -15,3 +15,10 @@ TRACE/models/
 # Per-run startup diagnostic log written by TRACE/startup_log.py.
 trace_startup.log
 TRACE/trace_startup.log
+
+# Thesis-writing scratch space — chapter outlines, figure drafts, internal
+# specs handed off between Claude sessions. Local-only by design; never
+# meant to ship in the repo or the installer. PyInstaller's datas list
+# already excludes the repo-root `documentation/` directory; this guard
+# prevents an accidental `git add -A` from a future session uploading it.
+documentation/
