@@ -3,7 +3,10 @@
 - render_overlay's new show_color_key flag: default True draws the key (batch
   unchanged), False suppresses it (the key region differs, the rest is identical).
 - LiveTuneSession renders with show_color_key=False.
-- The pane builds a static UI-side legend with one row per vein + EV.
+
+The UI-side static legend is covered by test_legend_view.py (a standalone
+offscreen script — building a pane under pytest crashes Qt's offscreen platform
+on teardown).
 
 Run:  python -m pytest liveSettings/tests/test_color_key.py -v
 """
@@ -92,29 +95,6 @@ def test_session_render_suppresses_key(monkeypatch):
     sess._regions_stale = True
     sess._render(PipelineConfig(), Appearance(), VIEW_FINAL, {})
     assert captured.get("show_color_key") is False
-
-
-# -- pane builds a static legend ------------------------------------------
-def test_pane_builds_static_legend():
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PyQt5.QtWidgets import QApplication, QGroupBox, QLabel
-
-    from identify_features.config import PipelineConfig
-    from identify_features.models.topology import VEIN_AP_ORDER
-    from live_tune.preview_pane import LivePreviewPane
-
-    app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
-    pane = LivePreviewPane(get_config=lambda: PipelineConfig())
-    legend = pane.legend
-    assert isinstance(legend, QGroupBox)
-    # One text label per canonical vein + the EV bucket (swatches are also
-    # QLabels, so filter to the ones carrying vein names).
-    texts = {lbl.text() for lbl in legend.findChildren(QLabel) if lbl.text()}
-    for vid in VEIN_AP_ORDER:
-        assert vid in texts, f"legend missing {vid}"
-    assert any("EV" in t for t in texts), "legend missing ectopic bucket"
-    pane.shutdown()
 
 
 if __name__ == "__main__":
