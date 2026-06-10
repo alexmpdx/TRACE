@@ -84,6 +84,20 @@ def _collect_model_paths(dialog) -> dict:
     return paths
 
 
+def _first_main_window_image(main_window) -> str:
+    """First image in the main window's loaded list, or "" if none.
+
+    The main window populates ``_image_paths`` (list of Path) from the chosen
+    input folder. Read defensively so a missing/empty attribute just yields no
+    seed rather than raising.
+    """
+    try:
+        paths = getattr(main_window, "_image_paths", None) or []
+        return str(paths[0]) if paths else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _build_preproc_getter(dialog, main_window):
     """Return a callable yielding current preprocessing options for the preview.
 
@@ -167,6 +181,7 @@ def attach_live_preview(dialog) -> Optional[LivePreviewPane]:
             model_paths=_collect_model_paths(dialog),
             default_image_dir=getattr(dialog, "_calib_input_path", "") or "",
             preproc_getter=_build_preproc_getter(dialog, main_window),
+            initial_image=_first_main_window_image(main_window),
             parent=dialog,
         )
         pane.setVisible(False)
@@ -192,6 +207,10 @@ def attach_live_preview(dialog) -> Optional[LivePreviewPane]:
             toggle.setText("Hide live preview ◂" if checked else "Show live preview ▸")
             if checked and dialog.width() < 1100:
                 dialog.resize(max(dialog.width() + 520, 1100), dialog.height())
+            if checked:
+                # Auto-load the seeded image the first time the preview is shown,
+                # so the slow DL preprocessing only runs on a deliberate open.
+                pane.auto_load_if_seeded()
 
         toggle.toggled.connect(_on_toggle)
 
