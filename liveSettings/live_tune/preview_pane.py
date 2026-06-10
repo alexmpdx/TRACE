@@ -132,12 +132,16 @@ class LivePreviewPane(QWidget):
         model_paths: Optional[dict] = None,
         default_image_dir: str = "",
         preproc_getter: Optional[Callable[[], dict]] = None,
+        initial_image: str = "",
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._get_config = get_config
         self._model_paths = model_paths or {}
         self._default_image_dir = default_image_dir
+        # Pre-fill the image field (e.g. the first image already loaded in the
+        # main window) so the user doesn't have to re-pick. Set after _build_ui.
+        self._initial_image = initial_image or ""
         # Returns the current preprocessing options (wing isolation, rotation,
         # expand, rescale target) so a re-run reflects them. None → defaults.
         self._preproc_getter = preproc_getter or (lambda: {})
@@ -179,6 +183,12 @@ class LivePreviewPane(QWidget):
         self._preproc_debounce.timeout.connect(self._fire_preproc)
 
         self._build_ui()
+        # Seed the image field from the host (first image in the main list).
+        # The sample isn't loaded automatically — preprocessing runs the DL
+        # models, which can be slow — but the path is pre-filled so the user
+        # only has to click "Load sample".
+        if self._initial_image:
+            self.ed_image.setText(self._initial_image)
 
     # -- UI construction --------------------------------------------------
     def _build_ui(self) -> None:
@@ -469,6 +479,21 @@ class LivePreviewPane(QWidget):
         self.btn_load.setEnabled(False)
         self.progress.show()
         self._worker.request_load(loader, self._preview_scale, self._get_config(), self._appearance)
+
+    def auto_load_if_seeded(self) -> None:
+        """Load the pre-filled image once, when the preview is first shown.
+
+        Called by the host the first time the user reveals the preview, so the
+        slow DL preprocessing only runs when they actually open it — and only if
+        an image was seeded (e.g. the first image in the main window's list) and
+        nothing has been loaded yet. Silently does nothing if models are missing
+        (image-mode requires them); the user can still pick + Load manually.
+        """
+        if self._loaded or not self.ed_image.text().strip():
+            return
+        if not (self._model_paths.get("landmark_checkpoint") and self._model_paths.get("segmentation_model_dir")):
+            return
+        self._on_load_clicked()
 
     # -- preprocessing re-run (host calls on_preproc_changed) -------------
     def on_preproc_changed(self) -> None:
