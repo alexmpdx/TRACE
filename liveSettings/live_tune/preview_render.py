@@ -125,6 +125,9 @@ def render_traced(
         vein_color_overrides=vein_color_overrides,
         vein_opacity=vein_opacity,
         show_color_key=False,
+        # The traced view shows snapped landmark labels; ectopic "EV" text on top
+        # of that adds clutter, so draw ectopic centerlines without their labels.
+        show_ectopic_labels=False,
     )
     _draw_landmarks(img, landmarks or {}, skel, _stroke_scale(img))
     return img
