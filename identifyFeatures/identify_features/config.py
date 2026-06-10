@@ -289,7 +289,7 @@ PIPELINE_PRESETS: dict[str, dict[str, Any]] = {
         "prune_min_length_um": None,
         "prune_min_length_vein_widths": 2.0,
         "final_stub_vein_widths": 3.0,
-        "junction_merge_vein_widths": 0.0,
+        "junction_merge_vein_widths": 2.0,
         "prune_radius_ratio_threshold": 0.3,
         "prune_scale_sigmas": [2.0, 4.0, 8.0, 16.0],
         "prune_single_scale_sigma": 4.0,
