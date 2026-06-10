@@ -145,6 +145,9 @@ class LivePreviewPane(QWidget):
         self._pending_tier: Optional[str] = None
         self._loaded = False
         self._tmp_dir: Optional[str] = None
+        # Whether the cached intervein regions are stale (need a Tier-C compute
+        # before they can be shown). Mirrors the session's flag via results.
+        self._regions_stale: bool = True
         # Debounce timer for preprocessing re-runs (slow DL path; longer wait).
         self._preproc_debounce: Optional[QTimer] = None
         # Preview resolution factor (1.0 = full). Default to half-res so the
@@ -588,13 +591,28 @@ class LivePreviewPane(QWidget):
             show_regions=self.cb_regions.isChecked(),
             show_vein_tissue=self.cb_tissue.isChecked(),
         )
-        if self._loaded:
-            self._worker.request_update(self._get_config(), self._appearance)
+        if not self._loaded:
+            return
+        # Intervein regions render only once they've been computed (the slow
+        # Tier-C step). Checking the box when they're stale would otherwise show
+        # nothing, so kick off the computation here — same as the Refresh button.
+        if self.cb_regions.isChecked() and self._regions_stale:
+            self._compute_intervein()
+            return
+        self._worker.request_update(self._get_config(), self._appearance)
 
     def _on_intervein_clicked(self) -> None:
         if not self._loaded:
             return
+        # Checking the box (without firing _on_appearance_changed's stale path
+        # twice) — block the signal, then compute.
+        self.cb_regions.blockSignals(True)
         self.cb_regions.setChecked(True)
+        self.cb_regions.blockSignals(False)
+        self._compute_intervein()
+
+    def _compute_intervein(self) -> None:
+        """Run the slow Tier-C intervein step and show the regions."""
         self._appearance = Appearance(
             show_veins=self.cb_veins.isChecked(),
             show_regions=True,
@@ -610,6 +628,9 @@ class LivePreviewPane(QWidget):
 
     def _on_result(self, result) -> None:
         self.progress.hide()
+        # Mirror the session's stale flag so the regions checkbox knows whether
+        # a Tier-C compute is needed before regions can be shown.
+        self._regions_stale = result.regions_stale
         if result.overlay_bgr is not None:
             self.view.set_pixmap(_bgr_to_qpixmap(result.overlay_bgr))
         if result.error:
@@ -625,6 +646,7 @@ class LivePreviewPane(QWidget):
         self.status.setText(" · ".join(bits))
 
     def _mark_intervein_stale(self) -> None:
+        self._regions_stale = True
         if self.cb_regions.isChecked():
             self.status.setText("Intervein params changed — press “Refresh intervein” to recompute.")
 
