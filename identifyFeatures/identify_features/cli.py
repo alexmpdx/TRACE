@@ -73,6 +73,10 @@ def _process_one(args_tuple):
         show_vein_tissue,
         synthesize_missing_crossveins,
         skip_intervein_regions,
+        show_color_key,
+        show_ectopic_labels,
+        show_region_labels,
+        vein_simplify_tolerance_px,
     ) = args_tuple
     try:
         config = PipelineConfig()
@@ -100,6 +104,10 @@ def _process_one(args_tuple):
                     result.intervein_regions,
                     output_dir / f"{stem}_overlay.png",
                     show_vein_tissue=show_vein_tissue,
+                    show_color_key=show_color_key,
+                    show_ectopic_labels=show_ectopic_labels,
+                    show_region_labels=show_region_labels,
+                    vein_simplify_tolerance_px=vein_simplify_tolerance_px,
                 )
                 if all_overlays:
                     render_ap_overlay_to_file(base_img, result, output_dir / f"{stem}_ap_overlay.png")
@@ -176,6 +184,35 @@ def main():
         "--show-vein-tissue",
         action="store_true",
         help="In the overlay PNG, fill buffered vein tissue polygons (default: skeleton lines only)",
+    )
+    parser.add_argument(
+        "--no-color-key",
+        dest="show_color_key",
+        action="store_false",
+        default=True,
+        help="Suppress the vein color-key legend in the overlay's upper-left corner",
+    )
+    parser.add_argument(
+        "--no-ectopic-labels",
+        dest="show_ectopic_labels",
+        action="store_false",
+        default=True,
+        help="Suppress the EV1/EV2… text labels next to ectopic veins in the overlay",
+    )
+    parser.add_argument(
+        "--no-region-labels",
+        dest="show_region_labels",
+        action="store_false",
+        default=True,
+        help="Suppress the intervein region name text in the overlay (region fills are kept)",
+    )
+    parser.add_argument(
+        "--smooth-veins",
+        dest="vein_simplify_tolerance_px",
+        type=float,
+        default=0.0,
+        metavar="TOL_PX",
+        help="Douglas-Peucker tolerance (px) for smoothing vein centerlines in the overlay (0 = raw skeleton)",
     )
     parser.add_argument(
         "--preset",
@@ -258,6 +295,10 @@ def _run_single(args):
                 result.intervein_regions,
                 overlay_path,
                 show_vein_tissue=args.show_vein_tissue,
+                show_color_key=args.show_color_key,
+                show_ectopic_labels=args.show_ectopic_labels,
+                show_region_labels=args.show_region_labels,
+                vein_simplify_tolerance_px=args.vein_simplify_tolerance_px,
             )
             print(f"Overlay: {overlay_path}")
 
@@ -309,6 +350,10 @@ def _run_batch(args):
             args.show_vein_tissue,
             args.synthesize_missing_crossveins,
             args.skip_intervein_regions,
+            args.show_color_key,
+            args.show_ectopic_labels,
+            args.show_region_labels,
+            args.vein_simplify_tolerance_px,
         )
         for stem, det, lm, img in specimens
     ]

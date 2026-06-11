@@ -136,6 +136,35 @@ def parse_args(argv=None):
         help="In the per-wing overlay PNG, fill buffered vein tissue polygons (default: skeleton lines only)",
     )
     parser.add_argument(
+        "--no-color-key",
+        dest="show_color_key",
+        action="store_false",
+        default=True,
+        help="Suppress the vein color-key legend in the overlay's upper-left corner",
+    )
+    parser.add_argument(
+        "--no-ectopic-labels",
+        dest="show_ectopic_labels",
+        action="store_false",
+        default=True,
+        help="Suppress the EV1/EV2… text labels next to ectopic veins in the overlay",
+    )
+    parser.add_argument(
+        "--no-region-labels",
+        dest="show_region_labels",
+        action="store_false",
+        default=True,
+        help="Suppress the intervein region name text in the overlay (region fills are kept)",
+    )
+    parser.add_argument(
+        "--smooth-veins",
+        dest="vein_simplify_tolerance_px",
+        type=float,
+        default=0.0,
+        metavar="TOL_PX",
+        help="Douglas-Peucker tolerance (px) for smoothing vein centerlines in the overlay (0 = raw skeleton)",
+    )
+    parser.add_argument(
         "--calibrate-workers",
         type=Path,
         metavar="PATH",
@@ -455,6 +484,10 @@ def main(argv=None):
         target_um_per_px=args.target_um_per_px,
         rescale_tolerance_low=args.rescale_tolerance_low,
         rescale_tolerance_high=args.rescale_tolerance_high,
+        show_color_key=args.show_color_key,
+        show_ectopic_labels=args.show_ectopic_labels,
+        show_region_labels=args.show_region_labels,
+        vein_simplify_tolerance_px=args.vein_simplify_tolerance_px,
     )
 
     # Summary

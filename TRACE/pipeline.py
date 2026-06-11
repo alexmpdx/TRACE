@@ -469,6 +469,10 @@ def trace_folder(
     on_image_complete=None,
     on_image_failed_preproc=None,
     on_image_failed_analysis=None,
+    show_color_key: bool = True,
+    show_ectopic_labels: bool = True,
+    show_region_labels: bool = True,
+    vein_simplify_tolerance_px: float = 0.0,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -598,6 +602,10 @@ def trace_folder(
             on_image_complete=on_image_complete,
             on_image_failed_preproc=on_image_failed_preproc,
             on_image_failed_analysis=on_image_failed_analysis,
+            show_color_key=show_color_key,
+            show_ectopic_labels=show_ectopic_labels,
+            show_region_labels=show_region_labels,
+            vein_simplify_tolerance_px=vein_simplify_tolerance_px,
         )
     finally:
         if temp_dir_obj is not None:
@@ -636,6 +644,10 @@ def _run(
     on_image_complete=None,
     on_image_failed_preproc=None,
     on_image_failed_analysis=None,
+    show_color_key: bool = True,
+    show_ectopic_labels: bool = True,
+    show_region_labels: bool = True,
+    vein_simplify_tolerance_px: float = 0.0,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -950,6 +962,10 @@ def _run(
                     region_color_overrides=config.region_colors,
                     vein_opacity=config.vein_opacity,
                     intervein_opacity=config.intervein_opacity,
+                    show_color_key=show_color_key,
+                    show_ectopic_labels=show_ectopic_labels,
+                    show_region_labels=show_region_labels,
+                    vein_simplify_tolerance_px=vein_simplify_tolerance_px,
                 )
                 trace_result.overlay_path = ov_path
 

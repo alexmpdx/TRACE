@@ -135,6 +135,8 @@ def render_overlay(
     intervein_opacity: float = _REGION_FILL_OPACITY,
     show_color_key: bool = True,
     show_ectopic_labels: bool = True,
+    show_region_labels: bool = True,
+    vein_simplify_tolerance_px: float = 0.0,
 ) -> np.ndarray:
     """Render veins and regions as a color overlay on the wing image.
 
@@ -143,7 +145,7 @@ def render_overlay(
     2. (optional) Vein tissue polygon fills if ``show_vein_tissue``  (skipped if not show_veins)
     3. Vein centerline strokes  (skipped if not show_veins)
     4. Ectopic vein ID labels  (skipped if not show_veins or not show_ectopic_labels)
-    5. Region name labels (with [M]/[I] status suffixes)  (skipped if not show_regions)
+    5. Region name labels (with [M]/[I] status suffixes)  (skipped if not show_regions or not show_region_labels)
     6. Color-key legend in the upper-left corner  (skipped if not show_veins or not show_color_key)
 
     Args:
@@ -161,6 +163,15 @@ def render_overlay(
         show_ectopic_labels: If True (default), draw the "EV1"/"EV2"… text labels
             next to ectopic veins. Set False to draw ectopic centerlines without
             their text (e.g. an intermediate preview where the labels add clutter).
+        show_region_labels: If True (default), draw the intervein region name text
+            (with [M]/[I] status suffixes) at each region's centroid. Set False to
+            keep the colored region fills but suppress the text labels — useful
+            for publication-style figures.
+        vein_simplify_tolerance_px: Douglas-Peucker simplification tolerance applied
+            to vein centerlines before drawing. 0 (default) = draw the raw skeleton
+            polyline; higher values smooth out pixel-level zigzag. A few px is
+            usually enough to remove staircasing while preserving vein direction
+            changes. Affects only the rendered overlay, not the saved geometry.
 
     Returns:
         BGR overlay image (same dimensions as base_image).
@@ -206,7 +217,12 @@ def render_overlay(
         for v in veins:
             if v.centerline is None:
                 continue
-            pts = np.array(v.centerline.coords, dtype=np.int32)
+            line = v.centerline
+            if vein_simplify_tolerance_px > 0:
+                simplified = line.simplify(vein_simplify_tolerance_px)
+                if not simplified.is_empty and len(simplified.coords) >= 2:
+                    line = simplified
+            pts = np.array(line.coords, dtype=np.int32)
             cv2.polylines(stroke_target, [pts], False, _vein_bgr(v.vein_id, vein_color_overrides), vein_thickness)
         if vein_opacity < 1.0:
             img = cv2.addWeighted(stroke_target, vein_opacity, img, 1.0 - vein_opacity, 0)
@@ -226,7 +242,7 @@ def render_overlay(
             img = cv2.addWeighted(text_target, vein_opacity, img, 1.0 - vein_opacity, 0)
 
     # Layer 5: region labels
-    if show_regions:
+    if show_regions and show_region_labels:
         for r in regions:
             if r.polygon is None:
                 continue
@@ -266,6 +282,10 @@ def render_overlay_to_file(
     region_color_overrides: Optional[dict[str, list[int]]] = None,
     vein_opacity: float = 1.0,
     intervein_opacity: float = _REGION_FILL_OPACITY,
+    show_color_key: bool = True,
+    show_ectopic_labels: bool = True,
+    show_region_labels: bool = True,
+    vein_simplify_tolerance_px: float = 0.0,
 ) -> None:
     """Render overlay and write to a PNG file."""
     img_out = render_overlay(
@@ -279,6 +299,10 @@ def render_overlay_to_file(
         region_color_overrides=region_color_overrides,
         vein_opacity=vein_opacity,
         intervein_opacity=intervein_opacity,
+        show_color_key=show_color_key,
+        show_ectopic_labels=show_ectopic_labels,
+        show_region_labels=show_region_labels,
+        vein_simplify_tolerance_px=vein_simplify_tolerance_px,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), img_out)
