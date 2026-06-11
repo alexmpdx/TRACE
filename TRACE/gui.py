@@ -230,6 +230,66 @@ def _pick_save_file_native(caption: str, initial: str, name_filter: str = "") ->
     return path
 
 
+def _open_native_picker_async(
+    holder,
+    caption: str,
+    initial: str,
+    on_picked,
+    *,
+    name_filter: str = "",
+    folder: bool = False,
+    save: bool = False,
+) -> None:
+    """Async native picker — ``QFileDialog.open()`` + ``fileSelected`` signal.
+
+    The synchronous ``_pick_*_native`` helpers above call the static
+    ``QFileDialog`` methods, which run a *nested* Qt event loop. That
+    nested loop is intercepted by napari's process-wide event filter
+    once napari has been loaded in the session — the native panel's
+    file list silently goes dead. Use this async variant from any
+    picker that lives inside (or might be opened after) a napari
+    context: the Advanced Settings dialog (live preview pane embeds
+    napari), the inspector dialog, the Custom Measurements tab.
+
+    ``open()`` shows the dialog modally without a nested event loop, so
+    napari's filter operates on the main loop normally and the native
+    panel receives mouse events. The result arrives asynchronously via
+    ``fileSelected``; ``on_picked(path)`` runs when the user clicks
+    Open (not called on Cancel). The dialog reference is stashed on
+    ``holder._active_picker`` so Python's GC doesn't free the dialog
+    between ``open()`` and the user closing it.
+
+    Parameters:
+      - ``folder=True`` — directory picker (``ShowDirsOnly`` set).
+      - ``save=True`` — save dialog (``AcceptSave`` + ``AnyFile``).
+        Mutually exclusive with ``folder=True``.
+      - ``name_filter`` — Qt filter string for file pickers, ignored
+        when ``folder=True``.
+    """
+    dlg = QFileDialog()
+    dlg.setWindowTitle(caption)
+    dlg.setDirectory(initial or "")
+    if folder:
+        dlg.setFileMode(QFileDialog.Directory)
+        dlg.setOption(QFileDialog.ShowDirsOnly, True)
+    else:
+        if name_filter:
+            dlg.setNameFilter(name_filter)
+        if save:
+            dlg.setFileMode(QFileDialog.AnyFile)
+            dlg.setAcceptMode(QFileDialog.AcceptSave)
+        else:
+            dlg.setFileMode(QFileDialog.ExistingFile)
+    dlg.setWindowModality(Qt.ApplicationModal)
+    dlg.fileSelected.connect(on_picked)
+    # Stash the reference on the calling instance so the dialog lives
+    # past this function return. The holder owns a single slot —
+    # replaced on each new picker; safe because pickers are
+    # application-modal so only one can be visible at a time.
+    holder._active_picker = dlg
+    dlg.open()
+
+
 def _build_landmark_name_pattern():
     """Compile the regex used to swap raw landmark keys for anatomical names.
 
@@ -685,6 +745,13 @@ class TraceWindow(QMainWindow):
         # fires itemChanged. The slot would otherwise recurse-mutate the
         # user-skip set while we're rebuilding it.
         self._suppress_check_signal: bool = False
+        # Holds the currently-open async file picker (see
+        # _open_native_picker_async) so Python's GC doesn't free it
+        # between open() and the user clicking Open / Cancel. Required
+        # for the input / output / load-previous-run pickers to survive
+        # napari's process-wide event filter intercepting nested-event-
+        # loop pickers.
+        self._active_picker = None
         self.config = PipelineConfig()
         self._show_vein_tissue = False
         self._show_color_key = True
@@ -1285,9 +1352,15 @@ class TraceWindow(QMainWindow):
     # Folder / model selection
     # -----------------------------------------------------------------------
     def _select_input(self):
-        folder = _pick_folder_native(
-            "Select Input Folder", _picker_initial_path(self.input_edit.text())
+        _open_native_picker_async(
+            self,
+            "Select Input Folder",
+            _picker_initial_path(self.input_edit.text()),
+            self._on_input_folder_picked,
+            folder=True,
         )
+
+    def _on_input_folder_picked(self, folder: str) -> None:
         if not folder:
             return
         self.input_edit.setText(folder)
@@ -1609,9 +1682,15 @@ class TraceWindow(QMainWindow):
         item.setForeground(_status_color(status))
 
     def _select_output(self):
-        folder = _pick_folder_native(
-            "Select Output Folder", _picker_initial_path(self.output_edit.text())
+        _open_native_picker_async(
+            self,
+            "Select Output Folder",
+            _picker_initial_path(self.output_edit.text()),
+            self._on_output_folder_picked,
+            folder=True,
         )
+
+    def _on_output_folder_picked(self, folder: str) -> None:
         if folder:
             self.output_edit.setText(folder)
 
@@ -2725,10 +2804,15 @@ class TraceWindow(QMainWindow):
             )
             return
         seed = self.output_edit.text().strip() or str(Path.home())
-        folder = _pick_folder_native(
+        _open_native_picker_async(
+            self,
             "Pick the output folder of a previous run",
             seed,
+            self._on_load_previous_run_picked,
+            folder=True,
         )
+
+    def _on_load_previous_run_picked(self, folder: str) -> None:
         if not folder:
             return
         try:

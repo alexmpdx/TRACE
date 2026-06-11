@@ -198,6 +198,14 @@ class InlineGeneralPanel(QWidget):
         self._default_region_colors: dict[str, list[int]] = {
             k: list(v) for k, v in self._topology_region_defaults.items()
         }
+        # Holds the currently-open async file picker (see
+        # TRACE.gui._open_native_picker_async) so Python's GC doesn't
+        # free it between open() and the user clicking Open / Cancel.
+        # The scale-estimator wing-image picker sits next to napari
+        # (the Custom Measurements tab embeds it via measurementMaker),
+        # so once napari is loaded the nested-event-loop static-method
+        # path is dead — async is mandatory here.
+        self._active_picker = None
         # Reference-distance state for the Estimate button (lazy popup).
         self._scale_estimator_available = True
         try:
@@ -1033,13 +1041,20 @@ class InlineGeneralPanel(QWidget):
         if not self._confirm_scale_estimator_caveats():
             return
         seed = self._window.input_edit.text() or lm_path
-        from TRACE.gui import _pick_file_native
+        from TRACE.gui import _open_native_picker_async
 
-        image_path = _pick_file_native(
+        # Bind ``lm_path`` and ``host_dialog`` into the callback —
+        # they're needed for the post-pick estimator run and the
+        # caller's optional auto-accept of the wrapping dialog.
+        _open_native_picker_async(
+            self,
             "Select a wing image",
             self._picker_initial_path(seed),
-            "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.ome.tif);;All Files (*)",
+            lambda image_path: self._on_scale_estimator_image_picked(image_path, lm_path, host_dialog),
+            name_filter="Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.ome.tif);;All Files (*)",
         )
+
+    def _on_scale_estimator_image_picked(self, image_path: str, lm_path: str, host_dialog: QDialog | None) -> None:
         if not image_path:
             return
         reference_um = float(self._scale_ref_um_spin.value())

@@ -306,6 +306,13 @@ class PipelineConfigDialog(QDialog):
         self._calib_seg_path = segmentation_model_path
         self._gate_panel = None  # populated by _build_landmarks_tab when a model is loaded
         self._initial_gate_override = gate_override
+        # Holds the currently-open native file picker so Python's GC doesn't
+        # free it between open() and the user clicking Open / Cancel. See
+        # TRACE.gui._open_native_picker_async for the open()-vs-exec_()
+        # rationale (avoids the napari × nested-event-loop interaction
+        # that kills the file list inside Advanced Settings once the live
+        # preview pane has loaded napari).
+        self._active_picker = None
         # (kind, widget, extra) tuples indexed by PipelineConfig field name.
         self._widgets: dict[str, tuple[str, Any, Any]] = {}
         # Stage 1 (resolutionAdjust) — per-model training-µm/px targets, which
@@ -497,19 +504,25 @@ class PipelineConfigDialog(QDialog):
     # Import / Save pipeline-config JSON
     # -----------------------------------------------------------------------
     def _import_config(self) -> None:
-        from TRACE.config_io import load_settings
-
         # Open in the bundled TRACE/presets/ folder so users land in the
         # right place by default. Falls back to CWD if the folder is missing.
         presets_dir = Path(__file__).resolve().parent / "presets"
         initial_dir = str(presets_dir) if presets_dir.is_dir() else ""
-        from TRACE.gui import _pick_file_native
+        from TRACE.gui import _open_native_picker_async
 
-        path = _pick_file_native(
-            "Import Pipeline Config", initial_dir, "JSON (*.json);;All Files (*)"
+        _open_native_picker_async(
+            self,
+            "Import Pipeline Config",
+            initial_dir,
+            self._on_import_config_picked,
+            name_filter="JSON (*.json);;All Files (*)",
         )
+
+    def _on_import_config_picked(self, path: str) -> None:
         if not path:
             return
+        from TRACE.config_io import load_settings
+
         try:
             new_config, gate_override, gui_state = load_settings(Path(path))
         except Exception as e:  # noqa: BLE001
@@ -549,8 +562,6 @@ class PipelineConfigDialog(QDialog):
         QMessageBox.information(self, "Import complete", f"Imported pipeline-config from:\n{path}")
 
     def _export_config(self) -> None:
-        from TRACE.config_io import save_settings
-
         # Default save location is TRACE/presets/ so saved presets appear in
         # the same place the preset combo at the top of the dialog reads from.
         presets_dir = Path(__file__).resolve().parent / "presets"
@@ -558,13 +569,22 @@ class PipelineConfigDialog(QDialog):
             default_path = str(presets_dir / "pipeline_config.json")
         else:
             default_path = "pipeline_config.json"
-        from TRACE.gui import _pick_save_file_native
+        from TRACE.gui import _open_native_picker_async
 
-        path = _pick_save_file_native(
-            "Export Pipeline Config", default_path, "JSON (*.json);;All Files (*)"
+        _open_native_picker_async(
+            self,
+            "Export Pipeline Config",
+            default_path,
+            self._on_export_config_picked,
+            name_filter="JSON (*.json);;All Files (*)",
+            save=True,
         )
+
+    def _on_export_config_picked(self, path: str) -> None:
         if not path:
             return
+        from TRACE.config_io import save_settings
+
         # Pull GUI-only state from the host window so the saved file
         # round-trips every user-visible setting, not just PipelineConfig.
         host = self.parent()
@@ -598,12 +618,17 @@ class PipelineConfigDialog(QDialog):
         return self._wing_model_edit.text().strip()
 
     def _select_wing_model_folder(self):
-        from TRACE.gui import _pick_folder_native, _picker_initial_path
+        from TRACE.gui import _open_native_picker_async, _picker_initial_path
 
-        folder = _pick_folder_native(
+        _open_native_picker_async(
+            self,
             "Select Wing-Identification Model Folder",
             _picker_initial_path(self._wing_model_edit.text()),
+            self._on_wing_model_folder_picked,
+            folder=True,
         )
+
+    def _on_wing_model_folder_picked(self, folder: str) -> None:
         if folder:
             self._wing_model_edit.setText(folder)
 
@@ -975,17 +1000,26 @@ class PipelineConfigDialog(QDialog):
     # -----------------------------------------------------------------------
     def _autodetect_target_um_per_px(self, spin: QDoubleSpinBox, get_model_path_fn) -> None:
         """Open a folder picker, run autodetect, write the average into `spin`."""
-        from TRACE.gui import _pick_folder_native, _picker_initial_path
+        from TRACE.gui import _open_native_picker_async, _picker_initial_path
 
         seed_path = ""
         try:
             seed_path = get_model_path_fn() or ""
         except Exception:
             seed_path = ""
-        folder = _pick_folder_native(
+        # Bind ``spin`` (the per-stage target spinbox) into the callback
+        # so the result lands in the right widget — the auto-detect
+        # helper is shared by landmark / segmentation / wing isolation,
+        # each with its own spinbox.
+        _open_native_picker_async(
+            self,
             "Select training-image folder",
             _picker_initial_path(seed_path),
+            lambda folder: self._on_autodetect_folder_picked(folder, spin),
+            folder=True,
         )
+
+    def _on_autodetect_folder_picked(self, folder: str, spin: QDoubleSpinBox) -> None:
         if not folder:
             return
         try:
@@ -1044,33 +1078,44 @@ class PipelineConfigDialog(QDialog):
         return self._seg_model_edit.text().strip()
 
     def _select_landmark_model_folder(self):
-        from pathlib import Path as _P
+        from TRACE.gui import _open_native_picker_async, _picker_initial_path
 
-        from TRACE.gui import _pick_folder_native, _picker_initial_path
-
-        folder = _pick_folder_native(
+        _open_native_picker_async(
+            self,
             "Select Model Folder (contains best_fold*.pt directly)",
             _picker_initial_path(self._lm_model_edit.text()),
+            self._on_landmark_model_folder_picked,
+            folder=True,
         )
-        if folder:
-            if not sorted(_P(folder).glob("best_fold*.pt")):
-                QMessageBox.warning(
-                    self,
-                    "No fold checkpoints",
-                    f"No best_fold*.pt files in {folder}.\n\n"
-                    "Pick the model folder itself — the one that contains best_fold0.pt … "
-                    "best_fold4.pt directly (and, optionally, gate_config.yaml + training_chart.png).",
-                )
-                return
-            self._lm_model_edit.setText(folder)
+
+    def _on_landmark_model_folder_picked(self, folder: str) -> None:
+        if not folder:
+            return
+        from pathlib import Path as _P
+
+        if not sorted(_P(folder).glob("best_fold*.pt")):
+            QMessageBox.warning(
+                self,
+                "No fold checkpoints",
+                f"No best_fold*.pt files in {folder}.\n\n"
+                "Pick the model folder itself — the one that contains best_fold0.pt … "
+                "best_fold4.pt directly (and, optionally, gate_config.yaml + training_chart.png).",
+            )
+            return
+        self._lm_model_edit.setText(folder)
 
     def _select_segmentation_model_folder(self):
-        from TRACE.gui import _pick_folder_native, _picker_initial_path
+        from TRACE.gui import _open_native_picker_async, _picker_initial_path
 
-        folder = _pick_folder_native(
+        _open_native_picker_async(
+            self,
             "Select Segmentation Model Folder",
             _picker_initial_path(self._seg_model_edit.text()),
+            self._on_segmentation_model_folder_picked,
+            folder=True,
         )
+
+    def _on_segmentation_model_folder_picked(self, folder: str) -> None:
         if folder:
             self._seg_model_edit.setText(folder)
 

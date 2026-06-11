@@ -76,6 +76,10 @@ class LandmarkPickerWidget(QWidget):
         self._default_image_dir = default_image_dir
         self._initial_image_path = initial_image_path
         self._initial_landmarks_path = initial_landmarks_path
+        # Holds the currently-open native file picker so Python's GC doesn't
+        # free it between open() and the user clicking Open / Cancel. See
+        # _open_native_picker for the open()-vs-exec_() rationale.
+        self._active_picker: Optional[QFileDialog] = None
         # Optional callback: takes an image path, runs LandmarkLocator, returns
         # the path to a freshly-written *_landmarks.geojson. Used by Load when
         # the user picked an image but no landmarks file — we auto-generate
@@ -323,38 +327,84 @@ class LandmarkPickerWidget(QWidget):
         self._splitter.setStretchFactor(1, 4)
 
     # --- File pickers ------------------------------------------------------
-    # We force Qt's own (non-native) dialog because the macOS native dialog
-    # mis-handles file selection when napari/qtpy is also loaded in the
-    # process — clicks land but selection never commits. The Qt dialog is
-    # ugly but reliable across platforms.
-    _FILE_DIALOG_OPTS = QFileDialog.DontUseNativeDialog
+    # All four pickers in this widget go through ``_open_native_picker``,
+    # which uses ``QFileDialog.open()`` + the ``fileSelected`` signal
+    # instead of the static convenience methods. Reason:
+    #
+    # ``QFileDialog.getOpenFileName(...)`` (and its save / directory
+    # siblings) call ``exec_()`` internally, which spins up a *nested*
+    # Qt event loop. Napari registers application-wide event filters on
+    # QApplication that intercept mouse events inside that nested loop
+    # before they ever reach the native NSOpenPanel — the file list
+    # silently goes dead. ``parent=None`` (the workaround used elsewhere
+    # in TRACE for the non-napari pickers) doesn't help here, because
+    # the filter is process-wide, not parent-scoped.
+    #
+    # ``open()`` shows the dialog modally without a nested event loop —
+    # napari's filters operate on the main loop normally and the native
+    # panel receives mouse events as expected. The result arrives
+    # asynchronously via ``fileSelected``, so each picker passes a
+    # callback and the click-handling logic moves into a dedicated
+    # ``_on_<thing>_picked`` slot.
+
+    def _open_native_picker(
+        self,
+        title: str,
+        initial_dir: str,
+        name_filter: str,
+        on_picked,
+        *,
+        save: bool = False,
+    ) -> None:
+        """Show a native macOS file picker without a nested event loop."""
+        dlg = QFileDialog()
+        dlg.setWindowTitle(title)
+        dlg.setDirectory(initial_dir or "")
+        dlg.setNameFilter(name_filter)
+        if save:
+            dlg.setFileMode(QFileDialog.AnyFile)
+            dlg.setAcceptMode(QFileDialog.AcceptSave)
+        else:
+            dlg.setFileMode(QFileDialog.ExistingFile)
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.fileSelected.connect(on_picked)
+        # Hold a reference so Python's GC doesn't free the dialog before
+        # the user clicks Open / Cancel. open() returns immediately so the
+        # local would otherwise drop out of scope. Replaced on each new
+        # picker; safe because they're application-modal — only one can
+        # be visible at a time.
+        self._active_picker = dlg
+        dlg.open()
 
     def _select_image(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
+        self._open_native_picker(
             "Select sample wing image",
             self._default_image_dir,
             "Wing images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.pdf);;All files (*)",
-            options=self._FILE_DIALOG_OPTS,
+            self._on_image_picked,
         )
-        if path:
-            self._image_edit.setText(path)
-            # Picking a new image invalidates any prior landmarks selection
-            # (those landmarks belonged to a different wing). Clearing here
-            # also unblocks the auto-detect path: a downstream landmarks_generator
-            # only fires when the landmarks edit is empty on Load click.
-            self._lm_edit.setText("")
-            self._default_image_dir = str(Path(path).parent)
+
+    def _on_image_picked(self, path: str) -> None:
+        if not path:
+            return
+        self._image_edit.setText(path)
+        # Picking a new image invalidates any prior landmarks selection
+        # (those landmarks belonged to a different wing). Clearing here
+        # also unblocks the auto-detect path: a downstream landmarks_generator
+        # only fires when the landmarks edit is empty on Load click.
+        self._lm_edit.setText("")
+        self._default_image_dir = str(Path(path).parent)
 
     def _select_landmarks(self):
         start_dir = str(Path(self._image_edit.text()).parent) if self._image_edit.text() else self._default_image_dir
-        path, _ = QFileDialog.getOpenFileName(
-            self,
+        self._open_native_picker(
             "Select matching landmarks GeoJSON",
             start_dir,
             "Landmarks GeoJSON (*_landmarks.geojson *.geojson);;All files (*)",
-            options=self._FILE_DIALOG_OPTS,
+            self._on_landmarks_picked,
         )
+
+    def _on_landmarks_picked(self, path: str) -> None:
         if path:
             self._lm_edit.setText(path)
 
@@ -648,13 +698,15 @@ class LandmarkPickerWidget(QWidget):
         if not self._pairs:
             QMessageBox.information(self, "No pairs", "No pairs configured to save.")
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self,
+        self._open_native_picker(
             "Save landmark distance pairs",
             self._default_image_dir,
             "JSON (*.json);;All files (*)",
-            options=self._FILE_DIALOG_OPTS,
+            self._on_save_pairs_picked,
+            save=True,
         )
+
+    def _on_save_pairs_picked(self, path: str) -> None:
         if not path:
             return
         if not path.lower().endswith(".json"):
@@ -671,13 +723,14 @@ class LandmarkPickerWidget(QWidget):
             QMessageBox.critical(self, "Save failed", str(exc))
 
     def _load_pairs_from_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
+        self._open_native_picker(
             "Load landmark distance pairs",
             self._default_image_dir,
             "JSON (*.json);;All files (*)",
-            options=self._FILE_DIALOG_OPTS,
+            self._on_load_pairs_picked,
         )
+
+    def _on_load_pairs_picked(self, path: str) -> None:
         if not path:
             return
         try:
