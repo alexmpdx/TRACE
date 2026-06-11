@@ -782,6 +782,10 @@ class TraceWindow(QMainWindow):
         # panel exposes an opt-out checkbox backed by the same setting.
         if self.settings.value("auto_update_check_enabled", True, type=bool):
             QTimer.singleShot(0, self._maybe_auto_check_updates)
+        # Post-run restore prompt. Deferred to QTimer so the window is
+        # visible before the dialog appears — otherwise the prompt
+        # races the first paint and shows up against a blank background.
+        QTimer.singleShot(0, self._maybe_offer_restore_post_run_state)
 
         # Theme live-switch wiring. _apply_theme_styles re-runs every
         # inline stylesheet that depends on theme tokens (eta_label,
@@ -1055,6 +1059,23 @@ class TraceWindow(QMainWindow):
         btn_layout.addWidget(self.btn_run)
         btn_layout.addWidget(self.btn_cancel)
         left_layout.addLayout(btn_layout)
+
+        # Load-previous-run is always visible — it's the deliberate
+        # fallback for "I dismissed the on-launch prompt" and for
+        # picking older runs in a different output folder. Lives here
+        # (below Run / Cancel) rather than in a menu bar because the
+        # main window has no menu bar today, and grouping with the
+        # other post-run actions matches the user's mental model.
+        # Disabled while a run is in progress so the worker can't
+        # race against a state restore.
+        self.btn_load_previous = QPushButton("Load previous run…")
+        self.btn_load_previous.setToolTip(
+            "Reload the post-run state of a previous TRACE run so you can open the "
+            "inspector on its failed images. Pick the output folder you used for that "
+            "run; per-image overrides you saved before are still there."
+        )
+        self.btn_load_previous.clicked.connect(self._load_previous_run_dialog)
+        left_layout.addWidget(self.btn_load_previous)
 
         # Rerun buttons appear after a run that left ≥1 failed image
         # (visibility recomputed in _refresh_rerun_buttons). The no-gate
@@ -2477,18 +2498,240 @@ class TraceWindow(QMainWindow):
         from the worker's returned results to cover all categories.
         """
         manifest_failed: set[str] = set()
+        manifest_analysis_failed: set[str] = set()
         if self._manifest is not None:
             try:
                 manifest_failed = self._manifest.failed_preproc_set()
             except Exception:
                 manifest_failed = set(getattr(self._manifest, "failed_preproc_images", []) or [])
+            try:
+                manifest_analysis_failed = self._manifest.analysis_failed_set()
+            except Exception:
+                # Older manifests may not have the analysis_failed_images
+                # field at all; defaulting to empty is correct for that
+                # case (those runs predate the field).
+                manifest_analysis_failed = set(getattr(self._manifest, "analysis_failed_images", []) or [])
         analysis_failed: set[str] = {
             r.image_path.name
             for r in (results or [])
             if getattr(r, "error", None) and getattr(r, "error_stage", None) == "analysis"
         }
-        self._last_run_failed_set = manifest_failed | analysis_failed
+        self._last_run_failed_set = manifest_failed | manifest_analysis_failed | analysis_failed
         self._refresh_rerun_buttons()
+
+    def _restore_post_run_state(self, manifest, run_folder: Path) -> None:
+        """Repaint the GUI as if the worker had just finished ``manifest``.
+
+        Drives both entry points (auto-prompt on launch and the
+        Load-previous-run button). Without re-running the pipeline, this:
+
+          - adopts ``manifest`` + ``run_folder`` so the rerun-failed paths
+            (which look up self._manifest) work seamlessly;
+          - points the input-folder edit at the manifest's saved input
+            path and refreshes _image_paths / _basename_to_row so row
+            lookups during state replay actually resolve;
+          - replays each image's terminal state into _image_status,
+            _image_error_text, _failure_category from the persisted
+            manifest fields, then redraws the row labels via
+            _update_image_status (which is how live failures get their
+            tooltips today);
+          - rebuilds _last_run_failed_set via _record_failures_from_run,
+            which in turn calls _refresh_rerun_buttons — the Review +
+            Rerun trio reappears with the correct counts.
+
+        Output-section checkboxes and CSV-measurement groups are NOT
+        restored: they're config for *running* the pipeline, not
+        reviewing, and the user will adjust them deliberately if they
+        decide to rerun anything. Leaving the current settings alone
+        avoids surprising overwrites.
+        """
+        from TRACE.run_state import STATUS_COMPLETED
+
+        # Block image-list signal handlers while we rebuild — the
+        # input-folder change normally triggers Run-button enabling
+        # heuristics that don't apply mid-restore.
+        prior_input = self.input_edit.text()
+        if manifest.input_dir and Path(manifest.input_dir).exists():
+            self.input_edit.setText(manifest.input_dir)
+        elif not prior_input:
+            # Manifest references an input folder that's gone; show what
+            # the manifest claims so the user can fix the path manually.
+            self.input_edit.setText(manifest.input_dir)
+        # The user's output folder (parent of run_<N>); if the manifest
+        # lived at the top-level legacy location, run_folder IS the
+        # output folder so .parent would back into the user's home —
+        # use run_folder itself in that case.
+        legacy_layout = (run_folder / "_run_state.json").is_file() and run_folder.name != ""
+        if legacy_layout and not run_folder.name.startswith("run_"):
+            self.output_edit.setText(str(run_folder))
+        else:
+            self.output_edit.setText(str(run_folder.parent))
+        # Adopt the manifest. After this point, anything else that
+        # reads self._manifest (rerun-failed flow, completion handlers)
+        # sees the persisted state.
+        self._manifest = manifest
+        self._run_folder = run_folder
+
+        # _refresh_image_list reads self.input_edit.text() so it picks
+        # up the path we just set. Side effect: rebuilds _image_paths,
+        # _basename_to_row, _row_base_labels — all required for
+        # _update_image_status row lookups below.
+        self._refresh_image_list()
+
+        # Replay per-image state from the manifest.
+        completed = set(manifest.completed_images or [])
+        preproc_failed = set(manifest.failed_preproc_images or [])
+        analysis_failed = set(manifest.analysis_failed_images or [])
+        all_failed = preproc_failed | analysis_failed
+        # Stage-2-failed images get marked completed too (see
+        # _on_image_failed_analysis docstring), so flip them out of the
+        # success-only set before painting.
+        succeeded_only = completed - all_failed
+
+        messages = manifest.failure_messages or {}
+        for bn in succeeded_only:
+            self._image_status[bn] = ImageStatus.SUCCEEDED
+            self._update_image_status(bn, ImageStatus.SUCCEEDED)
+        for bn in preproc_failed:
+            msg = messages.get(bn, "")
+            if msg:
+                self._image_error_text[bn] = msg
+            # Derive the category the same way the live failure slot
+            # does. Older manifests stored no message → the regex sees
+            # "" and falls into preproc_other, which is harmless (only
+            # affects whether the "no gate aborts" rerun button shows
+            # up — and for the user reviewing post-hoc, they'd see the
+            # plain Rerun + Review buttons either way).
+            self._failure_category[bn] = _classify_preproc_failure(msg)
+            self._update_image_status(bn, ImageStatus.FAILED)
+        for bn in analysis_failed:
+            msg = messages.get(bn, "")
+            if msg:
+                self._image_error_text[bn] = msg
+            self._failure_category[bn] = "analysis"
+            self._update_image_status(bn, ImageStatus.FAILED)
+
+        # Tail end: rebuild _last_run_failed_set + paint the Review /
+        # Rerun buttons. _record_failures_from_run consults the
+        # manifest we just adopted and unions both failure lists.
+        self._record_failures_from_run([])
+
+        # Surface a one-line breadcrumb in the run log so the user
+        # knows the restore happened (and can scroll back to it).
+        try:
+            self._log(
+                f"--- Restored {len(all_failed)} failed image(s) from previous run at {run_folder} ---"
+            )
+        except Exception:
+            # Run-log widget isn't always there during early init.
+            pass
+
+        # Defensive: if find_completed_manifest mismatched the status
+        # (shouldn't happen, but treat as best-effort), don't crash.
+        if manifest.status != STATUS_COMPLETED:
+            logging.getLogger(__name__).warning(
+                "Restored manifest with non-completed status %s — UI is in a partially-restored state.",
+                manifest.status,
+            )
+
+    def _maybe_offer_restore_post_run_state(self) -> None:
+        """On launch, ask the user if they want to reload the previous run.
+
+        Only fires when (a) the saved output folder has a COMPLETED
+        manifest with at least one unreviewed failed image, AND (b) no
+        run is currently in progress (defensive — auto-prompt runs
+        once at init, before the user can start anything). Decline is
+        silent; the Load-previous-run button at the bottom of the left
+        column is the deliberate fallback for "I dismissed but changed
+        my mind" and for picking older runs.
+        """
+        if self.worker is not None and self.worker.isRunning():
+            return
+        output_text = self.output_edit.text().strip()
+        if not output_text:
+            return
+        output_dir = Path(output_text)
+        if not output_dir.is_dir():
+            return
+        try:
+            from TRACE.run_state import find_completed_manifest
+
+            found = find_completed_manifest(output_dir)
+        except Exception:
+            return
+        if found is None:
+            return
+        manifest, run_folder = found
+        failed_count = len(set(manifest.failed_preproc_images or []) | set(manifest.analysis_failed_images or []))
+        if failed_count <= 0:
+            return  # defensive — find_completed_manifest already filters this
+        reply = QMessageBox.question(
+            self,
+            "Reload previous run?",
+            (
+                f"Your last run in {output_dir} left {failed_count} image(s) flagged as failed "
+                f"that you may not have reviewed yet.\n\n"
+                "Reload that view so you can open the inspector on them?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._restore_post_run_state(manifest, run_folder)
+        # Open the inspector immediately — that's the user's actual
+        # goal. _review_failed_images warns + bails if it can't resolve
+        # paths, so a missing-input case is handled without an extra
+        # check here.
+        self._review_failed_images()
+
+    def _load_previous_run_dialog(self) -> None:
+        """Picker for the Load-previous-run button below the Run row.
+
+        Lets the user point at any output folder (current or otherwise)
+        and resurface its failed-image review state. Used for older
+        runs that aren't the most recent, or for runs in a different
+        output folder than the one the auto-prompt watches.
+        """
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Load previous run",
+                "Wait for the current run to finish before loading a previous one.",
+            )
+            return
+        seed = self.output_edit.text().strip() or str(Path.home())
+        folder = _pick_folder_native(
+            "Pick the output folder of a previous run",
+            seed,
+        )
+        if not folder:
+            return
+        try:
+            from TRACE.run_state import find_completed_manifest
+
+            found = find_completed_manifest(Path(folder))
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Load previous run",
+                f"Couldn't read run-state from {folder}:\n{type(exc).__name__}: {exc}",
+            )
+            return
+        if found is None:
+            QMessageBox.information(
+                self,
+                "Load previous run",
+                (
+                    f"No completed run with failed images was found under {folder}.\n\n"
+                    "A reloadable run needs (a) a finished TRACE run in that folder "
+                    "and (b) at least one image flagged as failed."
+                ),
+            )
+            return
+        manifest, run_folder = found
+        self._restore_post_run_state(manifest, run_folder)
+        self._review_failed_images()
 
     def _start_rerun_failed(self, *, disable_gates: bool) -> None:
         """Launch a rerun scoped to the last run's failed set.
@@ -3233,40 +3476,48 @@ class TraceWindow(QMainWindow):
 
         ``error_text`` is shown next to the row as a short one-liner.
         """
-        if self._manifest is not None and self._run_folder is not None:
-            self._manifest.mark_failed_preproc(basename)
-            save_manifest(self._run_folder, self._manifest)
         # Categorize BEFORE translating landmark names — the gate-error
         # prefix ("Core landmarks failed confidence gate") isn't touched
         # by translation today, but classifying on the raw text keeps
         # the regex coupling tight to LowConfidenceLandmarkError's own
         # message format.
         self._failure_category[basename] = _classify_preproc_failure(error_text)
-        if error_text:
-            # Translate raw landmark keys to anatomical names here, at
-            # storage, so the inline row label (rendered via
-            # _shorten_error → _update_image_status) shows friendly names
-            # alongside the run log.
-            self._image_error_text[basename] = _translate_landmark_names(error_text)
+        # Translate raw landmark keys to anatomical names here, at
+        # storage, so the inline row label (rendered via
+        # _shorten_error → _update_image_status) shows friendly names
+        # alongside the run log.
+        translated = _translate_landmark_names(error_text) if error_text else ""
+        if translated:
+            self._image_error_text[basename] = translated
+        if self._manifest is not None and self._run_folder is not None:
+            # Persist the translated message so the post-run restore flow
+            # can replay the same tooltip the user would have seen at the
+            # end of the run.
+            self._manifest.mark_failed_preproc(basename, translated)
+            save_manifest(self._run_folder, self._manifest)
         self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_image_failed_analysis(self, basename: str, error_text: str = "") -> None:
         """One image's Stage 2 errored — mark the row failed.
 
-        Manifest bookkeeping happens via the companion image_completed
-        signal that the pipeline fires alongside this one (see
-        _signal_complete in TRACE/pipeline.py): Stage-2-failed images
-        are still recorded as "completed" so they're not retried on
-        resume under unchanged settings. This handler flips the row
-        visual to FAILED and stashes the inline error text.
+        Stage-2 failures are persisted under analysis_failed_images so the
+        post-run "Reload previous session" flow can resurface them. The
+        companion image_completed signal that fires from _signal_complete
+        in TRACE/pipeline.py still records the image in completed_images
+        so resume's skip set keeps it out of a re-run (the manifest tracks
+        "did we get to Stage 2?" + "did Stage 2 succeed?" independently).
         """
         # Stage-2 failures don't go through _classify_preproc_failure —
         # the category is always "analysis" here. The no-gate rerun
         # button visibility check filters on category=="gate", so
         # analysis-only failures correctly show only the plain rerun.
         self._failure_category[basename] = "analysis"
-        if error_text:
-            self._image_error_text[basename] = _translate_landmark_names(error_text)
+        translated = _translate_landmark_names(error_text) if error_text else ""
+        if translated:
+            self._image_error_text[basename] = translated
+        if self._manifest is not None and self._run_folder is not None:
+            self._manifest.mark_failed_analysis(basename, translated)
+            save_manifest(self._run_folder, self._manifest)
         self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_paused(self, results: list) -> None:

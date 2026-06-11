@@ -80,6 +80,17 @@ class RunManifest:
     # so a resume that picks "Continue with current settings" clears these
     # from the skip set to give them another shot.
     failed_preproc_images: list[str] = field(default_factory=list)
+    # Images whose Stage 2 (identifyFeatures analysis) errored. Persisted so
+    # the post-run "Review failed images" / "Reload previous session" flows
+    # can resurface them without re-running the pipeline. Disjoint from
+    # failed_preproc_images by construction — an image either fails Stage 1
+    # or fails Stage 2, never both in the same run.
+    analysis_failed_images: list[str] = field(default_factory=list)
+    # Per-image error text (basename → message). Populated alongside the
+    # failed_* lists; used by the restore-previous-session flow to repaint
+    # the image-list tooltips that show *why* each image failed. Empty for
+    # any image whose error message wasn't captured (e.g. older manifests).
+    failure_messages: dict[str, str] = field(default_factory=dict)
 
     def mark_completed(self, image_basename: str) -> None:
         """Record an image as Stage-2-done. Idempotent; updates the timestamp.
@@ -94,10 +105,31 @@ class RunManifest:
             self.failed_preproc_images.remove(image_basename)
         self.updated_at = _now_iso()
 
-    def mark_failed_preproc(self, image_basename: str) -> None:
-        """Record an image as Stage-1-failed. Idempotent; updates the timestamp."""
+    def mark_failed_preproc(self, image_basename: str, error_text: str = "") -> None:
+        """Record an image as Stage-1-failed. Idempotent; updates the timestamp.
+
+        ``error_text`` is stored in ``failure_messages`` so the post-run
+        restore flow can replay the per-image tooltip. Pass an empty
+        string when no message is available; older callers stay
+        backwards-compatible because the default is empty.
+        """
         if image_basename not in self.failed_preproc_images:
             self.failed_preproc_images.append(image_basename)
+        if error_text:
+            self.failure_messages[image_basename] = error_text
+        self.updated_at = _now_iso()
+
+    def mark_failed_analysis(self, image_basename: str, error_text: str = "") -> None:
+        """Record an image as Stage-2-failed. Idempotent; updates the timestamp.
+
+        Mirrors mark_failed_preproc but for identifyFeatures errors. The
+        same image never lands in both lists in the same run — Stage 1
+        success is a precondition for Stage 2.
+        """
+        if image_basename not in self.analysis_failed_images:
+            self.analysis_failed_images.append(image_basename)
+        if error_text:
+            self.failure_messages[image_basename] = error_text
         self.updated_at = _now_iso()
 
     def completed_set(self) -> set[str]:
@@ -107,6 +139,18 @@ class RunManifest:
     def failed_preproc_set(self) -> set[str]:
         """Set view of the preproc-failed basenames for O(1) lookup."""
         return set(self.failed_preproc_images)
+
+    def analysis_failed_set(self) -> set[str]:
+        """Set view of the analysis-failed basenames for O(1) lookup."""
+        return set(self.analysis_failed_images)
+
+    def has_unreviewed_failures(self) -> bool:
+        """True when there's at least one image in either failure list.
+
+        Used by find_completed_manifest() to skip completed runs that
+        have nothing left to look at.
+        """
+        return bool(self.failed_preproc_images or self.analysis_failed_images)
 
     def is_in_progress(self) -> bool:
         """True when this run can be resumed (running or paused, not done)."""
@@ -154,6 +198,9 @@ def load_manifest(output_dir: Path) -> Optional[RunManifest]:
         )
         return None
     try:
+        raw_failure_messages = data.get("failure_messages", {}) or {}
+        if not isinstance(raw_failure_messages, dict):
+            raw_failure_messages = {}
         return RunManifest(
             version=int(data.get("version", _MANIFEST_VERSION)),
             started_at=str(data.get("started_at", "")),
@@ -167,6 +214,10 @@ def load_manifest(output_dir: Path) -> Optional[RunManifest]:
             total_images=int(data.get("total_images", 0)),
             completed_images=list(data.get("completed_images", []) or []),
             failed_preproc_images=list(data.get("failed_preproc_images", []) or []),
+            # Older manifests (pre-restore-feature) don't have these keys;
+            # defaulting to empty preserves backwards compatibility.
+            analysis_failed_images=list(data.get("analysis_failed_images", []) or []),
+            failure_messages={str(k): str(v) for k, v in raw_failure_messages.items()},
         )
     except (TypeError, ValueError) as exc:
         logger.warning("run_state: %s has bad fields: %s", path, exc)
@@ -191,6 +242,42 @@ def save_manifest(output_dir: Path, manifest: RunManifest) -> None:
         tmp.replace(target)
     except OSError as exc:
         logger.warning("run_state: cannot write %s: %s", target, exc)
+
+
+def find_completed_manifest(output_dir: Path) -> Optional[tuple["RunManifest", Path]]:
+    """Look for the most-recent COMPLETED manifest that still has failures.
+
+    Sibling of :func:`find_resumable_manifest`. The post-run restore flow
+    uses this to surface "the last run finished but you didn't get to
+    review N failed images — open them now?". Skips:
+
+      - non-completed runs (those go through find_resumable_manifest),
+      - completed runs whose failure lists are both empty (nothing to
+        review — no point offering to restore).
+
+    Returns ``(manifest, run_folder)`` for the most-recent qualifying
+    run, or ``None`` if there's nothing to offer. "Most recent" follows
+    ``manifest.started_at`` so renaming / moving folders doesn't shuffle
+    the priority. Same legacy ``output_dir/_run_state.json`` fallback as
+    find_resumable_manifest, for users coming from a pre-``run_<N>/``
+    layout.
+    """
+    candidates: list[tuple[RunManifest, Path]] = []
+    for run_dir in Path(output_dir).glob("run_*"):
+        if not run_dir.is_dir():
+            continue
+        m = load_manifest(run_dir)
+        if m is not None and m.status == STATUS_COMPLETED and m.has_unreviewed_failures():
+            candidates.append((m, run_dir))
+    legacy_path = manifest_path(output_dir)
+    if legacy_path.is_file():
+        m = load_manifest(output_dir)
+        if m is not None and m.status == STATUS_COMPLETED and m.has_unreviewed_failures():
+            candidates.append((m, Path(output_dir)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda mr: mr[0].started_at, reverse=True)
+    return candidates[0]
 
 
 def find_resumable_manifest(output_dir: Path) -> Optional[tuple["RunManifest", Path]]:
