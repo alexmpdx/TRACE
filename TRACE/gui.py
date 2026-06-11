@@ -691,6 +691,8 @@ class TraceWindow(QMainWindow):
         self._show_ectopic_labels = True
         self._show_region_labels = True
         self._vein_simplify_tolerance_px = 0.0
+        self._ectopic_label_font_scale = 3.0
+        self._show_compartment_labels = True
         self._include_unreliable_landmarks = False
         self._do_rotation = False
         self._rotation_mirror_correct = False
@@ -1765,6 +1767,8 @@ class TraceWindow(QMainWindow):
             "show_ectopic_labels": bool(self._show_ectopic_labels),
             "show_region_labels": bool(self._show_region_labels),
             "vein_simplify_tolerance_px": float(self._vein_simplify_tolerance_px),
+            "ectopic_label_font_scale": float(self._ectopic_label_font_scale),
+            "show_compartment_labels": bool(self._show_compartment_labels),
             "include_unreliable_landmarks": bool(self._include_unreliable_landmarks),
             "do_rotation": bool(self._do_rotation),
             "rotation_mirror_correct": bool(self._rotation_mirror_correct),
@@ -1805,6 +1809,13 @@ class TraceWindow(QMainWindow):
                 self._vein_simplify_tolerance_px = float(state["vein_simplify_tolerance_px"])
             except (TypeError, ValueError):
                 pass
+        if "ectopic_label_font_scale" in state:
+            try:
+                self._ectopic_label_font_scale = float(state["ectopic_label_font_scale"])
+            except (TypeError, ValueError):
+                pass
+        if "show_compartment_labels" in state:
+            self._show_compartment_labels = bool(state["show_compartment_labels"])
         if "include_unreliable_landmarks" in state:
             self._include_unreliable_landmarks = bool(state["include_unreliable_landmarks"])
         if "do_rotation" in state:
@@ -2009,6 +2020,8 @@ class TraceWindow(QMainWindow):
         self._show_ectopic_labels = True
         self._show_region_labels = True
         self._vein_simplify_tolerance_px = 0.0
+        self._ectopic_label_font_scale = 3.0
+        self._show_compartment_labels = True
         self._include_unreliable_landmarks = False
         self._do_rotation = False
         self._rotation_mirror_correct = False
@@ -2118,6 +2131,8 @@ class TraceWindow(QMainWindow):
         s.setValue("show_ectopic_labels", self._show_ectopic_labels)
         s.setValue("show_region_labels", self._show_region_labels)
         s.setValue("vein_simplify_tolerance_px", str(self._vein_simplify_tolerance_px))
+        s.setValue("ectopic_label_font_scale", str(self._ectopic_label_font_scale))
+        s.setValue("show_compartment_labels", self._show_compartment_labels)
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
         s.setValue("do_rotation", self._do_rotation)
         s.setValue("rotation_mirror_correct", self._rotation_mirror_correct)
@@ -2266,6 +2281,15 @@ class TraceWindow(QMainWindow):
                 self._vein_simplify_tolerance_px = float(saved_vst)
             except (TypeError, ValueError):
                 pass
+        saved_elfs = s.value("ectopic_label_font_scale", None)
+        if saved_elfs is not None:
+            try:
+                self._ectopic_label_font_scale = float(saved_elfs)
+            except (TypeError, ValueError):
+                pass
+        saved_scl = s.value("show_compartment_labels", None)
+        if saved_scl is not None:
+            self._show_compartment_labels = saved_scl == "true" or saved_scl is True
         saved_dor = s.value("do_rotation", None)
         if saved_dor is not None:
             self._do_rotation = saved_dor == "true" or saved_dor is True
@@ -3147,6 +3171,8 @@ class TraceWindow(QMainWindow):
                 show_ectopic_labels=self._show_ectopic_labels,
                 show_region_labels=self._show_region_labels,
                 vein_simplify_tolerance_px=self._vein_simplify_tolerance_px,
+                ectopic_label_font_scale=self._ectopic_label_font_scale,
+                show_compartment_labels=self._show_compartment_labels,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
                 gate_override=self._gate_override,
                 wing_isolation_model_dir=wing_model_dir,

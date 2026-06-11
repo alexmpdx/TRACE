@@ -570,7 +570,28 @@ class InlineGeneralPanel(QWidget):
         self.show_region_labels_chk.toggled.connect(self._on_show_region_labels_toggled)
         v.addWidget(self.show_region_labels_chk)
 
+        self.show_compartment_labels_chk = QCheckBox("Show AP compartment labels")
+        self.show_compartment_labels_chk.setToolTip(
+            "When on (default), the anterior/posterior compartment overlay (when "
+            "selected as an output) is annotated with ANT xx.x% / POST xx.x% text. "
+            "Turn off to keep the tinted compartment fills without the percentage labels."
+        )
+        self.show_compartment_labels_chk.toggled.connect(self._on_show_compartment_labels_toggled)
+        v.addWidget(self.show_compartment_labels_chk)
+
         form = QFormLayout()
+        self.ectopic_label_scale_spin = QDoubleSpinBox()
+        self.ectopic_label_scale_spin.setRange(0.5, 10.0)
+        self.ectopic_label_scale_spin.setDecimals(1)
+        self.ectopic_label_scale_spin.setSingleStep(0.5)
+        self.ectopic_label_scale_spin.setToolTip(
+            "cv2 font scale for the EV1/EV2… ectopic-vein labels in the overlay. "
+            "Default 3.0 matches the historical hardcoded size. Outline and fill "
+            "thicknesses scale proportionally so the label stays legible at any size."
+        )
+        self.ectopic_label_scale_spin.valueChanged.connect(self._on_ectopic_label_scale_changed)
+        form.addRow("Ectopic label size", self.ectopic_label_scale_spin)
+
         self.vein_smooth_spin = QDoubleSpinBox()
         self.vein_smooth_spin.setRange(0.0, 50.0)
         self.vein_smooth_spin.setDecimals(1)
@@ -777,6 +798,12 @@ class InlineGeneralPanel(QWidget):
     def _on_vein_smooth_changed(self, val: float) -> None:
         self._window._vein_simplify_tolerance_px = float(val)
 
+    def _on_show_compartment_labels_toggled(self, checked: bool) -> None:
+        self._window._show_compartment_labels = bool(checked)
+
+    def _on_ectopic_label_scale_changed(self, val: float) -> None:
+        self._window._ectopic_label_font_scale = float(val)
+
     def _on_vein_opacity_changed(self, val: float) -> None:
         self._window.config.vein_opacity = float(val)
 
@@ -830,6 +857,8 @@ class InlineGeneralPanel(QWidget):
         self._window._show_ectopic_labels = True
         self._window._show_region_labels = True
         self._window._vein_simplify_tolerance_px = 0.0
+        self._window._ectopic_label_font_scale = 3.0
+        self._window._show_compartment_labels = True
         self._window._intermediate_outputs = {key: False for key in self._window._intermediate_outputs}
         self._window.settings.setValue("max_workers", DEFAULT_MAX_WORKERS)
         # Re-arm the parallel-workers warning so a fresh climb above the
@@ -861,6 +890,8 @@ class InlineGeneralPanel(QWidget):
             self.show_color_key_chk,
             self.show_ectopic_labels_chk,
             self.show_region_labels_chk,
+            self.show_compartment_labels_chk,
+            self.ectopic_label_scale_spin,
             self.vein_smooth_spin,
             self.vein_opacity_spin,
             self.intervein_opacity_spin,
@@ -889,6 +920,8 @@ class InlineGeneralPanel(QWidget):
             self.show_color_key_chk.setChecked(bool(self._window._show_color_key))
             self.show_ectopic_labels_chk.setChecked(bool(self._window._show_ectopic_labels))
             self.show_region_labels_chk.setChecked(bool(self._window._show_region_labels))
+            self.show_compartment_labels_chk.setChecked(bool(self._window._show_compartment_labels))
+            self.ectopic_label_scale_spin.setValue(float(self._window._ectopic_label_font_scale))
             self.vein_smooth_spin.setValue(float(self._window._vein_simplify_tolerance_px))
             self.vein_opacity_spin.setValue(float(cfg.vein_opacity))
             self.intervein_opacity_spin.setValue(float(cfg.intervein_opacity))
