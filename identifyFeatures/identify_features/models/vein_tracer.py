@@ -694,7 +694,7 @@ def _label_landmark_edges(
     # as an option via config.soft_landmark_reach_metric.
     reach_metric = getattr(config, "soft_landmark_reach_metric", "path_length")
 
-    def _neighbor_reach_costs(junction, neighbors, target_node):
+    def _neighbor_reach_costs(junction, neighbors, target_node, *, Gm=None):
         """Return {neighbor: cost} under the configured metric.
 
         The junction is masked out so paths cannot loop back through it.
@@ -702,9 +702,14 @@ def _label_landmark_edges(
         """
         if target_node is None or target_node == junction:
             return {n: float("inf") for n in neighbors}
-        Gm = G.copy()
-        if Gm.has_node(junction):
-            Gm.remove_node(junction)
+        # ``Gm`` is the full graph with ``junction`` masked out so paths can't
+        # loop back through it. When the caller supplies ``Gm`` (already-masked
+        # for the same ``junction``), reuse it — the second ``_neighbor_reach_costs``
+        # call at the L4-L5 fallback uses the same masked graph as the first.
+        if Gm is None:
+            Gm = G.copy()
+            if Gm.has_node(junction):
+                Gm.remove_node(junction)
         costs: dict[int, float] = {}
         for n in neighbors:
             if not Gm.has_node(n):
@@ -993,10 +998,21 @@ def _label_landmark_edges(
                 l4d_costs_by_n: dict[int, float] = {}
                 l5d_costs_by_n: dict[int, float] = {}
                 remaining = _unlabeled_neighbors(node)
+                # Build the junction-masked graph once and share it across both
+                # _neighbor_reach_costs calls — they target different landmarks
+                # (L4.d vs L5.d) but mask the same junction from the same G.
+                shared_Gm = None
+                if remaining and (
+                    (_reliable_snap(lm_l4d) and not _l4_assigned())
+                    or (_reliable_snap(lm_l5d) and not _l5_assigned())
+                ):
+                    shared_Gm = G.copy()
+                    if shared_Gm.has_node(node):
+                        shared_Gm.remove_node(node)
                 if remaining and _reliable_snap(lm_l4d) and not _l4_assigned():
-                    l4d_costs_by_n = _neighbor_reach_costs(node, remaining, lm_l4d.snapped_node)
+                    l4d_costs_by_n = _neighbor_reach_costs(node, remaining, lm_l4d.snapped_node, Gm=shared_Gm)
                 if remaining and _reliable_snap(lm_l5d) and not _l5_assigned():
-                    l5d_costs_by_n = _neighbor_reach_costs(node, remaining, lm_l5d.snapped_node)
+                    l5d_costs_by_n = _neighbor_reach_costs(node, remaining, lm_l5d.snapped_node, Gm=shared_Gm)
 
                 if l4d_costs_by_n and not _l4_assigned():
                     best_l4 = min(l4d_costs_by_n, key=l4d_costs_by_n.get)
@@ -2656,11 +2672,13 @@ def _detect_crossveins_fallback(
                 perp_score = 0.0
                 perp_count = 0
                 edge_dir = line_direction(line, sample_px=line.length)
+                # `mid` doesn't depend on adj_vein / adj_line, so compute once
+                # rather than rebuilding it for every (adj_vein, adj_line) pair.
+                mid = line.interpolate(0.5, normalized=True)
 
                 for adj_vein in adj_veins:
                     for adj_line in vein_lines.get(adj_vein, []):
                         # Find direction of longitudinal at nearest point to candidate
-                        mid = line.interpolate(0.5, normalized=True)
                         proj_dist = adj_line.project(mid)
                         if proj_dist <= 0 or proj_dist >= adj_line.length:
                             continue
