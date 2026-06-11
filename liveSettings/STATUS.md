@@ -143,6 +143,33 @@ worker carries the active view (`set_view`); the pane gates the display
 checkboxes + intervein refresh to the final view only. Tests:
 `test_views.py` (7, headless) + a view-switch segment in `test_pane_smoke.py`.
 
+## Skeleton core/finish split + config memoization (2026-06-10)
+
+Tier A is split into a cacheable expensive **core** (rasterize + skeletonize +
+prune) and a cheap **finish** (graph cleanup / bridging / merge / cull), mirroring
+the identifyFeatures split (`_build_skeleton_core` / `_finish_skeleton_graph`,
+commits `043b8940`/`5cdc5838`, byte-identical to batch output). `CORE_FIELDS` /
+`FINISH_FIELDS` partition the Tier-A config fields (import-time assert). A change
+to a **finish-only** param (any `bridge_*`, `junction_merge_vein_widths`,
+`collinear_min_angle`, `final_stub_vein_widths`, `enable_small_fragment_removal`,
+`min_component_edge_fraction`) reuses the cached core and re-runs only the finish.
+
+**Measured (0003 full-res): a finish-only Wing-Graph change drops 4402ms → 548ms
+(~8×).** Plus two bounded LRUs (`_core_lru`, `_skel_lru`, cap 16, cleared on
+`set_input`, keyed on the effective-config signature) so revisiting any prior
+config is instant (`A_cached`, zero compute). `timings_ms` now reports
+`A_core`/`A_finish`/`A_cached` instead of the old `A_skeleton`.
+
+While wiring this, two fields (`assign_absent_partial_status`,
+`partial_endpoint_search_vw`) were found mis-classified as Tier A — they're used
+only by the vein tracer, so they were moved to Tier B (the partition assert
+surfaced it). No memoization at the veins/Tier-B level — the deepcopy-from-
+pristine discipline stays the single source of Tier-B correctness. Tests:
+`test_session.py` gained `test_core_finish_partition`,
+`test_finish_only_change_skips_core`, `test_core_change_rebuilds_core`,
+`test_finish_only_matches_full_rebuild` (the fast path equals a full rebuild),
+`test_revisiting_config_is_instant`, `test_set_input_clears_lru`.
+
 ## Not done / deferred
 
 - Smaller test wings would make `test_session.py` much faster; left on 0003 for
