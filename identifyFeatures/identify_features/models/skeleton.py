@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import math
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -110,6 +112,29 @@ class _DebugDumper:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _SkeletonCore:
+    """Intermediate product of the expensive (raster + skeletonize + prune) half.
+
+    Internal to this module — not a pipeline output. Exposed only so callers
+    that re-run the cheap graph-cleanup half (the live-tuning preview in
+    ``liveSettings/``) can cache the expensive half between parameter tweaks.
+
+    Treat the array fields as read-only. ``raw_graph`` is the UNSIMPLIFIED
+    ``nx.Graph`` straight from ``_skeleton_to_graph``; ``_finish_skeleton_graph``
+    deep-copies it before mutating, so a cached core can be reused across
+    finish-only re-runs without cross-run corruption.
+    """
+
+    vein_mask: np.ndarray
+    skel: np.ndarray
+    distance_map: "np.ndarray | None"
+    median_vein_width: float
+    prune_threshold: int
+    raw_graph: object  # nx.Graph
+    image_shape: tuple[int, int]
+
+
 def build_skeleton_graph(
     vein_polygons: list[Polygon | MultiPolygon],
     image_shape: tuple[int, int],
@@ -133,7 +158,26 @@ def build_skeleton_graph(
         config = PipelineConfig()
 
     dbg = _DebugDumper(debug_dir, image_shape) if debug_dir is not None else None
+    core = _build_skeleton_core(vein_polygons, image_shape, config, dbg=dbg)
+    return _finish_skeleton_graph(core, config, dbg=dbg)
 
+
+def _build_skeleton_core(
+    vein_polygons: list[Polygon | MultiPolygon],
+    image_shape: tuple[int, int],
+    config: "PipelineConfig",
+    dbg: "_DebugDumper | None" = None,
+) -> _SkeletonCore:
+    """Expensive half: rasterize, skeletonize, prune, build the raw graph.
+
+    Returns an intermediate ``_SkeletonCore`` that ``_finish_skeleton_graph``
+    consumes to produce the final ``SkeletonGraph``. Splitting at this point
+    lets the live-tuning preview cache the result and re-run only the cheap
+    graph-cleanup half when finish-only parameters change.
+
+    The split point is between ``_skeleton_to_graph`` (the last
+    full-resolution raster step) and the first ``_simplify_graph`` call.
+    """
     methods = config.skeleton_methods
     smooth_sigma = config.smooth_sigma
     prune_methods = config.prune_methods
@@ -143,14 +187,6 @@ def build_skeleton_graph(
     prune_radius_ratio = config.prune_radius_ratio_threshold
     prune_scale_sigmas = config.prune_scale_sigmas
     prune_single_scale_sigma = config.prune_single_scale_sigma
-    collinear_min_angle = config.collinear_min_angle
-    max_gap_px = config.to_px(config.bridge_max_gap_um)
-    bridge_gap_fraction = config.bridge_gap_fraction
-    direction_window_px = config.to_px(config.bridge_direction_window_um)
-    min_combined_length_px = config.to_px(config.bridge_min_combined_length_um)
-    bridge_min_facing_angle = config.bridge_min_facing_angle
-    bridge_on_axis_max_angle = config.bridge_on_axis_max_angle
-    bridge_on_axis_relaxed_cap = config.bridge_on_axis_relaxed_cap
 
     # Step 1: Rasterize vein polygons to binary mask
     vein_mask = rasterize_polygons(vein_polygons, image_shape)
@@ -180,11 +216,13 @@ def build_skeleton_graph(
     if dbg:
         dbg.dump_skel(skel, "skeleton_raw")
 
-    # Compute median vein width from the raw skeleton (before pruning)
+    # Compute median vein width from the raw skeleton (before pruning).
+    # Stored on the core so the finish half reuses the cached value rather
+    # than recomputing — keeps batch output identical and finish re-runs cheap.
     median_vein_width = _compute_median_vein_width(skel, distance_map, vein_mask)
     logger.info("Median vein width: %.1fpx", median_vein_width)
 
-    # Compute prune threshold (also reused by bridge passes)
+    # Compute prune threshold (also reused by bridge passes in the finish half).
     if prune_min_length_px is not None:
         prune_threshold = prune_min_length_px
     else:
@@ -223,6 +261,52 @@ def build_skeleton_graph(
     logger.info("Raw graph: %d nodes, %d edges", graph.number_of_nodes(), graph.number_of_edges())
     if dbg:
         dbg.dump_graph(graph, "graph_raw")
+
+    return _SkeletonCore(
+        vein_mask=vein_mask,
+        skel=skel,
+        distance_map=distance_map,
+        median_vein_width=median_vein_width,
+        prune_threshold=prune_threshold,
+        raw_graph=graph,
+        image_shape=image_shape,
+    )
+
+
+def _finish_skeleton_graph(
+    core: _SkeletonCore,
+    config: "PipelineConfig",
+    dbg: "_DebugDumper | None" = None,
+) -> SkeletonGraph:
+    """Cheap half: degree-2 contraction → junction merge → bridge passes →
+    cleanup → final stub removal → component cull.
+
+    Operates on a deep copy of ``core.raw_graph`` so the same core can be
+    reused across multiple finish-only re-runs (different finish-side params)
+    without cross-run corruption. The arrays on ``core`` are treated as
+    read-only; only the deep-copied graph is mutated.
+    """
+    collinear_min_angle = config.collinear_min_angle
+    max_gap_px = config.to_px(config.bridge_max_gap_um)
+    bridge_gap_fraction = config.bridge_gap_fraction
+    direction_window_px = config.to_px(config.bridge_direction_window_um)
+    min_combined_length_px = config.to_px(config.bridge_min_combined_length_um)
+    bridge_min_facing_angle = config.bridge_min_facing_angle
+    bridge_on_axis_max_angle = config.bridge_on_axis_max_angle
+    bridge_on_axis_relaxed_cap = config.bridge_on_axis_relaxed_cap
+
+    vein_mask = core.vein_mask
+    skel = core.skel
+    distance_map = core.distance_map
+    median_vein_width = core.median_vein_width
+    prune_threshold = core.prune_threshold
+    image_shape = core.image_shape
+
+    # Deep-copy the raw graph so a cached core can drive multiple finish
+    # re-runs without each mutating the other's view. Cost is negligible
+    # (the raw graph is small, ~hundreds of nodes); behavior is identical
+    # to the pre-split version which constructed the graph fresh each call.
+    graph = deepcopy(core.raw_graph)
 
     # Step 7: Contract degree-2 nodes
     graph = _simplify_graph(graph)
