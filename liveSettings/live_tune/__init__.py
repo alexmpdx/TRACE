@@ -10,7 +10,9 @@ See ../IMPLEMENTATION_SPEC.md for the design and the cache-tier model.
 
 from .session import (
     APPEARANCE_FIELDS,
+    CORE_FIELDS,
     FIELD_TIER,
+    FINISH_FIELDS,
     TIER_A,
     TIER_B,
     TIER_C,
@@ -29,6 +31,8 @@ __all__ = [
     "Appearance",
     "FIELD_TIER",
     "APPEARANCE_FIELDS",
+    "CORE_FIELDS",
+    "FINISH_FIELDS",
     "TIER_A",
     "TIER_B",
     "TIER_C",

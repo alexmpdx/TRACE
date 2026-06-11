@@ -21,9 +21,13 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from typing import Optional
+
+# Bound on each config->result LRU (entries hold preview-resolution arrays).
+_LRU_CAP = 16
 
 import numpy as np
 from identify_features.config import PipelineConfig
@@ -38,7 +42,11 @@ from identify_features.models.intervein_splitter import (
     split_merged_intervein_polygons,
 )
 from identify_features.models.landmark_anchor import anchor_landmarks
-from identify_features.models.skeleton import build_skeleton_graph
+from identify_features.models.skeleton import (
+    _build_skeleton_core,
+    _finish_skeleton_graph,
+    build_skeleton_graph,
+)
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
 from identify_features.views.overlay import render_overlay
@@ -102,6 +110,12 @@ _TIER_B_FIELDS = {
     "synthesize_missing_crossveins",
     "ectopic_min_length_um",
     "ectopic_min_length_vw",
+    # Used only by vein_tracer._assign_absent_and_partial (a trace phase), so
+    # they belong to Tier B, not the skeleton. (Previously defaulted to Tier A
+    # because they weren't listed here — corrected while wiring the core/finish
+    # split, which is what surfaced it.)
+    "assign_absent_partial_status",
+    "partial_endpoint_search_vw",
 }
 
 # Tier C: intervein splitting + naming (and the master skip toggle).
@@ -154,6 +168,73 @@ assert set(FIELD_TIER) == _ALL_FIELDS, (
     f"missing={_ALL_FIELDS - set(FIELD_TIER)} extra={set(FIELD_TIER) - _ALL_FIELDS}"
 )
 
+# ---------------------------------------------------------------------------
+# Tier-A sub-partition: CORE vs FINISH (matches identifyFeatures' skeleton split).
+# build_skeleton_graph was split into _build_skeleton_core (expensive: rasterize
+# + skeletonize + prune, ~60-75% of the cost) and _finish_skeleton_graph (cheap:
+# graph cleanup / bridging / merge / cull). A change to a FINISH-only field can
+# reuse the cached core and re-run only the cheap finish.
+#   CORE   = fields feeding the expensive half (skeletonization + scale + prune).
+#   FINISH = fields feeding only the cheap graph-cleanup half.
+# Every Tier-A field is exactly one of these (asserted below).
+# ---------------------------------------------------------------------------
+CORE_FIELDS = {
+    "um_per_px",  # feeds every um->px conversion, including prune thresholds (core)
+    "skeleton_methods",
+    "smooth_sigma",
+    "enable_basic_prune",
+    "prune_methods",
+    "prune_min_length_um",
+    "prune_min_length_vein_widths",
+    "prune_radius_ratio_threshold",
+    "prune_scale_sigmas",
+    "prune_single_scale_sigma",
+}
+
+FINISH_FIELDS = {
+    "collinear_min_angle",
+    "junction_merge_vein_widths",
+    "final_stub_vein_widths",
+    "enable_small_fragment_removal",
+    "min_component_edge_fraction",
+    # Bridging pass 1
+    "bridge_max_gap_um",
+    "bridge_gap_fraction",
+    "bridge_direction_window_um",
+    "bridge_min_combined_length_um",
+    "bridge_on_axis_max_angle",
+    "bridge_on_axis_relaxed_cap",
+    "bridge_min_facing_angle",
+    "bridge_direction_max_edge_fraction",  # Tier-A but unused by builder; finish is harmless
+    # Bridging pass 2
+    "bridge2_max_gap_um",
+    "bridge2_gap_fraction",
+    "bridge2_min_gap_vw",
+    "bridge2_direction_window_um",
+    "bridge2_min_combined_length_um",
+    "bridge2_min_combined_length_vw",
+    "bridge2_on_axis_max_angle",
+    "bridge2_on_axis_relaxed_cap",
+    "bridge2_min_facing_angle",
+    # Bridging pass 3
+    "bridge3_max_gap_vw",
+    "bridge3_short_edge_vw",
+    "bridge3_relaxed_facing_angle",
+    "bridge3_direction_window_um",
+    "bridge3_on_axis_max_angle",
+    "bridge3_on_axis_relaxed_cap",
+}
+
+# CORE_FIELDS and FINISH_FIELDS must exactly partition the Tier-A fields, so a
+# newly added Tier-A config field forces an explicit bucket choice (fail-loud).
+_TIER_A_FIELDS = {n for n, t in FIELD_TIER.items() if t == TIER_A}
+assert CORE_FIELDS | FINISH_FIELDS == _TIER_A_FIELDS, (
+    "CORE/FINISH must partition Tier A: "
+    f"missing={_TIER_A_FIELDS - (CORE_FIELDS | FINISH_FIELDS)} "
+    f"extra={(CORE_FIELDS | FINISH_FIELDS) - _TIER_A_FIELDS}"
+)
+assert not (CORE_FIELDS & FINISH_FIELDS), f"CORE/FINISH overlap: {CORE_FIELDS & FINISH_FIELDS}"
+
 
 @dataclass
 class Appearance:
@@ -199,13 +280,23 @@ class LiveTuneSession:
         self._image_shape: Optional[tuple[int, int]] = None
 
         # Tier caches.
-        self._pristine_skel = None  # Tier A output; NEVER anchored in place
+        self._skel_core = None  # Tier A-core: expensive half (rasterize/skeletonize/prune)
+        self._pristine_skel = None  # Tier A-finish output; NEVER anchored in place
         self._anchored_skel = None  # Tier B working copy (landmark nodes inserted)
         self._veins: list[VeinIdentification] = []
         self._anchored_landmarks: dict[str, Landmark] = {}
         self._wing_axis = None
         self._regions: list[InterveinRegion] = []
         self._regions_stale: bool = True
+
+        # Config -> result LRUs so revisiting a previously-seen config returns
+        # without recompute. Keyed on the EFFECTIVE config's field signatures,
+        # prefixed by an input epoch so a prior wing's caches never collide.
+        # _core_lru: core-field signature -> _SkeletonCore.
+        # _skel_lru: core+finish signature -> finished SkeletonGraph.
+        self._core_lru: "OrderedDict[tuple, object]" = OrderedDict()
+        self._skel_lru: "OrderedDict[tuple, object]" = OrderedDict()
+        self._input_epoch: int = 0
         # Veins are stale relative to the current config — set when a Tier-A/B
         # param changed but the active view didn't need tracing (skeleton view),
         # so the work was deferred. Switching to a tracing view recomputes them.
@@ -249,6 +340,7 @@ class LiveTuneSession:
         self._invalidate_all()
 
     def _invalidate_all(self) -> None:
+        self._skel_core = None
         self._pristine_skel = None
         self._anchored_skel = None
         self._veins = []
@@ -260,6 +352,11 @@ class LiveTuneSession:
         self._last_config = None
         self._last_appearance = None
         self._last_overlay = None
+        # A new input wing invalidates every cached skeleton; free the memory and
+        # bump the epoch so any stragglers can never key-collide with the new wing.
+        self._core_lru.clear()
+        self._skel_lru.clear()
+        self._input_epoch += 1
 
     @property
     def has_input(self) -> bool:
@@ -284,6 +381,36 @@ class LiveTuneSession:
         if self._preview_scale == 1.0 or config.um_per_px is None:
             return config
         return replace(config, um_per_px=config.um_per_px / self._preview_scale)
+
+    # -- LRU keys (built from the EFFECTIVE config; epoch-prefixed) -------
+    @staticmethod
+    def _sig(cfg: PipelineConfig, names) -> tuple:
+        """Hashable signature of the given config fields (lists -> tuples)."""
+        out = []
+        for name in sorted(names):
+            v = getattr(cfg, name)
+            out.append(tuple(v) if isinstance(v, list) else v)
+        return tuple(out)
+
+    def _core_key(self, cfg: PipelineConfig) -> tuple:
+        return (self._input_epoch, "core", self._sig(cfg, CORE_FIELDS))
+
+    def _skel_key(self, cfg: PipelineConfig) -> tuple:
+        return (self._input_epoch, "skel", self._sig(cfg, CORE_FIELDS | FINISH_FIELDS))
+
+    @staticmethod
+    def _lru_put(lru: "OrderedDict", key, value) -> None:
+        lru[key] = value
+        lru.move_to_end(key)
+        while len(lru) > _LRU_CAP:
+            lru.popitem(last=False)
+
+    @staticmethod
+    def _lru_get(lru: "OrderedDict", key):
+        if key in lru:
+            lru.move_to_end(key)
+            return lru[key]
+        return None
 
     # -- live update (tiers A/B/D) ---------------------------------------
     def update(
@@ -330,8 +457,11 @@ class LiveTuneSession:
             cfg = self._effective(config)
             # Skeleton (Tier A) recompute — needed by every view when the graph
             # is invalid. A new skeleton also invalidates the veins built on it.
+            # The skeleton is split into a CACHEABLE expensive core (steps 1-7)
+            # and a CHEAP finish (steps 8-17): a finish-only param change reuses
+            # the cached core and re-runs only the finish.
             if need is not None and need <= _LIVE_ORDER[TIER_A]:
-                self._recompute_skeleton(cfg, timings)
+                self._recompute_skeleton_tier(cfg, changed, timings)
                 self._veins_dirty = True
                 self._regions_stale = True
             elif need is not None and need <= _LIVE_ORDER[TIER_B]:
@@ -380,11 +510,74 @@ class LiveTuneSession:
         return "none"
 
     # -- tier implementations --------------------------------------------
-    def _recompute_skeleton(self, cfg: PipelineConfig, timings: dict) -> None:
+    def _recompute_skeleton_tier(
+        self, cfg: PipelineConfig, changed: set, timings: dict
+    ) -> None:
+        """Recompute the skeleton with the minimal work the change requires.
+
+        Decision order:
+          1. Full-skeleton LRU hit (this exact core+finish config seen before)
+             → restore the finished skeleton instantly, skip all compute.
+          2. First run or a CORE-field changed → (maybe LRU-hit the) core, then finish.
+          3. Only FINISH-field(s) changed → reuse the cached core, re-run finish.
+        ``changed`` is the set of changed field names from this update().
+        """
+        first_run = self._skel_core is None
+
+        # 1. Instant revisit: the whole finished skeleton was cached for this config.
+        if not first_run:
+            skel_hit = self._lru_get(self._skel_lru, self._skel_key(cfg))
+            if skel_hit is not None:
+                self._pristine_skel = skel_hit
+                # Restore the matching core so a later finish-only edit can resume.
+                core_hit = self._lru_get(self._core_lru, self._core_key(cfg))
+                if core_hit is not None:
+                    self._skel_core = core_hit
+                timings["A_cached"] = 0.0
+                return
+
+        core_changed = any(c in CORE_FIELDS for c in changed)
+        finish_changed = any(c in FINISH_FIELDS for c in changed)
+
+        if first_run or core_changed:
+            self._recompute_skeleton_core(cfg, timings)
+            self._recompute_skeleton_finish(cfg, timings)
+        elif finish_changed:
+            # The cheap win: reuse the cached expensive core, re-run only finish.
+            self._recompute_skeleton_finish(cfg, timings)
+        else:
+            # No core/finish field changed but Tier A was requested anyway
+            # (e.g. a stale pristine skeleton). Rebuild defensively from the core.
+            self._recompute_skeleton_finish(cfg, timings)
+
+    def _recompute_skeleton_core(self, cfg: PipelineConfig, timings: dict) -> None:
+        """Tier A-core: the expensive half (rasterize + skeletonize + prune).
+
+        Probes the core LRU first; on a miss, builds and caches the core.
+        """
+        key = self._core_key(cfg)
+        hit = self._lru_get(self._core_lru, key)
+        if hit is not None:
+            self._skel_core = hit
+            timings["A_core_cached"] = 0.0
+            return
         t0 = time.perf_counter()
-        # Fresh polygons each build; build_skeleton_graph rasterizes from them.
-        self._pristine_skel = build_skeleton_graph(self._vein_polys, self._image_shape, cfg)
-        timings["A_skeleton"] = (time.perf_counter() - t0) * 1000
+        self._skel_core = _build_skeleton_core(self._vein_polys, self._image_shape, cfg)
+        timings["A_core"] = (time.perf_counter() - t0) * 1000
+        self._lru_put(self._core_lru, key, self._skel_core)
+
+    def _recompute_skeleton_finish(self, cfg: PipelineConfig, timings: dict) -> None:
+        """Tier A-finish: the cheap half (graph cleanup / bridging / merge / cull).
+
+        Reuses the cached core. ``_finish_skeleton_graph`` deep-copies the core's
+        raw graph internally, so the same core can drive many finish re-runs.
+        """
+        if self._skel_core is None:
+            raise RuntimeError("finish requested before core built")
+        t0 = time.perf_counter()
+        self._pristine_skel = _finish_skeleton_graph(self._skel_core, cfg)
+        timings["A_finish"] = (time.perf_counter() - t0) * 1000
+        self._lru_put(self._skel_lru, self._skel_key(cfg), self._pristine_skel)
 
     def _recompute_veins(self, cfg: PipelineConfig, timings: dict) -> None:
         if self._pristine_skel is None:

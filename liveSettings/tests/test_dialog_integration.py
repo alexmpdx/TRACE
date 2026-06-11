@@ -83,16 +83,16 @@ def main() -> int:
     ok = _pump(app, lambda: len(results) > n0)
     assert ok, "editing a real dialog widget did not trigger recompute"
     rb = results[-1]
-    assert "B_trace" in rb.timings_ms and "A_skeleton" not in rb.timings_ms, rb.timings_ms
+    assert "B_trace" in rb.timings_ms and "A_core" not in rb.timings_ms, rb.timings_ms
     print(f"[wire] dialog snap_radius_um edit -> tier {rb.tier_ran} {rb.timings_ms}")
 
-    # And a skeleton-tier widget should rebuild the skeleton.
+    # And a skeleton-tier (core) widget should rebuild the expensive core.
     n1 = len(results)
     _, (_, sw, _) = next((n, v) for n, v in dialog._widgets.items() if n == "smooth_sigma")
     sw.setValue(sw.value() + 1.0)
     ok = _pump(app, lambda: len(results) > n1)
     assert ok, "skeleton-tier edit produced no recompute"
-    assert "A_skeleton" in results[-1].timings_ms
+    assert "A_core" in results[-1].timings_ms
     print(f"[wire] dialog smooth_sigma edit -> tier {results[-1].tier_ran}")
 
     # Close the dialog -> worker stops cleanly.

@@ -54,7 +54,7 @@ def test_skeleton_view_skips_tier_b_on_first_run():
     s = _make_session()
     r = s.update(PipelineConfig(), view=VIEW_SKELETON)
     assert r.error is None
-    assert "A_skeleton" in r.timings_ms
+    assert "A_core" in r.timings_ms
     assert "B_trace" not in r.timings_ms, "skeleton view must not run the trace"
     assert r.overlay_bgr is not None
     # No veins traced yet (deferred).
@@ -85,7 +85,7 @@ def test_final_view_unchanged_behavior():
     s = _make_session()
     r = s.update(PipelineConfig(), view=VIEW_FINAL)
     assert r.error is None
-    assert "A_skeleton" in r.timings_ms and "B_trace" in r.timings_ms
+    assert "A_core" in r.timings_ms and "B_trace" in r.timings_ms
     assert r.n_veins > 0
 
 
@@ -112,7 +112,7 @@ def test_skeleton_then_final_traces_once():
     # No further change → re-render only, no retrace.
     r2 = s.update(cfg, view=VIEW_FINAL)
     assert "B_trace" not in r2.timings_ms
-    assert "A_skeleton" not in r2.timings_ms
+    assert "A_core" not in r2.timings_ms and "A_finish" not in r2.timings_ms
 
 
 if __name__ == "__main__":

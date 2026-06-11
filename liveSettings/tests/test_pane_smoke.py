@@ -76,7 +76,7 @@ def main() -> int:
     ok = _pump(app, lambda: len(results) > n0)
     assert ok, "tier B update did not arrive"
     rb = results[-1]
-    assert "B_trace" in rb.timings_ms and "A_skeleton" not in rb.timings_ms
+    assert "B_trace" in rb.timings_ms and "A_core" not in rb.timings_ms
     print(f"[tierB] {rb.timings_ms} ok")
 
     # Tier D appearance change (toggle veins off).
