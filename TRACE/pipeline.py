@@ -473,6 +473,8 @@ def trace_folder(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
+    ectopic_label_font_scale: float = 3.0,
+    show_compartment_labels: bool = True,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
 
@@ -606,6 +608,8 @@ def trace_folder(
             show_ectopic_labels=show_ectopic_labels,
             show_region_labels=show_region_labels,
             vein_simplify_tolerance_px=vein_simplify_tolerance_px,
+            ectopic_label_font_scale=ectopic_label_font_scale,
+            show_compartment_labels=show_compartment_labels,
         )
     finally:
         if temp_dir_obj is not None:
@@ -648,6 +652,8 @@ def _run(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
+    ectopic_label_font_scale: float = 3.0,
+    show_compartment_labels: bool = True,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
     from preprocessing.pipeline import PipelineResult as _PreprocResult
@@ -966,12 +972,16 @@ def _run(
                     show_ectopic_labels=show_ectopic_labels,
                     show_region_labels=show_region_labels,
                     vein_simplify_tolerance_px=vein_simplify_tolerance_px,
+                    ectopic_label_font_scale=ectopic_label_font_scale,
                 )
                 trace_result.overlay_path = ov_path
 
             if "ap_overlay" in outputs and base is not None and wing_result is not None:
                 ap_path = output_dir / f"{stem}_ap_overlay.png"
-                if render_ap_overlay_to_file(base, wing_result, ap_path):
+                if render_ap_overlay_to_file(
+                    base, wing_result, ap_path,
+                    show_compartment_labels=show_compartment_labels,
+                ):
                     trace_result.ap_overlay_path = ap_path
 
             if "cv_ratio_overlay" in outputs and base is not None and wing_result is not None:

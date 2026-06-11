@@ -77,6 +77,8 @@ def _process_one(args_tuple):
         show_ectopic_labels,
         show_region_labels,
         vein_simplify_tolerance_px,
+        ectopic_label_font_scale,
+        show_compartment_labels,
     ) = args_tuple
     try:
         config = PipelineConfig()
@@ -108,9 +110,13 @@ def _process_one(args_tuple):
                     show_ectopic_labels=show_ectopic_labels,
                     show_region_labels=show_region_labels,
                     vein_simplify_tolerance_px=vein_simplify_tolerance_px,
+                    ectopic_label_font_scale=ectopic_label_font_scale,
                 )
                 if all_overlays:
-                    render_ap_overlay_to_file(base_img, result, output_dir / f"{stem}_ap_overlay.png")
+                    render_ap_overlay_to_file(
+                        base_img, result, output_dir / f"{stem}_ap_overlay.png",
+                        show_compartment_labels=show_compartment_labels,
+                    )
                     render_cv_ratio_overlay_to_file(
                         base_img, result, output_dir / f"{stem}_cv_ratio_overlay.png", um_per_px=config.um_per_px
                     )
@@ -215,6 +221,21 @@ def main():
         help="Douglas-Peucker tolerance (px) for smoothing vein centerlines in the overlay (0 = raw skeleton)",
     )
     parser.add_argument(
+        "--ectopic-label-scale",
+        dest="ectopic_label_font_scale",
+        type=float,
+        default=3.0,
+        metavar="SCALE",
+        help="cv2 font scale for ectopic-vein (EV1/EV2…) labels in the overlay (default 3.0)",
+    )
+    parser.add_argument(
+        "--no-compartment-labels",
+        dest="show_compartment_labels",
+        action="store_false",
+        default=True,
+        help="Suppress the ANT/POST percentage labels in the AP compartment overlay (the tinted fills are kept)",
+    )
+    parser.add_argument(
         "--preset",
         type=str,
         default=None,
@@ -299,12 +320,16 @@ def _run_single(args):
                 show_ectopic_labels=args.show_ectopic_labels,
                 show_region_labels=args.show_region_labels,
                 vein_simplify_tolerance_px=args.vein_simplify_tolerance_px,
+                ectopic_label_font_scale=args.ectopic_label_font_scale,
             )
             print(f"Overlay: {overlay_path}")
 
             if args.all_overlays:
                 ap_path = args.output_dir / f"{result.specimen_id}_ap_overlay.png"
-                if render_ap_overlay_to_file(base_img, result, ap_path):
+                if render_ap_overlay_to_file(
+                    base_img, result, ap_path,
+                    show_compartment_labels=args.show_compartment_labels,
+                ):
                     print(f"AP overlay: {ap_path}")
 
                 cv_path = args.output_dir / f"{result.specimen_id}_cv_ratio_overlay.png"
@@ -354,6 +379,8 @@ def _run_batch(args):
             args.show_ectopic_labels,
             args.show_region_labels,
             args.vein_simplify_tolerance_px,
+            args.ectopic_label_font_scale,
+            args.show_compartment_labels,
         )
         for stem, det, lm, img in specimens
     ]
