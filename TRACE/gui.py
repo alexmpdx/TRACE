@@ -638,6 +638,10 @@ class TraceWindow(QMainWindow):
         self._suppress_check_signal: bool = False
         self.config = PipelineConfig()
         self._show_vein_tissue = False
+        self._show_color_key = True
+        self._show_ectopic_labels = True
+        self._show_region_labels = True
+        self._vein_simplify_tolerance_px = 0.0
         self._include_unreliable_landmarks = False
         self._do_rotation = False
         self._rotation_mirror_correct = False
@@ -1687,6 +1691,10 @@ class TraceWindow(QMainWindow):
         """Snapshot every GUI-only flag (everything not in PipelineConfig)."""
         return {
             "show_vein_tissue": bool(self._show_vein_tissue),
+            "show_color_key": bool(self._show_color_key),
+            "show_ectopic_labels": bool(self._show_ectopic_labels),
+            "show_region_labels": bool(self._show_region_labels),
+            "vein_simplify_tolerance_px": float(self._vein_simplify_tolerance_px),
             "include_unreliable_landmarks": bool(self._include_unreliable_landmarks),
             "do_rotation": bool(self._do_rotation),
             "rotation_mirror_correct": bool(self._rotation_mirror_correct),
@@ -1716,6 +1724,17 @@ class TraceWindow(QMainWindow):
         """
         if "show_vein_tissue" in state:
             self._show_vein_tissue = bool(state["show_vein_tissue"])
+        if "show_color_key" in state:
+            self._show_color_key = bool(state["show_color_key"])
+        if "show_ectopic_labels" in state:
+            self._show_ectopic_labels = bool(state["show_ectopic_labels"])
+        if "show_region_labels" in state:
+            self._show_region_labels = bool(state["show_region_labels"])
+        if "vein_simplify_tolerance_px" in state:
+            try:
+                self._vein_simplify_tolerance_px = float(state["vein_simplify_tolerance_px"])
+            except (TypeError, ValueError):
+                pass
         if "include_unreliable_landmarks" in state:
             self._include_unreliable_landmarks = bool(state["include_unreliable_landmarks"])
         if "do_rotation" in state:
@@ -1916,6 +1935,10 @@ class TraceWindow(QMainWindow):
         # Reset instance state to __init__ defaults.
         self.config = PipelineConfig()
         self._show_vein_tissue = False
+        self._show_color_key = True
+        self._show_ectopic_labels = True
+        self._show_region_labels = True
+        self._vein_simplify_tolerance_px = 0.0
         self._include_unreliable_landmarks = False
         self._do_rotation = False
         self._rotation_mirror_correct = False
@@ -2021,6 +2044,10 @@ class TraceWindow(QMainWindow):
         s.setValue("pipeline_config_json", config_to_json(self.config))
         s.setValue("max_workers", self.inline_general_panel.workers_spin.value())
         s.setValue("show_vein_tissue", self._show_vein_tissue)
+        s.setValue("show_color_key", self._show_color_key)
+        s.setValue("show_ectopic_labels", self._show_ectopic_labels)
+        s.setValue("show_region_labels", self._show_region_labels)
+        s.setValue("vein_simplify_tolerance_px", str(self._vein_simplify_tolerance_px))
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
         s.setValue("do_rotation", self._do_rotation)
         s.setValue("rotation_mirror_correct", self._rotation_mirror_correct)
@@ -2154,6 +2181,21 @@ class TraceWindow(QMainWindow):
         saved_svt = s.value("show_vein_tissue", None)
         if saved_svt is not None:
             self._show_vein_tissue = saved_svt == "true" or saved_svt is True
+        saved_sck = s.value("show_color_key", None)
+        if saved_sck is not None:
+            self._show_color_key = saved_sck == "true" or saved_sck is True
+        saved_sel = s.value("show_ectopic_labels", None)
+        if saved_sel is not None:
+            self._show_ectopic_labels = saved_sel == "true" or saved_sel is True
+        saved_srl = s.value("show_region_labels", None)
+        if saved_srl is not None:
+            self._show_region_labels = saved_srl == "true" or saved_srl is True
+        saved_vst = s.value("vein_simplify_tolerance_px", None)
+        if saved_vst is not None:
+            try:
+                self._vein_simplify_tolerance_px = float(saved_vst)
+            except (TypeError, ValueError):
+                pass
         saved_dor = s.value("do_rotation", None)
         if saved_dor is not None:
             self._do_rotation = saved_dor == "true" or saved_dor is True
@@ -2809,6 +2851,10 @@ class TraceWindow(QMainWindow):
                 outputs=self._selected_outputs(),
                 max_workers=self.inline_general_panel.workers_spin.value(),
                 show_vein_tissue=self._show_vein_tissue,
+                show_color_key=self._show_color_key,
+                show_ectopic_labels=self._show_ectopic_labels,
+                show_region_labels=self._show_region_labels,
+                vein_simplify_tolerance_px=self._vein_simplify_tolerance_px,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
                 gate_override=self._gate_override,
                 wing_isolation_model_dir=wing_model_dir,

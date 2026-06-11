@@ -545,7 +545,45 @@ class InlineGeneralPanel(QWidget):
         self.show_vein_tissue_chk.toggled.connect(self._on_show_vein_tissue_toggled)
         v.addWidget(self.show_vein_tissue_chk)
 
+        self.show_color_key_chk = QCheckBox("Show vein color key in overlay")
+        self.show_color_key_chk.setToolTip(
+            "When on (default), the vein color legend is baked into the overlay's "
+            "upper-left corner. Turn off for publication-style figures."
+        )
+        self.show_color_key_chk.toggled.connect(self._on_show_color_key_toggled)
+        v.addWidget(self.show_color_key_chk)
+
+        self.show_ectopic_labels_chk = QCheckBox("Show ectopic vein labels (EV1, EV2, …)")
+        self.show_ectopic_labels_chk.setToolTip(
+            "When on (default), each ectopic vein is annotated with its EV1/EV2… text. "
+            "Turn off to keep the ectopic centerlines but hide the labels."
+        )
+        self.show_ectopic_labels_chk.toggled.connect(self._on_show_ectopic_labels_toggled)
+        v.addWidget(self.show_ectopic_labels_chk)
+
+        self.show_region_labels_chk = QCheckBox("Show intervein region labels")
+        self.show_region_labels_chk.setToolTip(
+            "When on (default), each intervein region is annotated with its name "
+            "(plus [M]/[I] status suffixes). Turn off to keep the colored region "
+            "fills without the text."
+        )
+        self.show_region_labels_chk.toggled.connect(self._on_show_region_labels_toggled)
+        v.addWidget(self.show_region_labels_chk)
+
         form = QFormLayout()
+        self.vein_smooth_spin = QDoubleSpinBox()
+        self.vein_smooth_spin.setRange(0.0, 50.0)
+        self.vein_smooth_spin.setDecimals(1)
+        self.vein_smooth_spin.setSingleStep(0.5)
+        self.vein_smooth_spin.setToolTip(
+            "Douglas-Peucker tolerance (px) for smoothing vein centerlines in the "
+            "overlay. 0 (default) = draw the raw skeleton polyline; a few pixels is "
+            "usually enough to remove staircasing. Affects only the rendered overlay, "
+            "not the saved geometry."
+        )
+        self.vein_smooth_spin.valueChanged.connect(self._on_vein_smooth_changed)
+        form.addRow("Vein smoothing (px)", self.vein_smooth_spin)
+
         self.vein_opacity_spin = QDoubleSpinBox()
         self.vein_opacity_spin.setRange(0.0, 1.0)
         self.vein_opacity_spin.setDecimals(2)
@@ -727,6 +765,18 @@ class InlineGeneralPanel(QWidget):
     def _on_show_vein_tissue_toggled(self, checked: bool) -> None:
         self._window._show_vein_tissue = bool(checked)
 
+    def _on_show_color_key_toggled(self, checked: bool) -> None:
+        self._window._show_color_key = bool(checked)
+
+    def _on_show_ectopic_labels_toggled(self, checked: bool) -> None:
+        self._window._show_ectopic_labels = bool(checked)
+
+    def _on_show_region_labels_toggled(self, checked: bool) -> None:
+        self._window._show_region_labels = bool(checked)
+
+    def _on_vein_smooth_changed(self, val: float) -> None:
+        self._window._vein_simplify_tolerance_px = float(val)
+
     def _on_vein_opacity_changed(self, val: float) -> None:
         self._window.config.vein_opacity = float(val)
 
@@ -776,6 +826,10 @@ class InlineGeneralPanel(QWidget):
         self._window._do_rotation = False
         self._window._rotation_mirror_correct = False
         self._window._show_vein_tissue = False
+        self._window._show_color_key = True
+        self._window._show_ectopic_labels = True
+        self._window._show_region_labels = True
+        self._window._vein_simplify_tolerance_px = 0.0
         self._window._intermediate_outputs = {key: False for key in self._window._intermediate_outputs}
         self._window.settings.setValue("max_workers", DEFAULT_MAX_WORKERS)
         # Re-arm the parallel-workers warning so a fresh climb above the
@@ -804,6 +858,10 @@ class InlineGeneralPanel(QWidget):
             self.rotation_mirror_correct_chk,
             self.synthesize_crossveins_chk,
             self.show_vein_tissue_chk,
+            self.show_color_key_chk,
+            self.show_ectopic_labels_chk,
+            self.show_region_labels_chk,
+            self.vein_smooth_spin,
             self.vein_opacity_spin,
             self.intervein_opacity_spin,
             self.workers_spin,
@@ -828,6 +886,10 @@ class InlineGeneralPanel(QWidget):
             self.rotation_mirror_correct_chk.setEnabled(bool(self._window._do_rotation))
             self.synthesize_crossveins_chk.setChecked(bool(cfg.synthesize_missing_crossveins))
             self.show_vein_tissue_chk.setChecked(bool(self._window._show_vein_tissue))
+            self.show_color_key_chk.setChecked(bool(self._window._show_color_key))
+            self.show_ectopic_labels_chk.setChecked(bool(self._window._show_ectopic_labels))
+            self.show_region_labels_chk.setChecked(bool(self._window._show_region_labels))
+            self.vein_smooth_spin.setValue(float(self._window._vein_simplify_tolerance_px))
             self.vein_opacity_spin.setValue(float(cfg.vein_opacity))
             self.intervein_opacity_spin.setValue(float(cfg.intervein_opacity))
             for key, chk in self.intermediate_output_chks.items():
