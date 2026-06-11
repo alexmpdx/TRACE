@@ -108,6 +108,49 @@ IMAGE_EXTENSIONS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Native file-picker helpers (macOS click-fix)
+# ---------------------------------------------------------------------------
+def _pick_folder_native(caption: str, initial: str) -> str:
+    """Show the native folder picker, working around the Qt-on-macOS bug.
+
+    Symptom (Qt 5.15.x, macOS Big Sur+): when
+    ``QFileDialog.getExistingDirectory`` is called with a Qt parent
+    widget, Qt's modal-event grab intercepts mouse events that should
+    land on the native NSOpenPanel's file-list pane. The path-navigator
+    dropdown and the Open / Cancel buttons live in chrome outside the
+    grab so they keep working — only the file list goes dead. Detaching
+    the dialog (``parent=None``) restores click handling. Cost: the
+    picker isn't centered on / sheeted to the main window. Windows /
+    Linux behave the same as before.
+
+    Returns the chosen absolute path, or an empty string if cancelled.
+    """
+    return QFileDialog.getExistingDirectory(None, caption, initial)
+
+
+def _pick_file_native(caption: str, initial: str, name_filter: str = "") -> str:
+    """File-open counterpart of :func:`_pick_folder_native` with the same parent=None workaround.
+
+    ``name_filter`` follows the standard Qt syntax
+    (``"YAML (*.yaml *.yml);;All Files (*)"``).
+
+    Returns the chosen absolute path, or an empty string if cancelled.
+    """
+    path, _ = QFileDialog.getOpenFileName(None, caption, initial, name_filter)
+    return path
+
+
+def _pick_save_file_native(caption: str, initial: str, name_filter: str = "") -> str:
+    """Save-as picker — same Qt-on-macOS workaround as the open / folder helpers.
+
+    ``initial`` may be a pre-filled filename or a directory path.
+    Returns the chosen absolute path, or an empty string if cancelled.
+    """
+    path, _ = QFileDialog.getSaveFileName(None, caption, initial, name_filter)
+    return path
+
+
 def _find_geojson_for_image(gt_dir: Path, image_name: str) -> tuple[Optional[Path], bool]:
     """Find the GeoJSON annotation file matching an image name, tolerating whitespace.
 
@@ -1471,7 +1514,7 @@ class GateConfigPanel(QWidget):
         }
 
     def _on_export(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Export gate YAML", "", "YAML (*.yaml *.yml)")
+        path = _pick_save_file_native("Export gate YAML", "", "YAML (*.yaml *.yml)")
         if not path:
             return
         doc = {"confidence": self.result_override()}
@@ -1542,7 +1585,7 @@ class GateConfigPanel(QWidget):
         )
 
     def _on_import(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Import gate YAML", "", "YAML (*.yaml *.yml)")
+        path = _pick_file_native("Import gate YAML", "", "YAML (*.yaml *.yml)")
         if not path:
             return
         try:
@@ -2546,9 +2589,7 @@ class LandmarkGUI(QMainWindow):
         start_dir = _project_root / "trained_models"
         if not start_dir.exists():
             start_dir = _project_root
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Fold Checkpoint", str(start_dir), "PyTorch (*.pt *.pth)"
-        )
+        path = _pick_file_native("Select Fold Checkpoint", str(start_dir), "PyTorch (*.pt *.pth)")
         if not path:
             return
         self._load_predictor_at(Path(path))
@@ -2560,7 +2601,7 @@ class LandmarkGUI(QMainWindow):
         start_dir = _project_root / "trained_models"
         if not start_dir.exists():
             start_dir = _project_root
-        folder = QFileDialog.getExistingDirectory(self, "Select Ensemble Folder", str(start_dir))
+        folder = _pick_folder_native("Select Ensemble Folder", str(start_dir))
         if not folder:
             return
         folder_path = Path(folder)
@@ -2632,7 +2673,7 @@ class LandmarkGUI(QMainWindow):
     def _on_load_folder(self) -> None:
         """Load images from a user-selected folder."""
         start = str(self._img_dir) if self._img_dir else str(_project_root)
-        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder", start)
+        folder = _pick_folder_native("Select Image Folder", start)
         if not folder:
             return
         folder = Path(folder)
@@ -2644,7 +2685,7 @@ class LandmarkGUI(QMainWindow):
     def _on_set_gt_dir(self) -> None:
         """Let the user pick a ground-truth annotation folder."""
         start = str(self._gt_dir) if self._gt_dir else str(_project_root)
-        folder = QFileDialog.getExistingDirectory(self, "Select GT Annotation Folder", start)
+        folder = _pick_folder_native("Select GT Annotation Folder", start)
         if not folder:
             return
         self._gt_dir = Path(folder)
@@ -2682,7 +2723,7 @@ class LandmarkGUI(QMainWindow):
 
     def _on_set_output(self) -> None:
         """Set the output directory for Save All."""
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Directory", str(_project_root))
+        folder = _pick_folder_native("Select Output Directory", str(_project_root))
         if folder:
             self._output_dir = Path(folder)
             self.statusBar().showMessage(f"Output directory: {self._output_dir}")
