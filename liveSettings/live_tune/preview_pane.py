@@ -214,6 +214,18 @@ class LivePreviewPane(QWidget):
         self.btn_load = QPushButton("Load sample")
         self.btn_load.clicked.connect(self._on_load_clicked)
         load_row.addWidget(self.btn_load)
+        # Force a complete from-scratch re-run: clears every cache and re-runs
+        # preprocessing + the pipeline at the current settings. Use it if the
+        # view looks stale, or after changing landmark-gate settings (those only
+        # take effect on a fresh preprocessing pass).
+        self.btn_refresh = QPushButton("Force refresh")
+        self.btn_refresh.setToolTip(
+            "Clear all caches and completely re-run this image (preprocessing + "
+            "pipeline) at the current settings — use if the preview looks stale, "
+            "or to apply changed landmark-gate settings."
+        )
+        self.btn_refresh.clicked.connect(self._on_force_refresh)
+        load_row.addWidget(self.btn_refresh)
         load_row.addStretch(1)
         load_row.addWidget(QLabel("Preview res:"))
         self.cmb_res = QComboBox()
@@ -239,6 +251,18 @@ class LivePreviewPane(QWidget):
         self.res_warning.setStyleSheet("color: #b8860b;")  # dark goldenrod — reads on light+dark
         sv.addWidget(self.res_warning)
         self._update_res_warning()
+
+        # Gate warning: the preview bypasses the landmark confidence gate so it
+        # never dead-ends, but a real batch run uses the strict gate and may
+        # reject a low-confidence landmark (failing/skipping the image). Shown
+        # when the loaded wing has any gate-failing landmark, so the user knows
+        # the preview may diverge from batch — and, after tweaking gate settings
+        # and refreshing, whether the pass/fail state changed.
+        self.gate_warning = QLabel()
+        self.gate_warning.setWordWrap(True)
+        self.gate_warning.setStyleSheet("color: #b8860b;")
+        sv.addWidget(self.gate_warning)
+        self.gate_warning.hide()
 
         root.addWidget(src)
 
@@ -515,6 +539,24 @@ class LivePreviewPane(QWidget):
         self.status.setText("Re-running preprocessing…")
         self._worker.request_load(loader, self._preview_scale, self._get_config(), self._appearance)
 
+    def _on_force_refresh(self) -> None:
+        """Clear every cache and completely re-run the image from scratch.
+
+        request_load runs the loader (fresh preprocessing → fresh GeoJSONs/
+        landmarks under the CURRENT gate settings) and feeds it to the session
+        via set_input, which invalidates all tier caches + the config LRUs. This
+        is the escape hatch for a stale-looking preview, and the way to apply
+        changed landmark-gate settings (they only take effect on a fresh pass).
+        """
+        loader = self._build_loader()
+        if loader is None:
+            return
+        self._set_params_enabled(False)
+        self.btn_load.setEnabled(False)
+        self.progress.show()
+        self.status.setText("Force refresh: re-running everything…")
+        self._worker.request_load(loader, self._preview_scale, self._get_config(), self._appearance)
+
     def _on_load_done(self, ok: bool, info: str) -> None:
         self.btn_load.setEnabled(True)
         if not ok:
@@ -526,6 +568,33 @@ class LivePreviewPane(QWidget):
         self._loaded = True
         self.status.setText(f"Loaded {info} — tuning is live.")
         self._set_params_enabled(True)
+        self._update_gate_warning()
+
+    def _update_gate_warning(self) -> None:
+        """Show a warning if the loaded wing has gate-failing landmark(s).
+
+        Reads the reliability metadata on the session's loaded landmarks (the
+        preview bypasses the gate, but the metadata records what the strict gate
+        decided). Refreshed on every load, so after changing gate settings +
+        Force refresh, the pass/fail state updates.
+        """
+        lms = getattr(self._session, "_landmarks_raw", None) or {}
+        failed = [(name, lm) for name, lm in lms.items() if not getattr(lm, "reliable", True)]
+        if not failed:
+            self.gate_warning.clear()
+            self.gate_warning.hide()
+            return
+        # Summarize the failures (name + gate_reason when present).
+        bits = []
+        for name, lm in failed:
+            reason = getattr(lm, "gate_reason", None)
+            bits.append(f"{name} ({reason})" if reason else name)
+        self.gate_warning.setText(
+            "⚠ Confidence gate: " + ", ".join(bits) + " — a real TRACE run uses the "
+            "strict gate and may reject these landmarks (failing/skipping the image). "
+            "The preview bypasses the gate, so its output may differ from batch on this wing."
+        )
+        self.gate_warning.show()
 
     # -- view selection ---------------------------------------------------
     def _on_view_changed(self) -> None:
@@ -677,7 +746,7 @@ class LivePreviewPane(QWidget):
 
     # -- misc -------------------------------------------------------------
     def _set_params_enabled(self, enabled: bool) -> None:
-        for w in (self.btn_preset, self.btn_fit):
+        for w in (self.btn_preset, self.btn_fit, self.btn_refresh):
             w.setEnabled(enabled)
         # View-dependent controls (vein/region display, intervein) are gated by
         # both load-state and the active view.
