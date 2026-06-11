@@ -1000,8 +1000,9 @@ class InlineGeneralPanel(QWidget):
         if not self._confirm_scale_estimator_caveats():
             return
         seed = self._window.input_edit.text() or lm_path
-        image_path, _ = QFileDialog.getOpenFileName(
-            self,
+        from TRACE.gui import _pick_file_native
+
+        image_path = _pick_file_native(
             "Select a wing image",
             self._picker_initial_path(seed),
             "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.ome.tif);;All Files (*)",

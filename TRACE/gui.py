@@ -181,6 +181,55 @@ def _picker_initial_path(current: str) -> str:
     return "/"
 
 
+def _pick_folder_native(caption: str, initial: str) -> str:
+    """Show the native folder picker, working around the Qt-on-macOS bug.
+
+    Symptom: when ``QFileDialog.getExistingDirectory`` is called with a Qt
+    parent widget that's modally active, Qt's modal-event grab intercepts
+    mouse events that should land on the native NSOpenPanel's file-list
+    pane. The path-navigator dropdown and the Open / Cancel buttons live
+    in chrome that isn't covered by the grab so they keep working — only
+    the file list goes dead. Detaching the dialog from any Qt parent
+    (passing ``None``) restores click handling. Cost: the picker isn't
+    parented to the main window, so it appears at the system position
+    rather than centered on / sheeted to TRACE — a one-time visual
+    surprise rather than a persistent annoyance.
+
+    Behaviour on Windows / Linux is unchanged in practice: their native
+    pickers don't suffer from this and the unparented presentation is
+    functionally identical for the user.
+
+    Returns the chosen absolute path, or an empty string if cancelled.
+    """
+    return QFileDialog.getExistingDirectory(None, caption, initial)
+
+
+def _pick_file_native(caption: str, initial: str, name_filter: str = "") -> str:
+    """File-picker counterpart of :func:`_pick_folder_native`.
+
+    Same root cause + same workaround: Qt's modal-event grab on a Qt
+    parent blocks file-list clicks when ``QFileDialog.getOpenFileName``
+    is called with one. Detaching (``parent=None``) restores click
+    handling at the cost of an unparented dialog. ``name_filter``
+    follows the standard Qt syntax (``"Images (*.tif *.png);;All Files (*)"``).
+
+    Returns the chosen absolute path, or an empty string if cancelled.
+    """
+    path, _ = QFileDialog.getOpenFileName(None, caption, initial, name_filter)
+    return path
+
+
+def _pick_save_file_native(caption: str, initial: str, name_filter: str = "") -> str:
+    """Save-as picker — same Qt-on-macOS workaround as the open / folder pickers.
+
+    ``initial`` may be a pre-filled filename (the macOS save panel
+    inherits the basename) or a directory path. Returns the chosen
+    absolute path or an empty string if the user cancelled.
+    """
+    path, _ = QFileDialog.getSaveFileName(None, caption, initial, name_filter)
+    return path
+
+
 def _build_landmark_name_pattern():
     """Compile the regex used to swap raw landmark keys for anatomical names.
 
@@ -1213,8 +1262,8 @@ class TraceWindow(QMainWindow):
     # Folder / model selection
     # -----------------------------------------------------------------------
     def _select_input(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Input Folder", _picker_initial_path(self.input_edit.text())
+        folder = _pick_folder_native(
+            "Select Input Folder", _picker_initial_path(self.input_edit.text())
         )
         if not folder:
             return
@@ -1537,8 +1586,8 @@ class TraceWindow(QMainWindow):
         item.setForeground(_status_color(status))
 
     def _select_output(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Output Folder", _picker_initial_path(self.output_edit.text())
+        folder = _pick_folder_native(
+            "Select Output Folder", _picker_initial_path(self.output_edit.text())
         )
         if folder:
             self.output_edit.setText(folder)

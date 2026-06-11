@@ -497,16 +497,16 @@ class PipelineConfigDialog(QDialog):
     # Import / Save pipeline-config JSON
     # -----------------------------------------------------------------------
     def _import_config(self) -> None:
-        from PyQt5.QtWidgets import QFileDialog
-
         from TRACE.config_io import load_settings
 
         # Open in the bundled TRACE/presets/ folder so users land in the
         # right place by default. Falls back to CWD if the folder is missing.
         presets_dir = Path(__file__).resolve().parent / "presets"
         initial_dir = str(presets_dir) if presets_dir.is_dir() else ""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import Pipeline Config", initial_dir, "JSON (*.json);;All Files (*)"
+        from TRACE.gui import _pick_file_native
+
+        path = _pick_file_native(
+            "Import Pipeline Config", initial_dir, "JSON (*.json);;All Files (*)"
         )
         if not path:
             return
@@ -549,8 +549,6 @@ class PipelineConfigDialog(QDialog):
         QMessageBox.information(self, "Import complete", f"Imported pipeline-config from:\n{path}")
 
     def _export_config(self) -> None:
-        from PyQt5.QtWidgets import QFileDialog
-
         from TRACE.config_io import save_settings
 
         # Default save location is TRACE/presets/ so saved presets appear in
@@ -560,8 +558,10 @@ class PipelineConfigDialog(QDialog):
             default_path = str(presets_dir / "pipeline_config.json")
         else:
             default_path = "pipeline_config.json"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Pipeline Config", default_path, "JSON (*.json);;All Files (*)"
+        from TRACE.gui import _pick_save_file_native
+
+        path = _pick_save_file_native(
+            "Export Pipeline Config", default_path, "JSON (*.json);;All Files (*)"
         )
         if not path:
             return
@@ -598,12 +598,9 @@ class PipelineConfigDialog(QDialog):
         return self._wing_model_edit.text().strip()
 
     def _select_wing_model_folder(self):
-        from PyQt5.QtWidgets import QFileDialog
+        from TRACE.gui import _pick_folder_native, _picker_initial_path
 
-        from TRACE.gui import _picker_initial_path
-
-        folder = QFileDialog.getExistingDirectory(
-            self,
+        folder = _pick_folder_native(
             "Select Wing-Identification Model Folder",
             _picker_initial_path(self._wing_model_edit.text()),
         )
@@ -978,17 +975,14 @@ class PipelineConfigDialog(QDialog):
     # -----------------------------------------------------------------------
     def _autodetect_target_um_per_px(self, spin: QDoubleSpinBox, get_model_path_fn) -> None:
         """Open a folder picker, run autodetect, write the average into `spin`."""
-        from PyQt5.QtWidgets import QFileDialog
-
-        from TRACE.gui import _picker_initial_path
+        from TRACE.gui import _pick_folder_native, _picker_initial_path
 
         seed_path = ""
         try:
             seed_path = get_model_path_fn() or ""
         except Exception:
             seed_path = ""
-        folder = QFileDialog.getExistingDirectory(
-            self,
+        folder = _pick_folder_native(
             "Select training-image folder",
             _picker_initial_path(seed_path),
         )
@@ -1052,12 +1046,9 @@ class PipelineConfigDialog(QDialog):
     def _select_landmark_model_folder(self):
         from pathlib import Path as _P
 
-        from PyQt5.QtWidgets import QFileDialog
+        from TRACE.gui import _pick_folder_native, _picker_initial_path
 
-        from TRACE.gui import _picker_initial_path
-
-        folder = QFileDialog.getExistingDirectory(
-            self,
+        folder = _pick_folder_native(
             "Select Model Folder (contains best_fold*.pt directly)",
             _picker_initial_path(self._lm_model_edit.text()),
         )
@@ -1074,12 +1065,9 @@ class PipelineConfigDialog(QDialog):
             self._lm_model_edit.setText(folder)
 
     def _select_segmentation_model_folder(self):
-        from PyQt5.QtWidgets import QFileDialog
+        from TRACE.gui import _pick_folder_native, _picker_initial_path
 
-        from TRACE.gui import _picker_initial_path
-
-        folder = QFileDialog.getExistingDirectory(
-            self,
+        folder = _pick_folder_native(
             "Select Segmentation Model Folder",
             _picker_initial_path(self._seg_model_edit.text()),
         )
