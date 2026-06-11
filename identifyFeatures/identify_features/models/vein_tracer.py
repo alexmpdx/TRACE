@@ -193,12 +193,22 @@ def trace_veins_from_landmarks(
 
     # Phase 1: Detect costa edges using margin band (on the merged graph)
     costa_band = None
+    costa_band_dist = None
     if wing_outline is not None:
         from identify_features.models.costa_detector import detect_costa_edges
 
         costa_keys, costa_band = detect_costa_edges(skel_graph, landmarks, wing_outline, config)
         for key in costa_keys:
             edge_labels[key] = "costa"
+        if costa_band is not None:
+            # _propagate_through_degree2 is called ~4 times below with the same
+            # costa_band each time; computing the EDT once here and reusing it
+            # avoids ~3 full-image distance transforms. distance_transform_edt
+            # is a deterministic pure function of its input, so the reuse is
+            # byte-identical to the pre-hoist computation.
+            from scipy import ndimage
+
+            costa_band_dist = ndimage.distance_transform_edt(costa_band == 0)
     if dbg:
         dbg.dump(G, edge_labels, "phase1_costa")
 
@@ -297,6 +307,7 @@ def trace_veins_from_landmarks(
         edge_labels,
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+        band_dist=costa_band_dist,
     )
     if dbg:
         dbg.dump(G, edge_labels, "phase2b_propagate")
@@ -312,6 +323,7 @@ def trace_veins_from_landmarks(
         edge_labels,
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+        band_dist=costa_band_dist,
     )
     if dbg:
         dbg.dump(G, edge_labels, "phase2d_repropagate")
@@ -323,6 +335,7 @@ def trace_veins_from_landmarks(
         edge_labels,
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+        band_dist=costa_band_dist,
     )
     if dbg:
         dbg.dump(G, edge_labels, "phase2e_connect_fragments")
@@ -377,6 +390,7 @@ def trace_veins_from_landmarks(
         edge_labels,
         costa_band=costa_band,
         costa_max_dist=skel_graph.median_vein_width_px * config.costa_propagation_max_distance_vw,
+        band_dist=costa_band_dist,
     )
     if dbg:
         dbg.dump(G, edge_labels, "phase4c_repropagate")
@@ -1343,6 +1357,7 @@ def _propagate_through_degree2(
     edge_labels: dict[tuple, str],
     costa_band: "np.ndarray | None" = None,
     costa_max_dist: float = 96.0,
+    band_dist: "np.ndarray | None" = None,
 ) -> None:
     """Propagate vein labels through degree-2 pass-through nodes.
 
@@ -1352,12 +1367,20 @@ def _propagate_through_degree2(
     Costa propagation is restricted: if any part of the new edge runs
     ≥ costa_max_dist pixels from the nearest costa band pixel,
     propagation is blocked (the edge has left the wing margin).
+
+    ``band_dist`` is the distance transform of ``costa_band == 0``. The
+    trace function calls this helper ~4 times per wing with the same
+    ``costa_band`` each time; computing the EDT once and passing it in
+    avoids ~3 full-image distance transforms (deterministic function of
+    its input, so reuse is byte-identical). If only ``costa_band`` is
+    given and ``band_dist`` is None, the EDT is computed here for callers
+    that don't pre-compute it.
     """
     from scipy import ndimage
 
-    # Precompute distance-from-band map for costa checks
-    band_dist = None
-    if costa_band is not None:
+    # Precompute distance-from-band map for costa checks (skipped if the
+    # caller already hoisted it out of a hot loop and passed it in).
+    if band_dist is None and costa_band is not None:
         band_dist = ndimage.distance_transform_edt(costa_band == 0)
 
     def _edge_in_costa_band(u, v):
