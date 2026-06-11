@@ -137,6 +137,7 @@ def render_overlay(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
+    ectopic_label_font_scale: float = 3.0,
 ) -> np.ndarray:
     """Render veins and regions as a color overlay on the wing image.
 
@@ -163,6 +164,9 @@ def render_overlay(
         show_ectopic_labels: If True (default), draw the "EV1"/"EV2"… text labels
             next to ectopic veins. Set False to draw ectopic centerlines without
             their text (e.g. an intermediate preview where the labels add clutter).
+        ectopic_label_font_scale: cv2 font scale for the EV1/EV2… labels (default
+            3.0 — the historical hardcoded size). Outline / fill thicknesses scale
+            proportionally so the label stays readable at any size.
         show_region_labels: If True (default), draw the intervein region name text
             (with [M]/[I] status suffixes) at each region's centroid. Set False to
             keep the colored region fills but suppress the text labels — useful
@@ -228,16 +232,22 @@ def render_overlay(
             img = cv2.addWeighted(stroke_target, vein_opacity, img, 1.0 - vein_opacity, 0)
 
     # Layer 4: ectopic vein labels — also gated by vein_opacity so a fully
-    # transparent "vein" channel leaves no EV text either.
-    if show_veins and show_ectopic_labels and vein_opacity > 0:
+    # transparent "vein" channel leaves no EV text either. Outline / fill
+    # thicknesses scale linearly with font size so the EV labels look right at
+    # any size (historical sizes: scale=3.0, bg_thickness=12, fg_thickness=5).
+    if show_veins and show_ectopic_labels and vein_opacity > 0 and ectopic_label_font_scale > 0:
         ev_text_color = _vein_bgr("EV", vein_color_overrides)
         text_target = img.copy() if vein_opacity < 1.0 else img
+        ev_bg_thickness = max(1, int(round(ectopic_label_font_scale * 4.0)))
+        ev_fg_thickness = max(1, int(round(ectopic_label_font_scale * 5.0 / 3.0)))
         for v in veins:
             if v.centerline is None or not v.vein_id.startswith("EV"):
                 continue
             mx, my = int(v.centerline.centroid.x), int(v.centerline.centroid.y)
-            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 12)
-            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX, 3.0, ev_text_color, 5)
+            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                        ectopic_label_font_scale, (255, 255, 255), ev_bg_thickness)
+            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                        ectopic_label_font_scale, ev_text_color, ev_fg_thickness)
         if vein_opacity < 1.0:
             img = cv2.addWeighted(text_target, vein_opacity, img, 1.0 - vein_opacity, 0)
 
@@ -286,6 +296,7 @@ def render_overlay_to_file(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
+    ectopic_label_font_scale: float = 3.0,
 ) -> None:
     """Render overlay and write to a PNG file."""
     img_out = render_overlay(
@@ -303,6 +314,7 @@ def render_overlay_to_file(
         show_ectopic_labels=show_ectopic_labels,
         show_region_labels=show_region_labels,
         vein_simplify_tolerance_px=vein_simplify_tolerance_px,
+        ectopic_label_font_scale=ectopic_label_font_scale,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), img_out)
@@ -319,8 +331,16 @@ _POST_COLOR_BGR = (0, 60, 180)  # warm red/orange tint
 def render_ap_overlay(
     base_image: np.ndarray,
     wing_result: Optional[WingResult],
+    show_compartment_labels: bool = True,
 ) -> Optional[np.ndarray]:
     """Render anterior/posterior compartment overlay with percentage labels.
+
+    Args:
+        base_image: BGR base image.
+        wing_result: WingResult; used to compute the AP split.
+        show_compartment_labels: If True (default), draw the "ANT xx.x%" /
+            "POST xx.x%" text at each compartment's centroid. Set False to
+            keep the tinted fills without the percentage labels.
 
     Returns BGR image, or None if AP split cannot be computed.
     """
@@ -341,17 +361,18 @@ def render_ap_overlay(
     img = cv2.addWeighted(layer, 0.35, img, 0.65, 0)
 
     # Percentage labels
-    total = anterior.area + posterior.area
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    for label, geom, color in [
-        (f"ANT {anterior.area / total * 100:.1f}%", anterior, (255, 200, 100)),
-        (f"POST {posterior.area / total * 100:.1f}%", posterior, (100, 100, 255)),
-    ]:
-        cx, cy = int(geom.centroid.x), int(geom.centroid.y)
-        (tw, th), _ = cv2.getTextSize(label, font, 2.0, 4)
-        tx, ty = cx - tw // 2, cy + th // 2
-        cv2.putText(img, label, (tx, ty), font, 2.0, (255, 255, 255), 8)
-        cv2.putText(img, label, (tx, ty), font, 2.0, color, 4)
+    if show_compartment_labels:
+        total = anterior.area + posterior.area
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        for label, geom, color in [
+            (f"ANT {anterior.area / total * 100:.1f}%", anterior, (255, 200, 100)),
+            (f"POST {posterior.area / total * 100:.1f}%", posterior, (100, 100, 255)),
+        ]:
+            cx, cy = int(geom.centroid.x), int(geom.centroid.y)
+            (tw, th), _ = cv2.getTextSize(label, font, 2.0, 4)
+            tx, ty = cx - tw // 2, cy + th // 2
+            cv2.putText(img, label, (tx, ty), font, 2.0, (255, 255, 255), 8)
+            cv2.putText(img, label, (tx, ty), font, 2.0, color, 4)
 
     return img
 
@@ -360,9 +381,10 @@ def render_ap_overlay_to_file(
     base_image: np.ndarray,
     wing_result: Optional[WingResult],
     out_path: Path,
+    show_compartment_labels: bool = True,
 ) -> bool:
     """Render AP overlay and write to PNG. Returns True if successful."""
-    img = render_ap_overlay(base_image, wing_result)
+    img = render_ap_overlay(base_image, wing_result, show_compartment_labels=show_compartment_labels)
     if img is None:
         return False
     out_path.parent.mkdir(parents=True, exist_ok=True)

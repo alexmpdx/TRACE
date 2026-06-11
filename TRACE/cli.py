@@ -165,6 +165,21 @@ def parse_args(argv=None):
         help="Douglas-Peucker tolerance (px) for smoothing vein centerlines in the overlay (0 = raw skeleton)",
     )
     parser.add_argument(
+        "--ectopic-label-scale",
+        dest="ectopic_label_font_scale",
+        type=float,
+        default=3.0,
+        metavar="SCALE",
+        help="cv2 font scale for ectopic-vein (EV1/EV2…) labels in the overlay (default 3.0)",
+    )
+    parser.add_argument(
+        "--no-compartment-labels",
+        dest="show_compartment_labels",
+        action="store_false",
+        default=True,
+        help="Suppress the ANT/POST percentage labels in the AP compartment overlay (the tinted fills are kept)",
+    )
+    parser.add_argument(
         "--calibrate-workers",
         type=Path,
         metavar="PATH",
@@ -488,6 +503,8 @@ def main(argv=None):
         show_ectopic_labels=args.show_ectopic_labels,
         show_region_labels=args.show_region_labels,
         vein_simplify_tolerance_px=args.vein_simplify_tolerance_px,
+        ectopic_label_font_scale=args.ectopic_label_font_scale,
+        show_compartment_labels=args.show_compartment_labels,
     )
 
     # Summary
