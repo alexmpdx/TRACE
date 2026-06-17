@@ -396,10 +396,10 @@ def render_ap_overlay_to_file(
 # CV ratio overlay
 # ---------------------------------------------------------------------------
 
-_LANDMARK_RADIUS = 15
-_LINE_THICKNESS = 4
-_CV_LINE_BGR = (0, 200, 200)  # cyan for crossvein distance
-_WL_LINE_BGR = (200, 200, 0)  # yellow-ish for wing length
+_LANDMARK_RADIUS = 50
+_LINE_THICKNESS = 24
+_CV_LINE_BGR = (180, 75, 0)  # cobalt for crossvein distance
+_WL_LINE_BGR = (0, 130, 255)  # orange for wing length
 _LANDMARK_BGR = (255, 255, 255)  # white dot fill
 _LANDMARK_BORDER_BGR = (0, 0, 0)  # black dot border
 
@@ -421,8 +421,8 @@ def render_cv_ratio_overlay(
     """Render wing length and crossvein distance measurement lines with landmarks.
 
     Shows:
-    - Yellow line: wing length (L1-Rs to DTip)
-    - Cyan line: crossvein distance (ACV.p to PCV.a)
+    - Orange line: wing length (L1-Rs to DTip)
+    - Cobalt line: crossvein distance (ACV.p to PCV.a)
     - Labeled landmark dots at each endpoint
     - CV ratio value
 
