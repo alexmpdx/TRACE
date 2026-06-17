@@ -659,6 +659,167 @@ def _hex_to_rgba(h: str, alpha: float = 1.0) -> tuple[float, float, float, float
     return (r / 255, g / 255, b / 255, alpha)
 
 
+def _add_bridge_turns_into_node_rects(layout: "Layout") -> None:
+    """Some edges, after spreading + snap, have their endpoint clamped onto
+    one side of the dst rect but still outside on the perpendicular axis —
+    e.g. WING_GJ → P5 ends at P5's left edge but 0.1 in below its bottom.
+    Append a perpendicular Bezier segment so the line turns 90° and meets
+    the rect boundary. Same logic for spline starts that don't quite enter
+    the src rect.
+    """
+    for e in layout.edges:
+        if not e.spline or len(e.spline) < 4:
+            continue
+        spline = [tuple(p) for p in e.spline]
+
+        # --- end side
+        dst = layout.nodes.get(e.dst)
+        if dst is not None:
+            dx0, dx1 = dst.x - dst.w / 2, dst.x + dst.w / 2
+            dy0, dy1 = dst.y - dst.h / 2, dst.y + dst.h / 2
+            ex, ey = spline[-1]
+            inside_x = dx0 - 0.01 <= ex <= dx1 + 0.01
+            inside_y = dy0 - 0.01 <= ey <= dy1 + 0.01
+            if not (inside_x and inside_y):
+                last4 = spline[-4:]
+                xs = [p[0] for p in last4]
+                ys = [p[1] for p in last4]
+                is_h = max(ys) - min(ys) < 0.05 and max(xs) - min(xs) > 0.05
+                is_v = max(xs) - min(xs) < 0.05 and max(ys) - min(ys) > 0.05
+                target = None
+                if is_h and not inside_y:
+                    target = (ex, dy0 if ey < dy0 else dy1)
+                elif is_v and not inside_x:
+                    target = (dx0 if ex < dx0 else dx1, ey)
+                if target is not None and target != (ex, ey):
+                    p0 = (ex, ey)
+                    p3 = target
+                    p1 = (p0[0] + (p3[0] - p0[0]) / 3.0, p0[1] + (p3[1] - p0[1]) / 3.0)
+                    p2 = (p0[0] + 2 * (p3[0] - p0[0]) / 3.0, p0[1] + 2 * (p3[1] - p0[1]) / 3.0)
+                    spline.extend([p1, p2, p3])
+
+        # --- start side
+        src = layout.nodes.get(e.src)
+        if src is not None:
+            sx0, sx1 = src.x - src.w / 2, src.x + src.w / 2
+            sy0, sy1 = src.y - src.h / 2, src.y + src.h / 2
+            sx, sy = spline[0]
+            inside_x = sx0 - 0.01 <= sx <= sx1 + 0.01
+            inside_y = sy0 - 0.01 <= sy <= sy1 + 0.01
+            if not (inside_x and inside_y):
+                first4 = spline[:4]
+                xs = [p[0] for p in first4]
+                ys = [p[1] for p in first4]
+                is_h = max(ys) - min(ys) < 0.05 and max(xs) - min(xs) > 0.05
+                is_v = max(xs) - min(xs) < 0.05 and max(ys) - min(ys) > 0.05
+                target = None
+                if is_h and not inside_y:
+                    target = (sx, sy0 if sy < sy0 else sy1)
+                elif is_v and not inside_x:
+                    target = (sx0 if sx < sx0 else sx1, sy)
+                if target is not None and target != (sx, sy):
+                    p3 = (sx, sy)
+                    p0 = target
+                    p1 = (p0[0] + (p3[0] - p0[0]) / 3.0, p0[1] + (p3[1] - p0[1]) / 3.0)
+                    p2 = (p0[0] + 2 * (p3[0] - p0[0]) / 3.0, p0[1] + 2 * (p3[1] - p0[1]) / 3.0)
+                    spline = [p0, p1, p2] + spline
+
+        e.spline = spline
+
+
+def _snap_endpoints_to_node_rects(layout: "Layout") -> None:
+    """Pull each edge's spline[0] and spline[-1] onto the boundary of their
+    src/dst node rect so the arrow tip actually meets the box.
+
+    `dot -Tplain` reserves ~0.15 in for an arrowhead by ending the spline
+    that far outside the target. Our vispy arrowhead is only ~0.10 in, so
+    the tip floats in empty space and the line visually appears to leave
+    the box from a corner — looks like an awkward angle even though the
+    underlying geometry is a perfect L.
+
+    The snap clamps the endpoint to the node rect while preserving the
+    direction of the adjacent Bezier segment:
+      - if the last 4 control points share x (vertical), only y is clamped
+      - if they share y (horizontal), only x is clamped
+      - otherwise (rare) both are clamped — the segment wasn't pure ortho
+        to start with, so we can't make it worse.
+    No diagonals are ever introduced.
+    """
+
+    def _seg_dir(ctrl):
+        xs = [p[0] for p in ctrl]
+        ys = [p[1] for p in ctrl]
+        if max(xs) - min(xs) < 0.05:
+            return "vertical"
+        if max(ys) - min(ys) < 0.05:
+            return "horizontal"
+        return None
+
+    def _reinterp(p0, p3):
+        return (
+            (p0[0] + (p3[0] - p0[0]) / 3.0, p0[1] + (p3[1] - p0[1]) / 3.0),
+            (p0[0] + 2 * (p3[0] - p0[0]) / 3.0, p0[1] + 2 * (p3[1] - p0[1]) / 3.0),
+        )
+
+    for e in layout.edges:
+        if not e.spline or len(e.spline) < 4:
+            continue
+        spline = [tuple(p) for p in e.spline]
+        # start: clamp to source rect along adjacent segment's axis
+        src = layout.nodes.get(e.src)
+        if src is not None:
+            x, y = spline[0]
+            sx0, sx1 = src.x - src.w / 2, src.x + src.w / 2
+            sy0, sy1 = src.y - src.h / 2, src.y + src.h / 2
+            direction = _seg_dir(spline[:4])
+            new_x, new_y = x, y
+            if direction == "vertical":
+                if y < sy0:
+                    new_y = sy0
+                elif y > sy1:
+                    new_y = sy1
+            elif direction == "horizontal":
+                if x < sx0:
+                    new_x = sx0
+                elif x > sx1:
+                    new_x = sx1
+            else:
+                new_x = max(sx0, min(sx1, x))
+                new_y = max(sy0, min(sy1, y))
+            if (new_x, new_y) != (x, y):
+                spline[0] = (new_x, new_y)
+                p1, p2 = _reinterp(spline[0], spline[3])
+                spline[1] = p1
+                spline[2] = p2
+        # end: clamp to dst rect along adjacent segment's axis
+        dst = layout.nodes.get(e.dst)
+        if dst is not None:
+            x, y = spline[-1]
+            dx0, dx1 = dst.x - dst.w / 2, dst.x + dst.w / 2
+            dy0, dy1 = dst.y - dst.h / 2, dst.y + dst.h / 2
+            direction = _seg_dir(spline[-4:])
+            new_x, new_y = x, y
+            if direction == "vertical":
+                if y < dy0:
+                    new_y = dy0
+                elif y > dy1:
+                    new_y = dy1
+            elif direction == "horizontal":
+                if x < dx0:
+                    new_x = dx0
+                elif x > dx1:
+                    new_x = dx1
+            else:
+                new_x = max(dx0, min(dx1, x))
+                new_y = max(dy0, min(dy1, y))
+            if (new_x, new_y) != (x, y):
+                spline[-1] = (new_x, new_y)
+                p1, p2 = _reinterp(spline[-4], spline[-1])
+                spline[-3] = p1
+                spline[-2] = p2
+        e.spline = spline
+
+
 def _spread_parallel_horizontal_segments(
     layout: "Layout",
     *,
@@ -1315,17 +1476,29 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
             return None
         return (n.x - n.w / 2, n.y - n.h / 2, n.x + n.w / 2, n.y + n.h / 2)
 
+    # Click-to-highlight state — populated as we create edge visuals so the
+    # mouse_release handler below can recolor the lines/arrows belonging to
+    # the clicked node's outgoing edges.
+    EDGE_BASE_LINE_COLOR = (0.30, 0.33, 0.40, 0.85)
+    EDGE_BASE_LINE_WIDTH = 1.6
+    EDGE_BASE_ARROW_COLOR = (0.30, 0.33, 0.40, 1.0)
+    EDGE_HIGHLIGHT_COLOR = (0.95, 0.45, 0.10, 1.0)
+    EDGE_HIGHLIGHT_WIDTH = 3.2
+    edge_visuals_by_src: dict = {}  # src_id -> list of (line, arrow_or_None)
+    all_edge_visuals: list = []
+
     for e in layout.edges:
         pts_raw = _catmull_rom_to_lines(e.spline)
         pts_raw = _clip_polyline_to_node_rects(pts_raw, _rect_for(e.src), _rect_for(e.dst))
         pts = pts_raw * SCALE
-        visuals.Line(
+        line_vis = visuals.Line(
             pos=pts,
-            color=(0.30, 0.33, 0.40, 0.85),
-            width=1.6,
+            color=EDGE_BASE_LINE_COLOR,
+            width=EDGE_BASE_LINE_WIDTH,
             method="gl",
             parent=view.scene,
         )
+        arrow_vis = None
         # Arrowhead at end
         if len(pts) >= 2:
             p_end = pts[-1]
@@ -1344,12 +1517,14 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
                     ],
                     dtype=np.float32,
                 )
-                visuals.Polygon(
+                arrow_vis = visuals.Polygon(
                     pos=tri,
-                    color=(0.30, 0.33, 0.40, 1.0),
-                    border_color=(0.30, 0.33, 0.40, 1.0),
+                    color=EDGE_BASE_ARROW_COLOR,
+                    border_color=EDGE_BASE_ARROW_COLOR,
                     parent=view.scene,
                 )
+        edge_visuals_by_src.setdefault(e.src, []).append((line_vis, arrow_vis))
+        all_edge_visuals.append((line_vis, arrow_vis))
         if e.label and e.label_pos:
             EDGE_LABEL_FONT = 6.5
             _t = visuals.Text(
@@ -1491,12 +1666,76 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
         return
 
     # Interactive help
-    print("Pipeline map — drag to pan, scroll to zoom, press 'r' to reset view.")
+    print(
+        "Pipeline map — drag to pan, scroll to zoom, press 'r' to reset view,\n"
+        "click a box to highlight its outgoing arrows (click again or off-box to clear)."
+    )
 
     @canvas.events.key_press.connect
     def _on_key(event):
         if event.key and event.key.name.lower() == "r":
             view.camera.set_range(x=(min(all_x), max(all_x)), y=(min(all_y), max(all_y)), margin=0.05)
+
+    # Click-to-highlight: when the user clicks a node box, recolor the
+    # outgoing edges. Distinguishes click from pan by tracking the press
+    # position and only firing when release is within a few pixels.
+    node_rects_scene: dict = {
+        ln.id: (
+            (ln.x - ln.w / 2) * SCALE,
+            (ln.y - ln.h / 2) * SCALE,
+            (ln.x + ln.w / 2) * SCALE,
+            (ln.y + ln.h / 2) * SCALE,
+        )
+        for ln in layout.nodes.values()
+    }
+    highlight_state: dict = {"node": None, "press_pos": None}
+
+    def _reset_highlight():
+        for line, arrow in all_edge_visuals:
+            line.set_data(color=EDGE_BASE_LINE_COLOR, width=EDGE_BASE_LINE_WIDTH)
+            if arrow is not None:
+                arrow.color = EDGE_BASE_ARROW_COLOR
+                arrow.border_color = EDGE_BASE_ARROW_COLOR
+        canvas.update()
+
+    def _apply_highlight(node_id: str):
+        _reset_highlight()
+        for line, arrow in edge_visuals_by_src.get(node_id, []):
+            line.set_data(color=EDGE_HIGHLIGHT_COLOR, width=EDGE_HIGHLIGHT_WIDTH)
+            if arrow is not None:
+                arrow.color = EDGE_HIGHLIGHT_COLOR
+                arrow.border_color = EDGE_HIGHLIGHT_COLOR
+        highlight_state["node"] = node_id
+        canvas.update()
+
+    @canvas.events.mouse_press.connect
+    def _on_press(event):
+        if event.button == 1:
+            highlight_state["press_pos"] = tuple(event.pos)
+
+    @canvas.events.mouse_release.connect
+    def _on_release(event):
+        if event.button != 1 or highlight_state["press_pos"] is None:
+            return
+        px, py = highlight_state["press_pos"]
+        rx, ry = event.pos
+        highlight_state["press_pos"] = None
+        # Distinguish click from drag/pan.
+        if abs(rx - px) > 4 or abs(ry - py) > 4:
+            return
+        scene_pos = view.scene.transform.imap(event.pos)
+        sx, sy = float(scene_pos[0]), float(scene_pos[1])
+        hit = None
+        for nid, (x0, y0, x1, y1) in node_rects_scene.items():
+            if x0 <= sx <= x1 and y0 <= sy <= y1:
+                hit = nid
+                break
+        if hit is None or hit == highlight_state["node"]:
+            if highlight_state["node"] is not None:
+                _reset_highlight()
+                highlight_state["node"] = None
+        else:
+            _apply_highlight(hit)
 
     from vispy import app as vispy_app
 
@@ -1580,6 +1819,15 @@ def main(argv: list[str] | None = None) -> int:
     # bumped back into a label band.
     _spread_parallel_horizontal_segments(layout, y_proximity_max=0.10, min_separation=0.40)
     _lift_horizontals_above_crossed_labels(layout)
+    # Finally, snap each spline's endpoints onto its src/dst rect so arrow
+    # tips actually touch the boxes. Preserves the direction of the adjacent
+    # Bezier segment, so no diagonals are introduced.
+    _snap_endpoints_to_node_rects(layout)
+    # When the snapped endpoint is on the rect's side but the perpendicular
+    # axis is still outside (e.g. horizontal line meets P5's left edge but
+    # below P5's bottom), append a 90° bridge segment so the line turns
+    # cleanly into the box.
+    _add_bridge_turns_into_node_rects(layout)
     nodes_meta = {n.id: n for n in NODES}
 
     missing = set(layout.nodes) - set(nodes_meta)
