@@ -423,7 +423,7 @@ _RANK_PAIRS: dict[str, list[list[str]]] = {
 _NODE_MIN_WIDTH: dict[str, float] = {
     "P3": 4.6,  # Stage 3: Landmark detection
     "I4": 3.5,  # Step 4: Compute wing axis
-    "I6": 4.6,  # Step 6: Call intervein regions
+    "I6": 7.5,  # Step 6: Call intervein regions
 }
 
 
@@ -659,6 +659,549 @@ def _hex_to_rgba(h: str, alpha: float = 1.0) -> tuple[float, float, float, float
     return (r / 255, g / 255, b / 255, alpha)
 
 
+def _spread_parallel_horizontal_segments(
+    layout: "Layout",
+    *,
+    x_overlap_min: float = 0.5,
+    y_proximity_max: float = 0.45,
+    min_separation: float = 0.50,
+) -> None:
+    """Find bundles of near-horizontal Bezier segments running parallel & close in y,
+    then push them apart so each line is clearly distinct.
+
+    `dot -Tplain` with `splines=ortho` often crams 3+ parallel horizontals into
+    the narrow gap between two ranks. We:
+      1. Collect every "long horizontal" Bezier segment (all 4 control points
+         share y within ±0.05 in, x-span > 0.5 in).
+      2. Bundle segments that overlap in x and are within `y_proximity_max` of
+         each other.
+      3. Spread each bundle around its mean y so consecutive lines are at least
+         `min_separation` apart.
+      4. After shifting a horizontal segment, re-interpolate the inner control
+         points of the adjacent (vertical) Bezier segments so each ortho turn
+         stays a clean straight line rather than wiggling.
+      5. Move the edge's label_pos along with its segment so the label sticks
+         with its line.
+    """
+    Y_TOL = 0.05  # tolerance for "same y" (horizontal segment)
+    X_MIN_SPAN = 0.5  # minimum x-span to qualify as a long horizontal
+
+    # Step 1 — collect horizontal Bezier segments.
+    segs = []
+    for edge_idx, e in enumerate(layout.edges):
+        spline = list(e.spline)
+        n_segs = (len(spline) - 1) // 3
+        for k in range(n_segs):
+            ctrl = [spline[3 * k + j] for j in range(4)]
+            ys = [p[1] for p in ctrl]
+            xs = [p[0] for p in ctrl]
+            if max(ys) - min(ys) > Y_TOL:
+                continue
+            x_span = max(xs) - min(xs)
+            if x_span < X_MIN_SPAN:
+                continue
+            segs.append(
+                {
+                    "edge_idx": edge_idx,
+                    "seg_idx": k,
+                    "n_segs": n_segs,
+                    "x0": min(xs),
+                    "x1": max(xs),
+                    "y": sum(ys) / 4.0,
+                }
+            )
+
+    # Step 2 — group by x-overlap + y-proximity (transitive closure).
+    parent = list(range(len(segs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(len(segs)):
+        for j in range(i + 1, len(segs)):
+            if abs(segs[i]["y"] - segs[j]["y"]) > y_proximity_max:
+                continue
+            x_overlap = min(segs[i]["x1"], segs[j]["x1"]) - max(segs[i]["x0"], segs[j]["x0"])
+            if x_overlap < x_overlap_min:
+                continue
+            union(i, j)
+
+    bundles: dict[int, list[int]] = {}
+    for i in range(len(segs)):
+        bundles.setdefault(find(i), []).append(i)
+
+    # Step 3 — for bundles of 2+, spread along y around the bundle mean,
+    # clamped to the y-channel between source bottoms and target tops so
+    # horizontals never end up overlapping their source or target nodes.
+    SAFETY = 0.10  # inches between a horizontal and the nearest node edge
+
+    def _channel(members):
+        """Allowed (y_min, y_max) for this bundle's horizontals."""
+        floor = float("-inf")
+        ceiling = float("inf")
+        for idx in members:
+            e = layout.edges[segs[idx]["edge_idx"]]
+            src = layout.nodes.get(e.src)
+            dst = layout.nodes.get(e.dst)
+            if src is None or dst is None:
+                continue
+            if src.y > dst.y:  # downward edge
+                ceiling = min(ceiling, src.y - src.h / 2)
+                floor = max(floor, dst.y + dst.h / 2)
+            else:  # upward
+                ceiling = min(ceiling, dst.y - dst.h / 2)
+                floor = max(floor, src.y + src.h / 2)
+        return floor + SAFETY, ceiling - SAFETY
+
+    shifts: list[tuple[int, int, float]] = []  # (edge_idx, seg_idx, dy)
+    for members in bundles.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda idx: segs[idx]["y"])
+        ys = [segs[idx]["y"] for idx in members]
+        mean_y = sum(ys) / len(ys)
+        n = len(members)
+        y_min_allowed, y_max_allowed = _channel(members)
+        available = y_max_allowed - y_min_allowed
+        # If the channel is too narrow for the requested spread, shrink it.
+        effective_sep = min(min_separation, available / max(n - 1, 1)) if available > 0 else min_separation
+        proposed = [mean_y + (k - (n - 1) / 2.0) * effective_sep for k in range(n)]
+        # Clamp the bundle as a whole (preserving the spread) so the top/bottom
+        # don't poke into the source/target node rectangles.
+        if proposed[-1] > y_max_allowed:
+            shift = y_max_allowed - proposed[-1]
+            proposed = [y + shift for y in proposed]
+        if proposed[0] < y_min_allowed:
+            shift = y_min_allowed - proposed[0]
+            proposed = [y + shift for y in proposed]
+        for rank, idx in enumerate(members):
+            dy = proposed[rank] - segs[idx]["y"]
+            if abs(dy) > 1e-4:
+                shifts.append((segs[idx]["edge_idx"], segs[idx]["seg_idx"], dy))
+
+    # Step 4 — apply shifts. We mutate edge.spline (a list of tuples) in place
+    # by rebuilding it. Then reinterpolate adjacent vertical segments so they
+    # stay straight after the corner moves.
+    def _reinterp_inner(p0, p3):
+        return (
+            (p0[0] + (p3[0] - p0[0]) / 3.0, p0[1] + (p3[1] - p0[1]) / 3.0),
+            (p0[0] + 2 * (p3[0] - p0[0]) / 3.0, p0[1] + 2 * (p3[1] - p0[1]) / 3.0),
+        )
+
+    # Group shifts by edge so a multi-segment edge gets a single rebuild.
+    per_edge: dict[int, list[tuple[int, float]]] = {}
+    for edge_idx, seg_idx, dy in shifts:
+        per_edge.setdefault(edge_idx, []).append((seg_idx, dy))
+
+    for edge_idx, sh in per_edge.items():
+        spline = [tuple(p) for p in layout.edges[edge_idx].spline]
+        n_segs = (len(spline) - 1) // 3
+        # Apply each shift: bump y of the 4 control points of seg_idx by dy.
+        for seg_idx, dy in sh:
+            for j in range(4):
+                px, py = spline[3 * seg_idx + j]
+                spline[3 * seg_idx + j] = (px, py + dy)
+            # Adjacent segments: rebuild their inner control points so the
+            # straight-line direction is preserved (no wiggle).
+            if seg_idx > 0:
+                p0 = spline[3 * (seg_idx - 1)]
+                p3 = spline[3 * seg_idx]  # already shifted
+                p1, p2 = _reinterp_inner(p0, p3)
+                spline[3 * (seg_idx - 1) + 1] = p1
+                spline[3 * (seg_idx - 1) + 2] = p2
+            if seg_idx < n_segs - 1:
+                p0 = spline[3 * (seg_idx + 1)]  # already shifted
+                p3 = spline[3 * (seg_idx + 1) + 3]
+                p1, p2 = _reinterp_inner(p0, p3)
+                spline[3 * (seg_idx + 1) + 1] = p1
+                spline[3 * (seg_idx + 1) + 2] = p2
+
+            # Step 5 — drag the edge label with its segment when applicable.
+            e = layout.edges[edge_idx]
+            if e.label_pos is not None:
+                lx, ly = e.label_pos
+                # Was the label on this segment (in x range and near old y)?
+                seg_info = next(
+                    (s for s in segs if s["edge_idx"] == edge_idx and s["seg_idx"] == seg_idx),
+                    None,
+                )
+                if seg_info and seg_info["x0"] - 0.1 <= lx <= seg_info["x1"] + 0.1:
+                    if abs(ly - seg_info["y"]) < 0.2:
+                        e.label_pos = (lx, ly + dy)
+
+        layout.edges[edge_idx].spline = spline
+
+
+def _reseat_fallback_edge_labels(layout: "Layout") -> None:
+    """`dot -Tplain` falls back to label_pos=(0, 0.11111) when it can't find
+    a good slot. When multiple edges all hit this fallback, their labels
+    stack in the bottom-left corner of the canvas, completely illegible.
+
+    Replace any fallback position with the geometric midpoint of the edge's
+    spline. The next displacement pass will then nudge it off any node it
+    happens to land inside.
+    """
+    for e in layout.edges:
+        if e.label is None or e.label_pos is None:
+            continue
+        lx, ly = e.label_pos
+        if abs(lx) < 0.01 and abs(ly - 0.11111) < 0.02:
+            spline = list(e.spline)
+            if not spline:
+                continue
+            mid = spline[len(spline) // 2]
+            e.label_pos = (float(mid[0]), float(mid[1]))
+
+
+def _displace_labels_off_obstacles(
+    layout: "Layout",
+    *,
+    safety: float = 0.10,
+    max_iters: int = 4,
+) -> None:
+    """If an edge label's bounding box overlaps any node OR any other edge
+    label, shift the label along whichever axis (up/down/left/right) clears
+    every overlap with the smallest displacement. Iterated since moving one
+    label may unblock another's preferred destination.
+
+    `dot` places some edge labels on the rank between two node rows, which
+    works when the rank-gap is wide enough; when it isn't (e.g. ``wing_outline``
+    landing in the narrow gap between I4 and I3, or ``anchored`` sitting
+    on MM), the label ends up tucked under a box. Other labels (e.g.
+    ``wing_axis`` next to ``split polys + veins``) can also land on top of
+    each other in the same rank-gap.
+    """
+    SCALE = 72.0
+    PX_TO_INCH = 3.27 / SCALE
+    EDGE_FONT_PX = 6.5
+    CW_EDGE = 0.55
+    LH = EDGE_FONT_PX * PX_TO_INCH
+
+    nodes = list(layout.nodes.values())
+
+    def label_w(label):
+        return len(label) * EDGE_FONT_PX * CW_EDGE * PX_TO_INCH
+
+    def has_overlap(cx, cy, lw, current_edge_idx):
+        lx0, lx1 = cx - lw / 2, cx + lw / 2
+        ly0, ly1 = cy - LH / 2, cy + LH / 2
+        for n in nodes:
+            nx0 = n.x - n.w / 2 - safety
+            nx1 = n.x + n.w / 2 + safety
+            ny0 = n.y - n.h / 2 - safety
+            ny1 = n.y + n.h / 2 + safety
+            if lx0 < nx1 and lx1 > nx0 and ly0 < ny1 and ly1 > ny0:
+                return True
+        for ei, e in enumerate(layout.edges):
+            if ei == current_edge_idx:
+                continue
+            if not e.label or e.label_pos is None:
+                continue
+            ox, oy = e.label_pos
+            ow = label_w(e.label)
+            ox0 = ox - ow / 2 - safety
+            ox1 = ox + ow / 2 + safety
+            oy0 = oy - LH / 2 - safety
+            oy1 = oy + LH / 2 + safety
+            if lx0 < ox1 and lx1 > ox0 and ly0 < oy1 and ly1 > oy0:
+                return True
+        return False
+
+    for _ in range(max_iters):
+        any_moved = False
+        for ei, e in enumerate(layout.edges):
+            if not e.label or e.label_pos is None:
+                continue
+            lx, ly = e.label_pos
+            lw = label_w(e.label)
+            if not has_overlap(lx, ly, lw, ei):
+                continue
+            best = None  # (distance, new_x, new_y)
+            for dx, dy in [(0, 1), (0, -1), (-1, 0), (1, 0)]:
+                for steps in range(1, 80):
+                    s = steps * 0.1
+                    tx, ty = lx + dx * s, ly + dy * s
+                    if not has_overlap(tx, ty, lw, ei):
+                        if best is None or s < best[0]:
+                            best = (s, tx, ty)
+                        break
+            if best:
+                e.label_pos = (best[1], best[2])
+                any_moved = True
+        if not any_moved:
+            break
+
+
+def _lift_horizontals_above_crossed_labels(
+    layout: "Layout",
+    *,
+    safety: float = 0.08,
+    max_iters: int = 3,
+) -> None:
+    """For each horizontal Bezier segment that crosses a label box (cluster or
+    edge) belonging to a DIFFERENT edge, shift the segment upward so it clears
+    the label. The shift is clamped to stay just below the source node's bottom
+    edge — we can't realistically push a horizontal above the box it exits.
+
+    Constants mirror the render() values: cluster labels = 12 px bold, edge
+    labels = 6.5 px italic. The scene-units → pixels ratio at the default
+    frame-fit zoom is ~3.27, so a pixel of text ≈ 0.045 graphviz-inches.
+
+    Runs up to `max_iters` passes; an earlier shift can introduce a new
+    crossing that the next pass cleans up.
+    """
+    SCALE = 72.0
+    SCENE_PER_PIXEL = 3.27
+    PX_TO_INCH = SCENE_PER_PIXEL / SCALE
+    CLUSTER_FONT_PX = 12.0
+    EDGE_FONT_PX = 6.5
+    CW_EDGE = 0.55
+    CW_CLUSTER = 0.62
+    CLUSTER_BASELINE_OFFSET = 17.6 / SCALE  # render code treats 17.6 scene units
+
+    nodes_meta = {n.id: n for n in NODES}
+
+    def _cluster_label_box(label, members):
+        xs = [n.x for n in members]
+        ws = [n.w for n in members]
+        ys_ = [n.y for n in members]
+        hs = [n.h for n in members]
+        x0 = min(xs[i] - ws[i] / 2 for i in range(len(members))) - 0.20
+        x1 = max(xs[i] + ws[i] / 2 for i in range(len(members))) + 0.20
+        y1_inches = max(ys_[i] + hs[i] / 2 for i in range(len(members))) + 0.50
+        baseline_inches = y1_inches - CLUSTER_BASELINE_OFFSET
+        ascent_inches = CLUSTER_FONT_PX * 0.80 * PX_TO_INCH
+        descent_inches = CLUSTER_FONT_PX * 0.20 * PX_TO_INCH
+        w = len(label) * CLUSTER_FONT_PX * CW_CLUSTER * PX_TO_INCH
+        cx = (x0 + x1) / 2
+        return cx - w / 2, cx + w / 2, baseline_inches - descent_inches, baseline_inches + ascent_inches
+
+    def _edge_label_box(label, cx, cy):
+        w = len(label) * EDGE_FONT_PX * CW_EDGE * PX_TO_INCH
+        h = EDGE_FONT_PX * PX_TO_INCH
+        return cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2
+
+    def _build_label_boxes():
+        boxes = []  # (kind, owner_id_or_edge_idx, x0, x1, y0, y1)
+        clusters_grouped = {}
+        for nid, ln in layout.nodes.items():
+            g = nodes_meta[nid].group
+            if not GROUPS[g].get("cluster", True):
+                continue
+            clusters_grouped.setdefault(g, []).append(ln)
+        for g, members in clusters_grouped.items():
+            label = GROUPS[g].get("label")
+            if not label:
+                continue
+            boxes.append(("cluster", g, *_cluster_label_box(label, members)))
+        for ei, e in enumerate(layout.edges):
+            if e.label and e.label_pos:
+                boxes.append(("edge", ei, *_edge_label_box(e.label, e.label_pos[0], e.label_pos[1])))
+        return boxes
+
+    def _horizontal_segs():
+        out = []
+        for ei, e in enumerate(layout.edges):
+            spline = list(e.spline)
+            n_segs = (len(spline) - 1) // 3
+            for k in range(n_segs):
+                ctrl = [spline[3 * k + j] for j in range(4)]
+                ys = [p[1] for p in ctrl]
+                xs = [p[0] for p in ctrl]
+                if max(ys) - min(ys) > 0.05:
+                    continue
+                if max(xs) - min(xs) < 0.5:
+                    continue
+                out.append((ei, k, n_segs, sum(ys) / 4, min(xs), max(xs)))
+        return out
+
+    def _reinterp_inner(p0, p3):
+        return (
+            (p0[0] + (p3[0] - p0[0]) / 3.0, p0[1] + (p3[1] - p0[1]) / 3.0),
+            (p0[0] + 2 * (p3[0] - p0[0]) / 3.0, p0[1] + 2 * (p3[1] - p0[1]) / 3.0),
+        )
+
+    STAGGER = 0.30  # additional separation between two segments lifted above the same label
+
+    for _ in range(max_iters):
+        boxes = _build_label_boxes()
+        segs = _horizontal_segs()
+        # First pass — compute everyone's proposed target_y.
+        proposals = []  # (ei, seg_idx, n_segs, sy, sx0, sx1, base_target_y)
+        for ei, seg_idx, n_segs, sy, sx0, sx1 in segs:
+            crossed_label_tops = []
+            for kind, owner, lx0, lx1, ly0, ly1 in boxes:
+                if kind == "edge" and owner == ei:
+                    continue
+                if ly0 <= sy <= ly1 and sx0 < lx1 and sx1 > lx0:
+                    crossed_label_tops.append(ly1)
+            if not crossed_label_tops:
+                continue
+            target_y = max(crossed_label_tops) + safety
+            proposals.append([ei, seg_idx, n_segs, sy, sx0, sx1, target_y])
+        # Stagger groups of proposals whose target_y is the same (e.g. multiple
+        # horizontals all lifted above the same cluster label). Sort each
+        # group by current sy so the one originally lower stays lower.
+        proposals.sort(key=lambda p: (round(p[6], 1), p[3]))
+        i = 0
+        while i < len(proposals):
+            j = i
+            while j < len(proposals) and abs(proposals[j][6] - proposals[i][6]) < 0.05:
+                # Same target_y AND x-range overlap with anyone in [i:j+1]?
+                if j > i:
+                    overlaps_any = any(
+                        min(proposals[j][5], proposals[k][5]) - max(proposals[j][4], proposals[k][4]) > 0.5
+                        for k in range(i, j)
+                    )
+                    if not overlaps_any:
+                        break
+                j += 1
+            # Group is proposals[i:j]; stagger upward.
+            for k_off, idx in enumerate(range(i, j)):
+                proposals[idx][6] += k_off * STAGGER
+            i = j
+        # Second pass — apply (with source-bottom cap).
+        any_change = False
+        for ei, seg_idx, n_segs, sy, sx0, sx1, target_y in proposals:
+            e = layout.edges[ei]
+            src = layout.nodes.get(e.src)
+            dst = layout.nodes.get(e.dst)
+            if src is not None:
+                if src.y > (dst.y if dst else float("-inf")):
+                    cap = src.y - src.h / 2 - safety
+                    if target_y > cap:
+                        target_y = cap
+            dy = target_y - sy
+            if abs(dy) < 0.01:
+                continue
+            spline = [tuple(p) for p in e.spline]
+            for j in range(4):
+                px, py = spline[3 * seg_idx + j]
+                spline[3 * seg_idx + j] = (px, py + dy)
+            if seg_idx > 0:
+                p0 = spline[3 * (seg_idx - 1)]
+                p3 = spline[3 * seg_idx]
+                p1, p2 = _reinterp_inner(p0, p3)
+                spline[3 * (seg_idx - 1) + 1] = p1
+                spline[3 * (seg_idx - 1) + 2] = p2
+            if seg_idx < n_segs - 1:
+                p0 = spline[3 * (seg_idx + 1)]
+                p3 = spline[3 * (seg_idx + 1) + 3]
+                p1, p2 = _reinterp_inner(p0, p3)
+                spline[3 * (seg_idx + 1) + 1] = p1
+                spline[3 * (seg_idx + 1) + 2] = p2
+            e.spline = spline
+            # Drag the edge's own label with its segment if applicable.
+            if e.label_pos is not None and sx0 - 0.1 <= e.label_pos[0] <= sx1 + 0.1:
+                if abs(e.label_pos[1] - (sy + 0.18)) < 0.30:  # label was lifted 0.18 above sy
+                    e.label_pos = (e.label_pos[0], e.label_pos[1] + dy)
+            any_change = True
+        if not any_change:
+            break
+
+
+def _lift_labels_off_horizontal_segments(layout: "Layout", lift: float = 0.18) -> None:
+    """For each labeled edge whose label sits on a roughly horizontal Bezier
+    segment, nudge the label `lift` inches upward so the line doesn't
+    visually pass through the italic text.
+
+    A segment qualifies as "horizontal" if its 4 control points share a y
+    value within a small tolerance. We only lift when the label's x is within
+    the segment's x-span and its y is within 0.2 in of the segment's y.
+    Labels on vertical segments or already off-axis are left alone.
+    """
+    Y_TOL = 0.05
+    for e in layout.edges:
+        if not e.label or e.label_pos is None:
+            continue
+        lx, ly = e.label_pos
+        spline = list(e.spline)
+        n_segs = (len(spline) - 1) // 3
+        for k in range(n_segs):
+            ctrl = [spline[3 * k + j] for j in range(4)]
+            ys = [p[1] for p in ctrl]
+            xs = [p[0] for p in ctrl]
+            if max(ys) - min(ys) > Y_TOL:
+                continue
+            seg_y = sum(ys) / 4
+            if not (min(xs) - 0.1 <= lx <= max(xs) + 0.1):
+                continue
+            if abs(ly - seg_y) > 0.2:
+                continue
+            e.label_pos = (lx, ly + lift)
+            break
+
+
+def _clip_polyline_to_node_rects(
+    pts: np.ndarray,
+    src_rect: tuple[float, float, float, float] | None,
+    dst_rect: tuple[float, float, float, float] | None,
+) -> np.ndarray:
+    """Trim leading/trailing polyline points that lie inside the src/dst node rects.
+
+    `dot -Tplain` sometimes emits an edge whose first Bezier control point sits
+    inside its source node (graphviz keeps it for spline-shape continuity but
+    visually the line then leaks into the box). Same issue at the target end.
+    We walk in from each end, find where the polyline first crosses the rect
+    boundary, and splice in the boundary-crossing point so the rendered line
+    starts/ends exactly at the node edge.
+    """
+
+    def inside(p, rect):
+        xmin, ymin, xmax, ymax = rect
+        return xmin <= p[0] <= xmax and ymin <= p[1] <= ymax
+
+    def segment_rect_exit(p_in, p_out, rect):
+        # Smallest t in (0, 1] where the segment from p_in (inside) to p_out
+        # (outside) crosses the rect boundary.
+        xmin, ymin, xmax, ymax = rect
+        dx = p_out[0] - p_in[0]
+        dy = p_out[1] - p_in[1]
+        ts = []
+        if dx > 0:
+            ts.append((xmax - p_in[0]) / dx)
+        elif dx < 0:
+            ts.append((xmin - p_in[0]) / dx)
+        if dy > 0:
+            ts.append((ymax - p_in[1]) / dy)
+        elif dy < 0:
+            ts.append((ymin - p_in[1]) / dy)
+        ts = [t for t in ts if 0 < t <= 1.0 + 1e-9]
+        if not ts:
+            return (float(p_out[0]), float(p_out[1]))
+        t = min(ts)
+        return (float(p_in[0] + t * dx), float(p_in[1] + t * dy))
+
+    pts_list = [tuple(map(float, p)) for p in pts]
+
+    if src_rect is not None and len(pts_list) >= 2 and inside(pts_list[0], src_rect):
+        first_out = next((i for i in range(len(pts_list)) if not inside(pts_list[i], src_rect)), None)
+        if first_out is not None and first_out > 0:
+            cross = segment_rect_exit(pts_list[first_out - 1], pts_list[first_out], src_rect)
+            pts_list = [cross] + pts_list[first_out:]
+
+    if dst_rect is not None and len(pts_list) >= 2 and inside(pts_list[-1], dst_rect):
+        # Walk from the end.
+        last_out = None
+        for i in range(len(pts_list) - 1, -1, -1):
+            if not inside(pts_list[i], dst_rect):
+                last_out = i
+                break
+        if last_out is not None and last_out < len(pts_list) - 1:
+            cross = segment_rect_exit(pts_list[last_out + 1], pts_list[last_out], dst_rect)
+            pts_list = pts_list[: last_out + 1] + [cross]
+
+    return np.array(pts_list, dtype=np.float32)
+
+
 def _catmull_rom_to_lines(spline: list[tuple[float, float]], samples_per_seg: int = 16):
     """Convert a dot B-spline control polygon to a dense polyline.
 
@@ -699,6 +1242,14 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
     )
     view = canvas.central_widget.add_view()
     view.camera = scene.PanZoomCamera(aspect=1)
+
+    # vispy's Text visual uses pixel-based font_size that does NOT scale with
+    # the camera. We collect every Text visual we create here along with its
+    # "base" font size (the size that looks right at the default frame-all
+    # view), then hook the camera's transform_change event to rescale font_size
+    # proportionally to zoom. See the _rescale_text() callback at the end of
+    # this function for the actual scaling logic.
+    scaling_texts: list = []
 
     # Coordinate scaling: dot units are inches; convert to a pixelly scale.
     SCALE = 72.0
@@ -741,11 +1292,11 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
         # capital-letter top sits ``CLUSTER_PAD`` px below the cluster top.
         label_text = GROUPS[group_id].get("label")
         if label_text:
-            CLUSTER_LABEL_FONT = 14.0
+            CLUSTER_LABEL_FONT = 12.0
             CLUSTER_PAD = 8.0
             cluster_label_ascent = CLUSTER_LABEL_FONT * 0.80
             baseline_y = y1 - CLUSTER_PAD - cluster_label_ascent
-            visuals.Text(
+            _t = visuals.Text(
                 label_text,
                 pos=((x0 + x1) / 2, baseline_y),
                 color=_hex_to_rgba(GROUPS[group_id]["stroke"]),
@@ -755,10 +1306,19 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
                 anchor_y="baseline",
                 parent=view.scene,
             )
+            scaling_texts.append((_t, CLUSTER_LABEL_FONT))
 
     # Edges --------------------------------------------------------------------
+    def _rect_for(node_id: str):
+        n = layout.nodes.get(node_id)
+        if n is None:
+            return None
+        return (n.x - n.w / 2, n.y - n.h / 2, n.x + n.w / 2, n.y + n.h / 2)
+
     for e in layout.edges:
-        pts = _catmull_rom_to_lines(e.spline) * SCALE
+        pts_raw = _catmull_rom_to_lines(e.spline)
+        pts_raw = _clip_polyline_to_node_rects(pts_raw, _rect_for(e.src), _rect_for(e.dst))
+        pts = pts_raw * SCALE
         visuals.Line(
             pos=pts,
             color=(0.30, 0.33, 0.40, 0.85),
@@ -791,16 +1351,18 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
                     parent=view.scene,
                 )
         if e.label and e.label_pos:
-            visuals.Text(
+            EDGE_LABEL_FONT = 6.5
+            _t = visuals.Text(
                 e.label,
                 pos=(e.label_pos[0] * SCALE, e.label_pos[1] * SCALE),
                 color=(0.25, 0.25, 0.35, 1.0),
-                font_size=8,
+                font_size=EDGE_LABEL_FONT,
                 italic=True,
                 anchor_x="center",
                 anchor_y="center",
                 parent=view.scene,
             )
+            scaling_texts.append((_t, EDGE_LABEL_FONT))
 
     # Nodes --------------------------------------------------------------------
     # vispy Text with anchor_y="baseline" places the glyph baseline exactly at
@@ -812,12 +1374,12 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
     #   descent ≈ 0.20 * font_size   (descenders below baseline)
     #   line_height = 1.1 * font_size (vispy default for multi-line Text)
     # Reduced from 12/9 so the initial-framing render (whole diagram in
-    # the window) doesn't overflow box borders. vispy's Text font_size is
-    # pixel-based and doesn't scale with the camera, so the values here
-    # set the *floor* — zooming in only makes the boxes bigger, not the
-    # text. Pick sizes that fit comfortably at the default frame-all view.
-    TITLE_FONT = 10.0
-    SUB_FONT = 7.5
+    # the window) doesn't overflow box borders. These sizes are the values
+    # that look right at the frame-all zoom; _rescale_text() (defined after
+    # the initial set_range() below) scales them up/down with the camera
+    # so text stays proportional to the boxes as the user zooms.
+    TITLE_FONT = 8.0
+    SUB_FONT = 6.0
     ASCENT_TITLE = TITLE_FONT * 0.80
     LINE_H_TITLE = TITLE_FONT * 1.10
     LINE_H_SUB = SUB_FONT * 1.10
@@ -851,7 +1413,7 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
         # Title baseline: top of box − padding − ascent, so the top of the
         # capital letters sits PAD_TOP below the box top edge.
         title_baseline = top_y - PAD_TOP - ASCENT_TITLE
-        visuals.Text(
+        _t = visuals.Text(
             meta.title,
             pos=(cx, title_baseline),
             color=_hex_to_rgba(group["stroke"]),
@@ -861,6 +1423,7 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
             anchor_y="baseline",
             parent=view.scene,
         )
+        scaling_texts.append((_t, TITLE_FONT))
         if meta.substeps:
             # First substep baseline sits below the title by (title descent
             # + gap + substep ascent).
@@ -868,7 +1431,7 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
                 title_baseline - (TITLE_FONT - ASCENT_TITLE) - GAP_TITLE_SUB - ASCENT_SUB  # title descent
             )
             sub_text = "\n".join(f"• {s}" for s in meta.substeps)
-            visuals.Text(
+            _t = visuals.Text(
                 sub_text,
                 pos=(cx - w / 2 + PAD_LEFT, sub_first_baseline),
                 color=(0.18, 0.20, 0.25, 1.0),
@@ -877,6 +1440,7 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
                 anchor_y="baseline",
                 parent=view.scene,
             )
+            scaling_texts.append((_t, SUB_FONT))
 
     # Frame the view to fit everything ----------------------------------------
     all_x: list[float] = []
@@ -885,6 +1449,36 @@ def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = 
         all_x += [(ln.x - ln.w / 2 - 0.5) * SCALE, (ln.x + ln.w / 2 + 0.5) * SCALE]
         all_y += [(ln.y - ln.h / 2 - 0.5) * SCALE, (ln.y + ln.h / 2 + 0.9) * SCALE]
     view.camera.set_range(x=(min(all_x), max(all_x)), y=(min(all_y), max(all_y)), margin=0.05)
+
+    # Snapshot the framing-zoom rect width as the "1.0×" reference. Every
+    # font_size in scaling_texts is the value picked to look right at this
+    # zoom — see the comment near TITLE_FONT/SUB_FONT for the framing-fit
+    # rationale. _rescale_text() below scales each visual's font_size by
+    # base_rect_width / current_rect_width so text grows linearly as the
+    # camera zooms in.
+    base_rect_width = float(view.camera.rect.width) or 1.0
+
+    def _rescale_text():
+        cur_w = float(view.camera.rect.width)
+        if cur_w <= 0:
+            return
+        ratio = base_rect_width / cur_w
+        for tv, base_size in scaling_texts:
+            new_size = max(1.0, base_size * ratio)
+            if abs(float(tv.font_size) - new_size) > 0.05:
+                tv.font_size = new_size
+
+    # PanZoomCamera doesn't fire an event when its rect changes — it just
+    # calls self.view_changed() (a regular method, not an EventEmitter).
+    # Monkey-patch it on this instance to piggyback the rescale call.
+    _orig_view_changed = view.camera.view_changed
+
+    def _view_changed_with_rescale():
+        _orig_view_changed()
+        _rescale_text()
+
+    view.camera.view_changed = _view_changed_with_rescale
+    _rescale_text()
 
     if png_path is not None:
         from vispy.io import write_png
@@ -960,6 +1554,32 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Wrote {args.dot}")
 
     layout = parse_plain(plain)
+    # Spread bundles of parallel near-horizontal segments BEFORE rendering, so
+    # 3-way pile-ups like the P2 → {WING_GJ, P3, OUT_ISO} fan all get their
+    # own visible track.
+    _spread_parallel_horizontal_segments(layout)
+    # Rescue any edge labels that graphviz dumped at its (0, 0.11) fallback
+    # position — they get reseated to their edge's midpoint before the next
+    # passes nudge them into a clear spot.
+    _reseat_fallback_edge_labels(layout)
+    # Lift edge labels off horizontal arrow lines so the italic text sits
+    # cleanly above the arrow instead of being bisected by it.
+    _lift_labels_off_horizontal_segments(layout)
+    # Move any labels that landed inside a node rectangle OR on top of
+    # another label (e.g. ``anchored`` on MM, ``wing_outline`` under I3,
+    # ``wing_axis`` overlapping ``split polys + veins``) into the nearest
+    # empty gap. Iterated since moving one label can free space for another.
+    _displace_labels_off_obstacles(layout)
+    # Then push any UNRELATED horizontal arrows up so they don't cross a
+    # label they don't belong to. Runs after the label displacement so we
+    # know each label's final position.
+    _lift_horizontals_above_crossed_labels(layout)
+    # Final cleanup: a lift can push two segments to almost identical y
+    # (both got lifted above the same cluster label). One more tight-bundle
+    # spread separates them; the follow-up lift catches anyone the spread
+    # bumped back into a label band.
+    _spread_parallel_horizontal_segments(layout, y_proximity_max=0.10, min_separation=0.40)
+    _lift_horizontals_above_crossed_labels(layout)
     nodes_meta = {n.id: n for n in NODES}
 
     missing = set(layout.nodes) - set(nodes_meta)
