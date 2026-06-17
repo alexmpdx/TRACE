@@ -1,3 +1,5 @@
+<a id="readme-top"></a>
+
 <p align="center">
   <img src="TRACE/GUI_images/logo/logo_dark.svg" alt="TRACE" width="320"/>
 </p>
