@@ -152,8 +152,9 @@ NODES: list[Node] = [
         [
             "Fit affine from reliable landmarks",
             "Rotate un-masked image to canonical orientation",
-            "Apply same affine to every produced GeoJSON",
+            "Apply same affine to every produced GeoJSON (in-place)",
             "Optional mirror-correct for opposite-chirality wings",
+            "→ rotated GeoJSONs feed identifyFeatures + overlay renders",
         ],
     ),
     # --- Preprocessing artifacts ---
