@@ -2564,7 +2564,15 @@ class LandmarkGUI(QMainWindow):
         override = dlg.result_override()
         # update_gate_config does a deep-merge, which would keep stale per_landmark
         # entries the user removed. Replace the gate_config wholesale instead.
+        # Preserve the `tiers:` metadata block — result_override() doesn't emit it
+        # (it isn't part of the active gate the predictor consumes), but the dialog
+        # reads it back from gate_config on next open to populate the tier dropdown.
+        # Dropping it here makes subsequent tier changes silently no-op until the
+        # model is reloaded.
+        preserved_tiers = self._predictor.gate_config.get("tiers")
         self._predictor.gate_config = override
+        if preserved_tiers is not None:
+            self._predictor.gate_config["tiers"] = preserved_tiers
         # Invalidate cached predictions so they re-run under the new gate
         for entry in self._entries:
             entry.prediction = None
