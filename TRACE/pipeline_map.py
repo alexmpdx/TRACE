@@ -1388,6 +1388,326 @@ def _catmull_rom_to_lines(spline: list[tuple[float, float]], samples_per_seg: in
     return np.array(pts, dtype=np.float32)
 
 
+def render_html(layout: Layout, nodes_meta: dict[str, Node], output_path: Path) -> None:
+    """Render the pipeline map as a self-contained interactive HTML file
+    (embedded SVG + JavaScript). Suitable for hosting on GitHub Pages —
+    clicking a node highlights its outgoing edges, with drag-to-pan and
+    scroll-to-zoom. No external dependencies; output is one file.
+
+    The geometry pipeline is identical to render() so the SVG matches the
+    vispy version pixel-for-pixel after all the spread/lift/snap passes.
+    """
+    import html
+
+    SCALE = 72.0
+
+    # Mirror vispy's viewBox framing: each node's rect plus margin so the
+    # default view shows the full diagram comfortably.
+    all_x: list[float] = []
+    all_y: list[float] = []
+    for ln in layout.nodes.values():
+        all_x += [(ln.x - ln.w / 2 - 0.5) * SCALE, (ln.x + ln.w / 2 + 0.5) * SCALE]
+        all_y += [(ln.y - ln.h / 2 - 0.5) * SCALE, (ln.y + ln.h / 2 + 0.9) * SCALE]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    W = max_x - min_x
+    H = max_y - min_y
+
+    def fy(y: float) -> float:
+        """Flip graphviz y-up to SVG y-down within the viewBox window."""
+        return max_y - y + min_y
+
+    def esc(s: str) -> str:
+        return html.escape(s, quote=True)
+
+    # Font sizes (in viewBox units). vispy uses pixel sizes that the
+    # rescale-on-zoom hack inflates with the camera; in SVG the units scale
+    # with zoom natively. SCENE_PER_PIXEL≈3.27 at the default frame-fit zoom
+    # is what we need to multiply by to get viewBox-units that look right.
+    SCENE_PER_PIXEL = 3.27
+    TITLE_PX = 8.0
+    SUB_PX = 6.0
+    CLUSTER_PX = 12.0
+    EDGE_LABEL_PX = 6.5
+    TITLE_FS = TITLE_PX * SCENE_PER_PIXEL
+    SUB_FS = SUB_PX * SCENE_PER_PIXEL
+    CLUSTER_FS = CLUSTER_PX * SCENE_PER_PIXEL
+    EDGE_LABEL_FS = EDGE_LABEL_PX * SCENE_PER_PIXEL
+
+    # Layout offsets — same scene-unit constants as render() so node text
+    # lines up under the title at the same place.
+    PAD_TOP = 30.0
+    PAD_LEFT = 10.0
+    GAP_TITLE_SUB = 22.0
+    ASCENT_TITLE = TITLE_FS * 0.80
+    LINE_H_SUB = SUB_FS * 1.10
+    ASCENT_SUB = SUB_FS * 0.80
+    CLUSTER_PAD = 8.0
+    CLUSTER_ASCENT = CLUSTER_FS * 0.80
+
+    parts: list[str] = []
+
+    # Cluster backgrounds + labels
+    by_group: dict[str, list[LaidOutNode]] = {}
+    for ln in layout.nodes.values():
+        g = nodes_meta[ln.id].group
+        by_group.setdefault(g, []).append(ln)
+    for group_id, members in by_group.items():
+        if not GROUPS[group_id].get("cluster", True):
+            continue
+        xs = [n.x for n in members]
+        ys = [n.y for n in members]
+        ws = [n.w for n in members]
+        hs = [n.h for n in members]
+        x0 = (min(xs[i] - ws[i] / 2 for i in range(len(members))) - 0.20) * SCALE
+        x1 = (max(xs[i] + ws[i] / 2 for i in range(len(members))) + 0.20) * SCALE
+        y0 = (min(ys[i] - hs[i] / 2 for i in range(len(members))) - 0.22) * SCALE
+        y1 = (max(ys[i] + hs[i] / 2 for i in range(len(members))) + 0.50) * SCALE
+        stroke = GROUPS[group_id]["stroke"]
+        fill = GROUPS[group_id]["fill"]
+        svg_y = fy(y1)
+        height = y1 - y0
+        parts.append(
+            f'<rect class="cluster-bg" x="{x0:.1f}" y="{svg_y:.1f}" '
+            f'width="{x1 - x0:.1f}" height="{height:.1f}" rx="10" ry="10" '
+            f'fill="{fill}" fill-opacity="0.25" stroke="{stroke}" '
+            f'stroke-opacity="0.35" stroke-width="2"/>'
+        )
+        label = GROUPS[group_id].get("label")
+        if label:
+            baseline = y1 - CLUSTER_PAD - CLUSTER_ASCENT
+            text_y = fy(baseline)
+            cx = (x0 + x1) / 2
+            parts.append(
+                f'<text class="cluster-label" x="{cx:.1f}" y="{text_y:.1f}" '
+                f'font-size="{CLUSTER_FS:.1f}" font-weight="bold" '
+                f'fill="{stroke}" text-anchor="middle">{esc(label)}</text>'
+            )
+
+    # Edges
+    def _rect_for(node_id: str):
+        n = layout.nodes.get(node_id)
+        if n is None:
+            return None
+        return (n.x - n.w / 2, n.y - n.h / 2, n.x + n.w / 2, n.y + n.h / 2)
+
+    for e in layout.edges:
+        pts_raw = _catmull_rom_to_lines(e.spline)
+        pts_raw = _clip_polyline_to_node_rects(pts_raw, _rect_for(e.src), _rect_for(e.dst))
+        pts = pts_raw * SCALE
+        poly_pts = " ".join(f"{p[0]:.1f},{fy(float(p[1])):.1f}" for p in pts)
+        parts.append(
+            f'<g class="edge" data-src="{esc(e.src)}" data-dst="{esc(e.dst)}">'
+        )
+        parts.append(f'  <polyline points="{poly_pts}"/>')
+        # Arrowhead
+        if len(pts) >= 2:
+            p_end = pts[-1]
+            p_prev = pts[-2]
+            d = p_end - p_prev
+            n_len = float(np.linalg.norm(d))
+            if n_len > 1e-6:
+                d = d / n_len
+                perp = np.array([-d[1], d[0]])
+                size = 7.0
+                tri = [
+                    p_end,
+                    p_end - d * size + perp * size * 0.5,
+                    p_end - d * size - perp * size * 0.5,
+                ]
+                tri_pts = " ".join(f"{p[0]:.1f},{fy(float(p[1])):.1f}" for p in tri)
+                parts.append(f'  <polygon points="{tri_pts}"/>')
+        parts.append("</g>")
+        # Edge label (kept outside the .edge group so it doesn't get
+        # highlighted along with the arrow)
+        if e.label and e.label_pos:
+            lx = e.label_pos[0] * SCALE
+            ly = fy(e.label_pos[1] * SCALE)
+            parts.append(
+                f'<text class="edge-label" x="{lx:.1f}" y="{ly:.1f}" '
+                f'font-size="{EDGE_LABEL_FS:.1f}" font-style="italic" '
+                f'fill="rgb(64,64,89)" text-anchor="middle" '
+                f'dominant-baseline="central">{esc(e.label)}</text>'
+            )
+
+    # Nodes
+    for ln in layout.nodes.values():
+        meta = nodes_meta[ln.id]
+        group = GROUPS[meta.group]
+        fill = group["fill"]
+        stroke = group["stroke"]
+        cx = ln.x * SCALE
+        cy = ln.y * SCALE
+        w = ln.w * SCALE
+        h = ln.h * SCALE
+        x0 = cx - w / 2
+        svg_top = fy(cy + h / 2)
+        radius = 8 if meta.kind == "process" else 14
+        parts.append(f'<g class="node" data-id="{esc(ln.id)}">')
+        parts.append(
+            f'  <rect x="{x0:.1f}" y="{svg_top:.1f}" '
+            f'width="{w:.1f}" height="{h:.1f}" '
+            f'rx="{radius}" ry="{radius}" fill="{fill}" '
+            f'stroke="{stroke}" stroke-width="1.8"/>'
+        )
+        # Title baseline so the cap-top sits PAD_TOP scene-units below the
+        # box top, matching render()'s layout math.
+        title_baseline = (cy + h / 2) - PAD_TOP - ASCENT_TITLE
+        parts.append(
+            f'  <text x="{cx:.1f}" y="{fy(title_baseline):.1f}" '
+            f'font-size="{TITLE_FS:.1f}" font-weight="bold" fill="{stroke}" '
+            f'text-anchor="middle">{esc(meta.title)}</text>'
+        )
+        if meta.substeps:
+            sub_first_baseline = (
+                title_baseline - (TITLE_FS - ASCENT_TITLE) - GAP_TITLE_SUB - ASCENT_SUB
+            )
+            for i, sub in enumerate(meta.substeps):
+                sub_baseline = sub_first_baseline - i * LINE_H_SUB
+                parts.append(
+                    f'  <text x="{x0 + PAD_LEFT:.1f}" y="{fy(sub_baseline):.1f}" '
+                    f'font-size="{SUB_FS:.1f}" fill="rgb(46,51,64)" '
+                    f'text-anchor="start">• {esc(sub)}</text>'
+                )
+        parts.append("</g>")
+
+    svg_body = "\n".join(parts)
+
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>TRACE pipeline map</title>
+<style>
+  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Helvetica", Arial, sans-serif; }}
+  #help {{ position: fixed; top: 12px; left: 12px; padding: 10px 14px;
+          background: rgba(255,255,255,0.95); border: 1px solid #ccc;
+          border-radius: 6px; font-size: 13px; line-height: 1.45;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.08); max-width: 360px; z-index: 10; }}
+  #help kbd {{ background: #eee; padding: 1px 5px; border-radius: 3px;
+              font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 12px; }}
+  svg {{ display: block; width: 100vw; height: 100vh; cursor: grab; user-select: none; }}
+  svg.panning {{ cursor: grabbing; }}
+  .edge polyline {{ fill: none; stroke: rgb(77,84,102); stroke-opacity: 0.85; stroke-width: 1.6; }}
+  .edge polygon {{ fill: rgb(77,84,102); }}
+  .edge.highlighted polyline {{ stroke: rgb(243,115,26); stroke-opacity: 1; stroke-width: 3.2; }}
+  .edge.highlighted polygon {{ fill: rgb(243,115,26); }}
+  .node {{ cursor: pointer; }}
+  .node rect {{ stroke-width: 1.8; transition: filter 120ms; }}
+  .node.active rect {{ filter: drop-shadow(0 0 4px rgba(243,115,26,0.55)); }}
+  text {{ pointer-events: none; }}
+  .cluster-bg {{ pointer-events: none; }}
+</style>
+</head>
+<body>
+<div id="help">
+  <strong>TRACE pipeline map</strong><br/>
+  Click a box to highlight its outgoing arrows. Click again or off-box to clear.<br/>
+  Drag to pan, scroll to zoom, press <kbd>R</kbd> to reset view.
+</div>
+<svg id="map" viewBox="{min_x:.1f} {min_y:.1f} {W:.1f} {H:.1f}"
+     preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
+{svg_body}
+</svg>
+<script>
+(function() {{
+  const svg = document.getElementById('map');
+  const vb = svg.viewBox.baseVal;
+  const orig = {{ x: vb.x, y: vb.y, w: vb.width, h: vb.height }};
+  let current = null;
+  let pressPos = null, panning = false;
+
+  function clearHighlight() {{
+    document.querySelectorAll('.edge.highlighted').forEach(e => e.classList.remove('highlighted'));
+    document.querySelectorAll('.node.active').forEach(n => n.classList.remove('active'));
+    current = null;
+  }}
+  function highlight(id) {{
+    clearHighlight();
+    document.querySelectorAll('.edge[data-src="' + id + '"]').forEach(e => e.classList.add('highlighted'));
+    const node = document.querySelector('.node[data-id="' + id + '"]');
+    if (node) node.classList.add('active');
+    current = id;
+  }}
+
+  // Drag-to-pan + click distinction
+  svg.addEventListener('mousedown', (e) => {{
+    if (e.button !== 0) return;
+    pressPos = {{ x: e.clientX, y: e.clientY, vbx: vb.x, vby: vb.y }};
+  }});
+  svg.addEventListener('mousemove', (e) => {{
+    if (!pressPos) return;
+    const dx = e.clientX - pressPos.x;
+    const dy = e.clientY - pressPos.y;
+    if (!panning && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {{
+      panning = true;
+      svg.classList.add('panning');
+    }}
+    if (panning) {{
+      const rect = svg.getBoundingClientRect();
+      vb.x = pressPos.vbx - dx * (vb.width / rect.width);
+      vb.y = pressPos.vby - dy * (vb.height / rect.height);
+    }}
+  }});
+  function endPan(clickTarget) {{
+    const wasPanning = panning;
+    panning = false;
+    pressPos = null;
+    svg.classList.remove('panning');
+    if (wasPanning) return false;  // suppress click on this drag
+    return true;
+  }}
+  svg.addEventListener('mouseup', () => endPan());
+  svg.addEventListener('mouseleave', () => {{ panning = false; pressPos = null; svg.classList.remove('panning'); }});
+
+  // Clicks (after we know the mouse-up wasn't part of a pan)
+  document.querySelectorAll('.node').forEach(n => {{
+    n.addEventListener('click', (ev) => {{
+      if (panning || (pressPos && (Math.abs(ev.clientX - pressPos.x) > 3 || Math.abs(ev.clientY - pressPos.y) > 3))) return;
+      ev.stopPropagation();
+      const id = n.dataset.id;
+      if (id === current) clearHighlight();
+      else highlight(id);
+    }});
+  }});
+  svg.addEventListener('click', (ev) => {{
+    if (panning) return;
+    if (ev.target.closest('.node')) return;
+    if (current) clearHighlight();
+  }});
+
+  // Scroll to zoom, centered on cursor
+  svg.addEventListener('wheel', (e) => {{
+    e.preventDefault();
+    const rect = svg.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width;
+    const my = (e.clientY - rect.top) / rect.height;
+    const cx = vb.x + mx * vb.width;
+    const cy = vb.y + my * vb.height;
+    const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+    vb.width *= factor;
+    vb.height *= factor;
+    vb.x = cx - mx * vb.width;
+    vb.y = cy - my * vb.height;
+  }}, {{ passive: false }});
+
+  // R to reset
+  document.addEventListener('keydown', (e) => {{
+    if ((e.key === 'r' || e.key === 'R') && !e.metaKey && !e.ctrlKey) {{
+      vb.x = orig.x; vb.y = orig.y; vb.width = orig.w; vb.height = orig.h;
+    }}
+  }});
+}})();
+</script>
+</body>
+</html>
+"""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(page, encoding="utf-8")
+    print(f"Wrote {output_path}")
+
+
 def render(layout: Layout, nodes_meta: dict[str, Node], png_path: Path | None = None) -> None:
     import vispy
 
@@ -1754,6 +2074,15 @@ _CACHED_LAYOUT_PATH = Path(__file__).resolve().parent / "pipeline_layout.plain"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--png", type=Path, default=None, help="Render to PNG and exit.")
+    parser.add_argument(
+        "--html",
+        type=Path,
+        default=None,
+        help=(
+            "Render an interactive HTML/SVG version (self-contained file with "
+            "click-to-highlight + pan/zoom). Suitable for GitHub Pages."
+        ),
+    )
     parser.add_argument("--dot", type=Path, default=None, help="Write DOT source to file.")
     parser.add_argument(
         "--regenerate-layout",
@@ -1851,6 +2180,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {n.id}: {n.w:.2f} x {n.h:.2f} in")
         return 0
 
+    if args.html is not None:
+        render_html(layout, nodes_meta, args.html)
+        return 0
     render(layout, nodes_meta, png_path=args.png)
     return 0
 

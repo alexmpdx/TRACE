@@ -8,13 +8,13 @@
 
 End-to-end *Drosophila* wing morphology analysis. Takes a folder of brightfield wing images and produces named vein/intervein overlays, a per-batch measurements CSV (areas, lengths, optional custom landmark distances), and intermediate GeoJSON artifacts. The orchestration spans six preprocessing stages and six analysis steps; this README is the entry point.
 
-For a visual map of the full pipeline (nodes, edges, artifacts), open the interactive viewer:
+For a visual map of the full pipeline (nodes, edges, artifacts):
 
-```bash
-TRACE/.venv-pipeline-map/bin/python TRACE/pipeline_map.py
-```
+- **[Interactive web version](https://alexmpdx.github.io/TRACE/)** — click any box to highlight its outgoing arrows, drag to pan, scroll to zoom.
+- Local desktop viewer: `TRACE/.venv-pipeline-map/bin/python TRACE/pipeline_map.py`
+- Static PNG fallback at `TRACE/pipeline_map_reference.png`.
 
-A static reference is rendered at `TRACE/pipeline_map_reference.png`. The map is intentionally kept up to date — see [`PIPELINE_MAP_GUIDE.md`](TRACE/PIPELINE_MAP_GUIDE.md) before adding new stages.
+The map is intentionally kept up to date — see [`PIPELINE_MAP_GUIDE.md`](TRACE/PIPELINE_MAP_GUIDE.md) before adding new stages.
 
 ---
 
