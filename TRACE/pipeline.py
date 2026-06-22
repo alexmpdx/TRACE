@@ -804,6 +804,7 @@ def _run(
 
     import cv2
     from identify_features.controllers.pipeline import identify_wing
+    from identify_features.garbage_detector import GarbageRejection
     from identify_features.views.csv_export import export_csv_batch
     from identify_features.views.geojson_export import export_geojson
     from identify_features.views.overlay import (
@@ -1082,6 +1083,17 @@ def _run(
         except InterruptedError:
             cancel_event.set()
             raise
+        except GarbageRejection as e:
+            # Quality filter aborted this wing — a clean, expected rejection, not a crash.
+            # Record just the one-line reason (no traceback) under a distinct stage so the
+            # GUI/log can tell "rejected garbage" apart from "errored".
+            elapsed = time.time() - t0
+            logger.info("Analysis aborted for %s (%.1fs): %s", stem, elapsed, e)
+            stage2_slots[i] = TraceResult(
+                image_path=preproc_result.image_path,
+                error=str(e),
+                error_stage="quality",
+            )
         except Exception as e:
             elapsed = time.time() - t0
             logger.exception("Analysis failed for %s (%.1fs)", stem, elapsed)

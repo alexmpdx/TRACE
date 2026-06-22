@@ -172,6 +172,45 @@ class PipelineConfig:
     vein_colors: dict[str, list[int]] | None = None
     region_colors: dict[str, list[int]] | None = None
 
+    # -- Garbage detector (data-quality filters) --
+    # See identify_features/garbage_detector/. Filters inspect intermediate pipeline state
+    # and abort wings that look like bad data (segmentation or identification failures).
+    #
+    # Wing-solidity filter (first/earliest filter, runs right after the wing outline is
+    # built). Solidity = wing_outline.area / convex_hull.area — a clean wing is a smooth,
+    # near-convex teardrop and sits very tightly at ~0.983–0.990 on real data; gross
+    # segmentation failures (half-missing blob, big concave bite) fall well below, and a
+    # featureless convex blob climbs toward 1.0. The range is two-sided to catch both.
+    solidity_filter_enabled: bool = True
+    # Fixed/user acceptance range. Setting these two fields directly IS the user-defined
+    # range. Defaults are conservative (calibrated on good wings only): the 0.95 floor sits
+    # ~0.033 below the real good-min so only gross failures are caught; the near-1.0 ceiling
+    # is a low-sensitivity safety net (real wings are already ~0.99 convex). Re-tune once
+    # confirmed *failed* segmentations are available to measure the real gap.
+    solidity_min: float = 0.95
+    solidity_max: float = 0.9999
+    # Threshold mode: "fixed" (primary — use the range above) or "batch_mad" (opt-in —
+    # robust median ± k·1.4826·MAD over the batch, resilient to the garbage it's detecting).
+    solidity_mode: str = "fixed"
+    # User-modifiable k for batch_mad mode. Default 5 clears the tight good-cluster tail with
+    # comfortable margin on real data; lower = stricter, higher = more permissive.
+    solidity_batch_k: float = 5.0
+    # batch_mad falls back to the fixed range below this many wings (too few to estimate a
+    # robust distribution; matches the user's "< 25 wings → fixed range" rule).
+    solidity_min_batch_size: int = 25
+    # Transient (NOT a user tunable): the batch orchestrator pre-resolves one solidity range
+    # for the whole batch and injects it here so per-wing workers don't each recompute it.
+    solidity_batch_range: tuple[float, float] | None = None
+
+    # Fragmentation filter (also WING_OUTLINE hook). The wing outline keeps only the largest
+    # connected component, silently discarding a partial second wing / debris blob in the
+    # frame — which then never affects solidity. This filter inspects the components first and
+    # aborts when a secondary disconnected region exceeds this fraction of the main wing area.
+    # On real data good wings carry at most ~0.6%-of-wing specks while a real second object is
+    # ≥1.5%, so the 1% default separates them cleanly.
+    fragmentation_filter_enabled: bool = True
+    fragmentation_max_secondary_frac: float = 0.01
+
     # -- Overlay opacity --
     # 0.0 = fully transparent (invisible), 1.0 = fully opaque. Defaults match
     # the historical hardcoded values: vein centerlines/tissue fully opaque,

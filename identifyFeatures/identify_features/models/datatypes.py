@@ -222,6 +222,7 @@ class WingResult:
     intervein_regions: list[InterveinRegion] = field(default_factory=list)
     landmarks: dict[str, Landmark] = field(default_factory=dict)
     wing_outline: Optional[Polygon] = None
+    wing_solidity: Optional[float] = None  # outline.area / convex_hull.area (garbage-detector metric)
     warnings: list[str] = field(default_factory=list)
 
     @property

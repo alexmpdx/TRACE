@@ -18,6 +18,7 @@ from pathlib import Path
 import cv2
 from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
 from identify_features.controllers.pipeline import identify_wing
+from identify_features.garbage_detector import GarbageRejection, precompute_solidities, resolve_solidity_range
 from identify_features.utils.psd_loader import imread_any
 from identify_features.views.csv_export import export_csv, export_csv_batch
 from identify_features.views.geojson_export import export_geojson
@@ -26,6 +27,33 @@ from identify_features.views.overlay import (
     render_cv_ratio_overlay_to_file,
     render_overlay_to_file,
 )
+
+
+def _garbage_settings_from_args(args) -> dict:
+    """Collect CLI garbage-detector settings into a plain dict (picklable for workers)."""
+    return {
+        "solidity_enabled": args.solidity_filter_enabled,
+        "solidity_range": args.solidity_range,
+        "solidity_mode": args.solidity_mode,
+        "solidity_batch_k": args.solidity_batch_k,
+        "solidity_batch_range": None,  # filled by the batch pre-pass in batch_mad mode
+        "fragmentation_enabled": args.fragmentation_filter_enabled,
+        "fragmentation_max_frac": args.fragmentation_max_frac,
+    }
+
+
+def _apply_garbage_settings(config, s: dict):
+    """Apply a garbage-settings dict (solidity + fragmentation) onto a PipelineConfig."""
+    config.solidity_filter_enabled = s["solidity_enabled"]
+    config.solidity_mode = s["solidity_mode"]
+    config.solidity_batch_k = s["solidity_batch_k"]
+    if s["solidity_range"] is not None:
+        config.solidity_min, config.solidity_max = float(s["solidity_range"][0]), float(s["solidity_range"][1])
+    config.solidity_batch_range = s["solidity_batch_range"]
+    config.fragmentation_filter_enabled = s["fragmentation_enabled"]
+    if s["fragmentation_max_frac"] is not None:
+        config.fragmentation_max_secondary_frac = float(s["fragmentation_max_frac"])
+    return config
 
 
 def _find_batch_specimens(
@@ -79,6 +107,7 @@ def _process_one(args_tuple):
         vein_simplify_tolerance_px,
         ectopic_label_font_scale,
         show_compartment_labels,
+        gd_settings,
     ) = args_tuple
     try:
         config = PipelineConfig()
@@ -88,6 +117,7 @@ def _process_one(args_tuple):
             config.um_per_px = um_per_px
         config.synthesize_missing_crossveins = synthesize_missing_crossveins
         config.skip_intervein_regions = skip_intervein_regions
+        _apply_garbage_settings(config, gd_settings)
         if verbose:
             logging.basicConfig(level=logging.INFO)
 
@@ -126,6 +156,8 @@ def _process_one(args_tuple):
             return stem, True, f"{stem}: {n_veins} veins (intervein regions skipped)", result
         n_regions = len(result.intervein_regions)
         return stem, True, f"{stem}: {n_veins} veins, {n_regions}/7 regions", result
+    except GarbageRejection as e:
+        return stem, False, f"{stem}: ABORTED — {e}", None
     except Exception as e:
         return stem, False, f"{stem}: ERROR — {e}", None
 
@@ -254,6 +286,50 @@ def main():
         action="store_true",
         help="Skip §6.1 intervein polygon splitting and §6.2 intervein region naming. Use when only vein outputs are needed; saves the watershed/distance-transform work. §6.3 vein tissue assignment still runs so overlays render filled vein polygons.",
     )
+    # -- Garbage detector (data-quality filters) --
+    parser.add_argument(
+        "--no-solidity-filter",
+        dest="solidity_filter_enabled",
+        action="store_false",
+        default=True,
+        help="Disable the wing-solidity garbage filter (does not abort low-quality wings)",
+    )
+    parser.add_argument(
+        "--solidity-range",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Accept wings with solidity in [MIN, MAX]; abort others (default: 0.95 0.9999)",
+    )
+    parser.add_argument(
+        "--solidity-mode",
+        type=str,
+        default="fixed",
+        choices=("fixed", "batch_mad"),
+        help="Solidity threshold mode: 'fixed' range (default) or 'batch_mad' robust outlier",
+    )
+    parser.add_argument(
+        "--solidity-batch-k",
+        type=float,
+        default=5.0,
+        metavar="K",
+        help="k for batch_mad mode: abort beyond median ± K·robust-sigma (default 5.0)",
+    )
+    parser.add_argument(
+        "--no-fragmentation-filter",
+        dest="fragmentation_filter_enabled",
+        action="store_false",
+        default=True,
+        help="Disable the fragmentation garbage filter (does not abort wings with a second wing/debris in frame)",
+    )
+    parser.add_argument(
+        "--fragmentation-max-frac",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help="Abort when a disconnected secondary region exceeds FRAC of the wing area (default 0.01)",
+    )
     parser.add_argument(
         "--verbose",
         "-v",
@@ -284,13 +360,18 @@ def _run_single(args):
         config.um_per_px = args.um_per_px
     config.synthesize_missing_crossveins = args.synthesize_missing_crossveins
     config.skip_intervein_regions = args.skip_intervein_regions
+    _apply_garbage_settings(config, _garbage_settings_from_args(args))
 
-    result = identify_wing(
-        args.detection,
-        args.landmarks,
-        args.image,
-        config=config,
-    )
+    try:
+        result = identify_wing(
+            args.detection,
+            args.landmarks,
+            args.image,
+            config=config,
+        )
+    except GarbageRejection as e:
+        print(f"ABORTED — {e}")
+        sys.exit(2)
 
     out_path = args.output_dir / f"{result.specimen_id}_output.geojson"
     export_geojson(result.veins, result.intervein_regions, out_path, um_per_px=config.um_per_px)
@@ -359,6 +440,16 @@ def _run_batch(args):
     max_workers = args.workers or min(os.cpu_count() // 2, 8)
     print(f"Processing with {max_workers} workers...")
 
+    gd_settings = _garbage_settings_from_args(args)
+    # Resolve one solidity range for the whole batch. batch_mad needs the full distribution
+    # up front, so do a cheap outline-only pre-pass; fixed mode skips it entirely.
+    if args.solidity_filter_enabled and args.solidity_mode == "batch_mad":
+        cfg = _apply_garbage_settings(PipelineConfig(), gd_settings)
+        sols = precompute_solidities(det for _stem, det, _lm, _img in specimens)
+        lo, hi, method = resolve_solidity_range(cfg, sols)
+        gd_settings["solidity_batch_range"] = (lo, hi)
+        print(f"Solidity {method}: accept [{lo:.4f}, {hi:.4f}] (from {len(sols)} outlines)")
+
     t0 = time.time()
     work_items = [
         (
@@ -381,6 +472,7 @@ def _run_batch(args):
             args.vein_simplify_tolerance_px,
             args.ectopic_label_font_scale,
             args.show_compartment_labels,
+            gd_settings,
         )
         for stem, det, lm, img in specimens
     ]
@@ -393,12 +485,15 @@ def _run_batch(args):
     print(f"Completed in {elapsed:.0f}s ({elapsed / 60:.1f} min)\n")
 
     successes = 0
+    aborted = 0
     csv_rows = []
     for stem, ok, line, wing_result in results:
         print(line)
         if ok:
             successes += 1
             csv_rows.append((stem, wing_result))
+        elif " ABORTED — " in line:
+            aborted += 1
 
     # Write combined measurements CSV
     um = args.um_per_px if args.um_per_px is not None else PipelineConfig().um_per_px
@@ -406,7 +501,12 @@ def _run_batch(args):
     export_csv_batch(csv_rows, csv_path, um_per_px=um)
     print(f"\nCSV: {csv_path}")
 
-    print(f"{successes}/{len(results)} succeeded")
+    failed = len(results) - successes
+    summary = f"{successes}/{len(results)} succeeded"
+    if failed:
+        errored = failed - aborted
+        summary += f" ({aborted} aborted by garbage filter, {errored} errored)"
+    print(summary)
     print(f"Output directory: {args.output_dir}")
 
 

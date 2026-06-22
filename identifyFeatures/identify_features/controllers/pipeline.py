@@ -11,6 +11,7 @@ from typing import Optional
 
 import cv2
 from identify_features.config import PipelineConfig
+from identify_features.garbage_detector import FilterContext, FilterStage, run_stage_filters
 from identify_features.models.datatypes import VeinIdentification, WingResult
 from identify_features.models.geojson_io import (
     _compute_wing_outline,
@@ -155,6 +156,15 @@ def identify_wing(
     wing_outline = _compute_wing_outline(all_polys)
     result.wing_outline = wing_outline
     result.landmarks = landmarks
+
+    # Garbage detection (earliest hook): abort wings whose outline is missing/degenerate
+    # or whose solidity is out of range. Runs before the image read so bad data short-
+    # circuits as early as possible. Raises GarbageRejection, caught by callers (CLI/TRACE).
+    gd_ctx = FilterContext(
+        config=config, specimen_id=specimen_id, wing_outline=wing_outline, all_polys=all_polys
+    )
+    run_stage_filters(FilterStage.WING_OUTLINE, gd_ctx)
+    result.wing_solidity = gd_ctx.scratch.get("wing_solidity")
 
     if image_path is not None:
         from identify_features.utils.psd_loader import imread_any

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+from identify_features.garbage_detector import compute_solidity
 from identify_features.models.datatypes import InterveinRegion, VeinIdentification
 from identify_features.models.topology import REGION_AP_ORDER, VEIN_AP_ORDER
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
@@ -223,9 +224,13 @@ def _wing_measurements(
                 eigvals = np.linalg.eigvalsh(np.cov(centered, rowvar=False))
                 if eigvals[0] > 0:
                     vals["wing_aspect_ratio"] = f"{float(np.sqrt(eigvals[1] / eigvals[0])):.4f}"
-            hull_area = outline.convex_hull.area
-            if hull_area > 0:
-                vals["wing_solidity"] = f"{outline.area / hull_area:.4f}"
+            # Reuse the value the garbage detector already computed when present;
+            # otherwise compute it (shared single source of truth).
+            solidity = wing_result.wing_solidity if wing_result else None
+            if solidity is None:
+                solidity = compute_solidity(outline)
+            if solidity is not None:
+                vals["wing_solidity"] = f"{solidity:.4f}"
 
     # CV ratio block: wing length + crossvein distance + CV ratio
     if "cv_ratio" in g:
