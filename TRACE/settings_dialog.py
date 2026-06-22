@@ -220,6 +220,14 @@ _FIELD_TOOLTIPS: dict[str, str] = {
         "Abort when a disconnected secondary region exceeds this fraction of the main wing area. "
         "Good wings carry ≤0.6% specks; real second objects are ≥1.5%. Default 0.01 (1%)."
     ),
+    "vein_association_filter_enabled": (
+        "Reject wings where too much of the segmented vein tissue isn't covered by any vein the "
+        "tracer identified — i.e. hallucinated vein tissue or failed tracing. Runs after tracing."
+    ),
+    "max_unassigned_vein_frac": (
+        "Abort when this fraction of segmented vein area is not associated with any traced vein. "
+        "Default 0.20 (20%)."
+    ),
 }
 
 
@@ -1351,6 +1359,12 @@ class PipelineConfigDialog(QDialog):
         self._add_float(
             form, "fragmentation_max_secondary_frac", "Max secondary-region fraction", 0.0, 1.0, 4, 0.005
         )
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Vein association (unexplained vein tissue)")
+        form = QFormLayout(gb)
+        self._add_bool(form, "vein_association_filter_enabled", "Enable vein-association filter")
+        self._add_float(form, "max_unassigned_vein_frac", "Max unassigned vein fraction", 0.0, 1.0, 3, 0.01)
         layout.addWidget(gb)
 
         layout.addStretch()

@@ -39,6 +39,8 @@ def _garbage_settings_from_args(args) -> dict:
         "solidity_batch_range": None,  # filled by the batch pre-pass in batch_mad mode
         "fragmentation_enabled": args.fragmentation_filter_enabled,
         "fragmentation_max_frac": args.fragmentation_max_frac,
+        "vein_association_enabled": args.vein_association_filter_enabled,
+        "max_unassigned_vein_frac": args.max_unassigned_vein_frac,
     }
 
 
@@ -53,6 +55,9 @@ def _apply_garbage_settings(config, s: dict):
     config.fragmentation_filter_enabled = s["fragmentation_enabled"]
     if s["fragmentation_max_frac"] is not None:
         config.fragmentation_max_secondary_frac = float(s["fragmentation_max_frac"])
+    config.vein_association_filter_enabled = s["vein_association_enabled"]
+    if s["max_unassigned_vein_frac"] is not None:
+        config.max_unassigned_vein_frac = float(s["max_unassigned_vein_frac"])
     return config
 
 
@@ -329,6 +334,20 @@ def main():
         default=None,
         metavar="FRAC",
         help="Abort when a disconnected secondary region exceeds FRAC of the wing area (default 0.01)",
+    )
+    parser.add_argument(
+        "--no-vein-association-filter",
+        dest="vein_association_filter_enabled",
+        action="store_false",
+        default=True,
+        help="Disable the vein-association filter (does not abort wings with unexplained vein tissue)",
+    )
+    parser.add_argument(
+        "--max-unassigned-vein-frac",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help="Abort when this fraction of segmented vein tissue isn't associated with a traced vein (default 0.08)",
     )
     parser.add_argument(
         "--verbose",

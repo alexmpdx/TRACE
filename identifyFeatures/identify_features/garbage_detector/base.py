@@ -98,11 +98,12 @@ class FilterContext:
     # Stage state (populated as the pipeline progresses).
     wing_outline: Any = None  # cleaned outline (largest component, holes dropped)
     all_polys: Any = None  # raw vein+intervein polygons (pre-cleanup; needed by fragmentation)
+    vein_polys: Any = None  # raw segmented vein polygons (needed by vein_association)
     image_shape: Optional[tuple[int, int]] = None
     skel: Any = None
     landmarks: Any = None
     wing_axis: Any = None
-    veins: Any = None
+    veins: Any = None  # traced VeinIdentification list (with tissue_polygon at TISSUE stage)
     regions: Any = None
 
     # Resolved batch parameters (e.g. solidity range from the batch pre-pass).

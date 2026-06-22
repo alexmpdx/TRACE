@@ -203,6 +203,13 @@ def identify_wing(
     # Always runs (cheap, and downstream rendering / GeoJSON export need tissue polygons).
     assign_vein_tissue_polygons(veins, skel.median_vein_width_px, config, wing_outline)
 
+    # Garbage detection (TISSUE hook): abort wings where too much segmented vein tissue is
+    # not associated with any traced vein (hallucinated vein / failed tracing).
+    tissue_ctx = FilterContext(
+        config=config, specimen_id=specimen_id, vein_polys=vein_polys, veins=veins, wing_outline=wing_outline
+    )
+    run_stage_filters(FilterStage.TISSUE, tissue_ctx)
+
     if config.skip_intervein_regions:
         logger.info("Step 6.1/6.2 skipped (skip_intervein_regions=True)")
         regions: list = []

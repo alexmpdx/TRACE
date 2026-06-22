@@ -211,6 +211,15 @@ class PipelineConfig:
     fragmentation_filter_enabled: bool = True
     fragmentation_max_secondary_frac: float = 0.01
 
+    # Vein-association filter (TISSUE hook, after vein tracing + tissue assignment). Aborts
+    # when too much of the segmented vein area is not covered by any traced vein's tissue
+    # polygon — i.e. vein tissue the tracer couldn't explain (untraced spurs/blobs from a
+    # bad segmentation or failed tracing). Fraction is of total segmented vein area. Default
+    # 0.08 (8%): calibrated on real data — good wings sit ≤4.7% (median ~1%), while a problem
+    # wing with unexplained vein material runs ~12%+.
+    vein_association_filter_enabled: bool = True
+    max_unassigned_vein_frac: float = 0.08
+
     # -- Overlay opacity --
     # 0.0 = fully transparent (invisible), 1.0 = fully opaque. Defaults match
     # the historical hardcoded values: vein centerlines/tissue fully opaque,
