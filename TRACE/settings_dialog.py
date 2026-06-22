@@ -187,6 +187,39 @@ _FIELD_TOOLTIPS: dict[str, str] = {
     ),
     "intervein_split_vein_barrier_vw": "Buffer radius around vein centerlines used as a barrier during intervein splitting (× median vein width).",
     "intervein_split_wing_buffer_vw": "Inset (× median vein width) from the wing outline during intervein splitting.",
+    # -- Quality (garbage detector) --
+    "solidity_filter_enabled": (
+        "Reject wings whose outline solidity (area ÷ convex-hull area) falls outside the "
+        "accepted range. Catches gross segmentation-shape failures. Aborts the wing with a reason."
+    ),
+    "solidity_min": (
+        "Lower solidity bound. A wing below this is too concave (big bite / missing chunk). "
+        "Real wings sit ~0.983–0.990; 0.95 catches only gross failures."
+    ),
+    "solidity_max": (
+        "Upper solidity bound. A wing above this is suspiciously convex (featureless blob with "
+        "none of a real wing's slight alula/hinge concavity)."
+    ),
+    "solidity_mode": (
+        "fixed: use the min/max range above (primary). batch_mad: derive the range from the "
+        "batch as median ± k·robust-σ (opt-in; needs enough wings)."
+    ),
+    "solidity_batch_k": (
+        "batch_mad only: how many robust σ (median ± k·1.4826·MAD) from the batch median counts "
+        "as an outlier. Higher = more permissive. Default 5."
+    ),
+    "solidity_min_batch_size": (
+        "batch_mad only: minimum number of wings before the robust range is trusted; below this "
+        "it falls back to the fixed min/max range."
+    ),
+    "fragmentation_filter_enabled": (
+        "Reject wings with a large disconnected secondary region (a partial second wing or debris "
+        "in frame) that the outline's largest-component step would otherwise silently discard."
+    ),
+    "fragmentation_max_secondary_frac": (
+        "Abort when a disconnected secondary region exceeds this fraction of the main wing area. "
+        "Good wings carry ≤0.6% specks; real second objects are ≥1.5%. Default 0.01 (1%)."
+    ),
 }
 
 
@@ -247,6 +280,7 @@ class PipelineConfigDialog(QDialog):
     _KIND_ENUM_LIST = "enum_list"
     _KIND_FLOAT_LIST = "float_list"
     _KIND_BOOL = "bool"
+    _KIND_CHOICE = "choice"
 
     def __init__(
         self,
@@ -412,6 +446,8 @@ class PipelineConfigDialog(QDialog):
                     kwargs[name] = [float(x.strip()) for x in text.split(",") if x.strip()]
             elif kind == self._KIND_BOOL:
                 kwargs[name] = widget.isChecked()
+            elif kind == self._KIND_CHOICE:
+                kwargs[name] = widget.currentText()
         # The main window's InlineGeneralPanel owns several PipelineConfig
         # fields that the dialog no longer renders (Scale + Output options).
         # Preserve them from the input config so OK doesn't wipe them.
@@ -470,6 +506,7 @@ class PipelineConfigDialog(QDialog):
         self._tabs.addTab(self._wrap_scrollable(self._build_wing_graph_tab()), "Wing Graph")
         self._tabs.addTab(self._wrap_scrollable(self._build_tracing_tab()), "Tracing")
         self._tabs.addTab(self._wrap_scrollable(self._build_intervein_tab()), "Intervein")
+        self._tabs.addTab(self._wrap_scrollable(self._build_quality_tab()), "Quality")
 
         # Rebuild the Landmarks tab whenever the landmark model path changes
         # so the gate panel re-reads gate_config.yaml from the new folder.
@@ -1291,6 +1328,34 @@ class PipelineConfigDialog(QDialog):
         layout.addStretch()
         return w
 
+    def _build_quality_tab(self) -> QWidget:
+        """Garbage-detector data-quality filters. These abort bad-data wings early, with a
+        reason shown in the run log. Both current filters run at the earliest (wing-outline)
+        pipeline hook, before tracing."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        gb = QGroupBox("Wing solidity (shape check)")
+        form = QFormLayout(gb)
+        self._add_bool(form, "solidity_filter_enabled", "Enable solidity filter")
+        self._add_float(form, "solidity_min", "Min solidity", 0.0, 1.0, 4, 0.005)
+        self._add_float(form, "solidity_max", "Max solidity", 0.0, 1.0, 4, 0.005)
+        self._add_choice(form, "solidity_mode", "Threshold mode", ["fixed", "batch_mad"])
+        self._add_float(form, "solidity_batch_k", "batch_mad: k (× robust σ)", 0.0, 100.0, 1, 0.5)
+        self._add_int(form, "solidity_min_batch_size", "batch_mad: min batch size", 1, 100000)
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Fragmentation (disconnected regions)")
+        form = QFormLayout(gb)
+        self._add_bool(form, "fragmentation_filter_enabled", "Enable fragmentation filter")
+        self._add_float(
+            form, "fragmentation_max_secondary_frac", "Max secondary-region fraction", 0.0, 1.0, 4, 0.005
+        )
+        layout.addWidget(gb)
+
+        layout.addStretch()
+        return w
+
     # -----------------------------------------------------------------------
     # Widget factories
     # -----------------------------------------------------------------------
@@ -1409,6 +1474,14 @@ class PipelineConfigDialog(QDialog):
         self._apply_field_tooltip(form, check, name)
         self._widgets[name] = (self._KIND_BOOL, check, None)
 
+    def _add_choice(self, form: QFormLayout, name: str, label: str, choices: list[str]):
+        """Bind a string-valued config field to a QComboBox over `choices`."""
+        combo = QComboBox()
+        combo.addItems(choices)
+        form.addRow(label, combo)
+        self._apply_field_tooltip(form, combo, name)
+        self._widgets[name] = (self._KIND_CHOICE, combo, choices)
+
     # -----------------------------------------------------------------------
     # Load / reset
     # -----------------------------------------------------------------------
@@ -1451,6 +1524,10 @@ class PipelineConfigDialog(QDialog):
                 widget.setText(", ".join(f"{x:g}" for x in val))
             elif kind == self._KIND_BOOL:
                 widget.setChecked(bool(val))
+            elif kind == self._KIND_CHOICE:
+                idx = widget.findText(str(val))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
         # Overlay color overrides (vein_colors / region_colors) are owned by
         # the main window's InlineGeneralPanel — the dialog no longer renders
         # color pickers, so nothing to restore here.
