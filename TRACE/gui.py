@@ -758,7 +758,7 @@ class TraceWindow(QMainWindow):
         self._show_ectopic_labels = True
         self._show_region_labels = True
         self._vein_simplify_tolerance_px = 0.0
-        self._ectopic_label_font_scale = 3.0
+        self._ectopic_label_font_scale = 1.0
         self._show_compartment_labels = True
         self._include_unreliable_landmarks = False
         self._do_rotation = False
@@ -2099,7 +2099,7 @@ class TraceWindow(QMainWindow):
         self._show_ectopic_labels = True
         self._show_region_labels = True
         self._vein_simplify_tolerance_px = 0.0
-        self._ectopic_label_font_scale = 3.0
+        self._ectopic_label_font_scale = 1.0
         self._show_compartment_labels = True
         self._include_unreliable_landmarks = False
         self._do_rotation = False
@@ -2614,10 +2614,15 @@ class TraceWindow(QMainWindow):
                 # field at all; defaulting to empty is correct for that
                 # case (those runs predate the field).
                 manifest_analysis_failed = set(getattr(self._manifest, "analysis_failed_images", []) or [])
+        # Stage-2 failures = a plain "analysis" error OR a garbage-filter abort (whose
+        # error_stage is the specific filter label, e.g. "solidity"/"missing veins").
+        from identify_features.garbage_detector import FILTER_LABELS
+
+        _stage2_error_stages = {"analysis"} | set(FILTER_LABELS.values())
         analysis_failed: set[str] = {
             r.image_path.name
             for r in (results or [])
-            if getattr(r, "error", None) and getattr(r, "error_stage", None) == "analysis"
+            if getattr(r, "error", None) and getattr(r, "error_stage", None) in _stage2_error_stages
         }
         self._last_run_failed_set = manifest_failed | manifest_analysis_failed | analysis_failed
         self._refresh_rerun_buttons()
@@ -3567,12 +3572,19 @@ class TraceWindow(QMainWindow):
         sync with on-disk artifacts; cost is one ~1 KB JSON write per
         image, dwarfed by the per-image overlay PNGs.
 
-        Note: this signal only fires for successes — Stage 2 errors go
-        through image_failed_analysis (which also marks the row).
+        Note: _signal_complete (TRACE/pipeline.py) fires image_completed for
+        BOTH outcomes — on failure it emits image_failed_analysis first (which
+        marks the row FAILED) and then image_completed for manifest bookkeeping.
+        So this handler must do the manifest write but must NOT downgrade a row
+        already marked FAILED back to SUCCEEDED — otherwise a Stage-2 abort
+        (e.g. a garbage-filter rejection) would show a green check instead of
+        the red ✗ that gate/preproc failures get.
         """
         if self._manifest is not None and self._run_folder is not None:
             self._manifest.mark_completed(basename)
             save_manifest(self._run_folder, self._manifest)
+        if self._image_status.get(basename) == ImageStatus.FAILED:
+            return
         self._update_image_status(basename, ImageStatus.SUCCEEDED)
 
     def _on_image_failed_preproc(self, basename: str, error_text: str = "") -> None:
