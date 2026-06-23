@@ -1294,6 +1294,12 @@ class GateConfigPanel(QWidget):
             "sharp ≥": "sharpness",
             "sp_ratio ≤": "second_peak_ratio",
         }
+        # Tooltip shown on the per-metric tier dropdown in each metric header.
+        per_metric_tier_tooltip = (
+            "Set every landmark's threshold for this gate to the chosen tier's "
+            "calibrated value. Other gates are unchanged — use this to mix tiers "
+            "across metrics (e.g. Strict peak but Permissive sharpness)."
+        )
         for col, h in enumerate(headers):
             if h in metric_by_header:
                 metric_key = metric_by_header[h]
@@ -1315,6 +1321,18 @@ class GateConfigPanel(QWidget):
                 lbl.setStyleSheet("font-weight: bold;")
                 lbl.setToolTip(metric_header_tooltips[h])
                 cell_layout.addWidget(lbl)
+                tier_btn = QToolButton()
+                tier_btn.setText("tier ▾")
+                tier_btn.setToolTip(per_metric_tier_tooltip)
+                tier_btn.setPopupMode(QToolButton.InstantPopup)
+                tier_menu = QMenu(tier_btn)
+                for tier_name in _TIER_NAMES:
+                    act = tier_menu.addAction(tier_name)
+                    act.triggered.connect(
+                        lambda _checked=False, mk=metric_key, t=tier_name: self._apply_tier_to_metric(mk, t)
+                    )
+                tier_btn.setMenu(tier_menu)
+                cell_layout.addWidget(tier_btn)
                 cell_layout.addStretch(1)
                 grid.addWidget(cell, 0, col)
             else:
@@ -1545,6 +1563,50 @@ class GateConfigPanel(QWidget):
             # currentTextChanged is a no-op when the row was already on `tier`;
             # force-apply so spinboxes refresh in that case too.
             self._apply_tier_to_row(name, tier)
+
+    def _apply_tier_to_metric(self, metric_key: str, tier: str) -> None:
+        """Set every landmark's spinbox for `metric_key` to `tier`'s calibrated value.
+
+        Leaves the other two metric spinboxes on each row untouched, then recomputes
+        the row's Tier combo so it reflects whichever tier (or Custom) the row's
+        three current values now match.
+        """
+        if tier not in _TIER_NAMES:
+            return
+        for name in self._landmark_order:
+            peak_v, sharp_v, spr_v = self._tier_values(tier, name)
+            new_val = {"peak": peak_v, "sharpness": sharp_v, "second_peak_ratio": spr_v}[metric_key]
+            self._rows[name][metric_key].setValue(new_val)
+            self._recompute_row_tier(name)
+
+    def _recompute_row_tier(self, name: str) -> None:
+        """Set the row's Tier combo to whichever tier all three spinbox values match, or Custom.
+
+        Signals are blocked while setting the combo so its `currentTextChanged`
+        handler (which would overwrite all three spinboxes back to that tier's
+        defaults) does not fire.
+        """
+        row = self._rows[name]
+        cur_peak = float(row["peak"].value())
+        cur_sharp = float(row["sharpness"].value())
+        cur_spr = float(row["second_peak_ratio"].value())
+
+        def _close(a: float, b: float, tol: float = 1e-3) -> bool:
+            return abs(float(a) - float(b)) <= tol
+
+        matched = "Custom"
+        for tier_name in _TIER_NAMES:
+            t_peak, t_sharp, t_spr = self._tier_values(tier_name, name)
+            if _close(cur_peak, t_peak) and _close(cur_sharp, t_sharp) and _close(cur_spr, t_spr):
+                matched = tier_name
+                break
+        combo = row["combo"]
+        was_blocked = combo.blockSignals(True)
+        try:
+            combo.setCurrentText(matched)
+        finally:
+            combo.blockSignals(was_blocked)
+        self._sync_row_editability(name)
 
     def _on_save_as_model_default(self) -> None:
         """Write the current gate to the model's sidecar YAML (auto-loaded on model load).
