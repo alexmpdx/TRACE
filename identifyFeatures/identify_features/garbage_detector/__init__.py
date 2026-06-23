@@ -8,11 +8,13 @@ Importing this package registers every built-in filter (see ``filters/__init__.p
 """
 
 from identify_features.garbage_detector.base import (
+    FILTER_LABELS,
     FilterContext,
     FilterStage,
     GarbageFilter,
     GarbageRejection,
     GarbageVerdict,
+    filter_label,
     run_stage_filters,
 )
 from identify_features.garbage_detector.filters.fragmentation import compute_secondary_fraction
@@ -34,6 +36,8 @@ __all__ = [
     "GarbageFilter",
     "GarbageRejection",
     "GarbageVerdict",
+    "FILTER_LABELS",
+    "filter_label",
     "run_stage_filters",
     "REGISTRY",
     "register_filter",

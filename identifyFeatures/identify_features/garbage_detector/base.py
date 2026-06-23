@@ -69,6 +69,22 @@ class GarbageVerdict:
         return cls(filter_name=filter_name, stage=stage, passed=False, reason=reason, **kw)
 
 
+# Human-facing label for each filter, used as the failure category shown in logs /
+# the TRACE GUI (e.g. "aborted (uncalled vein tissue)") instead of a generic "quality".
+# Keyed by GarbageFilter.name.
+FILTER_LABELS: dict[str, str] = {
+    "solidity": "solidity",
+    "fragmentation": "fragmentation",
+    "vein_association": "uncalled vein tissue",
+    "vein_presence": "missing veins",
+}
+
+
+def filter_label(filter_name: str) -> str:
+    """Human-facing label for a filter name (falls back to a generic 'quality')."""
+    return FILTER_LABELS.get(filter_name, "quality")
+
+
 class GarbageRejection(Exception):
     """Raised to abort a wing flagged as bad data.
 

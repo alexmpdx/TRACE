@@ -161,7 +161,10 @@ class TraceResult:
     segmentation_overlay_path: Optional[Path] = None
     segmentation_geojson_path: Optional[Path] = None
     error: Optional[str] = None
-    error_stage: Optional[str] = None  # "preprocessing", "analysis", or "wing_isolation"
+    # "preprocessing", "analysis", "wing_isolation", or — for a garbage-filter abort — the
+    # specific filter label (e.g. "solidity", "fragmentation", "uncalled vein tissue",
+    # "missing veins"; see garbage_detector.FILTER_LABELS).
+    error_stage: Optional[str] = None
 
 
 DEFAULT_MAX_WORKERS = 1
@@ -473,7 +476,7 @@ def trace_folder(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
-    ectopic_label_font_scale: float = 3.0,
+    ectopic_label_font_scale: float = 1.0,
     show_compartment_labels: bool = True,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
@@ -652,7 +655,7 @@ def _run(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
-    ectopic_label_font_scale: float = 3.0,
+    ectopic_label_font_scale: float = 1.0,
     show_compartment_labels: bool = True,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
@@ -1085,14 +1088,18 @@ def _run(
             raise
         except GarbageRejection as e:
             # Quality filter aborted this wing — a clean, expected rejection, not a crash.
-            # Record just the one-line reason (no traceback) under a distinct stage so the
-            # GUI/log can tell "rejected garbage" apart from "errored".
+            # Record just the one-line reason (no traceback) and tag the failure with the
+            # specific filter (solidity / fragmentation / uncalled vein tissue / missing
+            # veins) so the GUI/log names what failed rather than a generic "quality".
+            from identify_features.garbage_detector import filter_label
+
             elapsed = time.time() - t0
-            logger.info("Analysis aborted for %s (%.1fs): %s", stem, elapsed, e)
+            stage = filter_label(e.verdict.filter_name)
+            logger.info("Analysis aborted for %s (%.1fs) [%s]: %s", stem, elapsed, stage, e)
             stage2_slots[i] = TraceResult(
                 image_path=preproc_result.image_path,
                 error=str(e),
-                error_stage="quality",
+                error_stage=stage,
             )
         except Exception as e:
             elapsed = time.time() - t0
