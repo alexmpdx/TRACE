@@ -18,7 +18,7 @@ from typing import Callable, Optional
 from measurement_maker.distance import load_landmarks_from_geojson
 from measurement_maker.landmark_names import LANDMARK_DISPLAY_NAMES, landmark_display_name
 from measurement_maker.types import LandmarkPair
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QSettings, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,6 +40,29 @@ logger = logging.getLogger(__name__)
 # The raw-key → friendly-name mapping and the lookup helper live in
 # measurement_maker.landmark_names so non-GUI callers (TRACE's log handler)
 # can import them without pulling in napari. Imported at top of this module.
+
+
+# Per-picker last-visited-directory memory. Shares storage with the rest
+# of TRACE — same QSettings org/app — so the keys live under the same
+# preferences file as the input/output/model pickers. The prefix matches
+# TRACE.gui._PICKER_LAST_DIR_QSETTINGS_PREFIX so a future move into a
+# shared module is straightforward.
+_PICKER_LAST_DIR_QSETTINGS_PREFIX = "picker_last_dir/"
+
+
+def _get_picker_last_dir(key: str) -> str:
+    if not key:
+        return ""
+    s = QSettings("TRACE", "WingAnalysisPipeline")
+    return s.value(_PICKER_LAST_DIR_QSETTINGS_PREFIX + key, "", type=str)
+
+
+def _save_picker_last_dir(key: str, path: str) -> None:
+    if not key or not path:
+        return
+    s = QSettings("TRACE", "WingAnalysisPipeline")
+    s.setValue(_PICKER_LAST_DIR_QSETTINGS_PREFIX + key, path)
+    s.sync()
 
 
 class LandmarkPickerWidget(QWidget):
@@ -355,19 +378,49 @@ class LandmarkPickerWidget(QWidget):
         on_picked,
         *,
         save: bool = False,
+        last_dir_key: str = "",
     ) -> None:
-        """Show a native macOS file picker without a nested event loop."""
-        dlg = QFileDialog()
-        dlg.setWindowTitle(title)
-        dlg.setDirectory(initial_dir or "")
-        dlg.setNameFilter(name_filter)
+        """Show a native macOS file picker without a nested event loop.
+
+        ``last_dir_key`` — QSettings sub-key under which THIS picker's
+        last visited directory is remembered, independently of the other
+        pickers. Without it, macOS NSOpenPanel's process-wide "last
+        visited" cache wins over directoryURL and every picker opens at
+        whichever folder was used most recently anywhere in TRACE. Picked
+        paths get persisted back under the key on successful selection.
+        """
+        # If the caller's initial_dir is empty, fall back to the per-picker
+        # QSettings memory so this Browse button reopens where it last left
+        # off — not at whichever folder the previous OS-wide picker landed
+        # at.
+        effective = initial_dir
+        if not effective and last_dir_key:
+            effective = _get_picker_last_dir(last_dir_key)
+        # Construction-time directory is honored by NSOpenPanel more
+        # reliably than a post-constructor setDirectory() call, which the
+        # macOS panel routinely ignores in favor of its own cache.
+        dlg = QFileDialog(None, title, effective or "", name_filter)
         if save:
             dlg.setFileMode(QFileDialog.AnyFile)
             dlg.setAcceptMode(QFileDialog.AcceptSave)
         else:
             dlg.setFileMode(QFileDialog.ExistingFile)
         dlg.setWindowModality(Qt.ApplicationModal)
-        dlg.fileSelected.connect(on_picked)
+        # selectFile() overrides NSOpenPanel's smart-navigation cache that
+        # otherwise wins over directoryURL after the panel has been used
+        # once in the session.
+        if effective:
+            dlg.selectFile(effective)
+
+        def _on_selected(path: str) -> None:
+            # Persist the parent directory of whatever the user picked
+            # under this picker's key, so the next open at this key lands
+            # here regardless of what other pickers have done in between.
+            if path and last_dir_key:
+                _save_picker_last_dir(last_dir_key, str(Path(path).parent))
+            on_picked(path)
+
+        dlg.fileSelected.connect(_on_selected)
         # Hold a reference so Python's GC doesn't free the dialog before
         # the user clicks Open / Cancel. open() returns immediately so the
         # local would otherwise drop out of scope. Replaced on each new
@@ -382,6 +435,7 @@ class LandmarkPickerWidget(QWidget):
             self._default_image_dir,
             "Wing images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.pdf);;All files (*)",
             self._on_image_picked,
+            last_dir_key="measurement_maker_image",
         )
 
     def _on_image_picked(self, path: str) -> None:
@@ -402,6 +456,7 @@ class LandmarkPickerWidget(QWidget):
             start_dir,
             "Landmarks GeoJSON (*_landmarks.geojson *.geojson);;All files (*)",
             self._on_landmarks_picked,
+            last_dir_key="measurement_maker_landmarks",
         )
 
     def _on_landmarks_picked(self, path: str) -> None:
@@ -704,6 +759,7 @@ class LandmarkPickerWidget(QWidget):
             "JSON (*.json);;All files (*)",
             self._on_save_pairs_picked,
             save=True,
+            last_dir_key="measurement_maker_pairs",
         )
 
     def _on_save_pairs_picked(self, path: str) -> None:
@@ -728,6 +784,7 @@ class LandmarkPickerWidget(QWidget):
             self._default_image_dir,
             "JSON (*.json);;All files (*)",
             self._on_load_pairs_picked,
+            last_dir_key="measurement_maker_pairs",
         )
 
     def _on_load_pairs_picked(self, path: str) -> None:

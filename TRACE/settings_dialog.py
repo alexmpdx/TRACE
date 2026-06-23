@@ -570,6 +570,7 @@ class PipelineConfigDialog(QDialog):
             initial_dir,
             self._on_import_config_picked,
             name_filter="JSON (*.json);;All Files (*)",
+            last_dir_key="config_import",
         )
 
     def _on_import_config_picked(self, path: str) -> None:
@@ -632,6 +633,7 @@ class PipelineConfigDialog(QDialog):
             self._on_export_config_picked,
             name_filter="JSON (*.json);;All Files (*)",
             save=True,
+            last_dir_key="config_export",
         )
 
     def _on_export_config_picked(self, path: str) -> None:
@@ -680,6 +682,7 @@ class PipelineConfigDialog(QDialog):
             _picker_initial_path(self._wing_model_edit.text()),
             self._on_wing_model_folder_picked,
             folder=True,
+            last_dir_key="wing_isolation_model",
         )
 
     def _on_wing_model_folder_picked(self, folder: str) -> None:
@@ -1071,6 +1074,7 @@ class PipelineConfigDialog(QDialog):
             _picker_initial_path(seed_path),
             lambda folder: self._on_autodetect_folder_picked(folder, spin),
             folder=True,
+            last_dir_key="training_images_autodetect",
         )
 
     def _on_autodetect_folder_picked(self, folder: str, spin: QDoubleSpinBox) -> None:
@@ -1140,6 +1144,7 @@ class PipelineConfigDialog(QDialog):
             _picker_initial_path(self._lm_model_edit.text()),
             self._on_landmark_model_folder_picked,
             folder=True,
+            last_dir_key="landmark_model",
         )
 
     def _on_landmark_model_folder_picked(self, folder: str) -> None:
@@ -1167,6 +1172,7 @@ class PipelineConfigDialog(QDialog):
             _picker_initial_path(self._seg_model_edit.text()),
             self._on_segmentation_model_folder_picked,
             folder=True,
+            last_dir_key="segmentation_model",
         )
 
     def _on_segmentation_model_folder_picked(self, folder: str) -> None:

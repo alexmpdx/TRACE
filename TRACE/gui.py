@@ -230,6 +230,30 @@ def _pick_save_file_native(caption: str, initial: str, name_filter: str = "") ->
     return path
 
 
+# QSettings sub-namespace for per-picker last-visited-directory memory.
+# Each picker call site passes its own ``last_dir_key`` so its Browse
+# button remembers ITS path independently of the others — without this,
+# macOS NSOpenPanel falls back to a single per-process "last visited"
+# cache and every picker opens at whichever folder was used most recently
+# anywhere in TRACE (input picker landing at the output folder etc).
+_PICKER_LAST_DIR_QSETTINGS_PREFIX = "picker_last_dir/"
+
+
+def _get_picker_last_dir(key: str) -> str:
+    if not key:
+        return ""
+    s = QSettings("TRACE", "WingAnalysisPipeline")
+    return s.value(_PICKER_LAST_DIR_QSETTINGS_PREFIX + key, "", type=str)
+
+
+def _save_picker_last_dir(key: str, path: str) -> None:
+    if not key or not path:
+        return
+    s = QSettings("TRACE", "WingAnalysisPipeline")
+    s.setValue(_PICKER_LAST_DIR_QSETTINGS_PREFIX + key, path)
+    s.sync()
+
+
 def _open_native_picker_async(
     holder,
     caption: str,
@@ -239,6 +263,7 @@ def _open_native_picker_async(
     name_filter: str = "",
     folder: bool = False,
     save: bool = False,
+    last_dir_key: str = "",
 ) -> None:
     """Async native picker — ``QFileDialog.open()`` + ``fileSelected`` signal.
 
@@ -265,23 +290,59 @@ def _open_native_picker_async(
         Mutually exclusive with ``folder=True``.
       - ``name_filter`` — Qt filter string for file pickers, ignored
         when ``folder=True``.
+      - ``last_dir_key`` — QSettings sub-key used to remember THIS
+        picker's last visited directory independently of the other
+        pickers. Without it, macOS NSOpenPanel's process-wide
+        "last visited" cache wins over ``setDirectory()`` and every
+        picker opens at the folder used most recently anywhere.
+        Picked paths get persisted back under this key on successful
+        selection.
+
+    Initial-directory precedence:
+      1. The explicit ``initial`` arg if it points to an existing path
+         (typically the value already in the associated widget).
+      2. Per-picker QSettings memory under ``last_dir_key``.
+      3. "/" as a last-resort fallback (Finder's Computer view).
     """
-    dlg = QFileDialog()
-    dlg.setWindowTitle(caption)
-    dlg.setDirectory(initial or "")
+    resolved_initial = _picker_initial_path(initial)
+    # When `initial` was empty / non-existent (resolved to "/"), prefer
+    # the per-picker memory over the OS-wide cache.
+    if resolved_initial == "/" and last_dir_key:
+        saved = _get_picker_last_dir(last_dir_key)
+        if saved:
+            resolved_initial = _picker_initial_path(saved)
+    # Pass directory through the constructor; macOS native NSOpenPanel
+    # honors construction-time directoryURL more reliably than post-
+    # constructor setDirectory() calls. The trailing positional filter
+    # is ignored for folder pickers.
+    dlg = QFileDialog(None, caption, resolved_initial, name_filter if not folder else "")
     if folder:
         dlg.setFileMode(QFileDialog.Directory)
         dlg.setOption(QFileDialog.ShowDirsOnly, True)
     else:
-        if name_filter:
-            dlg.setNameFilter(name_filter)
         if save:
             dlg.setFileMode(QFileDialog.AnyFile)
             dlg.setAcceptMode(QFileDialog.AcceptSave)
         else:
             dlg.setFileMode(QFileDialog.ExistingFile)
     dlg.setWindowModality(Qt.ApplicationModal)
-    dlg.fileSelected.connect(on_picked)
+    # selectFile(path) overrides macOS NSOpenPanel's "last visited
+    # directory" cache that otherwise wins over directoryURL after the
+    # panel has been used once in the session. Skip the no-info "/"
+    # case where there's nothing meaningful to pre-select.
+    if resolved_initial and resolved_initial != "/":
+        dlg.selectFile(resolved_initial)
+
+    def _on_selected(path: str) -> None:
+        # Persist this picker's last-visited directory so the next click
+        # on the same Browse button opens here, regardless of what other
+        # pickers have been used in between.
+        if path and last_dir_key:
+            saved_path = path if folder else str(Path(path).parent)
+            _save_picker_last_dir(last_dir_key, saved_path)
+        on_picked(path)
+
+    dlg.fileSelected.connect(_on_selected)
     # Stash the reference on the calling instance so the dialog lives
     # past this function return. The holder owns a single slot —
     # replaced on each new picker; safe because pickers are
@@ -351,6 +412,10 @@ def _translate_landmark_names(text: str) -> str:
 # changes upstream, update this pattern in lockstep — there's a
 # back-pointer comment in predict.py.
 _GATE_FAILURE_PATTERN = re.compile(r"Core landmarks failed confidence gate", re.IGNORECASE)
+# Quality gates from identifyFeatures' garbage_detector (solidity / fragmentation /
+# vein_association / vein_presence). TRACE/pipeline.py prefixes GarbageRejection
+# error text with "Aborted by quality gate (<filter>):" — we match on that here.
+_QUALITY_GATE_PATTERN = re.compile(r"Aborted by quality gate", re.IGNORECASE)
 
 
 def _classify_preproc_failure(error_text: str) -> str:
@@ -362,8 +427,7 @@ def _classify_preproc_failure(error_text: str) -> str:
       "preproc_other" — any other Stage-1 failure (model load, file IO,
                         wing-isolation no-wing-found, etc).
 
-    Stage-2 (analysis) failures get a separate "analysis" category
-    set directly in _on_image_failed_analysis, not via this helper.
+    Stage-2 (analysis) failures go through _classify_analysis_failure.
 
     Parsing the message string is a pragmatic choice: the exception
     type doesn't survive the QThread boundary (only the stringified
@@ -374,6 +438,22 @@ def _classify_preproc_failure(error_text: str) -> str:
     if error_text and _GATE_FAILURE_PATTERN.search(error_text):
         return "gate"
     return "preproc_other"
+
+
+def _classify_analysis_failure(error_text: str) -> str:
+    """Map a Stage-2 error message to a coarse failure category.
+
+    Returns one of:
+      "gate"     — garbage-detector quality gate abort (GarbageRejection,
+                   prefixed in TRACE/pipeline.py). Lumped with landmark
+                   confidence-gate aborts so the "Rerun failed (no quality
+                   gates)" button picks them all up.
+      "analysis" — any other Stage-2 failure (vein tracer crash, output
+                   write error, etc).
+    """
+    if error_text and _QUALITY_GATE_PATTERN.search(error_text):
+        return "gate"
+    return "analysis"
 
 
 def _format_compact_value(v) -> str:
@@ -711,14 +791,8 @@ class TraceWindow(QMainWindow):
         # variant (visible only when ≥1 category=="gate" failure exists).
         # _last_run_failed_set is the union of manifest preproc failures and
         # in-memory Stage-2 (analysis) failures from the most recent run.
-        # _gate_override_backup snapshots the user's saved gate_override
-        # just before a no-gate rerun launches so _finalize_rerun can
-        # restore it on every end-of-run path. None when no no-gate
-        # rerun is in flight. None values are intentionally NOT persisted
-        # — the temporary "all gates disabled" override is purely runtime.
         self._failure_category: dict[str, str] = {}
         self._last_run_failed_set: set[str] = set()
-        self._gate_override_backup: dict | None = None
         # One-shot pending state set by _start_rerun_failed and consumed
         # by the very next _run_pipeline call. Kept on self so we don't
         # have to refactor _run_pipeline's signature (it has none — all
@@ -728,6 +802,13 @@ class TraceWindow(QMainWindow):
         self._pending_csv_filename_override: Optional[str] = None
         self._pending_rerun_skip_set: Optional[set[str]] = None
         self._pending_skip_workers_warning: bool = False
+        # Set by _start_rerun_failed(disable_gates=True). _run_pipeline
+        # splices these into the worker kwargs ONLY for this one launch
+        # without mutating self.config or self._gate_override — those are
+        # what _save_settings persists to QSettings, so any in-place flip
+        # would survive across TRACE restarts. Both reset on consumption.
+        self._pending_gate_override: Optional[dict] = None
+        self._pending_disable_garbage_filters: bool = False
         # User-driven skip: basenames the user has explicitly unchecked
         # in the Main-tab image list. Held separately from
         # _resume_skip_set (which is derived from the run manifest and
@@ -1153,11 +1234,11 @@ class TraceWindow(QMainWindow):
         # and on first launch.
         #
         # Stacked vertically rather than in a row because the combined
-        # widths ("Rerun failed images", "Rerun failed (no gate aborts)",
+        # widths ("Rerun failed images", "Rerun failed (no quality gates)",
         # "Review failed images (N)") far exceed the left column at its
         # default width — Windows truncates the middle of each label
         # without showing ellipses, so the user sees garbled text like
-        # "un failed (no gate abo". Vertical stacking gives each button
+        # "un failed (no quality g". Vertical stacking gives each button
         # its full label width regardless of the splitter position.
         rerun_layout = QVBoxLayout()
         rerun_layout.setContentsMargins(0, 0, 0, 0)
@@ -1170,11 +1251,12 @@ class TraceWindow(QMainWindow):
         )
         self.btn_rerun_failed.clicked.connect(lambda: self._start_rerun_failed(disable_gates=False))
         self.btn_rerun_failed.setVisible(False)
-        self.btn_rerun_failed_nogate = QPushButton("Rerun failed (no gate aborts)")
+        self.btn_rerun_failed_nogate = QPushButton("Rerun failed (no quality gates)")
         self.btn_rerun_failed_nogate.setToolTip(
-            "Same as Rerun failed images, but with every landmark confidence gate "
-            "temporarily disabled for this rerun only. Your saved gate settings "
-            "are not modified."
+            "Same as Rerun failed images, but with EVERY quality gate temporarily "
+            "disabled — landmark confidence gates plus the garbage-detector filters "
+            "(solidity, fragmentation, vein-association, vein-presence). Use when "
+            "you suspect a gate is too strict. Your saved settings are not modified."
         )
         self.btn_rerun_failed_nogate.clicked.connect(lambda: self._start_rerun_failed(disable_gates=True))
         self.btn_rerun_failed_nogate.setVisible(False)
@@ -1358,6 +1440,7 @@ class TraceWindow(QMainWindow):
             _picker_initial_path(self.input_edit.text()),
             self._on_input_folder_picked,
             folder=True,
+            last_dir_key="input_folder",
         )
 
     def _on_input_folder_picked(self, folder: str) -> None:
@@ -1688,6 +1771,7 @@ class TraceWindow(QMainWindow):
             _picker_initial_path(self.output_edit.text()),
             self._on_output_folder_picked,
             folder=True,
+            last_dir_key="output_folder",
         )
 
     def _on_output_folder_picked(self, folder: str) -> None:
@@ -2139,10 +2223,11 @@ class TraceWindow(QMainWindow):
         # Failed-images bookkeeping for the rerun buttons.
         self._failure_category.clear()
         self._last_run_failed_set.clear()
-        self._gate_override_backup = None
         self._pending_rerun_skip_set = None
         self._pending_csv_filename_override = None
         self._pending_skip_workers_warning = False
+        self._pending_gate_override = None
+        self._pending_disable_garbage_filters = False
         # Walkthrough seen-flags are stored in QSettings; settings.clear()
         # at the top of this method already cleared them.
 
@@ -2444,68 +2529,16 @@ class TraceWindow(QMainWindow):
         if has_failed:
             self.btn_review_failed.setText(f"Review failed images ({len(failed)})")
 
-        # Hint dispatch — deferred 300ms so the new button's geometry is
-        # settled before the overlay measures it. Each hint fires on
-        # every run that left ≥1 failed image UNLESS the user has
-        # explicitly ticked the "Don't show this again" checkbox in the
-        # overlay's popup. _show_button_hint passes the QSettings key
-        # through to the overlay so the checkbox tick is what persists
-        # the dismissal — no checkbox tick → hint fires again next run.
-        # The no-gate hint is prioritized over the plain hint when both
-        # could fire, so the user sees the more specific suggestion.
-        if (
-            has_failed
-            and has_gate_failure
-            and not self.settings.value("nogate_rerun_button_hint_dismissed", False, type=bool)
-        ):
-            QTimer.singleShot(
-                300,
-                lambda: self._show_button_hint(
-                    self.btn_rerun_failed_nogate,
-                    settings_key="nogate_rerun_button_hint_dismissed",
-                    title="Rerun without landmark gates",
-                    body=(
-                        "At least one image failed because of a landmark confidence gate "
-                        "abort. Click <b>Rerun failed (no gate aborts)</b> to retry those "
-                        "images with every gate temporarily disabled. Your saved gate "
-                        "settings will not be changed by this rerun."
-                    ),
-                ),
-            )
-        elif has_failed and not self.settings.value("rerun_button_hint_dismissed", False, type=bool):
-            QTimer.singleShot(
-                300,
-                lambda: self._show_button_hint(
-                    self.btn_rerun_failed,
-                    settings_key="rerun_button_hint_dismissed",
-                    title="Rerun failed images",
-                    body=(
-                        "One or more images failed in this run. Click <b>Rerun failed images</b> "
-                        "to re-process only those after adjusting settings. You'll be asked "
-                        "whether to append the new measurements to the existing CSV or write "
-                        "a new one."
-                    ),
-                ),
-            )
-        elif has_failed and not self.settings.value("review_failed_button_hint_dismissed", False, type=bool):
-            # Shown only once the rerun hints above have been dismissed, so the
-            # user meets these features in a natural progression (one hint per
-            # run). Dismissal is driven by the overlay's "Don't show again" box.
-            QTimer.singleShot(
-                300,
-                lambda: self._show_button_hint(
-                    self.btn_review_failed,
-                    settings_key="review_failed_button_hint_dismissed",
-                    title="Review failed images",
-                    body=(
-                        "You can also open the failed images one at a time in the "
-                        "landmark inspector to drag the landmarks into place manually. "
-                        "Click <b>Review failed images</b> to step through them — saved "
-                        "corrections become per-image overrides that the next run picks "
-                        "up automatically, no model retraining needed."
-                    ),
-                ),
-            )
+        # Failed-run walkthrough — multi-step overlay shown when ≥1 image
+        # failed in the just-finished run. Step 1 (no highlight) summarizes
+        # WHY images failed; steps 2-4 each highlight one of the post-run
+        # buttons (Review, Rerun, Rerun no-quality-gates). The no-gates
+        # step is conditional on a quality-gate failure being present —
+        # otherwise the button is hidden and there's nothing to point at.
+        # Deferred 300 ms so the buttons' freshly-set visibility is settled
+        # before the overlay measures their geometry.
+        if has_failed and not self.settings.value("failed_run_walkthrough_dismissed", False, type=bool):
+            QTimer.singleShot(300, self._show_failed_run_walkthrough)
 
     def _review_failed_images(self) -> None:
         """Open the landmark inspector on the last run's failed images (cohort)."""
@@ -2525,6 +2558,147 @@ class TraceWindow(QMainWindow):
             )
             return
         self._open_landmark_inspector(failed_paths[0], cohort=failed_paths)
+
+    def _summarize_failure_reasons(self, failed: set[str]) -> list[str]:
+        """Group the just-failed images into human-readable bullet points
+        for the failed-run walkthrough's step-1 summary.
+
+        Buckets:
+          - Landmark confidence gate (Stage 1, regex on the legacy
+            "Core landmarks failed confidence gate" prefix).
+          - Garbage-detector quality gates, split per filter — solidity /
+            fragmentation / vein-association / vein-presence — using the
+            "Aborted by quality gate (<filter>):" prefix added in
+            TRACE/pipeline.py's GarbageRejection handler.
+          - Other Stage-1 (preprocessing) failures: model load, file IO,
+            wing isolation with no wing found, etc.
+          - Other Stage-2 (analysis) failures: vein-tracer crashes, output
+            write errors, etc.
+        """
+        import re as _re
+
+        landmark_gate = 0
+        quality_gate_by_filter: dict[str, int] = {}
+        other_preproc = 0
+        other_analysis = 0
+        for name in failed:
+            cat = self._failure_category.get(name, "")
+            msg = self._image_error_text.get(name, "")
+            if cat == "gate":
+                m = _re.search(r"Aborted by quality gate \(([^)]+)\)", msg, _re.IGNORECASE)
+                if m:
+                    label = m.group(1).strip()
+                    quality_gate_by_filter[label] = quality_gate_by_filter.get(label, 0) + 1
+                else:
+                    landmark_gate += 1
+            elif cat == "preproc_other":
+                other_preproc += 1
+            else:  # "analysis" or unknown
+                other_analysis += 1
+
+        def _img_count(n: int) -> str:
+            return f"{n} image" if n == 1 else f"{n} images"
+
+        reasons: list[str] = []
+        if landmark_gate:
+            reasons.append(f"{_img_count(landmark_gate)} failed a landmark confidence gate")
+        for filter_name in sorted(quality_gate_by_filter):
+            n = quality_gate_by_filter[filter_name]
+            reasons.append(f"{_img_count(n)} failed the {filter_name} quality gate")
+        if other_preproc:
+            reasons.append(
+                f"{_img_count(other_preproc)} failed during preprocessing "
+                f"(model load / file read / no wing found / etc.)"
+            )
+        if other_analysis:
+            reasons.append(f"{_img_count(other_analysis)} failed during analysis")
+        return reasons
+
+    def _show_failed_run_walkthrough(self) -> None:
+        """Four-step walkthrough fired after a run with ≥1 failed image.
+
+        Step 1 (no highlight): summary of WHY images failed.
+        Step 2: Review failed images button.
+        Step 3: Rerun failed images button.
+        Step 4 (conditional): Rerun failed (no quality gates) button —
+            only when a quality-gate abort is present, since that's the
+            only case where the button is visible.
+
+        Settings_key="failed_run_walkthrough_dismissed" replaces the
+        old per-button hint keys; ticking "Don't show again" on any step
+        permanently suppresses the whole walkthrough.
+
+        If the main on-launch walkthrough is still up (rare — user
+        finishes a run while still reading the tutorial), defer 500 ms
+        so two overlays don't fight over the dim snapshot.
+        """
+        failed = self._last_run_failed_set
+        if not failed:
+            return
+        if self._walkthrough is not None:
+            try:
+                still_visible = self._walkthrough.isVisible()
+            except RuntimeError:
+                still_visible = False
+            if still_visible:
+                QTimer.singleShot(500, self._show_failed_run_walkthrough)
+                return
+
+        reasons = self._summarize_failure_reasons(failed)
+        # Format the summary body. PyQt's QLabel handles "<br>"; bullet
+        # rendering via Unicode bullets is fine since the popup body
+        # already supports HTML (the existing hints use <b>).
+        summary_body = "At least one image failed because of the following reasons:<br><br>" + "<br>".join(
+            f"• {r}" for r in reasons
+        )
+        steps: list[WalkthroughStep] = [
+            WalkthroughStep(
+                target_resolver=lambda _w: None,
+                title="Some images failed",
+                body=summary_body,
+            ),
+            WalkthroughStep(
+                target_resolver=lambda _w: self.btn_review_failed,
+                title="Review failed images",
+                body=(
+                    "Click <b>Review failed images</b> to open failed images in the "
+                    "model inspector. Review and edit landmark point locations and "
+                    "vein/intervein tissue detection — those corrections become "
+                    "per-image overrides that the next run picks up automatically."
+                ),
+            ),
+            WalkthroughStep(
+                target_resolver=lambda _w: self.btn_rerun_failed,
+                title="Rerun failed images",
+                body=(
+                    "Click <b>Rerun failed images</b> to re-process only the failed "
+                    "images, e.g. after adjusting settings. You'll be asked whether to "
+                    "append the new measurements to the existing CSV or write a new one."
+                ),
+            ),
+        ]
+        has_gate_failure = any(self._failure_category.get(n) == "gate" for n in failed)
+        if has_gate_failure:
+            steps.append(
+                WalkthroughStep(
+                    target_resolver=lambda _w: self.btn_rerun_failed_nogate,
+                    title="Rerun without quality gates",
+                    body=(
+                        "Click <b>Rerun failed (no quality gates)</b> to reprocess the "
+                        "failed images with all quality gates temporarily disabled. Use "
+                        "when you suspect a gate is too strict. Your saved settings "
+                        "won't be changed."
+                    ),
+                )
+            )
+        overlay = WalkthroughOverlay(
+            self,
+            steps,
+            settings=self.settings,
+            settings_key="failed_run_walkthrough_dismissed",
+            dont_show_label="Don't show this again",
+        )
+        overlay.start()
 
     def _show_button_hint(
         self,
@@ -2716,7 +2890,10 @@ class TraceWindow(QMainWindow):
             msg = messages.get(bn, "")
             if msg:
                 self._image_error_text[bn] = msg
-            self._failure_category[bn] = "analysis"
+            # Same regex-on-message classification as the live failure
+            # slot: garbage-detector quality aborts → "gate" so the
+            # no-gates rerun button surfaces; everything else "analysis".
+            self._failure_category[bn] = _classify_analysis_failure(msg)
             self._update_image_status(bn, ImageStatus.FAILED)
 
         # Tail end: rebuild _last_run_failed_set + paint the Review /
@@ -2815,6 +2992,7 @@ class TraceWindow(QMainWindow):
             seed,
             self._on_load_previous_run_picked,
             folder=True,
+            last_dir_key="load_previous_run",
         )
 
     def _on_load_previous_run_picked(self, folder: str) -> None:
@@ -2851,9 +3029,15 @@ class TraceWindow(QMainWindow):
 
         Inverts the user's failed_set into a skip_image_basenames arg so
         the existing pipeline code path needs no changes. When
-        ``disable_gates`` is True, snapshots the user's gate_override
-        and substitutes a temporary one with all confidence-gate
-        metrics disabled; the snapshot is restored in _finalize_rerun.
+        ``disable_gates`` is True, stashes one-shot pending overrides
+        (``_pending_gate_override`` + ``_pending_disable_garbage_filters``)
+        that ``_run_pipeline`` splices into the worker kwargs for this
+        one launch — without mutating self.config or self._gate_override.
+        That matters because _save_settings(...) inside _run_pipeline
+        persists those two attributes to QSettings, so any in-place flip
+        would survive across a TRACE restart. The overrides cover both
+        landmark confidence gates and the four garbage-detector filters
+        (solidity, fragmentation, vein_association, vein_presence).
         Prompts the user for append-to-existing-CSV vs. fresh CSV first.
         """
         if not self._last_run_failed_set:
@@ -2877,13 +3061,17 @@ class TraceWindow(QMainWindow):
         if csv_choice is None:
             return  # user cancelled
 
-        if disable_gates:
-            import copy as _copy
-
-            self._gate_override_backup = _copy.deepcopy(self._gate_override) if self._gate_override else None
-            self._gate_override = self._build_all_gates_disabled_override()
-        else:
-            self._gate_override_backup = None
+        # IMPORTANT: do NOT mutate self.config or self._gate_override here.
+        # _run_pipeline calls _save_settings() right after launch, which
+        # writes self.config + self._gate_override to QSettings — if we
+        # flipped those flags in-place, the disabled state would persist
+        # to disk and a TRACE restart would silently keep gates off.
+        # Instead, stash one-shot overrides for _run_pipeline to splice
+        # into the worker kwargs only for this launch. Both fields reset
+        # to falsy defaults at the top of _run_pipeline so the next
+        # normal Run inherits nothing.
+        self._pending_gate_override = self._build_all_gates_disabled_override() if disable_gates else None
+        self._pending_disable_garbage_filters = bool(disable_gates)
 
         # Stash the override-CSV filename on self so _run_pipeline can read
         # it; cleared back to None at the start of every _run_pipeline call.
@@ -2991,18 +3179,6 @@ class TraceWindow(QMainWindow):
             rescale_tolerance_high=self._rescale_tolerance_high,
         )
 
-    def _finalize_rerun(self) -> None:
-        """End-of-run hook: restore the user's gate_override after a no-gate rerun.
-
-        Always safe to call (no-op when no backup is in flight). The
-        backup is one-shot — once consumed, _gate_override_backup goes
-        back to None so a subsequent normal run doesn't get confused
-        about whether a restore is pending.
-        """
-        if self._gate_override_backup is not None:
-            self._gate_override = self._gate_override_backup
-            self._gate_override_backup = None
-
     # -----------------------------------------------------------------------
     # Pipeline execution
     # -----------------------------------------------------------------------
@@ -3014,9 +3190,16 @@ class TraceWindow(QMainWindow):
         rerun_skip_set = self._pending_rerun_skip_set
         csv_filename_override = self._pending_csv_filename_override
         skip_workers_warning = self._pending_skip_workers_warning
+        # No-quality-gates rerun overlay — applied to the worker kwargs
+        # below without touching self.config / self._gate_override so the
+        # user's saved settings stay clean on next launch.
+        pending_gate_override = self._pending_gate_override
+        disable_garbage_filters = self._pending_disable_garbage_filters
         self._pending_rerun_skip_set = None
         self._pending_csv_filename_override = None
         self._pending_skip_workers_warning = False
+        self._pending_gate_override = None
+        self._pending_disable_garbage_filters = False
         is_rerun = rerun_skip_set is not None
         # A fresh Run click starts a new failure-tracking slate. Reruns
         # keep their _last_run_failed_set so the buttons stay visible
@@ -3245,13 +3428,30 @@ class TraceWindow(QMainWindow):
         else:
             target_um_per_px = self._segmentation_target_um_per_px
 
+        # No-quality-gates rerun: build a deep copy of self.config with the
+        # four garbage-detector flags flipped off, just for this run. The
+        # original self.config is untouched, so _save_settings(...) below
+        # (and the QSettings write on TRACE close) persists the user's saved
+        # values — restarting TRACE doesn't inherit the temporarily-disabled
+        # state. Same shape of one-shot overlay we use for gate_override.
+        run_config = self.config
+        if disable_garbage_filters:
+            import copy as _copy
+
+            run_config = _copy.deepcopy(self.config)
+            run_config.solidity_filter_enabled = False
+            run_config.fragmentation_filter_enabled = False
+            run_config.vein_association_filter_enabled = False
+            run_config.required_veins = []
+        run_gate_override = pending_gate_override if pending_gate_override is not None else self._gate_override
+
         self.worker = TraceWorker(
             kwargs=dict(
                 input_dir=Path(self.input_edit.text()),
                 output_dir=Path(self.output_edit.text()),
                 landmark_checkpoint=Path(self._landmark_model_path),
                 segmentation_model_dir=Path(self._segmentation_model_path),
-                config=self.config,
+                config=run_config,
                 keep_intermediates=False,
                 outputs=self._selected_outputs(),
                 max_workers=self.inline_general_panel.workers_spin.value(),
@@ -3263,7 +3463,7 @@ class TraceWindow(QMainWindow):
                 ectopic_label_font_scale=self._ectopic_label_font_scale,
                 show_compartment_labels=self._show_compartment_labels,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
-                gate_override=self._gate_override,
+                gate_override=run_gate_override,
                 wing_isolation_model_dir=wing_model_dir,
                 wing_expand_fraction=self._wing_expand_fraction,
                 recursive=self.recursive_chk.isChecked(),
@@ -3522,7 +3722,6 @@ class TraceWindow(QMainWindow):
         self.transient_status_label.hide()
         # Capture failed-image set for the rerun buttons while the
         # manifest is still readable.
-        self._finalize_rerun()
         self._record_failures_from_run(results or [])
 
         if self._manifest is not None and self._run_folder is not None:
@@ -3629,11 +3828,13 @@ class TraceWindow(QMainWindow):
         so resume's skip set keeps it out of a re-run (the manifest tracks
         "did we get to Stage 2?" + "did Stage 2 succeed?" independently).
         """
-        # Stage-2 failures don't go through _classify_preproc_failure —
-        # the category is always "analysis" here. The no-gate rerun
-        # button visibility check filters on category=="gate", so
-        # analysis-only failures correctly show only the plain rerun.
-        self._failure_category[basename] = "analysis"
+        # Stage-2 has two flavours: a garbage-detector quality-gate abort
+        # (GarbageRejection — solidity / fragmentation / vein-association /
+        # vein-presence) gets bucketed as "gate" alongside landmark
+        # confidence-gate aborts, so the "Rerun failed (no quality gates)"
+        # button picks it up. Everything else stays "analysis" (genuine
+        # crash, output write error, etc).
+        self._failure_category[basename] = _classify_analysis_failure(error_text)
         translated = _translate_landmark_names(error_text) if error_text else ""
         if translated:
             self._image_error_text[basename] = translated
@@ -3696,9 +3897,7 @@ class TraceWindow(QMainWindow):
         # up the merged skip set fresh, so the user can adjust skips
         # between slices.
         self._set_skip_checkboxes_enabled(True)
-        # Restore any no-gate rerun override + recompute rerun-button
-        # visibility from this slice's failures.
-        self._finalize_rerun()
+        # Recompute rerun-button visibility from this slice's failures.
         self._record_failures_from_run(results)
 
     def _resume_paused_run(self) -> None:
@@ -4281,10 +4480,8 @@ class TraceWindow(QMainWindow):
         self._revert_in_progress_to_pending()
         self.transient_status_label.hide()
 
-        # Capture failures + restore any no-gate rerun override BEFORE
-        # wiping the manifest reference below. _record_failures_from_run
-        # reads manifest.failed_preproc_set().
-        self._finalize_rerun()
+        # Capture failures BEFORE wiping the manifest reference below.
+        # _record_failures_from_run reads manifest.failed_preproc_set().
         self._record_failures_from_run(results)
 
         # Mark the manifest as completed so the next run on this output

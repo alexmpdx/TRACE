@@ -1091,6 +1091,10 @@ def _run(
             # Record just the one-line reason (no traceback) and tag the failure with the
             # specific filter (solidity / fragmentation / uncalled vein tissue / missing
             # veins) so the GUI/log names what failed rather than a generic "quality".
+            # The "Aborted by quality gate" prefix is what the GUI's
+            # _classify_analysis_failure pattern-matches on to tag the failure as
+            # category="gate" — same bucket as landmark confidence-gate aborts, so the
+            # "Rerun failed (no quality gates)" button picks them up too.
             from identify_features.garbage_detector import filter_label
 
             elapsed = time.time() - t0
@@ -1098,7 +1102,7 @@ def _run(
             logger.info("Analysis aborted for %s (%.1fs) [%s]: %s", stem, elapsed, stage, e)
             stage2_slots[i] = TraceResult(
                 image_path=preproc_result.image_path,
-                error=str(e),
+                error=f"Aborted by quality gate ({stage}): {e}",
                 error_stage=stage,
             )
         except Exception as e:
