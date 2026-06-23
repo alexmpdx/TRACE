@@ -220,6 +220,11 @@ class PipelineConfig:
     vein_association_filter_enabled: bool = True
     max_unassigned_vein_frac: float = 0.08
 
+    # Vein-presence filter (VEINS hook). Abort a wing if any of these canonical veins is
+    # missing (no traced centerline — i.e. ABSENT or never found). Empty list (default) =
+    # never abort for a missing vein. Valid ids: costa, L1, L2, L3, L4, L5, L6, ACV, PCV, Rs.
+    required_veins: list[str] = field(default_factory=list)
+
     # -- Overlay opacity --
     # 0.0 = fully transparent (invisible), 1.0 = fully opaque. Defaults match
     # the historical hardcoded values: vein centerlines/tissue fully opaque,

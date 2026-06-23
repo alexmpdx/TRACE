@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -226,7 +227,11 @@ _FIELD_TOOLTIPS: dict[str, str] = {
     ),
     "max_unassigned_vein_frac": (
         "Abort when this fraction of segmented vein area is not associated with any traced vein. "
-        "Default 0.20 (20%)."
+        "Default 0.08 (8%)."
+    ),
+    "required_veins": (
+        "Abort the wing if any checked vein is missing (not traced). Leave all unchecked (default) "
+        "to never abort for a missing vein."
     ),
 }
 
@@ -289,6 +294,7 @@ class PipelineConfigDialog(QDialog):
     _KIND_FLOAT_LIST = "float_list"
     _KIND_BOOL = "bool"
     _KIND_CHOICE = "choice"
+    _KIND_STR_SET = "str_set"
 
     def __init__(
         self,
@@ -456,6 +462,9 @@ class PipelineConfigDialog(QDialog):
                 kwargs[name] = widget.isChecked()
             elif kind == self._KIND_CHOICE:
                 kwargs[name] = widget.currentText()
+            elif kind == self._KIND_STR_SET:
+                boxes, options = extra
+                kwargs[name] = [opt for opt in options if boxes[opt].isChecked()]
         # The main window's InlineGeneralPanel owns several PipelineConfig
         # fields that the dialog no longer renders (Scale + Output options).
         # Preserve them from the input config so OK doesn't wipe them.
@@ -1367,6 +1376,13 @@ class PipelineConfigDialog(QDialog):
         self._add_float(form, "max_unassigned_vein_frac", "Max unassigned vein fraction", 0.0, 1.0, 3, 0.01)
         layout.addWidget(gb)
 
+        gb = QGroupBox("Required veins (abort if missing)")
+        form = QFormLayout(gb)
+        from identify_features.models.topology import ALL_CANONICAL_VEINS
+
+        self._add_checkbox_set(form, "required_veins", "Require", list(ALL_CANONICAL_VEINS))
+        layout.addWidget(gb)
+
         layout.addStretch()
         return w
 
@@ -1496,6 +1512,23 @@ class PipelineConfigDialog(QDialog):
         self._apply_field_tooltip(form, combo, name)
         self._widgets[name] = (self._KIND_CHOICE, combo, choices)
 
+    def _add_checkbox_set(self, form: QFormLayout, name: str, label: str, options: list[str], columns: int = 4):
+        """Bind a list-of-strings config field to a grid of checkboxes (one per option).
+
+        get_config() returns the checked options as a list (preserving `options` order).
+        """
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setContentsMargins(0, 0, 0, 0)
+        boxes: dict[str, QCheckBox] = {}
+        for i, opt in enumerate(options):
+            cb = QCheckBox(opt)
+            grid.addWidget(cb, i // columns, i % columns)
+            boxes[opt] = cb
+        form.addRow(label, container)
+        self._apply_field_tooltip(form, container, name)
+        self._widgets[name] = (self._KIND_STR_SET, container, (boxes, options))
+
     # -----------------------------------------------------------------------
     # Load / reset
     # -----------------------------------------------------------------------
@@ -1542,6 +1575,11 @@ class PipelineConfigDialog(QDialog):
                 idx = widget.findText(str(val))
                 if idx >= 0:
                     widget.setCurrentIndex(idx)
+            elif kind == self._KIND_STR_SET:
+                boxes, _options = extra
+                selected = set(val or [])
+                for opt, cb in boxes.items():
+                    cb.setChecked(opt in selected)
         # Overlay color overrides (vein_colors / region_colors) are owned by
         # the main window's InlineGeneralPanel — the dialog no longer renders
         # color pickers, so nothing to restore here.

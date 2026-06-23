@@ -19,6 +19,7 @@ import cv2
 from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
 from identify_features.controllers.pipeline import identify_wing
 from identify_features.garbage_detector import GarbageRejection, precompute_solidities, resolve_solidity_range
+from identify_features.models.topology import ALL_CANONICAL_VEINS
 from identify_features.utils.psd_loader import imread_any
 from identify_features.views.csv_export import export_csv, export_csv_batch
 from identify_features.views.geojson_export import export_geojson
@@ -41,6 +42,7 @@ def _garbage_settings_from_args(args) -> dict:
         "fragmentation_max_frac": args.fragmentation_max_frac,
         "vein_association_enabled": args.vein_association_filter_enabled,
         "max_unassigned_vein_frac": args.max_unassigned_vein_frac,
+        "required_veins": args.require_vein,
     }
 
 
@@ -58,6 +60,7 @@ def _apply_garbage_settings(config, s: dict):
     config.vein_association_filter_enabled = s["vein_association_enabled"]
     if s["max_unassigned_vein_frac"] is not None:
         config.max_unassigned_vein_frac = float(s["max_unassigned_vein_frac"])
+    config.required_veins = list(s["required_veins"] or [])
     return config
 
 
@@ -348,6 +351,14 @@ def main():
         default=None,
         metavar="FRAC",
         help="Abort when this fraction of segmented vein tissue isn't associated with a traced vein (default 0.08)",
+    )
+    parser.add_argument(
+        "--require-vein",
+        action="append",
+        default=[],
+        choices=ALL_CANONICAL_VEINS,
+        metavar="VEIN",
+        help="Abort the wing if this canonical vein is missing (repeatable). Default: none required.",
     )
     parser.add_argument(
         "--verbose",

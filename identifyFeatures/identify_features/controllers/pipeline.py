@@ -196,6 +196,10 @@ def identify_wing(
     logger.info("Step 5: Tracing veins")
     veins = trace_veins_from_landmarks(skel, landmarks, wing_outline, config, wing_axis=wing_axis)
 
+    # Garbage detection (VEINS hook): abort if a user-required vein is missing.
+    veins_ctx = FilterContext(config=config, specimen_id=specimen_id, veins=veins, wing_outline=wing_outline)
+    run_stage_filters(FilterStage.VEINS, veins_ctx)
+
     # Step 6: Intervein Labeling — three passes (see docs/pipeline_reference.md §6)
     # Execution order is tissue first so the splitter's barrier mask can reuse vein tissue geometry.
 
