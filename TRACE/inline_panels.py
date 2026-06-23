@@ -545,13 +545,22 @@ class InlineGeneralPanel(QWidget):
         self._output_options_group = gb
         v = QVBoxLayout(gb)
 
+        # The checkboxes + spinboxes live in a child dialog ("More options…")
+        # so the inline panel stays uncluttered. The widgets are still owned by
+        # `self` so refresh_from_state() / restore_defaults() can address them
+        # by name; we just put them inside a hidden QDialog instead of `v`.
+        self._more_output_options_dialog = QDialog(self)
+        self._more_output_options_dialog.setWindowTitle("More output options")
+        self._more_output_options_dialog.setModal(False)
+        dlg_v = QVBoxLayout(self._more_output_options_dialog)
+
         self.show_vein_tissue_chk = QCheckBox("Fill buffered vein tissue in overlay")
         self.show_vein_tissue_chk.setToolTip(
             "When off (default), the per-wing overlay only shows vein skeleton "
             "centerlines. When on, it also fills the buffered vein tissue polygons."
         )
         self.show_vein_tissue_chk.toggled.connect(self._on_show_vein_tissue_toggled)
-        v.addWidget(self.show_vein_tissue_chk)
+        dlg_v.addWidget(self.show_vein_tissue_chk)
 
         self.show_color_key_chk = QCheckBox("Show vein color key in overlay")
         self.show_color_key_chk.setToolTip(
@@ -559,7 +568,8 @@ class InlineGeneralPanel(QWidget):
             "upper-left corner. Turn off for publication-style figures."
         )
         self.show_color_key_chk.toggled.connect(self._on_show_color_key_toggled)
-        v.addWidget(self.show_color_key_chk)
+        self.show_color_key_chk.toggled.connect(self._update_keys_and_labels_master_state)
+        dlg_v.addWidget(self.show_color_key_chk)
 
         self.show_ectopic_labels_chk = QCheckBox("Show ectopic vein labels (EV1, EV2, …)")
         self.show_ectopic_labels_chk.setToolTip(
@@ -567,7 +577,8 @@ class InlineGeneralPanel(QWidget):
             "Turn off to keep the ectopic centerlines but hide the labels."
         )
         self.show_ectopic_labels_chk.toggled.connect(self._on_show_ectopic_labels_toggled)
-        v.addWidget(self.show_ectopic_labels_chk)
+        self.show_ectopic_labels_chk.toggled.connect(self._update_keys_and_labels_master_state)
+        dlg_v.addWidget(self.show_ectopic_labels_chk)
 
         self.show_region_labels_chk = QCheckBox("Show intervein region labels")
         self.show_region_labels_chk.setToolTip(
@@ -576,7 +587,8 @@ class InlineGeneralPanel(QWidget):
             "fills without the text."
         )
         self.show_region_labels_chk.toggled.connect(self._on_show_region_labels_toggled)
-        v.addWidget(self.show_region_labels_chk)
+        self.show_region_labels_chk.toggled.connect(self._update_keys_and_labels_master_state)
+        dlg_v.addWidget(self.show_region_labels_chk)
 
         self.show_compartment_labels_chk = QCheckBox("Show AP compartment labels")
         self.show_compartment_labels_chk.setToolTip(
@@ -585,7 +597,8 @@ class InlineGeneralPanel(QWidget):
             "Turn off to keep the tinted compartment fills without the percentage labels."
         )
         self.show_compartment_labels_chk.toggled.connect(self._on_show_compartment_labels_toggled)
-        v.addWidget(self.show_compartment_labels_chk)
+        self.show_compartment_labels_chk.toggled.connect(self._update_keys_and_labels_master_state)
+        dlg_v.addWidget(self.show_compartment_labels_chk)
 
         form = QFormLayout()
         self.ectopic_label_scale_spin = QDoubleSpinBox()
@@ -594,8 +607,8 @@ class InlineGeneralPanel(QWidget):
         self.ectopic_label_scale_spin.setSingleStep(0.5)
         self.ectopic_label_scale_spin.setToolTip(
             "cv2 font scale for the EV1/EV2… ectopic-vein labels in the overlay. "
-            "Default 3.0 matches the historical hardcoded size. Outline and fill "
-            "thicknesses scale proportionally so the label stays legible at any size."
+            "Default 1.0. Outline and fill thicknesses scale proportionally so the "
+            "label stays legible at any size."
         )
         self.ectopic_label_scale_spin.valueChanged.connect(self._on_ectopic_label_scale_changed)
         form.addRow("Ectopic label size", self.ectopic_label_scale_spin)
@@ -628,7 +641,29 @@ class InlineGeneralPanel(QWidget):
         self.intervein_opacity_spin.setToolTip("Alpha (0..1) for the intervein-region overlay layer.")
         self.intervein_opacity_spin.valueChanged.connect(self._on_intervein_opacity_changed)
         form.addRow("Intervein opacity", self.intervein_opacity_spin)
-        v.addLayout(form)
+        dlg_v.addLayout(form)
+
+        dlg_buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        dlg_buttons.rejected.connect(self._more_output_options_dialog.hide)
+        dlg_v.addWidget(dlg_buttons)
+
+        self.show_keys_and_labels_chk = QCheckBox("Show keys and labels")
+        self.show_keys_and_labels_chk.setTristate(True)
+        self.show_keys_and_labels_chk.setToolTip(
+            "Master toggle for the four overlay labels: vein color key, ectopic "
+            "vein labels, intervein region labels, and AP compartment labels. "
+            "Use 'More options…' to toggle any of these individually."
+        )
+        self.show_keys_and_labels_chk.clicked.connect(self._on_keys_and_labels_master_clicked)
+        v.addWidget(self.show_keys_and_labels_chk)
+
+        self._more_output_options_btn = QPushButton("More options…")
+        self._more_output_options_btn.setToolTip(
+            "Open a window with the rest of the overlay rendering options "
+            "(individual label toggles, label size, vein smoothing, layer opacities)."
+        )
+        self._more_output_options_btn.clicked.connect(self._show_more_output_options_dialog)
+        v.addWidget(self._more_output_options_btn)
 
         vein_gb = QGroupBox("Vein colors")
         vein_gb.setToolTip("Click a swatch to choose a custom color for that vein in the overlay.")
@@ -641,6 +676,44 @@ class InlineGeneralPanel(QWidget):
         v.addWidget(region_gb)
 
         parent_layout.addWidget(gb)
+
+    def _show_more_output_options_dialog(self) -> None:
+        self._more_output_options_dialog.show()
+        self._more_output_options_dialog.raise_()
+        self._more_output_options_dialog.activateWindow()
+
+    def _keys_and_labels_children(self) -> tuple[QCheckBox, ...]:
+        return (
+            self.show_color_key_chk,
+            self.show_ectopic_labels_chk,
+            self.show_region_labels_chk,
+            self.show_compartment_labels_chk,
+        )
+
+    def _on_keys_and_labels_master_clicked(self, checked: bool) -> None:
+        """User toggled the master — propagate to all four children.
+
+        Each child's existing toggled handler runs and updates window state.
+        Children also call back into _update_keys_and_labels_master_state(),
+        which converges the master to Qt.Checked / Qt.Unchecked (never partial
+        after a full set).
+        """
+        for chk in self._keys_and_labels_children():
+            chk.setChecked(checked)
+
+    def _update_keys_and_labels_master_state(self, _checked: bool = False) -> None:
+        states = [chk.isChecked() for chk in self._keys_and_labels_children()]
+        if all(states):
+            new_state = Qt.Checked
+        elif not any(states):
+            new_state = Qt.Unchecked
+        else:
+            new_state = Qt.PartiallyChecked
+        self.show_keys_and_labels_chk.blockSignals(True)
+        try:
+            self.show_keys_and_labels_chk.setCheckState(new_state)
+        finally:
+            self.show_keys_and_labels_chk.blockSignals(False)
 
     def _build_parallel_processing_group(self, parent_layout: QVBoxLayout) -> None:
         gb = QGroupBox("Parallel processing")
@@ -865,7 +938,7 @@ class InlineGeneralPanel(QWidget):
         self._window._show_ectopic_labels = True
         self._window._show_region_labels = True
         self._window._vein_simplify_tolerance_px = 0.0
-        self._window._ectopic_label_font_scale = 3.0
+        self._window._ectopic_label_font_scale = 1.0
         self._window._show_compartment_labels = True
         self._window._intermediate_outputs = {key: False for key in self._window._intermediate_outputs}
         self._window.settings.setValue("max_workers", DEFAULT_MAX_WORKERS)
@@ -899,6 +972,7 @@ class InlineGeneralPanel(QWidget):
             self.show_ectopic_labels_chk,
             self.show_region_labels_chk,
             self.show_compartment_labels_chk,
+            self.show_keys_and_labels_chk,
             self.ectopic_label_scale_spin,
             self.vein_smooth_spin,
             self.vein_opacity_spin,
@@ -929,6 +1003,7 @@ class InlineGeneralPanel(QWidget):
             self.show_ectopic_labels_chk.setChecked(bool(self._window._show_ectopic_labels))
             self.show_region_labels_chk.setChecked(bool(self._window._show_region_labels))
             self.show_compartment_labels_chk.setChecked(bool(self._window._show_compartment_labels))
+            self._update_keys_and_labels_master_state()
             self.ectopic_label_scale_spin.setValue(float(self._window._ectopic_label_font_scale))
             self.vein_smooth_spin.setValue(float(self._window._vein_simplify_tolerance_px))
             self.vein_opacity_spin.setValue(float(cfg.vein_opacity))
@@ -1052,6 +1127,7 @@ class InlineGeneralPanel(QWidget):
             self._picker_initial_path(seed),
             lambda image_path: self._on_scale_estimator_image_picked(image_path, lm_path, host_dialog),
             name_filter="Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.psd *.ome.tif);;All Files (*)",
+            last_dir_key="scale_estimator_image",
         )
 
     def _on_scale_estimator_image_picked(self, image_path: str, lm_path: str, host_dialog: QDialog | None) -> None:

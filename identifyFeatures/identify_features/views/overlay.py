@@ -137,7 +137,7 @@ def render_overlay(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
-    ectopic_label_font_scale: float = 3.0,
+    ectopic_label_font_scale: float = 1.0,
 ) -> np.ndarray:
     """Render veins and regions as a color overlay on the wing image.
 
@@ -296,7 +296,7 @@ def render_overlay_to_file(
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
-    ectopic_label_font_scale: float = 3.0,
+    ectopic_label_font_scale: float = 1.0,
 ) -> None:
     """Render overlay and write to a PNG file."""
     img_out = render_overlay(

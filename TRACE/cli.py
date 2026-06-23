@@ -168,9 +168,9 @@ def parse_args(argv=None):
         "--ectopic-label-scale",
         dest="ectopic_label_font_scale",
         type=float,
-        default=3.0,
+        default=1.0,
         metavar="SCALE",
-        help="cv2 font scale for ectopic-vein (EV1/EV2…) labels in the overlay (default 3.0)",
+        help="cv2 font scale for ectopic-vein (EV1/EV2…) labels in the overlay (default 1.0)",
     )
     parser.add_argument(
         "--no-compartment-labels",
