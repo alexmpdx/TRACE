@@ -432,6 +432,24 @@ class InlineGeneralPanel(QWidget):
         est_row.addStretch(1)
         form.addRow(est_row)
 
+        # Mirror of the main-window "Detect scale from image metadata" checkbox.
+        # Kept in lockstep with the left-panel widget via _set_auto_detect_um_per_px
+        # on TraceWindow so flipping either one updates the runtime config and
+        # both checkboxes without re-firing each other's toggled signal.
+        self.auto_detect_um_per_px_chk = QCheckBox("Detect scale from image metadata")
+        self.auto_detect_um_per_px_chk.setToolTip(
+            "When checked, each image's µm/px is read from its OWN metadata (TIFF "
+            "XResolution + ResolutionUnit / OME-XML PhysicalSizeX) — measurements "
+            "convert through that image's real scale rather than a shared value. "
+            "The µm/px field above becomes the fallback used only when an image "
+            "has no parseable metadata. If checked AND the µm/px field is empty "
+            "AND any image lacks metadata, Run raises a pre-flight error so you "
+            "don't discover the missing scale mid-batch. Mirrored to the main "
+            "window's Scale group."
+        )
+        self.auto_detect_um_per_px_chk.toggled.connect(self._on_auto_detect_um_per_px_toggled)
+        form.addRow(self.auto_detect_um_per_px_chk)
+
         parent_layout.addWidget(gb)
 
     def _build_optional_preprocessing_group(self, parent_layout: QVBoxLayout) -> None:
@@ -842,6 +860,12 @@ class InlineGeneralPanel(QWidget):
         # Route through the window so the left-panel mirror updates in lock-step.
         self._window._set_scale(val, source="inline")
 
+    def _on_auto_detect_um_per_px_toggled(self, checked: bool) -> None:
+        # Route through the window so the left-panel checkbox and the runtime
+        # config stay in lock-step. source="inline" tells the helper not to
+        # echo back into this checkbox (which would re-fire toggled).
+        self._window._set_auto_detect_um_per_px(bool(checked), source="inline")
+
     def _on_wing_isolation_toggled(self, checked: bool) -> None:
         self._window._wing_isolation_enabled = bool(checked)
 
@@ -963,6 +987,7 @@ class InlineGeneralPanel(QWidget):
         """
         widgets = (
             self.scale_spin,
+            self.auto_detect_um_per_px_chk,
             self.wing_enable_chk,
             self.do_rotation_chk,
             self.rotation_mirror_correct_chk,
@@ -986,6 +1011,7 @@ class InlineGeneralPanel(QWidget):
             cfg = self._window.config
             scale_val = float(cfg.um_per_px) if cfg.um_per_px is not None else self.scale_spin.minimum()
             self.scale_spin.setValue(scale_val)
+            self.auto_detect_um_per_px_chk.setChecked(bool(getattr(cfg, "auto_detect_um_per_px", False)))
             # Mirror to the left-panel spinbox too (also with blocked signals
             # so it doesn't re-fire _set_scale and bounce back).
             left = getattr(self._window, "scale_spin", None)

@@ -224,6 +224,12 @@ class WingResult:
     wing_outline: Optional[Polygon] = None
     wing_solidity: Optional[float] = None  # outline.area / convex_hull.area (garbage-detector metric)
     warnings: list[str] = field(default_factory=list)
+    # µm/px for THIS specimen. Populated by TRACE when auto-detect-from-metadata
+    # is on, so each row in a batch CSV can convert its pixel measurements to
+    # µm using its own image's scale rather than a shared batch value. None
+    # means "no per-specimen scale known — fall back to the caller-supplied
+    # um_per_px arg".
+    um_per_px: Optional[float] = None
 
     @property
     def vein_map(self) -> dict[str, VeinIdentification]:

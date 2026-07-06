@@ -654,6 +654,13 @@ class PipelineResult:
     # (1.0, None) when no rescale happened.
     rescale_factor: float = 1.0
     original_shape: Optional[tuple[int, int]] = None
+    # µm/px actually used for this image. When the caller passes
+    # ``auto_detect_um_per_px=True`` and the image carried readable metadata
+    # (TIFF resolution tags / OME-XML PhysicalSizeX), this is the metadata-
+    # derived value; otherwise it falls back to whatever ``input_um_per_px``
+    # was passed in. TRACE reads it downstream to build a per-image identify
+    # config so each wing's measurements convert through its OWN scale.
+    effective_um_per_px: Optional[float] = None
     error: Optional[str] = None
     error_stage: Optional[str] = None
     stages_completed: list[str] = field(default_factory=list)
@@ -699,6 +706,7 @@ def process_single_image(
     target_um_per_px: Optional[float] = None,
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
+    auto_detect_um_per_px: bool = False,
 ) -> PipelineResult:
     """Run selected pipeline stages on a single image.
 
@@ -797,6 +805,45 @@ def process_single_image(
         if img is None:
             raise ValueError(f"Failed to read image: {dest_image}")
         image_path = imwrite_ome_tiff(output_dir / _clean_stem(image_path), img)
+
+    # Per-image µm/px detection (opt-in). Read this image's own µm/px from its
+    # metadata (TIFF XResolution + ResolutionUnit / OME-XML PhysicalSizeX) and
+    # use that as this image's ``input_um_per_px`` — every downstream stage
+    # (resolutionAdjust rescale + identifyFeatures measurements) then converts
+    # through the image's OWN scale rather than a shared value. Silently falls
+    # back to the caller-supplied ``input_um_per_px`` when the image has no
+    # parseable metadata (which the GUI has already guaranteed is non-None via
+    # its Run-time pre-flight check when this flag is on).
+    if auto_detect_um_per_px:
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+        try:
+            from resolutionAdjust.auto_detect import _read_um_per_px_from_tiff
+
+            detected = _read_um_per_px_from_tiff(image_path)
+        except Exception:
+            detected = None
+        if detected is not None and detected > 0:
+            input_um_per_px = float(detected)
+            _log.info(
+                "%s: detected µm/px = %.4f from image metadata",
+                image_path.name,
+                detected,
+            )
+        elif input_um_per_px is not None and input_um_per_px > 0:
+            _log.info(
+                "%s: no readable µm/px metadata, falling back to manual scale %.4f",
+                image_path.name,
+                input_um_per_px,
+            )
+        else:
+            _log.info(
+                "%s: no readable µm/px metadata and no fallback scale — "
+                "measurements will be in pixels",
+                image_path.name,
+            )
+    result.effective_um_per_px = input_um_per_px
 
     # Stage 1: resolutionAdjust. When the user has entered a Scale (input µm/px)
     # AND the selected model has a target µm/px set, rescale the image toward the
@@ -1067,6 +1114,7 @@ def process_folder(
     target_um_per_px: Optional[float] = None,
     rescale_tolerance_low: float = 0.85,
     rescale_tolerance_high: float = 1.15,
+    auto_detect_um_per_px: bool = False,
     skip_image_basenames: Optional[set[str]] = None,
     pause_event: Optional[threading.Event] = None,
 ) -> list[PipelineResult]:
@@ -1214,6 +1262,7 @@ def process_folder(
                 target_um_per_px=target_um_per_px,
                 rescale_tolerance_low=rescale_tolerance_low,
                 rescale_tolerance_high=rescale_tolerance_high,
+                auto_detect_um_per_px=auto_detect_um_per_px,
             )
             _emit(i, img_path.name, "done")
             return result

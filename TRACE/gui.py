@@ -87,6 +87,13 @@ class _PlaceholderSpinBox(QDoubleSpinBox):
     QLineEdit's normal placeholder rendering kicks in.
 
     Configure by calling `set_placeholder("...")` on the instance.
+
+    Also accepts empty text as "unset" so the user can Backspace / Delete a
+    previously-entered value back to blank. Vanilla QDoubleSpinBox's default
+    ``validate()`` refuses empty text and its ``fixup()`` reverts the widget
+    to the last valid value — this override maps empty to ``minimum()``,
+    which is what the rest of the code already treats as "not set" (e.g.
+    ``_set_scale`` writes ``None`` to config when val <= minimum).
     """
 
     def set_placeholder(self, text: str) -> None:
@@ -99,6 +106,24 @@ class _PlaceholderSpinBox(QDoubleSpinBox):
         if value == self.minimum() and self.lineEdit().placeholderText():
             return ""
         return super().textFromValue(value)
+
+    def valueFromText(self, text: str) -> float:  # noqa: N802 — Qt API
+        # Empty text → minimum() so the placeholder shows again and the
+        # existing "val > minimum → real value, else None" plumbing writes
+        # None to config.um_per_px.
+        if not text.strip():
+            return self.minimum()
+        return super().valueFromText(text)
+
+    def validate(self, text: str, pos: int):  # noqa: N802 — Qt API
+        # Accept blank as valid so the user can clear the field. Without
+        # this, Qt calls fixup() and reverts to the last numeric value the
+        # moment the user finishes editing an empty field.
+        from PyQt5.QtGui import QValidator
+
+        if not text.strip():
+            return QValidator.Acceptable, text, pos
+        return super().validate(text, pos)
 
 
 # Bundled default-model folders. Used to preload the three model paths on a
@@ -1069,7 +1094,15 @@ class TraceWindow(QMainWindow):
         # source for the value (both spinboxes write to self.config.um_per_px
         # via _set_scale, which keeps them in sync).
         scale_group = QGroupBox("Scale")
-        sg = QHBoxLayout(scale_group)
+        # Two-row vertical layout: row 1 = label + spinbox, row 2 = the
+        # per-image checkbox. The checkbox reads as an option that governs
+        # the spinbox above rather than a peer widget on its right.
+        scale_group_layout = QVBoxLayout(scale_group)
+        scale_group_layout.setContentsMargins(9, 9, 9, 9)
+        scale_group_layout.setSpacing(4)
+        scale_row_widget = QWidget()
+        sg = QHBoxLayout(scale_row_widget)
+        sg.setContentsMargins(0, 0, 0, 0)
         sg.addWidget(QLabel("µm/px:"))
         self.scale_spin = _PlaceholderSpinBox()
         self.scale_spin.setDecimals(4)
@@ -1083,6 +1116,20 @@ class TraceWindow(QMainWindow):
         )
         self.scale_spin.valueChanged.connect(lambda v: self._set_scale(v, source="left"))
         sg.addWidget(self.scale_spin, stretch=1)
+        scale_group_layout.addWidget(scale_row_widget)
+        self.auto_detect_um_per_px_chk = QCheckBox("Detect scale from image metadata")
+        self.auto_detect_um_per_px_chk.setToolTip(
+            "When checked, each image's µm/px is read from its OWN metadata (TIFF "
+            "XResolution + ResolutionUnit / OME-XML PhysicalSizeX) — measurements "
+            "convert through that image's real scale rather than a shared value. "
+            "The scale field above becomes the fallback used only when an image "
+            "has no parseable metadata. If checked AND the scale field is empty "
+            "AND any image lacks metadata, Run raises a pre-flight error so you "
+            "don't discover the missing scale mid-batch."
+        )
+        self.auto_detect_um_per_px_chk.setChecked(bool(getattr(self.config, "auto_detect_um_per_px", False)))
+        self.auto_detect_um_per_px_chk.toggled.connect(self._on_auto_detect_um_per_px_toggled)
+        scale_group_layout.addWidget(self.auto_detect_um_per_px_chk)
         left_layout.addWidget(scale_group)
 
         # Parallel processing lives in the right-panel General tab
@@ -1800,6 +1847,103 @@ class TraceWindow(QMainWindow):
             self.inline_general_panel.scale_spin.setValue(val)
             self.inline_general_panel.scale_spin.blockSignals(False)
 
+    def _on_auto_detect_um_per_px_toggled(self, checked: bool) -> None:
+        """Left-panel checkbox handler — routes through _set_auto_detect_um_per_px
+        so the inline General-tab mirror stays in sync.
+        """
+        self._set_auto_detect_um_per_px(bool(checked), source="left")
+
+    def _set_auto_detect_um_per_px(self, checked: bool, *, source: str) -> None:
+        """Sync ``auto_detect_um_per_px`` across the runtime config, the
+        left-panel checkbox, and the inline General-tab checkbox.
+
+        Two checkboxes show the flag; they stay in lock-step. ``source`` is
+        "left" or "inline" identifying the originating widget so we don't
+        echo back into it and re-fire its toggled signal. Enforcement
+        (pre-flight scan for images without metadata) happens at Run-click
+        time in ``_preflight_check_per_image_scale``.
+        """
+        self.config.auto_detect_um_per_px = bool(checked)
+        if source != "left" and hasattr(self, "auto_detect_um_per_px_chk"):
+            self.auto_detect_um_per_px_chk.blockSignals(True)
+            self.auto_detect_um_per_px_chk.setChecked(bool(checked))
+            self.auto_detect_um_per_px_chk.blockSignals(False)
+        if source != "inline" and hasattr(self, "inline_general_panel"):
+            inline_chk = getattr(self.inline_general_panel, "auto_detect_um_per_px_chk", None)
+            if inline_chk is not None:
+                inline_chk.blockSignals(True)
+                inline_chk.setChecked(bool(checked))
+                inline_chk.blockSignals(False)
+
+    def _preflight_check_per_image_scale(self, effective_skips: Optional[set[str]] = None) -> bool:
+        """Return True when the current config lets every image get a scale.
+
+        Fires when ``auto_detect_um_per_px`` is on. Walks ``self._image_paths``
+        (already filtered to supported image formats by ``discover_images``),
+        drops any basenames in ``effective_skips`` (the pipeline's own skip
+        set — user-unchecked rows, resume-cache hits, rerun's inverted set),
+        and flags anything that's either a non-TIFF or a TIFF whose metadata
+        isn't parseable. If any remain AND the manual scale field is empty,
+        shows a QMessageBox and returns False so the run is aborted before
+        any preprocessing starts. When the manual scale IS entered,
+        missing-metadata images just fall through to that fallback (no
+        error). When the flag is off, this method is a no-op that returns
+        True.
+
+        ``effective_skips`` should mirror the ``skip_image_basenames`` arg
+        the caller ultimately passes to the worker: ``rerun_skip_set`` when
+        set, otherwise ``resume_skip_set | user_skip_set``. Anything on that
+        list won't be processed, so its missing metadata mustn't block Run.
+        """
+        if not bool(getattr(self.config, "auto_detect_um_per_px", False)):
+            return True
+        # If the user entered a manual scale, missing-metadata images just
+        # use it as fallback — no pre-flight scan needed.
+        manual_scale = self.config.um_per_px
+        if manual_scale is not None and manual_scale > 0:
+            return True
+        # Nothing discovered yet → pipeline's own "no images" guard handles it.
+        if not self._image_paths:
+            return True
+        try:
+            from resolutionAdjust.auto_detect import _read_um_per_px_from_tiff, _TIFF_EXTS
+        except Exception:  # pragma: no cover
+            # If the detector can't be imported, we can't validate — allow
+            # the run rather than block on our own tooling failure.
+            return True
+        skips = effective_skips or set()
+        missing: list[str] = []
+        for p in self._image_paths:
+            # Anything the pipeline itself won't process shouldn't block Run.
+            if p.name in skips:
+                continue
+            if p.suffix.lower() not in _TIFF_EXTS:
+                # Non-TIFF: this detector only reads TIFF tags / OME-XML, so
+                # anything else counts as "no per-image scale available".
+                missing.append(p.name)
+                continue
+            v = _read_um_per_px_from_tiff(p)
+            if v is None or v <= 0:
+                missing.append(p.name)
+        if not missing:
+            return True
+        # Truncate the list so the dialog stays scannable.
+        preview = ", ".join(missing[:8])
+        more = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
+        QMessageBox.critical(
+            self,
+            "Missing per-image scale",
+            "Per-image µm/px is enabled, but no fallback scale has been entered "
+            "AND the following image(s) don't carry parseable metadata:\n\n"
+            f"{preview}{more}\n\n"
+            "Either:\n"
+            "  • Enter a µm/px value in the Scale field to use as the fallback, or\n"
+            "  • Uncheck the images above in the list so they're skipped, or\n"
+            "  • Uncheck 'Detect scale from image metadata' and enter a "
+            "single value that applies to every image.",
+        )
+        return False
+
     def reset_workers_warning(self):
         """Re-arm the spinner-change parallel-workers warning so it fires again on the next bump above 1.
 
@@ -2143,6 +2287,14 @@ class TraceWindow(QMainWindow):
         # (e.g. synthesize_missing_crossveins on the Tracing tab) — pull
         # current state into the panel widgets so they stay in sync.
         self.inline_general_panel.refresh_from_state()
+        # Same for the per-image-metadata checkbox on the left panel: the
+        # dialog might have flipped auto_detect_um_per_px via config import.
+        if hasattr(self, "auto_detect_um_per_px_chk"):
+            self.auto_detect_um_per_px_chk.blockSignals(True)
+            self.auto_detect_um_per_px_chk.setChecked(
+                bool(getattr(self.config, "auto_detect_um_per_px", False))
+            )
+            self.auto_detect_um_per_px_chk.blockSignals(False)
 
     def _on_settings_dialog_finished(self) -> None:
         """Drop the cached dialog reference so the next Advanced click
@@ -2251,6 +2403,11 @@ class TraceWindow(QMainWindow):
         # freshly-reset window state.
         self.inline_general_panel.refresh_from_state()
         self.inline_custom_distances_panel.refresh_from_state()
+        # Reset the per-image-metadata checkbox to the fresh-config default (off).
+        if hasattr(self, "auto_detect_um_per_px_chk"):
+            self.auto_detect_um_per_px_chk.blockSignals(True)
+            self.auto_detect_um_per_px_chk.setChecked(False)
+            self.auto_detect_um_per_px_chk.blockSignals(False)
 
         self.log_text.clear()
         self.statusBar().showMessage("GUI reset to defaults")
@@ -2498,6 +2655,17 @@ class TraceWindow(QMainWindow):
         # visible to the panels by the time they sync.
         self.inline_general_panel.refresh_from_state()
         self.inline_custom_distances_panel.refresh_from_state()
+
+        # Sync the per-image-metadata checkbox with the restored config —
+        # ``auto_detect_um_per_px`` round-trips through pipeline_config_json
+        # like every other PipelineConfig field, but the checkbox widget
+        # isn't automatically re-read; do it here.
+        if hasattr(self, "auto_detect_um_per_px_chk"):
+            self.auto_detect_um_per_px_chk.blockSignals(True)
+            self.auto_detect_um_per_px_chk.setChecked(
+                bool(getattr(self.config, "auto_detect_um_per_px", False))
+            )
+            self.auto_detect_um_per_px_chk.blockSignals(False)
 
     # -----------------------------------------------------------------------
     # Rerun-failed-images flow (TODO #11)
@@ -3227,11 +3395,29 @@ class TraceWindow(QMainWindow):
                 self, "Missing Model", "Please select a segmentation model folder in Settings → Models."
             )
             return
-        if self.config.um_per_px is None:
+        # Scale validation branches on the per-image-metadata flag:
+        #   - flag off  → single manual µm/px is required (legacy behaviour).
+        #   - flag on   → manual µm/px is OPTIONAL, but if it's empty AND any
+        #                 NON-SKIPPED image lacks parseable metadata, pre-flight
+        #                 aborts here. Skipped images (user-unchecked, resume
+        #                 cache hits, rerun's inverted set) never run so their
+        #                 missing metadata must NOT block Run — we mirror the
+        #                 same skip-set computation the worker uses below.
+        if bool(getattr(self.config, "auto_detect_um_per_px", False)):
+            preflight_skips = (
+                rerun_skip_set
+                if rerun_skip_set is not None
+                else (self._resume_skip_set or set()) | self._user_skip_set
+            )
+            if not self._preflight_check_per_image_scale(effective_skips=preflight_skips):
+                return
+        elif self.config.um_per_px is None:
             QMessageBox.warning(
                 self,
                 "Missing Scale",
-                "Please enter a µm/px conversion factor in the Scale field before running.",
+                "Please enter a µm/px conversion factor in the Scale field before running, "
+                "or enable 'Detect scale from image metadata' to read the scale "
+                "from each image's TIFF metadata.",
             )
             return
 

@@ -21,6 +21,14 @@ class PipelineConfig:
     # in the µm/px spinbox and forces the user to enter their own value before running.
     # Existing users with a saved config keep whatever scale they previously set.
     um_per_px: float | None = None
+    # When True, read µm/px from each image's own metadata (TIFF XResolution +
+    # ResolutionUnit tags, or OME-XML PhysicalSizeX) at pipeline time — every
+    # image uses its OWN scale instead of a single shared value. Falls back to
+    # ``um_per_px`` above when an image has no parseable metadata. Enforced by
+    # the GUI: when this flag is on AND ``um_per_px`` is None AND any input
+    # image lacks metadata, the Run button raises a pre-flight error so the
+    # user doesn't discover the missing scale mid-run.
+    auto_detect_um_per_px: bool = False
 
     # -- Skeletonization --
     skeleton_methods: list[SkeletonMethod] = field(default_factory=lambda: [SkeletonMethod.RIDGE])

@@ -715,6 +715,7 @@ def _run(
         target_um_per_px=target_um_per_px,
         rescale_tolerance_low=rescale_tolerance_low,
         rescale_tolerance_high=rescale_tolerance_high,
+        auto_detect_um_per_px=getattr(config, "auto_detect_um_per_px", False),
         # Filter at Stage 1 itself rather than post-hoc, so the
         # already-processed (or previously-failed-on-same-settings)
         # images don't even go through landmark / hinge / segmentation.
@@ -893,26 +894,48 @@ def _run(
 
         _emit_progress(i, stem, "starting")
         t0 = time.time()
+        # Per-image µm/px. Preprocessing stamps ``effective_um_per_px`` on
+        # the result: metadata-derived value when auto-detect was on and the
+        # image carried readable metadata, otherwise the caller's fallback
+        # (config.um_per_px). Every downstream converter uses this per-image
+        # value instead of the shared batch ``scale`` so measurements are
+        # accurate even when images came from different microscope sessions.
+        per_image_scale = getattr(preproc_result, "effective_um_per_px", None)
+        if per_image_scale is None or per_image_scale <= 0:
+            per_image_scale = scale
         try:
             wing_result = None
             if needs_analysis:
+                # Build a config carrying this image's scale so identify_wing's
+                # µm-based thresholds (snap radius, sample distances, ectopic
+                # length cutoff, measurements) all convert through the right
+                # µm/px. Cheap dataclass replace; no downstream cache churn.
+                per_image_config = config
+                if per_image_scale is not None and per_image_scale != config.um_per_px:
+                    from dataclasses import replace as _replace
+
+                    per_image_config = _replace(config, um_per_px=per_image_scale)
                 wing_result = identify_wing(
                     detection_geojson=preproc_result.segmentation_geojson_path,
                     landmarks_geojson=preproc_result.landmarks_geojson_path,
                     image_path=image_in_preproc if image_in_preproc.exists() else preproc_result.image_path,
-                    config=config,
+                    config=per_image_config,
                     specimen_id=stem,
                 )
+                if wing_result is not None:
+                    # Stamp the effective µm/px so batch CSV export uses THIS
+                    # specimen's scale on its row instead of a shared batch value.
+                    wing_result.um_per_px = per_image_scale
 
             # Stage 1 inverse: when preprocessing rescaled this image, identify_wing's
             # outputs are in rescaled-pixel space. Map every geometry back to original
             # pixels and recompute cached length/area so CSV + GeoJSON exporters can use
-            # the user's original µm/px (`scale`) directly.
+            # this image's µm/px directly.
             rescale_factor = getattr(preproc_result, "rescale_factor", 1.0)
             if wing_result is not None and rescale_factor and rescale_factor != 1.0:
                 from resolutionAdjust import inverse_rescale_wing_result
 
-                inverse_rescale_wing_result(wing_result, rescale_factor, um_per_px=scale)
+                inverse_rescale_wing_result(wing_result, rescale_factor, um_per_px=per_image_scale)
 
             trace_result = TraceResult(image_path=preproc_result.image_path)
 
@@ -923,7 +946,7 @@ def _run(
                     wing_result.veins if gj_write_veins else [],
                     wing_result.intervein_regions if gj_write_regions else [],
                     gj_path,
-                    um_per_px=scale,
+                    um_per_px=per_image_scale,
                     show_vein_tissue=show_vein_tissue,
                 )
                 trace_result.output_geojson_path = gj_path
@@ -990,7 +1013,7 @@ def _run(
 
             if "cv_ratio_overlay" in outputs and base is not None and wing_result is not None:
                 cv_path = output_dir / f"{stem}_cv_ratio_overlay.png"
-                if render_cv_ratio_overlay_to_file(base, wing_result, cv_path, um_per_px=scale):
+                if render_cv_ratio_overlay_to_file(base, wing_result, cv_path, um_per_px=per_image_scale):
                     trace_result.cv_ratio_overlay_path = cv_path
 
             # When Stage 1 rescaled, the saved GeoJSONs are in rescaled-pixel

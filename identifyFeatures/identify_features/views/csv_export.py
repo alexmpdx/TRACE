@@ -603,9 +603,23 @@ def export_csv_batch(
 
     ``groups`` controls which measurement groups appear as columns (see
     MEASUREMENT_GROUPS). None = all groups (back-compat default).
+
+    Each row's µm conversion uses ``wing_result.um_per_px`` when set (TRACE's
+    auto-detect-from-metadata mode stamps the per-image scale there), falling
+    back to the caller-supplied ``um_per_px`` for specimens without a
+    per-image scale.
     """
-    scale = um_per_px if um_per_px is not None and um_per_px > 0 else None
-    include_um = scale is not None
+    # µm columns are included whenever ANY row has a resolvable scale — either
+    # the batch-wide arg OR at least one specimen carrying its own um_per_px.
+    def _resolve_scale(wing_result: WingResult) -> Optional[float]:
+        per_specimen = getattr(wing_result, "um_per_px", None)
+        if per_specimen is not None and per_specimen > 0:
+            return float(per_specimen)
+        if um_per_px is not None and um_per_px > 0:
+            return float(um_per_px)
+        return None
+
+    include_um = any(_resolve_scale(r) is not None for _, r in all_results)
     fieldnames = _build_fieldnames(include_um, groups=groups)
 
     rows = []
@@ -614,7 +628,7 @@ def export_csv_batch(
             _build_row(
                 wing_result.veins,
                 wing_result.intervein_regions,
-                um_per_px,
+                _resolve_scale(wing_result),
                 specimen_id,
                 wing_result=wing_result,
                 groups=groups,
