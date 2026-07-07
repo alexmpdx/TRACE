@@ -1046,7 +1046,15 @@ class TraceWindow(QMainWindow):
 
         # --- Left panel ---
         left = QWidget()
-        left.setMaximumWidth(380)
+        # A minimum width sized to fit the widest CSV-column row
+        # ("A/P compartment areas" + the "requires Measurements CSV"
+        # pulse hint + group-box padding + hierarchy indent). Without
+        # this, the row's requested width isn't enforced by the splitter
+        # and both the checkbox label and the pulse hint clip. NO
+        # maximumWidth cap — an earlier fixed 380-px maximum silently
+        # prevented the splitter divider from ever moving right, so
+        # users reported it as "not adjustable".
+        left.setMinimumWidth(460)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
 
@@ -1223,10 +1231,14 @@ class TraceWindow(QMainWindow):
                 from TRACE.theme import current_theme as _ct
 
                 cd_hint.setStyleSheet(f"color: {_ct().link};")
-                # Reserve enough width that the hint never truncates when it
-                # pops in, even if the user drags the splitter narrow. Hidden
-                # widgets don't count in layout sizing, so this only kicks in
-                # while the pulse animation is visible.
+                # Reserve the hint's natural width in the layout even while
+                # hidden — hidden widgets are normally excluded from sizing,
+                # which caused the pulse-revealed hint to clip on narrow
+                # panels. setRetainSizeWhenHidden + a min width based on
+                # sizeHint keep the row wide enough from the outset.
+                _sp = cd_hint.sizePolicy()
+                _sp.setRetainSizeWhenHidden(True)
+                cd_hint.setSizePolicy(_sp)
                 cd_hint.setMinimumWidth(cd_hint.sizeHint().width())
                 cd_hint.hide()
                 cd_row_widget.set_hint(cd_hint)
@@ -1442,20 +1454,32 @@ class TraceWindow(QMainWindow):
         self._splitter.addWidget(left)
         self._splitter.addWidget(right)
         self._splitter.setStretchFactor(1, 1)
-        # Windows-Qt's native splitter handle is ~1 px wide, which is nearly
-        # impossible to grab — users (correctly) report the left column is
-        # "not adjustable" there. Force a wider handle (matches the macOS
-        # rendering width) and an explicit hover cursor so the handle is
-        # both visible and grabbable on every platform.
-        self._splitter.setHandleWidth(6)
+        # The default QSplitter handle is nearly invisible on both macOS
+        # (transparent 1-px seam between children) and Windows (~1 px wide)
+        # — users can't see where to grab and report the left column as
+        # "not adjustable". Widen the handle, style it as a subtle vertical
+        # bar via a stylesheet so it's actually visible on macOS, and give
+        # it an explicit split-cursor so the interaction is discoverable.
+        self._splitter.setHandleWidth(8)
+        self._splitter.setStyleSheet(
+            "QSplitter::handle:horizontal {"
+            "  background: palette(mid);"
+            "  border-left: 1px solid palette(midlight);"
+            "  border-right: 1px solid palette(midlight);"
+            "}"
+            "QSplitter::handle:horizontal:hover {"
+            "  background: palette(highlight);"
+            "}"
+        )
+        self._splitter.handle(1).setCursor(Qt.SplitHCursor)
         self._splitter.setChildrenCollapsible(False)
-        # Start the left column wide enough to fit the "requires Measurements
-        # CSV" pulse hint without clipping. The hint sits in a horizontal row
-        # inside the Outputs frame and pops in when the user clicks a
-        # disabled child checkbox; with the previous default ratio (~33/67)
-        # the row got squeezed and the hint truncated on Windows where
-        # font-metrics for the system UI font are wider than on macOS.
-        self._splitter.setSizes([340, 860])
+        # Start the left column wide enough to fit the widest CSV-row +
+        # "requires Measurements CSV" pulse hint without clipping. The
+        # hint sits in a horizontal row inside the Outputs frame and pops
+        # in when the user clicks a disabled child checkbox; a narrower
+        # default would clip both the checkbox label and the hint until
+        # the user manually widened the panel.
+        self._splitter.setSizes([460, 860])
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
         main_layout.addWidget(self._splitter)
 
@@ -1480,10 +1504,14 @@ class TraceWindow(QMainWindow):
         from TRACE.theme import current_theme as _ct
 
         hint.setStyleSheet(f"color: {_ct().link};")
-        # Reserve enough width that the hint never truncates when it pops in,
-        # even if the user drags the splitter narrow. Hidden widgets don't
-        # count in layout sizing, so this only kicks in while the pulse
-        # animation is visible.
+        # Reserve the hint's natural width in the layout even while hidden,
+        # so the row's minimum width bakes the hint in from construction
+        # onward. Hidden widgets are normally excluded from layout sizing,
+        # which meant the row committed to a narrower minimum and the hint
+        # got clipped by that fixed row width when the pulse revealed it.
+        _sp = hint.sizePolicy()
+        _sp.setRetainSizeWhenHidden(True)
+        hint.setSizePolicy(_sp)
         hint.setMinimumWidth(hint.sizeHint().width())
         hint.hide()
         row.set_hint(hint)

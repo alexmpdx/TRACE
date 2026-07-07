@@ -824,6 +824,15 @@ class InlineGeneralPanel(QWidget):
         h.addWidget(chk)
         hint = QLabel(hint_text)
         hint.setStyleSheet(f"color: {_ct().link};")
+        # Reserve room for the hint in the layout even while it's hidden,
+        # so the row width accounts for its natural size from the start.
+        # Without this the row commits to a narrower minimum during layout
+        # (hidden widgets are excluded), and when the pulse then shows the
+        # label its text gets clipped by the row's fixed width.
+        _sp = hint.sizePolicy()
+        _sp.setRetainSizeWhenHidden(True)
+        hint.setSizePolicy(_sp)
+        hint.setMinimumWidth(hint.sizeHint().width())
         hint.hide()
         row.set_hint(hint)
         h.addWidget(hint)
