@@ -289,31 +289,36 @@ def _open_native_picker_async(
     folder: bool = False,
     save: bool = False,
     last_dir_key: str = "",
-    sync: bool = False,
+    sync: Optional[bool] = None,
 ) -> None:
     """Native picker with per-picker last-directory memory.
 
     Two execution modes, chosen via ``sync``:
 
-    - ``sync=True`` (default for main-window Browse buttons that live on
-      the main Qt event loop, safely outside any napari context) uses
-      the static ``QFileDialog.getExistingDirectory`` /
-      ``getOpenFileName`` / ``getSaveFileName`` helpers with
+    - ``sync=True`` uses the static ``QFileDialog.getExistingDirectory``
+      / ``getOpenFileName`` / ``getSaveFileName`` helpers with
       ``parent=None``. These block the calling code until the user
       picks or cancels, and — critically — macOS NSOpenPanel actually
-      honors the passed-in initial directory in this path. The blocking
-      nested event loop that made napari misbehave is fine here because
-      main-tab pickers are not inside napari.
+      honors the passed-in initial directory + per-picker last-dir
+      memory in this path. The blocking nested event loop is fine
+      wherever napari isn't loaded.
 
     - ``sync=False`` uses ``QFileDialog.open()`` + the ``fileSelected``
-      signal — asynchronous, no nested event loop. Required for any
-      picker that lives inside (or might be opened after) a napari
-      context: the Advanced Settings dialog (live preview pane embeds
-      napari), the inspector dialog, the Custom Measurements tab.
-      Downside: on macOS NSOpenPanel's process-wide "last visited"
-      cache overrides the specified directoryURL for the async path,
-      so the picker may open at whichever folder was used most recently
-      anywhere in the app rather than at ``initial``.
+      signal — asynchronous, no nested event loop. Required whenever
+      napari IS loaded in the process (its application-wide event
+      filters break the nested loop and kill file-list clicks — see
+      [[qfiledialog-napari-gotcha]]). Downside: on macOS NSOpenPanel's
+      process-wide "last visited" cache overrides the specified
+      directoryURL for the async path, so the picker may open at
+      whichever folder was used most recently anywhere in the app
+      rather than at ``initial``.
+
+    - ``sync=None`` (default) auto-selects: sync when napari isn't
+      loaded, async when it is. Detection uses ``sys.modules`` since
+      napari's Qt event filters are installed as a side effect of the
+      module import. Callers that need to force a mode (e.g. main-window
+      Browse buttons that are always sync-safe) can still pass True/False
+      explicitly.
 
     Parameters:
       - ``folder=True`` — directory picker.
@@ -337,6 +342,16 @@ def _open_native_picker_async(
         saved = _get_picker_last_dir(last_dir_key)
         if saved:
             resolved_initial = _picker_initial_path(saved)
+
+    # Auto-select sync/async by whether napari has been loaded — the
+    # only condition that makes sync mode unsafe (napari's app-wide Qt
+    # event filters kill the file list inside the nested loop). Static
+    # helpers honor the initial directory + per-widget last-dir memory
+    # on macOS; open() doesn't. See [[qfiledialog-napari-gotcha]].
+    if sync is None:
+        import sys as _sys
+
+        sync = "napari" not in _sys.modules
 
     def _finalize(path: str) -> None:
         # Persist this picker's last-visited directory so the next click
@@ -2139,6 +2154,16 @@ class TraceWindow(QMainWindow):
             "rescale_tolerance_low": float(self._rescale_tolerance_low),
             "rescale_tolerance_high": float(self._rescale_tolerance_high),
             "intermediate_outputs": dict(self._intermediate_outputs),
+            # Final overlay outputs (Vein / Intervein / A-P compartment / CV
+            # ratio / CSV / Custom measurements) — each is a top-level Outputs
+            # checkbox. Saved so a config JSON round-trips the "what should
+            # this run produce" selection along with the pipeline config
+            # itself.
+            "output_types": {key: chk.isChecked() for key, chk in self.output_checks.items()},
+            # CSV measurement-group selections — the Wing area / Wing shape /
+            # Vein lengths / etc. sub-checkboxes under Measurements CSV.
+            "csv_measurement_groups": {key: chk.isChecked() for key, chk in self.csv_group_checks.items()},
+            "include_custom_measurements": bool(self.include_custom_measurements_chk.isChecked()),
             "max_workers": int(self.inline_general_panel.workers_spin.value()),
             "user_landmark_distances": list(self._user_landmark_distances),
             "distance_sample_image": str(self._distance_sample_image or ""),
@@ -2221,6 +2246,20 @@ class TraceWindow(QMainWindow):
             for k, v in state["intermediate_outputs"].items():
                 if k in self._intermediate_outputs:
                     self._intermediate_outputs[k] = bool(v)
+        if "output_types" in state and isinstance(state["output_types"], dict):
+            # Preserve the original key universe; only update keys present in
+            # both. Setting the checkbox fires its toggled signal, which
+            # propagates to any dependent widgets (e.g. the "requires
+            # Measurements CSV" hint on child rows).
+            for k, v in state["output_types"].items():
+                if k in self.output_checks:
+                    self.output_checks[k].setChecked(bool(v))
+        if "csv_measurement_groups" in state and isinstance(state["csv_measurement_groups"], dict):
+            for k, v in state["csv_measurement_groups"].items():
+                if k in self.csv_group_checks:
+                    self.csv_group_checks[k].setChecked(bool(v))
+        if "include_custom_measurements" in state:
+            self.include_custom_measurements_chk.setChecked(bool(state["include_custom_measurements"]))
         if "max_workers" in state:
             try:
                 workers_val = int(state["max_workers"])
