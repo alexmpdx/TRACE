@@ -752,10 +752,17 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         coords_yx = np.array([[y, x] for (x, y) in landmarks_dict.values()], dtype=float)
         if coords_yx.size == 0:
             coords_yx = np.empty((0, 2), dtype=float)
+        # Scale the point size to the image, mirroring the landmark-overlay output
+        # (visualize.py: radius = min(h, w) / 125). napari `size` is a diameter, so
+        # double the overlay radius — points then look the same relative to the wing
+        # regardless of image resolution, instead of a fixed 90 px that dwarfs small
+        # images and vanishes on large ones.
+        h, w = image.shape[:2]
+        point_size = max(20, int(min(h, w) / 125 * 2))
         self._points_layer = self._viewer.add_points(
             coords_yx,
             name="landmarks",
-            size=90,
+            size=point_size,
             face_color="cyan",
             border_color="black",
             border_width=0.15,
