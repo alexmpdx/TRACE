@@ -35,15 +35,21 @@ class PipelineConfig:
     smooth_sigma: float = 2.0  # Gaussian sigma for boundary smoothing
 
     # -- Pruning --
-    enable_basic_prune: bool = True  # Step 4 length-based branch prune; disable to keep short branches
-    prune_methods: list[PruneMethod] = field(default_factory=list)  # Empty = length-based pruning only
+    # Defaults match the "distance-map" preset (see PIPELINE_PRESETS below).
+    # Distance-map pruning is the shipped-out-of-the-box behavior — fresh
+    # TRACE installs and identify-features CLI runs without --preset land
+    # here. Switch to the "length-based" preset to get the prior defaults.
+    enable_basic_prune: bool = False  # Step 4 length-based branch prune; disable to keep short branches
+    prune_methods: list[PruneMethod] = field(
+        default_factory=lambda: [PruneMethod.DISTANCE_MAP]
+    )  # Empty = length-based pruning only
     prune_min_length_um: float | None = None  # Minimum branch length to keep (µm; None = use median vein width)
     prune_min_length_vein_widths: float = 2.0  # Multiplier of median vein width for auto prune threshold
     final_stub_vein_widths: float = 3.0  # Final stub removal: multiplier of median vein width
     junction_merge_vein_widths: float = (
         2.0  # Tight junction merge: merge deg-2/3 nodes within this × vein width (0 = disabled)
     )
-    enable_small_fragment_removal: bool = True  # Steps 11/14 small-fragment prune; disable to keep isolated components
+    enable_small_fragment_removal: bool = False  # Steps 11/14 small-fragment prune; disable to keep isolated components
     # Final-pass orphan-component cull: at the end of skeleton building (step 17),
     # discard any connected component whose total edge length is below this
     # fraction of the graph's combined edge length. Set to 0 to keep every
@@ -223,10 +229,11 @@ class PipelineConfig:
     # when too much of the segmented vein area is not covered by any traced vein's tissue
     # polygon — i.e. vein tissue the tracer couldn't explain (untraced spurs/blobs from a
     # bad segmentation or failed tracing). Fraction is of total segmented vein area. Default
-    # 0.08 (8%): calibrated on real data — good wings sit ≤4.7% (median ~1%), while a problem
-    # wing with unexplained vein material runs ~12%+.
+    # 0.10 (10%): calibrated on real data — good wings sit ≤4.7% (median ~1%), while a problem
+    # wing with unexplained vein material runs ~12%+. The 10% cap keeps healthy wings well
+    # inside the pass zone while still catching the 12%+ failure mode.
     vein_association_filter_enabled: bool = True
-    max_unassigned_vein_frac: float = 0.08
+    max_unassigned_vein_frac: float = 0.10
 
     # Vein-presence filter (VEINS hook). Abort a wing if any of these canonical veins is
     # missing (no traced centerline — i.e. ABSENT or never found). Empty list (default) =

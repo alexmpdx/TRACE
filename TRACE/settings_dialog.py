@@ -352,7 +352,7 @@ class PipelineConfigDialog(QDialog):
         self._calib_input_path = input_path
         self._calib_lm_path = landmark_model_path
         self._calib_seg_path = segmentation_model_path
-        self._gate_panel = None  # populated by _build_landmarks_tab when a model is loaded
+        self._gate_panel = None  # populated by _populate_landmark_gate_section when a model is loaded
         self._initial_gate_override = gate_override
         # Holds the currently-open native file picker so Python's GC doesn't
         # free it between open() and the user clicking Open / Cancel. See
@@ -511,44 +511,54 @@ class PipelineConfigDialog(QDialog):
         preset_row.addWidget(apply_btn)
         layout.addLayout(preset_row)
 
+        # Config-file row: Import + Save sit under Apply preset because
+        # they're the same kind of action (loading / persisting the whole
+        # config), grouped visually with the preset row instead of buried
+        # in the OK / Cancel / Restore Defaults strip at the bottom.
+        config_row = QHBoxLayout()
+        config_row.addWidget(QLabel("Configuration file:"))
+        config_row.addStretch(1)
+        import_btn = QPushButton("Import…")
+        import_btn.setToolTip(
+            "Load a previously-exported pipeline-config JSON file. Replaces the "
+            "settings shown in this dialog (commit with OK, discard with Cancel)."
+        )
+        import_btn.clicked.connect(self._import_config)
+        config_row.addWidget(import_btn)
+        save_btn = QPushButton("Save…")
+        save_btn.setToolTip(
+            "Save the current pipeline-config (as edited in this dialog) to a JSON file "
+            "for reuse (CLI --config or this dialog's Import)."
+        )
+        save_btn.clicked.connect(self._export_config)
+        config_row.addWidget(save_btn)
+        layout.addLayout(config_row)
+
         self._tabs = QTabWidget()
         layout.addWidget(self._tabs, stretch=1)
 
-        # Remembered so _reset_defaults can rebuild this tab in-place after
-        # the model path changes — otherwise the gate panel keeps showing
-        # the prior model's state (or its error message).
-        self._landmarks_tab_index = self._tabs.count()
-        self._tabs.addTab(self._wrap_scrollable(self._build_landmarks_tab()), "Landmarks")
+        # Landmark confidence gates and pipeline quality filters are both
+        # "quality" — merged into a single Quality tab (was two separate
+        # Landmarks / Quality tabs). The landmark-gate panel section
+        # inside it is rebuilt in place when the landmark model path
+        # changes, via _rebuild_landmark_gate_section, so the surrounding
+        # quality-filter widgets don't lose in-progress edits.
+        self._tabs.addTab(self._wrap_scrollable(self._build_quality_tab()), "Quality")
         self._tabs.addTab(self._wrap_scrollable(self._build_models_tab()), "Models")
         self._tabs.addTab(self._wrap_scrollable(self._build_wing_graph_tab()), "Wing Graph")
         self._tabs.addTab(self._wrap_scrollable(self._build_tracing_tab()), "Tracing")
         self._tabs.addTab(self._wrap_scrollable(self._build_intervein_tab()), "Intervein")
-        self._tabs.addTab(self._wrap_scrollable(self._build_quality_tab()), "Quality")
 
         # Rebuild the Landmarks tab whenever the landmark model path changes
         # so the gate panel re-reads gate_config.yaml from the new folder.
         # Connected here (not in _build_models_tab) because _lm_model_edit
         # only exists after the Models tab is built, and the Landmarks tab
         # needs to exist (we replace it in-place).
-        self._lm_model_edit.textChanged.connect(self._rebuild_landmarks_tab)
+        self._lm_model_edit.textChanged.connect(self._rebuild_landmark_gate_section)
 
+        # Import/Save sit at the top under Apply preset — see config_row
+        # above. This bar is only OK / Cancel / Restore Defaults now.
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
-        # Import/Save sit alongside Restore Defaults — they edit the same
-        # working buffer the dialog operates on. Import overwrites the
-        # dialog's live state; Save serializes the current widget state to
-        # JSON. OK commits both to the host window; Cancel discards them.
-        import_btn = btns.addButton("Import…", QDialogButtonBox.ActionRole)
-        import_btn.setToolTip(
-            "Load a previously-exported pipeline-config JSON file. Replaces the "
-            "settings shown in this dialog (commit with OK, discard with Cancel)."
-        )
-        import_btn.clicked.connect(self._import_config)
-        save_btn = btns.addButton("Save…", QDialogButtonBox.ActionRole)
-        save_btn.setToolTip(
-            "Save the current pipeline-config (as edited in this dialog) to a JSON file "
-            "for reuse (CLI --config or this dialog's Import)."
-        )
-        save_btn.clicked.connect(self._export_config)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         btns.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._reset_defaults)
@@ -594,7 +604,7 @@ class PipelineConfigDialog(QDialog):
             self._initial_gate_override = gate_override
             # Rebuild the Landmarks tab so the gate panel reflects the imported
             # override against the (possibly changed) landmark-model path.
-            self._rebuild_landmarks_tab()
+            self._rebuild_landmark_gate_section()
         # Apply GUI-only state (Settings-tab toggles, model paths, custom
         # distances, etc.) directly to the host window. This is an immediate,
         # non-revertible operation — Cancel'ing the dialog does NOT undo
@@ -701,26 +711,25 @@ class PipelineConfigDialog(QDialog):
             return self._initial_gate_override
         return self._gate_panel.result_override()
 
-    def _build_landmarks_tab(self) -> QWidget:
-        """Confidence-gate editor tab. Requires a landmark model path; otherwise placeholder."""
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+    def _populate_landmark_gate_section(self) -> None:
+        """Fill self._landmark_gate_container with the per-landmark gate panel
+        (or a status message if no model is loaded / gate_config is unreadable).
 
-        # Output flag (always visible — independent of whether a gate-panel model is loaded).
-        gb = QGroupBox("Output options")
-        form = QFormLayout(gb)
-        self._include_unreliable_landmarks_chk = QCheckBox("Include low-confidence landmarks")
-        self._include_unreliable_landmarks_chk.setToolTip(
-            "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
-            "dropped from the output. When on, they are still emitted (marked reliable=false). "
-            "Core-landmark failures abort the image regardless of this setting. "
-            "Also enables soft-weighting in wingRotator: gate-failed landmarks contribute "
-            "to the rotation fit at reduced weight instead of being dropped."
-        )
-        form.addRow("", self._include_unreliable_landmarks_chk)
-        layout.addWidget(gb)
+        Called once at build time and again from _rebuild_landmark_gate_section
+        whenever the landmark-model path changes — the surrounding widgets in
+        the Quality tab (include-low-confidence flag, solidity / fragmentation /
+        vein-association / required-veins groups) are NOT rebuilt, so their
+        in-progress edits are preserved.
+        """
+        container = self._landmark_gate_container
+        # Purge existing widgets from prior populate calls before rebuilding.
+        while container.layout().count():
+            item = container.layout().takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        layout = container.layout()
 
         if not self._calib_lm_path:
             msg = QLabel(
@@ -730,8 +739,7 @@ class PipelineConfigDialog(QDialog):
             msg.setWordWrap(True)
             msg.setStyleSheet(f"color: {_ct().text_muted}; padding: 12px;")
             layout.addWidget(msg)
-            layout.addStretch()
-            return w
+            return
 
         # Bind the logger names BEFORE the outer try so they're defined in
         # the except clause regardless of whether the try ever reached the
@@ -747,19 +755,18 @@ class PipelineConfigDialog(QDialog):
             from landmark_locator.scripts.gui import GateConfigPanel, read_gate_config
 
             if _log is not None:
-                _log(f"Landmarks tab: reading gate config from {self._calib_lm_path}")
+                _log(f"Landmark gate section: reading gate config from {self._calib_lm_path}")
             gate_config, landmark_order = read_gate_config(Path(self._calib_lm_path))
             if _log is not None:
-                _log("Landmarks tab: read_gate_config OK")
+                _log("Landmark gate section: read_gate_config OK")
         except Exception as exc:
             if _log_exc is not None:
-                _log_exc("Landmarks tab: read_gate_config failed", exc)
+                _log_exc("Landmark gate section: read_gate_config failed", exc)
             err = QLabel(f"Could not read gate config from {self._calib_lm_path}: {exc}")
             err.setWordWrap(True)
             err.setStyleSheet(f"color: {_ct().error_text}; padding: 12px;")
             layout.addWidget(err)
-            layout.addStretch()
-            return w
+            return
 
         if not landmark_order:
             # read_gate_config returned the library DEFAULT_GATE_CONFIG fallback
@@ -775,8 +782,7 @@ class PipelineConfigDialog(QDialog):
             msg.setWordWrap(True)
             msg.setStyleSheet(f"color: {_ct().warning}; padding: 12px;")
             layout.addWidget(msg)
-            layout.addStretch()
-            return w
+            return
 
         # Merge any persisted GUI override on top so the panel shows the user's last edits.
         # NOTE: TRACE deliberately does not pass `sidecar_path` — gate edits here belong
@@ -789,12 +795,10 @@ class PipelineConfigDialog(QDialog):
         self._gate_panel = GateConfigPanel(
             gate_config,
             landmark_order,
-            w,
+            container,
             display_names=_LANDMARK_DISPLAY_NAMES,
         )
         layout.addWidget(self._gate_panel)
-        layout.addStretch(1)
-        return w
 
     def _make_target_row(
         self,
@@ -1352,12 +1356,45 @@ class PipelineConfigDialog(QDialog):
         return w
 
     def _build_quality_tab(self) -> QWidget:
-        """Garbage-detector data-quality filters. These abort bad-data wings early, with a
-        reason shown in the run log. Both current filters run at the earliest (wing-outline)
-        pipeline hook, before tracing."""
+        """Merged quality-gates editor: per-landmark confidence gates (rebuilt
+        in place when the landmark model changes) + garbage-detector data-quality
+        filters (solidity, fragmentation, vein-association, required veins).
+
+        Both sections abort bad-data wings early with a reason logged. Landmark
+        gates run first (Stage 1 preprocessing); the garbage-detector filters
+        run during identifyFeatures (Stage 2)."""
         w = QWidget()
         layout = QVBoxLayout(w)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
+        # -- Landmark section (output flag + per-landmark confidence gates in one box) --
+        gb = QGroupBox("Landmarks")
+        gb_layout = QVBoxLayout(gb)
+        self._include_unreliable_landmarks_chk = QCheckBox("Include low-confidence landmarks")
+        self._include_unreliable_landmarks_chk.setToolTip(
+            "When off (default), landmarks flagged low-confidence by LandmarkLocator are "
+            "dropped from the output. When on, they are still emitted (marked reliable=false). "
+            "Core-landmark failures abort the image regardless of this setting. "
+            "Also enables soft-weighting in wingRotator: gate-failed landmarks contribute "
+            "to the rotation fit at reduced weight instead of being dropped."
+        )
+        gb_layout.addWidget(self._include_unreliable_landmarks_chk)
+
+        # Container for the per-landmark confidence-gate panel. Sits inside
+        # the "Landmarks" groupbox so the visible border encircles both the
+        # output-flag checkbox AND the gate panel. Populated now and
+        # re-populated whenever the landmark model path changes, without
+        # disturbing the checkbox above or the filter groups below.
+        self._landmark_gate_container = QWidget()
+        gate_container_layout = QVBoxLayout(self._landmark_gate_container)
+        gate_container_layout.setContentsMargins(0, 0, 0, 0)
+        gate_container_layout.setSpacing(6)
+        gb_layout.addWidget(self._landmark_gate_container)
+        layout.addWidget(gb)
+        self._populate_landmark_gate_section()
+
+        # -- Pipeline-level data-quality filters --
         gb = QGroupBox("Wing solidity (shape check)")
         form = QFormLayout(gb)
         self._add_bool(form, "solidity_filter_enabled", "Enable solidity filter")
@@ -1615,28 +1652,22 @@ class PipelineConfigDialog(QDialog):
         # Rebuild the Landmarks tab so the GateConfigPanel reads the bundled
         # model's gate_config.yaml. Without this, the tab keeps showing the
         # prior model's state (or an error if it was missing a YAML).
-        self._rebuild_landmarks_tab()
+        self._rebuild_landmark_gate_section()
 
-    def _rebuild_landmarks_tab(self) -> None:
+    def _rebuild_landmark_gate_section(self) -> None:
         """Re-read gate_config.yaml from the currently-selected landmark folder
-        and rebuild the Landmarks tab in place.
+        and repopulate the landmark-gate section of the Quality tab in place.
 
         Called whenever the landmark model path changes (textChanged) and from
         _reset_defaults so the gate panel always reflects the model in the
         Models tab — including when Reset to Model Defaults is clicked, since
-        the panel's _cfg comes from this build.
+        the panel's _cfg comes from this rebuild. The rest of the Quality tab
+        (filter groupboxes) is untouched so in-progress edits survive.
         """
         # Sync the dialog's stored landmark path with the line edit.
         self._calib_lm_path = self._lm_model_edit.text().strip()
         self._gate_panel = None
-        new_widget = self._wrap_scrollable(self._build_landmarks_tab())
-        old_widget = self._tabs.widget(self._landmarks_tab_index)
-        was_current = self._tabs.currentIndex() == self._landmarks_tab_index
-        self._tabs.removeTab(self._landmarks_tab_index)
-        old_widget.deleteLater()
-        self._tabs.insertTab(self._landmarks_tab_index, new_widget, "Landmarks")
-        if was_current:
-            self._tabs.setCurrentIndex(self._landmarks_tab_index)
+        self._populate_landmark_gate_section()
 
     def _apply_selected_preset(self):
         from dataclasses import fields as _dc_fields
@@ -1661,7 +1692,7 @@ class PipelineConfigDialog(QDialog):
         gate_override = preset.get("gate_override")
         if gate_override is not None:
             self._initial_gate_override = gate_override
-            self._rebuild_landmarks_tab()
+            self._rebuild_landmark_gate_section()
         # If the preset includes a saved gui_state block (new format), apply
         # it to the host window immediately so all the GUI-only flags (model
         # paths, intermediate outputs, workers, etc.) update too.
