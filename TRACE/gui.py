@@ -289,39 +289,40 @@ def _open_native_picker_async(
     folder: bool = False,
     save: bool = False,
     last_dir_key: str = "",
+    sync: bool = False,
 ) -> None:
-    """Async native picker — ``QFileDialog.open()`` + ``fileSelected`` signal.
+    """Native picker with per-picker last-directory memory.
 
-    The synchronous ``_pick_*_native`` helpers above call the static
-    ``QFileDialog`` methods, which run a *nested* Qt event loop. That
-    nested loop is intercepted by napari's process-wide event filter
-    once napari has been loaded in the session — the native panel's
-    file list silently goes dead. Use this async variant from any
-    picker that lives inside (or might be opened after) a napari
-    context: the Advanced Settings dialog (live preview pane embeds
-    napari), the inspector dialog, the Custom Measurements tab.
+    Two execution modes, chosen via ``sync``:
 
-    ``open()`` shows the dialog modally without a nested event loop, so
-    napari's filter operates on the main loop normally and the native
-    panel receives mouse events. The result arrives asynchronously via
-    ``fileSelected``; ``on_picked(path)`` runs when the user clicks
-    Open (not called on Cancel). The dialog reference is stashed on
-    ``holder._active_picker`` so Python's GC doesn't free the dialog
-    between ``open()`` and the user closing it.
+    - ``sync=True`` (default for main-window Browse buttons that live on
+      the main Qt event loop, safely outside any napari context) uses
+      the static ``QFileDialog.getExistingDirectory`` /
+      ``getOpenFileName`` / ``getSaveFileName`` helpers with
+      ``parent=None``. These block the calling code until the user
+      picks or cancels, and — critically — macOS NSOpenPanel actually
+      honors the passed-in initial directory in this path. The blocking
+      nested event loop that made napari misbehave is fine here because
+      main-tab pickers are not inside napari.
+
+    - ``sync=False`` uses ``QFileDialog.open()`` + the ``fileSelected``
+      signal — asynchronous, no nested event loop. Required for any
+      picker that lives inside (or might be opened after) a napari
+      context: the Advanced Settings dialog (live preview pane embeds
+      napari), the inspector dialog, the Custom Measurements tab.
+      Downside: on macOS NSOpenPanel's process-wide "last visited"
+      cache overrides the specified directoryURL for the async path,
+      so the picker may open at whichever folder was used most recently
+      anywhere in the app rather than at ``initial``.
 
     Parameters:
-      - ``folder=True`` — directory picker (``ShowDirsOnly`` set).
-      - ``save=True`` — save dialog (``AcceptSave`` + ``AnyFile``).
-        Mutually exclusive with ``folder=True``.
+      - ``folder=True`` — directory picker.
+      - ``save=True`` — save dialog. Mutually exclusive with folder.
       - ``name_filter`` — Qt filter string for file pickers, ignored
         when ``folder=True``.
       - ``last_dir_key`` — QSettings sub-key used to remember THIS
         picker's last visited directory independently of the other
-        pickers. Without it, macOS NSOpenPanel's process-wide
-        "last visited" cache wins over ``setDirectory()`` and every
-        picker opens at the folder used most recently anywhere.
-        Picked paths get persisted back under this key on successful
-        selection.
+        pickers. Picked paths get persisted back under this key.
 
     Initial-directory precedence:
       1. The explicit ``initial`` arg if it points to an existing path
@@ -336,10 +337,32 @@ def _open_native_picker_async(
         saved = _get_picker_last_dir(last_dir_key)
         if saved:
             resolved_initial = _picker_initial_path(saved)
-    # Pass directory through the constructor; macOS native NSOpenPanel
-    # honors construction-time directoryURL more reliably than post-
-    # constructor setDirectory() calls. The trailing positional filter
-    # is ignored for folder pickers.
+
+    def _finalize(path: str) -> None:
+        # Persist this picker's last-visited directory so the next click
+        # on the same Browse button opens here, regardless of what other
+        # pickers have been used in between.
+        if path and last_dir_key:
+            saved_path = path if folder else str(Path(path).parent)
+            _save_picker_last_dir(last_dir_key, saved_path)
+        on_picked(path)
+
+    if sync:
+        # Native macOS picker via the static helpers. parent=None avoids
+        # Qt's modal-event grab from blocking file-list clicks on macOS
+        # (see _pick_folder_native docstring). Static helpers run their
+        # own blocking nested loop, which macOS NSOpenPanel handles
+        # correctly and where directoryURL is honored — so per-picker
+        # last-dir memory actually takes effect visually.
+        if folder:
+            path = QFileDialog.getExistingDirectory(None, caption, resolved_initial)
+        elif save:
+            path, _ = QFileDialog.getSaveFileName(None, caption, resolved_initial, name_filter)
+        else:
+            path, _ = QFileDialog.getOpenFileName(None, caption, resolved_initial, name_filter)
+        _finalize(path)
+        return
+
     dlg = QFileDialog(None, caption, resolved_initial, name_filter if not folder else "")
     if folder:
         dlg.setFileMode(QFileDialog.Directory)
@@ -351,23 +374,11 @@ def _open_native_picker_async(
         else:
             dlg.setFileMode(QFileDialog.ExistingFile)
     dlg.setWindowModality(Qt.ApplicationModal)
-    # selectFile(path) overrides macOS NSOpenPanel's "last visited
-    # directory" cache that otherwise wins over directoryURL after the
-    # panel has been used once in the session. Skip the no-info "/"
-    # case where there's nothing meaningful to pre-select.
     if resolved_initial and resolved_initial != "/":
+        dlg.setDirectory(resolved_initial)
         dlg.selectFile(resolved_initial)
 
-    def _on_selected(path: str) -> None:
-        # Persist this picker's last-visited directory so the next click
-        # on the same Browse button opens here, regardless of what other
-        # pickers have been used in between.
-        if path and last_dir_key:
-            saved_path = path if folder else str(Path(path).parent)
-            _save_picker_last_dir(last_dir_key, saved_path)
-        on_picked(path)
-
-    dlg.fileSelected.connect(_on_selected)
+    dlg.fileSelected.connect(_finalize)
     # Stash the reference on the calling instance so the dialog lives
     # past this function return. The holder owns a single slot —
     # replaced on each new picker; safe because pickers are
@@ -1493,6 +1504,7 @@ class TraceWindow(QMainWindow):
             self._on_input_folder_picked,
             folder=True,
             last_dir_key="input_folder",
+            sync=True,
         )
 
     def _on_input_folder_picked(self, folder: str) -> None:
@@ -1824,6 +1836,7 @@ class TraceWindow(QMainWindow):
             self._on_output_folder_picked,
             folder=True,
             last_dir_key="output_folder",
+            sync=True,
         )
 
     def _on_output_folder_picked(self, folder: str) -> None:
@@ -3191,6 +3204,7 @@ class TraceWindow(QMainWindow):
             self._on_load_previous_run_picked,
             folder=True,
             last_dir_key="load_previous_run",
+            sync=True,
         )
 
     def _on_load_previous_run_picked(self, folder: str) -> None:
