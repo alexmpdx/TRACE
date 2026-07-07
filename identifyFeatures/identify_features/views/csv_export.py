@@ -46,8 +46,8 @@ MEASUREMENT_GROUPS: "OrderedDict[str, str]" = OrderedDict(
         ("wing_shape", "Wing shape (aspect ratio, solidity)"),
         ("vein_lengths", "Vein lengths"),
         ("intervein_areas", "Intervein region areas"),
-        ("cv_ratio", "CV ratio (CV distance, wing length)"),
-        ("ap_areas", "AP compartment areas"),
+        ("cv_ratio", "CV ratio (CV distance/wing length)"),
+        ("ap_areas", "A/P compartment areas"),
     ]
 )
 

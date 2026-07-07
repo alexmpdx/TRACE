@@ -396,7 +396,6 @@ def render_ap_overlay_to_file(
 # CV ratio overlay
 # ---------------------------------------------------------------------------
 
-_LANDMARK_RADIUS = 50
 _LINE_THICKNESS = 24
 _CV_LINE_BGR = (180, 75, 0)  # cobalt for crossvein distance
 _WL_LINE_BGR = (0, 130, 255)  # orange for wing length
@@ -404,19 +403,60 @@ _LANDMARK_BGR = (255, 255, 255)  # white dot fill
 _LANDMARK_BORDER_BGR = (0, 0, 0)  # black dot border
 
 
-def _draw_labeled_point(img, x, y, name, color):
-    """Draw a landmark dot with label."""
-    cv2.circle(img, (x, y), _LANDMARK_RADIUS, _LANDMARK_BORDER_BGR, -1)
-    cv2.circle(img, (x, y), _LANDMARK_RADIUS - 3, color, -1)
+def _draw_labeled_point(img, x, y, name, color, size_scale: float = 1.0, show_label: bool = True):
+    """Draw a landmark dot with optional label. Base radius / font / offsets
+    are derived from the image dimensions using the SAME formulas as
+    ``landmark_locator.scripts.visualize.draw_landmarks_on_image`` so at
+    ``size_scale=1.0`` the dots on this overlay match the dots on the
+    landmarks overlay pixel-for-pixel. ``size_scale`` uses a quadratic
+    response for the dot radius (matches visualize.py's rationale: a
+    linear scale reads as almost no change when the image is fit to the
+    viewport) and a linear response for the font / stroke thickness.
+
+    ``show_label`` — when False, only the dot is drawn (no text). Same
+    contract as ``draw_landmarks_on_image``'s ``show_labels`` kwarg.
+    """
+    h, w = img.shape[:2]
+    dot_scale = size_scale * size_scale
+    radius = max(5, int(min(h, w) / 125 * dot_scale))
+    border_thick = max(1, radius // 4)  # black annulus around colored fill
+    cv2.circle(img, (x, y), radius, _LANDMARK_BORDER_BGR, -1)
+    cv2.circle(img, (x, y), max(1, radius - border_thick), color, -1)
+    if not show_label:
+        return
+    font_scale = max(0.45, (min(h, w) / 1100.0) * size_scale)
+    font_thick = max(1, int(round((min(h, w) / 900.0) * size_scale)))
+    text_offset_x = radius + max(3, radius)
+    text_offset_y = max(3, radius // 2)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(img, name, (x + _LANDMARK_RADIUS + 8, y + 8), font, 1.5, (255, 255, 255), 6)
-    cv2.putText(img, name, (x + _LANDMARK_RADIUS + 8, y + 8), font, 1.5, (0, 0, 0), 2)
+    cv2.putText(
+        img,
+        name,
+        (x + text_offset_x, y + text_offset_y),
+        font,
+        font_scale,
+        (255, 255, 255),
+        font_thick + 2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        img,
+        name,
+        (x + text_offset_x, y + text_offset_y),
+        font,
+        font_scale,
+        (0, 0, 0),
+        font_thick,
+        cv2.LINE_AA,
+    )
 
 
 def render_cv_ratio_overlay(
     base_image: np.ndarray,
     wing_result: Optional[WingResult],
     um_per_px: Optional[float] = None,
+    landmark_size_scale: float = 1.0,
+    show_landmark_labels: bool = True,
 ) -> Optional[np.ndarray]:
     """Render wing length and crossvein distance measurement lines with landmarks.
 
@@ -446,8 +486,8 @@ def render_cv_ratio_overlay(
     pt_l1rs = (int(l1rs.x), int(l1rs.y))
     pt_dtip = (int(dtip.x), int(dtip.y))
     cv2.line(img, pt_l1rs, pt_dtip, _WL_LINE_BGR, _LINE_THICKNESS)
-    _draw_labeled_point(img, *pt_l1rs, "L1-Rs", _WL_LINE_BGR)
-    _draw_labeled_point(img, *pt_dtip, "DTip", _WL_LINE_BGR)
+    _draw_labeled_point(img, *pt_l1rs, "L1-Rs", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
+    _draw_labeled_point(img, *pt_dtip, "DTip", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
 
     # Wing length label at midpoint
     wing_length_px = math.hypot(dtip.x - l1rs.x, dtip.y - l1rs.y)
@@ -465,8 +505,8 @@ def render_cv_ratio_overlay(
         pt_acvp = (int(acvp.x), int(acvp.y))
         pt_pcva = (int(pcva.x), int(pcva.y))
         cv2.line(img, pt_acvp, pt_pcva, _CV_LINE_BGR, _LINE_THICKNESS)
-        _draw_labeled_point(img, *pt_acvp, "ACV.p", _CV_LINE_BGR)
-        _draw_labeled_point(img, *pt_pcva, "PCV.a", _CV_LINE_BGR)
+        _draw_labeled_point(img, *pt_acvp, "ACV.p", _CV_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
+        _draw_labeled_point(img, *pt_pcva, "PCV.a", _CV_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
 
         # CV distance label at midpoint
         cv_dist_px = math.hypot(pcva.x - acvp.x, pcva.y - acvp.y)
@@ -492,9 +532,17 @@ def render_cv_ratio_overlay_to_file(
     wing_result: Optional[WingResult],
     out_path: Path,
     um_per_px: Optional[float] = None,
+    landmark_size_scale: float = 1.0,
+    show_landmark_labels: bool = True,
 ) -> bool:
     """Render CV ratio overlay and write to PNG. Returns True if successful."""
-    img = render_cv_ratio_overlay(base_image, wing_result, um_per_px)
+    img = render_cv_ratio_overlay(
+        base_image,
+        wing_result,
+        um_per_px,
+        landmark_size_scale=landmark_size_scale,
+        show_landmark_labels=show_landmark_labels,
+    )
     if img is None:
         return False
     out_path.parent.mkdir(parents=True, exist_ok=True)

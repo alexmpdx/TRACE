@@ -35,15 +35,15 @@ OUTPUT_TYPES = OrderedDict(
     [
         ("wing_isolated_image", "Isolated wing image"),
         ("chopped_image", "Wing after hinge removal"),
-        ("landmarks_overlay", "Landmark points overlay PNG"),
+        ("landmarks_overlay", "Landmark points overlay"),
         ("landmarks_geojson", "Landmark predictions GeoJSON"),
-        ("segmentation_overlay", "Vein/intervein inference overlay PNG"),
-        ("segmentation_geojson", "Vein/intervein inference GeoJSON"),
+        ("segmentation_overlay", "Vein/intervein segmentation overlay"),
+        ("segmentation_geojson", "Vein/intervein segmentation GeoJSON"),
         ("geojson", "Named vein and/or intervein GeoJSON"),
-        ("vein_overlay", "Vein overlay PNG"),
-        ("intervein_overlay", "Intervein region overlay PNG"),
-        ("ap_overlay", "AP compartment overlay PNG"),
-        ("cv_ratio_overlay", "CV ratio overlay PNG"),
+        ("vein_overlay", "Vein overlay"),
+        ("intervein_overlay", "Intervein region overlay"),
+        ("ap_overlay", "A/P compartment overlay"),
+        ("cv_ratio_overlay", "CV ratio overlay"),
         ("csv", "Measurements CSV"),
     ]
 )
@@ -397,12 +397,23 @@ def _render_landmarks_overlay(
     landmarks_geojson_path: Path,
     out_path: Path,
     inverse_scale: float = 1.0,
+    landmark_size_scale: float = 1.0,
+    show_landmark_labels: bool = True,
 ) -> bool:
     """Render landmark points from a landmarks GeoJSON over the base image.
 
     `inverse_scale` multiplies every point coordinate before drawing — used when
     the GeoJSON is in rescaled-pixel space and the base image has already been
     resized back to original resolution.
+
+    `landmark_size_scale` multiplies the auto-derived dot radius / font
+    size / halo thickness in ``draw_landmarks_on_image``; the same value is
+    used by the CV-ratio overlay so a single "Landmark point size" spinbox
+    in the GUI drives every landmark-drawing output.
+
+    `show_landmark_labels` — when False, dots are drawn without their name
+    labels. Toggled by the "Show landmark point labels" checkbox in
+    More output options.
     """
     import cv2
 
@@ -432,7 +443,12 @@ def _render_landmarks_overlay(
     try:
         from landmark_locator.scripts.visualize import draw_landmarks_on_image
 
-        rendered = draw_landmarks_on_image(base_bgr, predictions)
+        rendered = draw_landmarks_on_image(
+            base_bgr,
+            predictions,
+            size_scale=landmark_size_scale,
+            show_labels=show_landmark_labels,
+        )
     except Exception:
         logger.exception("landmarks_overlay: draw_landmarks_on_image failed")
         return False
@@ -475,8 +491,10 @@ def trace_folder(
     show_color_key: bool = True,
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
+    show_landmark_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
     ectopic_label_font_scale: float = 1.0,
+    landmark_size_scale: float = 1.0,
     show_compartment_labels: bool = True,
 ) -> list[TraceResult]:
     """Run the TRACE pipeline on a folder of wing images.
@@ -610,8 +628,10 @@ def trace_folder(
             show_color_key=show_color_key,
             show_ectopic_labels=show_ectopic_labels,
             show_region_labels=show_region_labels,
+            show_landmark_labels=show_landmark_labels,
             vein_simplify_tolerance_px=vein_simplify_tolerance_px,
             ectopic_label_font_scale=ectopic_label_font_scale,
+            landmark_size_scale=landmark_size_scale,
             show_compartment_labels=show_compartment_labels,
         )
     finally:
@@ -654,8 +674,10 @@ def _run(
     show_color_key: bool = True,
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
+    show_landmark_labels: bool = True,
     vein_simplify_tolerance_px: float = 0.0,
     ectopic_label_font_scale: float = 1.0,
+    landmark_size_scale: float = 1.0,
     show_compartment_labels: bool = True,
 ) -> list[TraceResult]:
     """Internal implementation — separated so temp dir cleanup is in the caller."""
@@ -829,6 +851,20 @@ def _run(
     scale = config.um_per_px
     total = len(successful_preproc)
     stage2_slots: list[Optional[TraceResult]] = [None] * total
+
+    # Damp both size-slider deltas by 1/4 before handing them to the render
+    # functions. The raw formulas (quadratic on landmark dot radius, linear
+    # on ectopic font) grew far too fast per spinbox step — a bump from 1.0
+    # → 2.0 quadrupled the dot area, which felt "way too quickly". The
+    # transform keeps 1.0 as the identity value (no change) and shrinks
+    # every displacement from 1.0 to 25% of its raw magnitude:
+    #    effective = 1 + (raw - 1) * 0.25
+    # so spin=2.0 → 1.25, spin=5.0 → 2.0, spin=10.0 → 3.25, spin=0.1 → 0.775.
+    # The spinbox range in the GUI is unchanged; users still type the same
+    # numbers, they just produce a smaller effect.
+    _SIZE_SLIDER_DAMPING = 0.25
+    landmark_size_scale = 1.0 + (landmark_size_scale - 1.0) * _SIZE_SLIDER_DAMPING
+    ectopic_label_font_scale = 1.0 + (ectopic_label_font_scale - 1.0) * _SIZE_SLIDER_DAMPING
     csv_slots: list[Optional[tuple[str, object]]] = [None] * total
     # specimen stem → path to its landmarks geojson, for post-CSV user-distance augmentation.
     user_dist_landmark_paths: dict[str, Path] = {}
@@ -1013,7 +1049,14 @@ def _run(
 
             if "cv_ratio_overlay" in outputs and base is not None and wing_result is not None:
                 cv_path = output_dir / f"{stem}_cv_ratio_overlay.png"
-                if render_cv_ratio_overlay_to_file(base, wing_result, cv_path, um_per_px=per_image_scale):
+                if render_cv_ratio_overlay_to_file(
+                    base,
+                    wing_result,
+                    cv_path,
+                    um_per_px=per_image_scale,
+                    landmark_size_scale=landmark_size_scale,
+                    show_landmark_labels=show_landmark_labels,
+                ):
                     trace_result.cv_ratio_overlay_path = cv_path
 
             # When Stage 1 rescaled, the saved GeoJSONs are in rescaled-pixel
@@ -1025,7 +1068,14 @@ def _run(
                 lm_gj = preproc_result.landmarks_geojson_path
                 if lm_gj and Path(lm_gj).exists():
                     lm_ov_path = output_dir / f"{stem}_landmarks_overlay.png"
-                    if _render_landmarks_overlay(base, Path(lm_gj), lm_ov_path, inverse_scale=overlay_inverse_scale):
+                    if _render_landmarks_overlay(
+                        base,
+                        Path(lm_gj),
+                        lm_ov_path,
+                        inverse_scale=overlay_inverse_scale,
+                        landmark_size_scale=landmark_size_scale,
+                        show_landmark_labels=show_landmark_labels,
+                    ):
                         trace_result.landmarks_overlay_path = lm_ov_path
 
             if "segmentation_overlay" in outputs and base is not None:

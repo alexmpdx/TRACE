@@ -863,8 +863,13 @@ class TraceWindow(QMainWindow):
         self._show_color_key = True
         self._show_ectopic_labels = True
         self._show_region_labels = True
+        self._show_landmark_labels = True
+        # NB: __init__ + reset-defaults keep in sync — both instances updated
+        # by this replace_all; see also the QSettings/gui_state persistence
+        # sites just below and the pipeline pass-through in _run_pipeline.
         self._vein_simplify_tolerance_px = 0.0
         self._ectopic_label_font_scale = 1.0
+        self._landmark_size_scale = 1.0
         self._show_compartment_labels = True
         self._include_unreliable_landmarks = False
         self._do_rotation = False
@@ -2073,8 +2078,10 @@ class TraceWindow(QMainWindow):
             "show_color_key": bool(self._show_color_key),
             "show_ectopic_labels": bool(self._show_ectopic_labels),
             "show_region_labels": bool(self._show_region_labels),
+            "show_landmark_labels": bool(self._show_landmark_labels),
             "vein_simplify_tolerance_px": float(self._vein_simplify_tolerance_px),
             "ectopic_label_font_scale": float(self._ectopic_label_font_scale),
+            "landmark_size_scale": float(self._landmark_size_scale),
             "show_compartment_labels": bool(self._show_compartment_labels),
             "include_unreliable_landmarks": bool(self._include_unreliable_landmarks),
             "do_rotation": bool(self._do_rotation),
@@ -2111,6 +2118,8 @@ class TraceWindow(QMainWindow):
             self._show_ectopic_labels = bool(state["show_ectopic_labels"])
         if "show_region_labels" in state:
             self._show_region_labels = bool(state["show_region_labels"])
+        if "show_landmark_labels" in state:
+            self._show_landmark_labels = bool(state["show_landmark_labels"])
         if "vein_simplify_tolerance_px" in state:
             try:
                 self._vein_simplify_tolerance_px = float(state["vein_simplify_tolerance_px"])
@@ -2119,6 +2128,11 @@ class TraceWindow(QMainWindow):
         if "ectopic_label_font_scale" in state:
             try:
                 self._ectopic_label_font_scale = float(state["ectopic_label_font_scale"])
+            except (TypeError, ValueError):
+                pass
+        if "landmark_size_scale" in state:
+            try:
+                self._landmark_size_scale = float(state["landmark_size_scale"])
             except (TypeError, ValueError):
                 pass
         if "show_compartment_labels" in state:
@@ -2334,8 +2348,13 @@ class TraceWindow(QMainWindow):
         self._show_color_key = True
         self._show_ectopic_labels = True
         self._show_region_labels = True
+        self._show_landmark_labels = True
+        # NB: __init__ + reset-defaults keep in sync — both instances updated
+        # by this replace_all; see also the QSettings/gui_state persistence
+        # sites just below and the pipeline pass-through in _run_pipeline.
         self._vein_simplify_tolerance_px = 0.0
         self._ectopic_label_font_scale = 1.0
+        self._landmark_size_scale = 1.0
         self._show_compartment_labels = True
         self._include_unreliable_landmarks = False
         self._do_rotation = False
@@ -2451,8 +2470,10 @@ class TraceWindow(QMainWindow):
         s.setValue("show_color_key", self._show_color_key)
         s.setValue("show_ectopic_labels", self._show_ectopic_labels)
         s.setValue("show_region_labels", self._show_region_labels)
+        s.setValue("show_landmark_labels", self._show_landmark_labels)
         s.setValue("vein_simplify_tolerance_px", str(self._vein_simplify_tolerance_px))
         s.setValue("ectopic_label_font_scale", str(self._ectopic_label_font_scale))
+        s.setValue("landmark_size_scale", str(self._landmark_size_scale))
         s.setValue("show_compartment_labels", self._show_compartment_labels)
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
         s.setValue("do_rotation", self._do_rotation)
@@ -2596,6 +2617,9 @@ class TraceWindow(QMainWindow):
         saved_srl = s.value("show_region_labels", None)
         if saved_srl is not None:
             self._show_region_labels = saved_srl == "true" or saved_srl is True
+        saved_sll = s.value("show_landmark_labels", None)
+        if saved_sll is not None:
+            self._show_landmark_labels = saved_sll == "true" or saved_sll is True
         saved_vst = s.value("vein_simplify_tolerance_px", None)
         if saved_vst is not None:
             try:
@@ -2606,6 +2630,12 @@ class TraceWindow(QMainWindow):
         if saved_elfs is not None:
             try:
                 self._ectopic_label_font_scale = float(saved_elfs)
+            except (TypeError, ValueError):
+                pass
+        saved_lss = s.value("landmark_size_scale", None)
+        if saved_lss is not None:
+            try:
+                self._landmark_size_scale = float(saved_lss)
             except (TypeError, ValueError):
                 pass
         saved_scl = s.value("show_compartment_labels", None)
@@ -3645,8 +3675,10 @@ class TraceWindow(QMainWindow):
                 show_color_key=self._show_color_key,
                 show_ectopic_labels=self._show_ectopic_labels,
                 show_region_labels=self._show_region_labels,
+                show_landmark_labels=self._show_landmark_labels,
                 vein_simplify_tolerance_px=self._vein_simplify_tolerance_px,
                 ectopic_label_font_scale=self._ectopic_label_font_scale,
+                landmark_size_scale=self._landmark_size_scale,
                 show_compartment_labels=self._show_compartment_labels,
                 include_unreliable_landmarks=self._include_unreliable_landmarks,
                 gate_override=run_gate_override,

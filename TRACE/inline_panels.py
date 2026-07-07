@@ -608,7 +608,17 @@ class InlineGeneralPanel(QWidget):
         self.show_region_labels_chk.toggled.connect(self._update_keys_and_labels_master_state)
         dlg_v.addWidget(self.show_region_labels_chk)
 
-        self.show_compartment_labels_chk = QCheckBox("Show AP compartment labels")
+        self.show_landmark_labels_chk = QCheckBox("Show landmark point labels")
+        self.show_landmark_labels_chk.setToolTip(
+            "When on (default), landmark points on the landmarks overlay AND the CV "
+            "ratio overlay are annotated with their names (D-Tip, L1-Rs, ACV.p, "
+            "PCV.a, …). Turn off to keep the colored dots without the text."
+        )
+        self.show_landmark_labels_chk.toggled.connect(self._on_show_landmark_labels_toggled)
+        self.show_landmark_labels_chk.toggled.connect(self._update_keys_and_labels_master_state)
+        dlg_v.addWidget(self.show_landmark_labels_chk)
+
+        self.show_compartment_labels_chk = QCheckBox("Show A/P compartment labels")
         self.show_compartment_labels_chk.setToolTip(
             "When on (default), the anterior/posterior compartment overlay (when "
             "selected as an output) is annotated with ANT xx.x% / POST xx.x% text. "
@@ -630,6 +640,24 @@ class InlineGeneralPanel(QWidget):
         )
         self.ectopic_label_scale_spin.valueChanged.connect(self._on_ectopic_label_scale_changed)
         form.addRow("Ectopic label size", self.ectopic_label_scale_spin)
+
+        # Landmark point size. Multiplies the auto-derived dot radius / font /
+        # halo used by draw_landmarks_on_image AND the CV-ratio overlay's
+        # _draw_labeled_point, so every landmark-drawing output scales in
+        # lockstep. 1.0 = defaults; the range mirrors the landmark_locator
+        # GUI's on-screen slider so behaviour matches what users see there.
+        self.landmark_size_spin = QDoubleSpinBox()
+        self.landmark_size_spin.setRange(0.1, 5.0)
+        self.landmark_size_spin.setDecimals(1)
+        self.landmark_size_spin.setSingleStep(0.1)
+        self.landmark_size_spin.setToolTip(
+            "Scale factor for landmark points drawn on every landmark-carrying overlay "
+            "(landmarks overlay + CV ratio overlay). Default 1.0. Applied to the "
+            "dot radius, the point label font, and the halo thicknesses so the "
+            "annotation stays readable at any size."
+        )
+        self.landmark_size_spin.valueChanged.connect(self._on_landmark_size_changed)
+        form.addRow("Landmark point size", self.landmark_size_spin)
 
         self.vein_smooth_spin = QDoubleSpinBox()
         self.vein_smooth_spin.setRange(0.0, 50.0)
@@ -705,6 +733,7 @@ class InlineGeneralPanel(QWidget):
             self.show_color_key_chk,
             self.show_ectopic_labels_chk,
             self.show_region_labels_chk,
+            self.show_landmark_labels_chk,
             self.show_compartment_labels_chk,
         )
 
@@ -900,6 +929,9 @@ class InlineGeneralPanel(QWidget):
     def _on_show_region_labels_toggled(self, checked: bool) -> None:
         self._window._show_region_labels = bool(checked)
 
+    def _on_show_landmark_labels_toggled(self, checked: bool) -> None:
+        self._window._show_landmark_labels = bool(checked)
+
     def _on_vein_smooth_changed(self, val: float) -> None:
         self._window._vein_simplify_tolerance_px = float(val)
 
@@ -908,6 +940,9 @@ class InlineGeneralPanel(QWidget):
 
     def _on_ectopic_label_scale_changed(self, val: float) -> None:
         self._window._ectopic_label_font_scale = float(val)
+
+    def _on_landmark_size_changed(self, val: float) -> None:
+        self._window._landmark_size_scale = float(val)
 
     def _on_vein_opacity_changed(self, val: float) -> None:
         self._window.config.vein_opacity = float(val)
@@ -961,8 +996,10 @@ class InlineGeneralPanel(QWidget):
         self._window._show_color_key = True
         self._window._show_ectopic_labels = True
         self._window._show_region_labels = True
+        self._window._show_landmark_labels = True
         self._window._vein_simplify_tolerance_px = 0.0
         self._window._ectopic_label_font_scale = 1.0
+        self._window._landmark_size_scale = 1.0
         self._window._show_compartment_labels = True
         self._window._intermediate_outputs = {key: False for key in self._window._intermediate_outputs}
         self._window.settings.setValue("max_workers", DEFAULT_MAX_WORKERS)
@@ -996,9 +1033,11 @@ class InlineGeneralPanel(QWidget):
             self.show_color_key_chk,
             self.show_ectopic_labels_chk,
             self.show_region_labels_chk,
+            self.show_landmark_labels_chk,
             self.show_compartment_labels_chk,
             self.show_keys_and_labels_chk,
             self.ectopic_label_scale_spin,
+            self.landmark_size_spin,
             self.vein_smooth_spin,
             self.vein_opacity_spin,
             self.intervein_opacity_spin,
@@ -1028,9 +1067,13 @@ class InlineGeneralPanel(QWidget):
             self.show_color_key_chk.setChecked(bool(self._window._show_color_key))
             self.show_ectopic_labels_chk.setChecked(bool(self._window._show_ectopic_labels))
             self.show_region_labels_chk.setChecked(bool(self._window._show_region_labels))
+            self.show_landmark_labels_chk.setChecked(
+                bool(getattr(self._window, "_show_landmark_labels", True))
+            )
             self.show_compartment_labels_chk.setChecked(bool(self._window._show_compartment_labels))
             self._update_keys_and_labels_master_state()
             self.ectopic_label_scale_spin.setValue(float(self._window._ectopic_label_font_scale))
+            self.landmark_size_spin.setValue(float(getattr(self._window, "_landmark_size_scale", 1.0)))
             self.vein_smooth_spin.setValue(float(self._window._vein_simplify_tolerance_px))
             self.vein_opacity_spin.setValue(float(cfg.vein_opacity))
             self.intervein_opacity_spin.setValue(float(cfg.intervein_opacity))
