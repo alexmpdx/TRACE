@@ -3465,9 +3465,10 @@ class TraceWindow(QMainWindow):
             Stage 3, so the hinge chop uses the user's corrected landmarks.
 
         Returns a preprocessing PipelineResult; the inspector reads
-        ``segmentation_geojson_path`` and ``rescale_factor`` from it (the
-        polygons are mapped into original-image space and shown over the
-        original image).
+        ``chopped_image_path`` (the exact image the segmentation model saw),
+        ``segmentation_geojson_path`` and ``rescale_factor`` from it. The mask is
+        shown/edited over that preprocessed image and the saved override is
+        divided back into original-image space for the Stage-5 sidecar.
         """
         from preprocessing.pipeline import process_single_image
 
@@ -4437,10 +4438,13 @@ class TraceWindow(QMainWindow):
             self._log(f"Warning: could not format run-settings preamble: {exc}")
             return
         self._log("Run settings:")
-        self.log_text.append("---")
-        self.log_text.append(text)
-        self.log_text.append("---")
-        self.log_text.append("")
+        # Mirror the machine-parseable YAML block into run.log too so a
+        # streamed log has the same "what config produced this run"
+        # header the widget shows. Route the widget append and the file
+        # append through the same lines to stay in sync.
+        for _preamble_line in ("---", text, "---", ""):
+            self.log_text.append(_preamble_line)
+            self._stream_log_line(_preamble_line)
         sb = self.log_text.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -4602,9 +4606,36 @@ class TraceWindow(QMainWindow):
         # _SignalLogHandler. _log_run_settings appends its YAML block via
         # log_text.append directly, intentionally bypassing this hook so
         # the block stays machine-parseable.
-        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {_translate_landmark_names(msg)}")
+        line = f"[{time.strftime('%H:%M:%S')}] {_translate_landmark_names(msg)}"
+        self.log_text.append(line)
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+        # Stream every logged line to run.log in the active run folder so
+        # the running log persists incrementally alongside settings.yaml
+        # and _run_state.json — no more losing progress info if TRACE is
+        # killed / crashes / closed mid-run. _write_run_metadata still
+        # runs at terminal transitions as a canonical full-snapshot
+        # rewrite (from log_text.toPlainText()) covering anything that
+        # slipped in before _run_folder was set.
+        self._stream_log_line(line)
+
+    def _stream_log_line(self, line: str) -> None:
+        """Append `line` to run.log in the active run folder.
+
+        No-op if the run folder isn't set (pre-run bookkeeping messages
+        land in the log widget only) or the write fails (disk full,
+        permissions, race with folder deletion). Silent failure is
+        intentional — a log-write hiccup must never derail a run.
+        """
+        folder = self._run_folder
+        if folder is None:
+            return
+        try:
+            with (folder / "run.log").open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.write("\n")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_progress(self, idx, total, name, stage, detail):
         """Update internal stage-tracking state on each progress event.
