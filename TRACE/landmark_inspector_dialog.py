@@ -999,7 +999,9 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
     A vein traces a thin branching network whose *holes* are the enclosed
     intervein regions — and a napari Shapes polygon can't represent holes (it
     would fill them in and bury the whole wing). So the segmentation is shown as
-    a per-class label *mask* over the ORIGINAL image, where holes are inherent.
+    a per-class label *mask* over the PREPROCESSED image (rescaled + isolated +
+    hinge-chopped, pre-rotation) — the exact image the model saw — where holes
+    are inherent.
     Editing is paint / fill / erase (napari Labels), the natural model for
     segmentation. On save the mask is re-vectorized to vein/intervein polygons
     via modelTOjson's ``mask_to_geojson`` — the exact converter the pipeline
@@ -1025,6 +1027,11 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
         self._labels_layer = None
         self._baseline_mask = None  # mask as loaded (for Restore)
         self._last_saved_mask = None  # mask at last save (for dirty-state)
+        # Rescale factor applied by preprocessing (Stage 1). The mask is edited in
+        # the preprocessed (rescaled) pixel space the model actually saw; on save
+        # the vectorized polygons are divided back to original space for the
+        # sidecar. 1.0 when no rescale was applied.
+        self._rescale_factor = 1.0
         self._loaded = False
         self._init_async()
         self._build_ui()
@@ -1038,6 +1045,7 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
         self._labels_layer = None
         self._baseline_mask = None
         self._last_saved_mask = None
+        self._rescale_factor = 1.0
         self._loaded = False
         self._bump_load_token()  # discard any in-flight load for the old image
 
@@ -1138,10 +1146,18 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
     def load_or_generate(self) -> None:
         """Obtain the segmentation for this image and render it as a paint mask.
 
-        A prior ``<stem>_segmentation_override.geojson`` (already in original
-        space) is loaded directly. Otherwise the configured preprocessing chain
-        is run on demand (rotation OFF, gates OFF) and its segmentation mapped
-        into original space. Any unsaved landmark edits are flushed first so
+        The vein/intervein model runs on the *preprocessed* image (rescaled +
+        wing-isolated + hinge-chopped, rotation OFF), so the inspector shows and
+        edits the mask over **that exact image** — pixel-identical to what the
+        model saw. This matters when Stage 1 rescales heavily: painting over the
+        original image (a prior design) diverged from the real inference.
+
+        The configured preprocessing chain is always run on demand (rotation
+        OFF, gates OFF) to obtain that preprocessed image + its rescale factor.
+        A prior ``<stem>_segmentation_override.geojson`` (stored in original
+        space) is loaded and scaled *into* preprocessed space for editing;
+        otherwise the freshly-generated segmentation (already in preprocessed
+        space) is used as-is. Any unsaved landmark edits are flushed first so
         Stage 3 picks them up and the hinge chop uses the corrected landmarks.
         """
         # Flush landmark edits on the GUI thread BEFORE the worker starts, so
@@ -1157,48 +1173,65 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
 
             from TRACE.psd_loader import imread_any
 
-            if override_path.is_file():
-                # Saved overrides are already in original-image pixel space.
-                parsed = _parse_segmentation_geojson(override_path)
-            else:
-                tmp_dir = Path(tempfile.mkdtemp(prefix="trace_seg_inspect_"))
+            have_override = override_path.is_file()
+            tmp_dir = Path(tempfile.mkdtemp(prefix="trace_seg_inspect_"))
+            try:
+                # Always run preprocessing so we have the exact image the model
+                # segments. Skip the segmentation forward pass when we already
+                # have an override to render (we only need the preprocessed image
+                # + rescale factor in that case).
                 try:
-                    try:
-                        result = window.run_single_image_preprocessing_for_segmentation(
-                            image_path, tmp_dir, with_segmentation=True
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        raise RuntimeError(
-                            f"Could not preprocess this image for vein/intervein inference:\n\n{exc}\n\n"
-                            "Check that a landmark model and a segmentation model are configured "
-                            "in Settings → Models."
-                        )
+                    result = window.run_single_image_preprocessing_for_segmentation(
+                        image_path, tmp_dir, with_segmentation=not have_override
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"Could not preprocess this image for vein/intervein inference:\n\n{exc}\n\n"
+                        "Check that a landmark model and a segmentation model are configured "
+                        "in Settings → Models."
+                    )
+
+                rf = getattr(result, "rescale_factor", 1.0) or 1.0
+                # The preprocessed image the segmentation model actually saw:
+                # rescaled + isolated + hinge-chopped, pre-rotation. Fall back
+                # through the chain if an optional stage didn't produce a file.
+                preproc_path = None
+                for attr in ("chopped_image_path", "wing_isolated_image_path", "processed_image_path"):
+                    p = getattr(result, attr, None)
+                    if p and Path(p).is_file():
+                        preproc_path = Path(p)
+                        break
+                if preproc_path is None:
+                    preproc_path = image_path
+
+                if have_override:
+                    # Sidecar is in original-image space; scale INTO the
+                    # preprocessed (rescaled) space so it aligns with preproc_path.
+                    parsed = _parse_segmentation_geojson(override_path)
+                    if rf != 1.0:
+                        parsed = [{"class": p["class"], "geometry": _scale_geom(p["geometry"], rf)} for p in parsed]
+                else:
                     seg_path = getattr(result, "segmentation_geojson_path", None)
                     parsed = _parse_segmentation_geojson(seg_path) if seg_path and Path(seg_path).is_file() else []
-                    # Map preprocessed-space polygons into original-image space.
-                    # Wing isolation / hinge chop don't move coords; only rescale does.
-                    rf = getattr(result, "rescale_factor", 1.0) or 1.0
-                    if rf != 1.0:
-                        parsed = [
-                            {"class": p["class"], "geometry": _scale_geom(p["geometry"], 1.0 / rf)} for p in parsed
-                        ]
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
 
-            image = imread_any(image_path)
-            if image is None:
-                raise IOError(f"Could not load image: {image_path}")
-            # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
-            if image.ndim == 3 and image.shape[2] == 3:
-                image = np.ascontiguousarray(image[..., ::-1])
-            elif image.ndim == 3 and image.shape[2] == 4:
-                image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
-            mask = self._rasterize(parsed, image.shape[:2])
-            return {"image": image, "mask": mask}
+                image = imread_any(preproc_path)
+                if image is None:
+                    raise IOError(f"Could not load preprocessed image: {preproc_path}")
+                # imread_any returns BGR(A) (cv2 convention) but napari expects RGB(A).
+                if image.ndim == 3 and image.shape[2] == 3:
+                    image = np.ascontiguousarray(image[..., ::-1])
+                elif image.ndim == 3 and image.shape[2] == 4:
+                    image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
+                mask = self._rasterize(parsed, image.shape[:2])
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            return {"image": image, "mask": mask, "rescale_factor": rf}
 
         self._begin_load(work)
 
     def _render_payload(self, payload: dict) -> None:
+        self._rescale_factor = payload.get("rescale_factor", 1.0) or 1.0
         self._render(payload["image"], payload["mask"])
 
     def _fail_load(self, message: str) -> None:
@@ -1235,7 +1268,7 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
             return np.zeros(shape, dtype=np.uint8)
 
     def _render(self, image, mask) -> None:
-        """Build the image + Labels layers from a preloaded (RGB) image + mask."""
+        """Build the image + Labels layers from a preloaded (RGB) preprocessed image + mask."""
         import napari
         from napari.utils.colormaps import DirectLabelColormap
 
@@ -1331,7 +1364,14 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
         ]
         fc = mask_to_geojson(mask, classes_meta, str(self._image_path))
         features_out = list(fc.get("features", [])) if isinstance(fc, dict) else []
+        # The mask is in preprocessed (rescaled) pixel space; the sidecar is
+        # stored in ORIGINAL-image space (Stage 5 multiplies back by
+        # rescale_factor). Divide the vectorized coords by the rescale factor so
+        # the on-disk contract is unchanged and resolution-independent.
+        rf = self._rescale_factor or 1.0
         for f in features_out:
+            if rf != 1.0 and isinstance(f.get("geometry"), dict):
+                f["geometry"] = _scale_geom(f["geometry"], 1.0 / rf)
             f.setdefault("properties", {})["gate_reason"] = "manual override"
 
         if not features_out:

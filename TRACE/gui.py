@@ -2018,10 +2018,7 @@ class TraceWindow(QMainWindow):
             "",
         ]
         if missing:
-            body_parts.append(
-                f"{len(missing)} image(s) don't carry parseable µm/px metadata:\n"
-                f"  {_fmt(missing)}"
-            )
+            body_parts.append(f"{len(missing)} image(s) don't carry parseable µm/px metadata:\n" f"  {_fmt(missing)}")
         if implausible:
             examples = _fmt([f"{name} (reported {v:.2f} µm/px)" for name, v in implausible])
             body_parts.append(
@@ -2426,9 +2423,7 @@ class TraceWindow(QMainWindow):
         # dialog might have flipped auto_detect_um_per_px via config import.
         if hasattr(self, "auto_detect_um_per_px_chk"):
             self.auto_detect_um_per_px_chk.blockSignals(True)
-            self.auto_detect_um_per_px_chk.setChecked(
-                bool(getattr(self.config, "auto_detect_um_per_px", False))
-            )
+            self.auto_detect_um_per_px_chk.setChecked(bool(getattr(self.config, "auto_detect_um_per_px", False)))
             self.auto_detect_um_per_px_chk.blockSignals(False)
 
     def _on_settings_dialog_finished(self) -> None:
@@ -2813,9 +2808,7 @@ class TraceWindow(QMainWindow):
         # isn't automatically re-read; do it here.
         if hasattr(self, "auto_detect_um_per_px_chk"):
             self.auto_detect_um_per_px_chk.blockSignals(True)
-            self.auto_detect_um_per_px_chk.setChecked(
-                bool(getattr(self.config, "auto_detect_um_per_px", False))
-            )
+            self.auto_detect_um_per_px_chk.setChecked(bool(getattr(self.config, "auto_detect_um_per_px", False)))
             self.auto_detect_um_per_px_chk.blockSignals(False)
 
     # -----------------------------------------------------------------------
@@ -3223,9 +3216,7 @@ class TraceWindow(QMainWindow):
         # Surface a one-line breadcrumb in the run log so the user
         # knows the restore happened (and can scroll back to it).
         try:
-            self._log(
-                f"--- Restored {len(all_failed)} failed image(s) from previous run at {run_folder} ---"
-            )
+            self._log(f"--- Restored {len(all_failed)} failed image(s) from previous run at {run_folder} ---")
         except Exception:
             # Run-log widget isn't always there during early init.
             pass
@@ -3558,9 +3549,7 @@ class TraceWindow(QMainWindow):
         #                 same skip-set computation the worker uses below.
         if bool(getattr(self.config, "auto_detect_um_per_px", False)):
             preflight_skips = (
-                rerun_skip_set
-                if rerun_skip_set is not None
-                else (self._resume_skip_set or set()) | self._user_skip_set
+                rerun_skip_set if rerun_skip_set is not None else (self._resume_skip_set or set()) | self._user_skip_set
             )
             if not self._preflight_check_per_image_scale(effective_skips=preflight_skips):
                 return
