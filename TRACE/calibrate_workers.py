@@ -108,6 +108,16 @@ def calibrate_for_trace(
         )
         stat = recommend_workers.calibrate(spec, cli_extra=[])
 
+    if not stat.success:
+        # Stage 2 subprocess crashed — surface the actual reason so the
+        # GUI can show it in the "Calibration failed" dialog instead of
+        # silently returning a fallback recommendation of --workers 1
+        # (which hides configuration / environment problems from the
+        # user). stderr_tail travels back on CalibrationStats even when
+        # sys.stderr is None (frozen Windows build; see #33).
+        tail = stat.stderr_tail.strip() or f"CLI returned {stat.returncode}"
+        raise RuntimeError(f"Stage 2 calibration subprocess failed:\n{tail}")
+
     rec = recommend_workers.recommend(stat, sysinfo)
     return {
         "system": sysinfo,

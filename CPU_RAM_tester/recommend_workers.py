@@ -25,8 +25,31 @@ from pathlib import Path
 try:
     import psutil
 except ImportError:
-    sys.stderr.write("This script requires psutil. Install with: pip install psutil\n")
+    # sys.stderr can be None in PyInstaller windowed / GUI-only builds
+    # (Frozen Windows TRACE.exe launches with no attached console), so
+    # an unguarded ``sys.stderr.write`` here would raise
+    # ``AttributeError: 'NoneType' object has no attribute 'write'``
+    # from a bare psutil ImportError. Guard so at worst we exit silently.
+    if sys.stderr is not None:
+        sys.stderr.write("This script requires psutil. Install with: pip install psutil\n")
     sys.exit(2)
+
+
+def _safe_stderr_write(msg: str) -> None:
+    """Best-effort write to stderr. No-op when stderr is None.
+
+    PyInstaller windowed builds (console=False) detach stdio entirely,
+    leaving ``sys.stderr`` as None. A plain ``sys.stderr.write(...)`` in
+    that context raises AttributeError before the first real-work line
+    runs — which was the reported "'NoneType' object has no attribute
+    'write'" crash from GitHub issue #33.
+    """
+    if sys.stderr is not None:
+        try:
+            sys.stderr.write(msg)
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +137,11 @@ class CalibrationStats:
     peak_rss_gb: float
     success: bool
     returncode: int
+    # Tail of the calibration subprocess's combined stdout+stderr on
+    # failure. Populated even when sys.stderr is None (frozen GUI build)
+    # so callers can surface the real CLI failure to the user instead of
+    # only seeing "Calibration run failed". Empty string on success.
+    stderr_tail: str = ""
 
 
 class _Monitor(threading.Thread):
@@ -185,9 +213,14 @@ def calibrate(spec: tuple[str, Path, Path, Path | None], cli_extra: list[str]) -
         wall = time.time() - t0
 
         success = proc.returncode == 0
+        tail = ""
         if not success:
             tail = "\n".join(stdout.splitlines()[-20:])
-            sys.stderr.write(f"\nCLI exited {proc.returncode}; tail:\n{tail}\n")
+            # _safe_stderr_write is a no-op when stderr is None (frozen
+            # windowed build). The tail also travels back to the caller
+            # via CalibrationStats.stderr_tail so the GUI can display it
+            # even without a console.
+            _safe_stderr_write(f"\nCLI exited {proc.returncode}; tail:\n{tail}\n")
 
         return CalibrationStats(
             specimen=stem,
@@ -195,6 +228,7 @@ def calibrate(spec: tuple[str, Path, Path, Path | None], cli_extra: list[str]) -
             peak_rss_gb=monitor.peak_rss / GIB,
             success=success,
             returncode=proc.returncode,
+            stderr_tail=tail,
         )
 
 
