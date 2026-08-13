@@ -171,13 +171,37 @@ def _scrub_paths(text: str) -> str:
     occur in practice). Only the home dir is touched — non-home paths (lab
     shares, etc.) stay intact because they're typically diagnostically
     valuable.
+
+    Windows separator handling: a Windows home path from ``Path.home()``
+    is literal ``C:\\Users\\Alice`` (one backslash between components).
+    Logs commonly emit the same path in three OTHER forms:
+
+    - **Doubled** (``C:\\\\Users\\\\Alice``) — the repr / JSON-escape form
+      you get from ``str(list_of_paths)`` or ``json.dumps``. Reported in
+      issue #31, where a startup log ``sys.path[:8]`` line leaked a
+      username because the repr-doubled form didn't match the
+      single-backslash regex built from ``Path.home()``.
+    - **Forward-slash** (``C:/Users/Alice``) — many Python APIs normalise
+      to this form.
+    - **Mixed** — depends on the caller.
+
+    Build a regex separator class ``[\\/]{{1,2}}`` between each
+    ``re.escape``d path component so all four forms get caught.
     """
     home = str(Path.home())
     if not text or not home:
         return text
     if os.name == "nt":
         import re as _re
-        return _re.sub(_re.escape(home), "~", text, flags=_re.IGNORECASE)
+
+        # Split the home path on its native separator, then rejoin the
+        # re.escape'd components with a permissive separator regex that
+        # matches 1-or-2 chars of \ or /. Covers repr-doubled paths
+        # (issue #31), forward-slash paths, and the original literal form.
+        parts = home.split("\\")
+        sep_re = r"[\\/]{1,2}"
+        pattern = sep_re.join(_re.escape(p) for p in parts)
+        return _re.sub(pattern, "~", text, flags=_re.IGNORECASE)
     return text.replace(home, "~")
 
 
