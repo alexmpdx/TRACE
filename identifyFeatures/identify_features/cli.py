@@ -42,6 +42,8 @@ def _garbage_settings_from_args(args) -> dict:
         "fragmentation_max_frac": args.fragmentation_max_frac,
         "vein_association_enabled": args.vein_association_filter_enabled,
         "max_unassigned_vein_frac": args.max_unassigned_vein_frac,
+        "intervein_association_enabled": args.intervein_association_filter_enabled,
+        "max_unassigned_intervein_frac": args.max_unassigned_intervein_frac,
         "required_veins": args.require_vein,
     }
 
@@ -60,6 +62,9 @@ def _apply_garbage_settings(config, s: dict):
     config.vein_association_filter_enabled = s["vein_association_enabled"]
     if s["max_unassigned_vein_frac"] is not None:
         config.max_unassigned_vein_frac = float(s["max_unassigned_vein_frac"])
+    config.intervein_association_filter_enabled = s["intervein_association_enabled"]
+    if s["max_unassigned_intervein_frac"] is not None:
+        config.max_unassigned_intervein_frac = float(s["max_unassigned_intervein_frac"])
     config.required_veins = list(s["required_veins"] or [])
     return config
 
@@ -351,6 +356,20 @@ def main():
         default=None,
         metavar="FRAC",
         help="Abort when this fraction of segmented vein tissue isn't associated with a traced vein (default 0.08)",
+    )
+    parser.add_argument(
+        "--no-intervein-association-filter",
+        dest="intervein_association_filter_enabled",
+        action="store_false",
+        default=True,
+        help="Disable the intervein-association filter (does not abort wings with unexplained intervein tissue)",
+    )
+    parser.add_argument(
+        "--max-unassigned-intervein-frac",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help="Abort when this fraction of segmented intervein tissue isn't associated with a named region (default 0.15)",
     )
     parser.add_argument(
         "--require-vein",

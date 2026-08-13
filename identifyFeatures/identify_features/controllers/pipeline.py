@@ -151,6 +151,10 @@ def identify_wing(
     # Step 1: Parse inputs
     logger.info("Step 1: Parsing inputs for %s", specimen_id)
     vein_polys, intervein_polys = load_detection_geojson(detection_geojson)
+    # Keep the raw segmented intervein polygons — `intervein_polys` gets rebound by
+    # splitting/merging below, but the intervein-association garbage filter compares
+    # named regions against the model's original intervein output.
+    raw_intervein_polys = list(intervein_polys)
     landmarks = load_landmarks_geojson(landmarks_geojson)
     all_polys = vein_polys + intervein_polys
     wing_outline = _compute_wing_outline(all_polys)
@@ -243,6 +247,17 @@ def identify_wing(
             wing_outline,
             wing_axis,
         )
+
+    # Garbage detection (REGIONS hook): abort wings where too much segmented intervein tissue
+    # is not associated with any named region. No-op when intervein regions were skipped.
+    regions_ctx = FilterContext(
+        config=config,
+        specimen_id=specimen_id,
+        intervein_polys=raw_intervein_polys,
+        regions=regions,
+        wing_outline=wing_outline,
+    )
+    run_stage_filters(FilterStage.REGIONS, regions_ctx)
 
     result.veins = veins
     result.intervein_regions = regions

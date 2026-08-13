@@ -227,7 +227,15 @@ _FIELD_TOOLTIPS: dict[str, str] = {
     ),
     "max_unassigned_vein_frac": (
         "Abort when this fraction of segmented vein area is not associated with any traced vein. "
-        "Default 0.08 (8%)."
+        "Default 0.10 (10%)."
+    ),
+    "intervein_association_filter_enabled": (
+        "Reject wings where too much of the segmented intervein tissue isn't covered by any named "
+        "region — i.e. hallucinated intervein tissue or failed region naming. Runs after region naming."
+    ),
+    "max_unassigned_intervein_frac": (
+        "Abort when this fraction of segmented intervein area is not associated with any named region. "
+        "Good wings run ~5–8% (named regions are inset from the wing edge), so the default is 0.15 (15%)."
     ),
     "required_veins": (
         "Abort the wing if any checked vein is missing (not traced). Leave all unchecked (default) "
@@ -1486,6 +1494,14 @@ class PipelineConfigDialog(QDialog):
         form = QFormLayout(gb)
         self._add_bool(form, "vein_association_filter_enabled", "Enable vein-association filter")
         self._add_float(form, "max_unassigned_vein_frac", "Max unassigned vein fraction", 0.0, 1.0, 3, 0.01)
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Intervein association (unexplained intervein tissue)")
+        form = QFormLayout(gb)
+        self._add_bool(form, "intervein_association_filter_enabled", "Enable intervein-association filter")
+        self._add_float(
+            form, "max_unassigned_intervein_frac", "Max unassigned intervein fraction", 0.0, 1.0, 3, 0.01
+        )
         layout.addWidget(gb)
 
         gb = QGroupBox("Required veins (abort if missing)")

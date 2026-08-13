@@ -235,6 +235,18 @@ class PipelineConfig:
     vein_association_filter_enabled: bool = True
     max_unassigned_vein_frac: float = 0.10
 
+    # Intervein-association filter (REGIONS hook, after region naming). The intervein mirror
+    # of the vein-association filter: aborts when too much of the segmented intervein area is
+    # not covered by any named region — intervein tissue the pipeline couldn't explain (model
+    # painted intervein where there is none, or region naming failed). Fraction is of total
+    # segmented intervein area. Skipped entirely when skip_intervein_regions is set.
+    # Default 0.15 (15%): unlike the vein case, good wings carry a ~6-8% structural baseline of
+    # "uncovered" intervein because named regions are inset from the wing outline and eroded
+    # around veins (good wings measured 0.054–0.077). 0.15 is ~2x that good max — comfortable
+    # headroom against false positives while still catching gross unexplained-intervein failures.
+    intervein_association_filter_enabled: bool = True
+    max_unassigned_intervein_frac: float = 0.15
+
     # Vein-presence filter (VEINS hook). Abort a wing if any of these canonical veins is
     # missing (no traced centerline — i.e. ABSENT or never found). Empty list (default) =
     # never abort for a missing vein. Valid ids: costa, L1, L2, L3, L4, L5, L6, ACV, PCV, Rs.

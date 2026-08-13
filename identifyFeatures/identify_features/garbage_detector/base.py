@@ -76,6 +76,7 @@ FILTER_LABELS: dict[str, str] = {
     "solidity": "solidity",
     "fragmentation": "fragmentation",
     "vein_association": "uncalled vein tissue",
+    "intervein_association": "uncalled intervein tissue",
     "vein_presence": "missing veins",
 }
 
@@ -115,12 +116,13 @@ class FilterContext:
     wing_outline: Any = None  # cleaned outline (largest component, holes dropped)
     all_polys: Any = None  # raw vein+intervein polygons (pre-cleanup; needed by fragmentation)
     vein_polys: Any = None  # raw segmented vein polygons (needed by vein_association)
+    intervein_polys: Any = None  # raw segmented intervein polygons (needed by intervein_association)
     image_shape: Optional[tuple[int, int]] = None
     skel: Any = None
     landmarks: Any = None
     wing_axis: Any = None
     veins: Any = None  # traced VeinIdentification list (with tissue_polygon at TISSUE stage)
-    regions: Any = None
+    regions: Any = None  # named InterveinRegion list (at REGIONS stage)
 
     # Resolved batch parameters (e.g. solidity range from the batch pre-pass).
     batch: Any = None
