@@ -31,6 +31,27 @@ _UNIT_TO_UM = {
     "nanometer": 1.0 / 1000.0,
 }
 
+# Plausibility band for microscopy µm/px values on a fly wing. A 100X
+# super-resolution lens caps out around 0.04 µm/px; a whole-slide macro
+# lens is around 10 µm/px. The 0.02 – 50 band is generous either way.
+#
+# The specific failure mode this guards is a very common bad-metadata
+# pattern: capture / conversion software writes the generic screen-DPI
+# tag ``XResolution=96, ResolutionUnit=inch`` when the operator didn't
+# calibrate, which converts to 25400/96 ≈ 264 µm/px. That value is
+# ~500× coarser than real wing microscopy, so resolutionAdjust would
+# try to upscale each image ~500× per axis (250 000× area) and blow
+# OpenCV's allocator past a terabyte. The same nonsense happens with
+# 72 dpi → 353 µm/px. Anything outside this band is rejected as bad
+# metadata regardless of source (TIFF tags OR OME-XML PhysicalSizeX).
+_MIN_PLAUSIBLE_UM_PER_PX = 0.02
+_MAX_PLAUSIBLE_UM_PER_PX = 50.0
+
+
+def _is_plausible_um_per_px(v: Optional[float]) -> bool:
+    """True when ``v`` is inside the microscopy-plausibility band."""
+    return v is not None and _MIN_PLAUSIBLE_UM_PER_PX <= v <= _MAX_PLAUSIBLE_UM_PER_PX
+
 
 def _resolution_to_um_per_px(res_value: float, unit: int) -> Optional[float]:
     """Convert TIFF XResolution + ResolutionUnit to µm/px.
@@ -47,12 +68,20 @@ def _resolution_to_um_per_px(res_value: float, unit: int) -> Optional[float]:
     return None
 
 
-def _read_um_per_px_from_tiff(path: Path) -> Optional[float]:
+def _read_um_per_px_from_tiff(path: Path, *, allow_implausible: bool = False) -> Optional[float]:
     """Best-effort read of µm/px from a single TIFF.
 
     Tries (in order): OME-XML PhysicalSizeX in the ImageDescription tag, then
     XResolution + ResolutionUnit. Returns None when neither yields a usable
     value.
+
+    Plausibility filter: by default, values outside
+    [``_MIN_PLAUSIBLE_UM_PER_PX``, ``_MAX_PLAUSIBLE_UM_PER_PX``] are treated
+    as bad metadata (see the module-level constants for the specific failure
+    mode this guards) and return None with a WARNING log. Callers that need
+    to see the raw reading — the pre-flight check in TRACE, which
+    distinguishes "no metadata" from "implausible metadata" for the user
+    dialog — can pass ``allow_implausible=True``.
     """
     try:
         import tifffile
@@ -60,6 +89,7 @@ def _read_um_per_px_from_tiff(path: Path) -> Optional[float]:
         logger.warning("tifffile not installed; auto-detect cannot read TIFF metadata")
         return None
 
+    reading: Optional[float] = None
     try:
         with tifffile.TiffFile(str(path)) as tif:
             page = tif.pages[0]
@@ -76,29 +106,44 @@ def _read_um_per_px_from_tiff(path: Path) -> Optional[float]:
                             size = float(m_size.group(1))
                             unit_str = m_unit.group(1).strip().lower() if m_unit else "µm"
                             factor = _UNIT_TO_UM.get(unit_str, _UNIT_TO_UM.get(unit_str.replace("μ", "µ")))
-                            if factor is None:
-                                # Fall through to TIFF resolution tags.
-                                pass
-                            elif size > 0:
-                                return size * factor
+                            if factor is not None and size > 0:
+                                reading = size * factor
                         except ValueError:
                             pass
 
-            xres = tags.get("XResolution")
-            unit = tags.get("ResolutionUnit")
-            if xres is not None and unit is not None:
-                val = xres.value
-                if isinstance(val, tuple) and len(val) == 2:
-                    num, den = val
-                    if den:
-                        res = num / den
-                        return _resolution_to_um_per_px(float(res), int(unit.value))
-                elif isinstance(val, (int, float)) and val > 0:
-                    return _resolution_to_um_per_px(float(val), int(unit.value))
+            if reading is None:
+                xres = tags.get("XResolution")
+                unit = tags.get("ResolutionUnit")
+                if xres is not None and unit is not None:
+                    val = xres.value
+                    if isinstance(val, tuple) and len(val) == 2:
+                        num, den = val
+                        if den:
+                            res = num / den
+                            reading = _resolution_to_um_per_px(float(res), int(unit.value))
+                    elif isinstance(val, (int, float)) and val > 0:
+                        reading = _resolution_to_um_per_px(float(val), int(unit.value))
     except Exception as exc:
         logger.debug("auto-detect: failed to read %s: %s", path.name, exc)
         return None
-    return None
+
+    if reading is None or reading <= 0:
+        return None
+    if allow_implausible:
+        return reading
+    if not _is_plausible_um_per_px(reading):
+        logger.warning(
+            "auto-detect: %s reported µm/px=%.4f, outside plausibility band "
+            "[%.2f, %.2f] — rejecting as bad metadata (common cause: capture "
+            "software wrote a screen-DPI default like 72 or 96 dpi instead of "
+            "a real physical calibration). Falling back to manual scale.",
+            path.name,
+            reading,
+            _MIN_PLAUSIBLE_UM_PER_PX,
+            _MAX_PLAUSIBLE_UM_PER_PX,
+        )
+        return None
+    return reading
 
 
 def autodetect_um_per_px_from_folder(folder: Path) -> tuple[Optional[float], int, int]:

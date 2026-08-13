@@ -53,6 +53,7 @@ from TRACE.output_tooltips import output_tooltip_html
 from TRACE.pipeline import (
     DEFAULT_MAX_WORKERS,
     INTERMEDIATE_OUTPUTS,
+    MEASUREMENT_GROUP_TOOLTIPS,
     MEASUREMENT_GROUPS,
     OUTPUT_TOOLTIPS,
     OUTPUT_TYPES,
@@ -1208,6 +1209,9 @@ class TraceWindow(QMainWindow):
                 for gkey, glabel in MEASUREMENT_GROUPS.items():
                     gchk = QCheckBox(glabel)
                     gchk.setChecked(True)
+                    tip = MEASUREMENT_GROUP_TOOLTIPS.get(gkey)
+                    if tip:
+                        gchk.setToolTip(tip)
                     self.csv_group_checks[gkey] = gchk
                     cgl.addWidget(self._wrap_csv_child(gchk, chk))
                 # Custom landmark distances also writes only into the batch CSV,
@@ -1967,13 +1971,20 @@ class TraceWindow(QMainWindow):
         if not self._image_paths:
             return True
         try:
-            from resolutionAdjust.auto_detect import _read_um_per_px_from_tiff, _TIFF_EXTS
+            from resolutionAdjust.auto_detect import (
+                _MAX_PLAUSIBLE_UM_PER_PX,
+                _MIN_PLAUSIBLE_UM_PER_PX,
+                _TIFF_EXTS,
+                _is_plausible_um_per_px,
+                _read_um_per_px_from_tiff,
+            )
         except Exception:  # pragma: no cover
             # If the detector can't be imported, we can't validate — allow
             # the run rather than block on our own tooling failure.
             return True
         skips = effective_skips or set()
         missing: list[str] = []
+        implausible: list[tuple[str, float]] = []
         for p in self._image_paths:
             # Anything the pipeline itself won't process shouldn't block Run.
             if p.name in skips:
@@ -1983,26 +1994,56 @@ class TraceWindow(QMainWindow):
                 # anything else counts as "no per-image scale available".
                 missing.append(p.name)
                 continue
-            v = _read_um_per_px_from_tiff(p)
+            # Read the raw value so we can differentiate no-metadata from
+            # bad-metadata in the error dialog. Runtime paths keep using
+            # the filtered reader — the filter is what protects
+            # resolutionAdjust from allocating terabytes when metadata is
+            # a screen-DPI default.
+            v = _read_um_per_px_from_tiff(p, allow_implausible=True)
             if v is None or v <= 0:
                 missing.append(p.name)
-        if not missing:
+            elif not _is_plausible_um_per_px(v):
+                implausible.append((p.name, float(v)))
+        if not missing and not implausible:
             return True
-        # Truncate the list so the dialog stays scannable.
-        preview = ", ".join(missing[:8])
-        more = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
-        QMessageBox.critical(
-            self,
-            "Missing per-image scale",
-            "Per-image µm/px is enabled, but no fallback scale has been entered "
-            "AND the following image(s) don't carry parseable metadata:\n\n"
-            f"{preview}{more}\n\n"
-            "Either:\n"
-            "  • Enter a µm/px value in the Scale field to use as the fallback, or\n"
-            "  • Uncheck the images above in the list so they're skipped, or\n"
-            "  • Uncheck 'Detect scale from image metadata' and enter a "
-            "single value that applies to every image.",
+        # Truncate the lists so the dialog stays scannable.
+
+        def _fmt(items: list[str]) -> str:
+            preview = ", ".join(items[:8])
+            more = f" (+{len(items) - 8} more)" if len(items) > 8 else ""
+            return f"{preview}{more}"
+
+        body_parts: list[str] = [
+            "Per-image µm/px is enabled with no fallback scale entered.",
+            "",
+        ]
+        if missing:
+            body_parts.append(
+                f"{len(missing)} image(s) don't carry parseable µm/px metadata:\n"
+                f"  {_fmt(missing)}"
+            )
+        if implausible:
+            examples = _fmt([f"{name} (reported {v:.2f} µm/px)" for name, v in implausible])
+            body_parts.append(
+                f"{len(implausible)} image(s) reported a µm/px outside the "
+                f"microscopy plausibility band [{_MIN_PLAUSIBLE_UM_PER_PX:.2f}, "
+                f"{_MAX_PLAUSIBLE_UM_PER_PX:.2f}] — the metadata is almost "
+                f"certainly a screen-DPI default (e.g. 96 dpi → 264.58 µm/px) "
+                f"and not a real physical calibration:\n"
+                f"  {examples}"
+            )
+        body_parts.extend(
+            [
+                "",
+                "Either:",
+                "  • Enter a µm/px value in the Scale field to use as the fallback, or",
+                "  • Uncheck the images above in the list so they're skipped, or",
+                "  • Uncheck 'Detect scale from image metadata' and enter a "
+                "single value that applies to every image.",
+            ]
         )
+        title = "Missing per-image scale" if not implausible else "Per-image scale problem"
+        QMessageBox.critical(self, title, "\n".join(body_parts))
         return False
 
     def reset_workers_warning(self):

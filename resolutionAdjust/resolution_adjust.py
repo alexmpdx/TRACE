@@ -21,6 +21,18 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Runtime backstop against terabyte-scale allocations from bad calibration.
+# Ratio = input_um_per_px / target_um_per_px. A ratio above this cap would
+# upscale an image by >20× per axis (>400× pixel count) — always a
+# calibration mistake in wing microscopy, never something we should attempt.
+# The auto-detect metadata reader has its own plausibility filter that
+# catches the common bad-metadata sources (screen-DPI defaults like
+# 96 dpi → 264 µm/px); this cap is the "never allocate a TB, no matter
+# what" backstop for anything that slipped past — e.g. a user typing
+# "300" into the µm/px field by accident. Off-band ratios pass through
+# unchanged with a WARNING log.
+_MAX_RESCALE_RATIO = 20.0
+
 
 @dataclass
 class ResolutionAdjustResult:
@@ -130,6 +142,38 @@ def adjust_resolution(
         )
 
     ratio = input_um_per_px / target_um_per_px
+
+    # Runtime backstop: refuse ratios that would blow the allocator. See
+    # _MAX_RESCALE_RATIO. This is defense-in-depth behind the pre-flight
+    # + auto-detect plausibility filter; if the user typed a bad manual
+    # scale OR loaded a config with one, we still don't allocate a TB.
+    if ratio > _MAX_RESCALE_RATIO or ratio < 1.0 / _MAX_RESCALE_RATIO:
+        logger.warning(
+            "resolutionAdjust: %s ratio=%.3f (input=%.4f µm/px, target=%.4f µm/px) "
+            "exceeds runtime cap [1/%.0f, %.0f] — passing through unchanged. "
+            "Check that the µm/px calibration for this image is correct; "
+            "attempting the rescale would allocate ~%.0f× more pixels than "
+            "the source image.",
+            image_path.name,
+            ratio,
+            input_um_per_px,
+            target_um_per_px,
+            _MAX_RESCALE_RATIO,
+            _MAX_RESCALE_RATIO,
+            ratio * ratio if ratio > 1 else 1.0 / (ratio * ratio),
+        )
+        img = _read_image(image_path)
+        h, w = img.shape[:2]
+        return ResolutionAdjustResult(
+            image_path=image_path,
+            scale_factor=1.0,
+            original_shape=(h, w),
+            rescaled=False,
+            target_um_per_px=target_um_per_px,
+            effective_um_per_px=input_um_per_px,
+            input_um_per_px=input_um_per_px,
+            ratio=ratio,
+        )
 
     img = _read_image(image_path)
     h, w = img.shape[:2]
