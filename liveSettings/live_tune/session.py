@@ -138,12 +138,47 @@ APPEARANCE_FIELDS = {
     "region_colors",
 }
 
+# Fields that don't affect ANY stage the live preview renders. Routed to
+# Tier D so the assertion at import time (which requires FIELD_TIER to
+# cover every PipelineConfig field) passes without lying about which
+# fields feed the skeleton — CORE_FIELDS + FINISH_FIELDS below partitions
+# only the real skeleton-relevant Tier-A set.
+#
+# Membership rationale:
+#   - auto_detect_um_per_px    — controls how *the pipeline* reads scale
+#                                from TIFF metadata at the top of Stage 1;
+#                                the preview receives whatever um_per_px
+#                                is already on the config, no re-read.
+#   - solidity_*, fragmentation_*, vein_association_*, required_veins,
+#     max_unassigned_vein_frac — garbage-detector filters; they abort a
+#                                run at pipeline hooks but never change
+#                                any pixel or geometry the preview draws.
+_INERT_FIELDS = {
+    "auto_detect_um_per_px",
+    # Solidity filter
+    "solidity_filter_enabled",
+    "solidity_min",
+    "solidity_max",
+    "solidity_mode",
+    "solidity_batch_k",
+    "solidity_min_batch_size",
+    "solidity_batch_range",
+    # Fragmentation filter
+    "fragmentation_filter_enabled",
+    "fragmentation_max_secondary_frac",
+    # Vein-association filter + required-veins list
+    "vein_association_filter_enabled",
+    "max_unassigned_vein_frac",
+    "required_veins",
+}
+
 
 def _build_field_tier() -> dict[str, str]:
     """Map each PipelineConfig field to its tier; everything else is tier A.
 
-    Anything not explicitly B/C/D feeds skeleton construction (or scale, which
-    feeds every um->px conversion upstream), so the safe default is tier A.
+    Anything not explicitly B/C/D (or _INERT_FIELDS, routed to D) feeds
+    skeleton construction (or scale, which feeds every um->px conversion
+    upstream), so the safe default is tier A.
     """
     tier: dict[str, str] = {}
     for f in fields(PipelineConfig):
@@ -152,7 +187,7 @@ def _build_field_tier() -> dict[str, str]:
             tier[name] = TIER_B
         elif name in _TIER_C_FIELDS:
             tier[name] = TIER_C
-        elif name in APPEARANCE_FIELDS:
+        elif name in APPEARANCE_FIELDS or name in _INERT_FIELDS:
             tier[name] = TIER_D
         else:
             tier[name] = TIER_A
