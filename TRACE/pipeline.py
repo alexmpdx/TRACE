@@ -90,6 +90,7 @@ _LEGACY_OVERLAY_ALIASES = {"overlay": ("vein_overlay", "intervein_overlay")}
 # Re-export so GUI/CLI can import groups + labels from a single module.
 from identify_features.views.csv_export import (  # noqa: E402
     ALL_MEASUREMENT_GROUPS,
+    MEASUREMENT_GROUP_TOOLTIPS,
     MEASUREMENT_GROUPS,
 )
 

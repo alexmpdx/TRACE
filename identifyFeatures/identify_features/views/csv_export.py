@@ -51,6 +51,23 @@ MEASUREMENT_GROUPS: "OrderedDict[str, str]" = OrderedDict(
     ]
 )
 
+# Per-group tooltips for the GUI checkboxes. Keys are a subset of
+# MEASUREMENT_GROUPS — groups without an entry render as a bare label.
+MEASUREMENT_GROUP_TOOLTIPS: dict[str, str] = {
+    "wing_shape": (
+        "Aspect ratio: sqrt(λ₁/λ₂) of the wing outline's PCA eigenvalues — the "
+        "ratio of the wing's long axis to its short axis. Wildtype ~2.3.\n\n"
+        "Solidity: wing area / convex-hull area. Wildtype ~0.97–0.99; drops on "
+        "notched mutants (e.g. Notch, Serrate)."
+    ),
+    "cv_ratio": (
+        "Crossvein distance / wing length.\n\n"
+        "CV distance measurement: ACV-L4 junction to PCV-L4 junction.\n"
+        "Wing length measurement: L1-Rs junction to L3 distal end."
+    ),
+    "ap_areas": "Area of the anterior and posterior compartments.",
+}
+
 ALL_MEASUREMENT_GROUPS: frozenset[str] = frozenset(MEASUREMENT_GROUPS.keys())
 
 
