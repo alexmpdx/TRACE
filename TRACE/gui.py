@@ -861,6 +861,16 @@ class TraceWindow(QMainWindow):
         # would survive across TRACE restarts. Both reset on consumption.
         self._pending_gate_override: Optional[dict] = None
         self._pending_disable_garbage_filters: bool = False
+        # Set by _maybe_prompt_append_csv when the user picks an output
+        # folder that already has one or more measurements_*.csv files
+        # from prior runs and chooses "Append to this CSV". _run_pipeline
+        # splices this into the worker kwargs for one launch: renames the
+        # target to <prev_stem>_<new_run>.csv and pipes it in as
+        # append_from_csv so trace_folder's CSV block folds the old rows
+        # into the new run's output. Cleared after consumption AND on
+        # every subsequent output-folder change so a stale prior choice
+        # doesn't leak into an unrelated later run.
+        self._pending_append_csv: Optional[Path] = None
         # User-driven skip: basenames the user has explicitly unchecked
         # in the Main-tab image list. Held separately from
         # _resume_skip_set (which is derived from the run manifest and
@@ -1889,6 +1899,116 @@ class TraceWindow(QMainWindow):
     def _on_output_folder_picked(self, folder: str) -> None:
         if folder:
             self.output_edit.setText(folder)
+            # Any stale "append to X.csv" choice from a previously-picked
+            # folder is invalid the moment the target folder changes.
+            # Clear before re-prompting so a user who declines the new
+            # folder's dialog starts clean.
+            self._pending_append_csv = None
+            self._maybe_prompt_append_csv(Path(folder))
+
+    def _maybe_prompt_append_csv(self, folder: Path) -> None:
+        """If ``folder`` already holds measurement CSV(s) from prior runs,
+        ask the user whether to append this run's rows into one of them.
+
+        Selection is stashed on ``self._pending_append_csv`` and consumed
+        by ``_run_pipeline`` at worker-launch time: the chosen CSV is
+        moved into the new run's csv_path.append_source slot so the
+        pipeline's existing merge step folds its rows into the new run's
+        output. The combined file is named
+        ``<prev_stem>_<new_run_folder_name>.csv`` per user spec (new run
+        name appended to previous).
+
+        No-op when: folder doesn't exist, contains no measurement CSVs,
+        or the only candidate is unreadable.
+        """
+        if not folder.is_dir():
+            return
+        # Match every naming era so upgraded users' old CSVs are visible:
+        # the pre-v0.2.10 shared "measurements.csv", the current
+        # "measurements_run_<stamp>.csv", and prior append-combined
+        # "measurements_run_A_run_B.csv" chains.
+        candidates = sorted(
+            (p for p in folder.glob("measurements*.csv") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            return
+
+        from PyQt5.QtWidgets import (
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QLabel,
+            QVBoxLayout,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Append to existing measurements?")
+        layout = QVBoxLayout(dlg)
+        label = QLabel(
+            "This output folder already contains measurement CSV(s) from "
+            "previous runs. Do you want the new run's rows to be appended "
+            "into one of them?\n\n"
+            "Append: the chosen CSV is renamed to include this run's ID "
+            "and the new rows are added to it (previous rows preserved; "
+            "duplicate specimens are not re-added).\n\n"
+            "Write separate CSV: the new run gets its own "
+            "measurements_run_<stamp>.csv; existing files are untouched."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        combo = QComboBox(dlg)
+        for p in candidates:
+            combo.addItem(p.name, userData=p)
+        combo.setToolTip("Most recently modified CSV first")
+        layout.addWidget(combo)
+
+        btns = QDialogButtonBox(dlg)
+        btn_append = btns.addButton("Append to selected CSV", QDialogButtonBox.AcceptRole)
+        btn_new = btns.addButton("Write separate CSV", QDialogButtonBox.RejectRole)
+        btns.setToolTip("")
+        btn_append.setDefault(True)
+        layout.addWidget(btns)
+
+        chosen = {"append": False}
+
+        def _on_append():
+            chosen["append"] = True
+            dlg.accept()
+
+        btn_append.clicked.connect(_on_append)
+        btn_new.clicked.connect(dlg.reject)
+
+        dlg.exec_()
+
+        if chosen["append"]:
+            data = combo.currentData()
+            if isinstance(data, Path) and data.is_file():
+                self._pending_append_csv = data
+        # If the user picked "Write separate CSV" or closed the dialog,
+        # _pending_append_csv stays None (already cleared above).
+
+    def _resolve_run_csv_filename(self) -> Optional[str]:
+        """Compute the batch CSV's filename for this launch.
+
+        Precedence:
+          - No run folder yet → None (pipeline falls back to legacy
+            "measurements.csv"; happens only in edge paths where the run
+            folder isn't set before the worker is built).
+          - _pending_append_csv set → "<prev_stem>_<run_folder_name>.csv"
+            per user spec: new run name appended to previous run name.
+            Chains cleanly: appending twice yields
+            "measurements_run_A_run_B_run_C.csv".
+          - Otherwise → "measurements_<run_folder_name>.csv".
+        """
+        if self._run_folder is None:
+            return None
+        new_run_id = self._run_folder.name
+        if self._pending_append_csv is not None:
+            prev_stem = self._pending_append_csv.stem
+            return f"{prev_stem}_{new_run_id}.csv"
+        return f"measurements_{new_run_id}.csv"
 
     # -----------------------------------------------------------------------
     # Pipeline settings (PipelineConfig)
@@ -3825,8 +3945,28 @@ class TraceWindow(QMainWindow):
                 # measurements_rerun_<ts>.csv instead of merging into the
                 # existing measurements.csv. None = default behavior.
                 csv_filename_override=csv_filename_override,
+                # Name the batch CSV after the run folder so multiple
+                # runs to the same output folder produce distinct files
+                # (measurements_run_<stamp>.csv) instead of overwriting
+                # a shared measurements.csv. Resume reuses the same
+                # run_folder → same filename → the resume-merge path in
+                # pipeline.py still merges as before. csv_filename_override
+                # still wins for the "rerun failed → new CSV" branch.
+                # When _pending_append_csv is set (user chose to append
+                # into a prior run's CSV at output-folder-selection time)
+                # this filename becomes "<prev_stem>_<new_run>.csv" so
+                # the combined output visibly ties both run IDs together.
+                csv_filename=self._resolve_run_csv_filename(),
+                # Route the previously-chosen CSV into trace_folder's
+                # append-source slot so the merge step folds its rows
+                # into this run's output. One-shot: cleared just below
+                # so the choice doesn't leak into a subsequent Run.
+                append_from_csv=self._pending_append_csv,
             )
         )
+        # Consume the one-shot append target: whether the launch succeeds
+        # or fails, subsequent Runs must not re-append the same file.
+        self._pending_append_csv = None
         self.worker.progress.connect(self._on_progress)
         self.worker.log_message.connect(self._log)
         self.worker.all_done.connect(self._on_all_done)

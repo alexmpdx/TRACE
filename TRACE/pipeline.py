@@ -485,6 +485,8 @@ def trace_folder(
     rescale_tolerance_high: float = 1.15,
     skip_image_basenames: Optional[set[str]] = None,
     csv_filename_override: Optional[str] = None,
+    csv_filename: Optional[str] = None,
+    append_from_csv: Optional[Path] = None,
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
     on_image_failed_preproc=None,
@@ -622,6 +624,8 @@ def trace_folder(
             rescale_tolerance_high=rescale_tolerance_high,
             skip_image_basenames=skip_image_basenames,
             csv_filename_override=csv_filename_override,
+            csv_filename=csv_filename,
+            append_from_csv=append_from_csv,
             pause_event=pause_event,
             on_image_complete=on_image_complete,
             on_image_failed_preproc=on_image_failed_preproc,
@@ -668,6 +672,8 @@ def _run(
     rescale_tolerance_high: float = 1.15,
     skip_image_basenames: Optional[set[str]] = None,
     csv_filename_override: Optional[str] = None,
+    csv_filename: Optional[str] = None,
+    append_from_csv: Optional[Path] = None,
     pause_event: Optional["threading.Event"] = None,
     on_image_complete=None,
     on_image_failed_preproc=None,
@@ -1257,26 +1263,53 @@ def _run(
 
     # --- Batch CSV ---
     if "csv" in outputs:
-        # csv_filename_override is the rerun-failed "Write to new CSV"
-        # branch. When set, write to that filename and skip the
-        # resume-merge entirely — the user explicitly asked for a fresh,
-        # standalone CSV. When unset, default name + normal merge path.
-        csv_path = output_dir / (csv_filename_override or "measurements.csv")
-        # Resume support: if we're skipping previously-completed images,
-        # park the prior measurements.csv aside so its rows can be folded
-        # back in after the new slice writes. The merge happens at the
-        # end of this block (covering both the fast path and the normal
-        # export_csv_batch path).
-        # The override-branch deliberately skips this — it's writing a
-        # new file by name, so there's nothing to fold in.
+        # Filename precedence:
+        #   1. csv_filename_override — rerun-failed "Write to new CSV"
+        #      branch: skip resume-merge entirely, user explicitly wants
+        #      a fresh standalone CSV.
+        #   2. csv_filename — normal per-run naming (GUI passes
+        #      "measurements_<run_folder_name>.csv" so each run's CSV is
+        #      uniquely tied to its run folder / manifest / run.log).
+        #      Still participates in the resume-merge path below because
+        #      a resumed run reuses the same run_folder → same filename.
+        #   3. "measurements.csv" fallback for CLI / older callers that
+        #      don't compute a run-specific name.
+        csv_path = output_dir / (csv_filename_override or csv_filename or "measurements.csv")
+        # Two paths can pre-stage an existing CSV as `.append_source` so
+        # the merge step at the end of this block folds its rows in:
+        #
+        #   A) Resume: skipping previously-completed images, move THIS
+        #      run's own csv_path aside so the new slice can write fresh
+        #      then merge the prior slice's rows back in.
+        #
+        #   B) Append-to-existing (append_from_csv): user explicitly asked
+        #      at output-folder-selection time to append the new run's
+        #      rows into an existing measurements CSV from a prior run.
+        #      Source CSV lives at a DIFFERENT path (the previous run's
+        #      filename); move it TO the current csv_path's append_source
+        #      sibling so the merge picks it up. Ignored when it points
+        #      at the same file as csv_path (defensive no-op).
+        #
+        # csv_filename_override deliberately skips both — it's writing a
+        # new standalone CSV by name, so there's nothing to fold in.
         csv_append_source: Optional[Path] = None
-        if not csv_filename_override and skip_image_basenames and csv_path.is_file():
-            csv_append_source = csv_path.with_suffix(".csv.append_source")
-            try:
-                csv_path.replace(csv_append_source)
-            except OSError as exc:
-                logger.warning("CSV resume: cannot move %s aside: %s", csv_path, exc)
-                csv_append_source = None
+        if not csv_filename_override:
+            if skip_image_basenames and csv_path.is_file():
+                csv_append_source = csv_path.with_suffix(".csv.append_source")
+                try:
+                    csv_path.replace(csv_append_source)
+                except OSError as exc:
+                    logger.warning("CSV resume: cannot move %s aside: %s", csv_path, exc)
+                    csv_append_source = None
+            elif append_from_csv is not None and append_from_csv.is_file() and append_from_csv.resolve() != csv_path.resolve():
+                csv_append_source = csv_path.with_suffix(".csv.append_source")
+                try:
+                    append_from_csv.replace(csv_append_source)
+                except OSError as exc:
+                    logger.warning(
+                        "CSV append: cannot move %s to %s: %s", append_from_csv, csv_append_source, exc
+                    )
+                    csv_append_source = None
         if fast_csv_path:
             # Fast path: identifyFeatures did not run, so there is no
             # measurements.csv to augment. Write one from scratch using only
