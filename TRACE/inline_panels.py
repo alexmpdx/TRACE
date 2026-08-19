@@ -2790,5 +2790,49 @@ class InlineHelpPanel(QWidget):
             )
             return
 
-        # Exit TRACE so the installer can replace files.
-        QApplication.quit()
+        # Exit TRACE so the installer can replace files. Reported
+        # 2026-08-19: on Windows, ``QApplication.quit()`` alone often
+        # didn't actually close the process — the installer would launch
+        # but TRACE would keep running in the background because Qt's
+        # graceful quit waits for any lingering QThread / non-daemon
+        # Python thread (idle auto-update thread, PyTorch cleanup
+        # threads, etc.) to finish, and PyInstaller's frozen wrapper
+        # adds additional finalizer steps that block. Since the whole
+        # point of this exit is to release TRACE.exe so the installer
+        # can overwrite it, we skip the graceful path entirely on the
+        # frozen Windows build and hard-exit with ``os._exit(0)``.
+        # Non-frozen dev runs keep the graceful path so autouse fixtures
+        # and unit tests aren't nuked mid-teardown.
+        #
+        # Sequence:
+        #   1. Close the main window explicitly so its closeEvent
+        #      saves QSettings geometry + inline-panel state before we
+        #      go — losing that state on every update was itself a
+        #      minor UX regression.
+        #   2. processEvents() gives Qt a tick to flush the close +
+        #      any pending log-to-disk writes before we bail.
+        #   3. Hard-exit via os._exit(0) on frozen Windows; graceful
+        #      QApplication.quit() elsewhere.
+        try:
+            main_window = getattr(self, "_window", None)
+            if main_window is not None:
+                main_window.close()
+            QApplication.processEvents()
+        except Exception:  # noqa: BLE001
+            pass
+
+        if getattr(sys, "frozen", False) and sys.platform == "win32":
+            # Skip Python's cleanup entirely — atexit handlers, thread
+            # joins, and PyInstaller's finalizer all get bypassed. On
+            # Windows that's fine: the process just terminates and the
+            # installer takes over immediately.
+            try:
+                if sys.stdout is not None:
+                    sys.stdout.flush()
+                if sys.stderr is not None:
+                    sys.stderr.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            os._exit(0)
+        else:
+            QApplication.quit()
