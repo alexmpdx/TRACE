@@ -149,8 +149,10 @@ APPEARANCE_FIELDS = {
 #                                from TIFF metadata at the top of Stage 1;
 #                                the preview receives whatever um_per_px
 #                                is already on the config, no re-read.
-#   - solidity_*, fragmentation_*, vein_association_*, required_veins,
-#     max_unassigned_vein_frac — garbage-detector filters; they abort a
+#   - solidity_*, fragmentation_*, vein_association_*,
+#     intervein_association_*, required_veins,
+#     max_unassigned_vein_frac, max_unassigned_intervein_frac —
+#                                garbage-detector filters; they abort a
 #                                run at pipeline hooks but never change
 #                                any pixel or geometry the preview draws.
 _INERT_FIELDS = {
@@ -170,6 +172,12 @@ _INERT_FIELDS = {
     "vein_association_filter_enabled",
     "max_unassigned_vein_frac",
     "required_veins",
+    # Intervein-association filter (added 2026-07-22 in
+    # identify_features/garbage_detector/filters/intervein_association.py;
+    # commit 38843e8f). Aborts wings with excess unassigned intervein
+    # tissue — same shape as the vein-association filter.
+    "intervein_association_filter_enabled",
+    "max_unassigned_intervein_frac",
 }
 
 

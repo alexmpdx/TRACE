@@ -1171,7 +1171,7 @@ class PipelineConfigDialog(QDialog):
             QMessageBox.critical(self, "Auto-detect failed", f"Could not scan folder:\n{exc}")
             return
         if avg is None:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "No metadata found",
                 f"None of the {n_total} TIFF file(s) in this folder had readable µm/px "
@@ -1235,7 +1235,7 @@ class PipelineConfigDialog(QDialog):
         from pathlib import Path as _P
 
         if not sorted(_P(folder).glob("best_fold*.pt")):
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "No fold checkpoints",
                 f"No best_fold*.pt files in {folder}.\n\n"

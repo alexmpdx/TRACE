@@ -31,11 +31,19 @@ class _CalibrationThread(QThread):
     finished_ok = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
-    def __init__(self, image_or_folder: Path, landmark_model: Path, segmentation_model: Path, parent=None):
+    def __init__(
+        self,
+        image_or_folder: Path,
+        landmark_model: Path,
+        segmentation_model: Path,
+        parent=None,
+        recursive: bool = False,
+    ):
         super().__init__(parent)
         self._image_or_folder = image_or_folder
         self._landmark_model = landmark_model
         self._segmentation_model = segmentation_model
+        self._recursive = bool(recursive)
 
     def run(self):
         try:
@@ -46,6 +54,7 @@ class _CalibrationThread(QThread):
                 landmark_checkpoint=self._landmark_model,
                 segmentation_model_dir=self._segmentation_model,
                 progress_callback=lambda stage, detail: self.progress.emit(stage, detail),
+                recursive=self._recursive,
             )
             self.finished_ok.emit(result)
         except Exception as e:
@@ -69,10 +78,26 @@ class CalibrateWidget(QWidget):
         self._input_path = ""
         self._landmark_path = ""
         self._seg_path = ""
+        # Forwarded to pick_calibration_image so calibration image discovery
+        # matches whichever "Include subfolders" state the user has selected
+        # in the main window. Default False (safe: fail on a wrong-folder
+        # selection rather than silently descend).
+        self._recursive = False
         self._thread = None
         self._started_at = None
         self._phase_starts: dict[str, float] = {}
         self._current_phase: str | None = None
+        # Callable invoked immediately before every _start_calibration to
+        # re-seed self._input_path / model paths from the host's current
+        # state. Set via ``set_refresher`` after construction; used
+        # instead of self.parent() to look up _refresh_calibrate_paths
+        # because Qt reparents this widget from its constructor-time
+        # parent to whichever QGroupBox / layout owner it ends up
+        # inside. Without a captured refresher we'd silently keep the
+        # stale path from construction time and try to calibrate against
+        # whichever folder was showing when the Settings tab was first
+        # built — reported 2026-08-19 in a follow-up on issue #35.
+        self._refresher = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -111,27 +136,46 @@ class CalibrateWidget(QWidget):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def set_paths(self, input_path: str, landmark_path: str, seg_path: str):
+    def set_paths(
+        self,
+        input_path: str,
+        landmark_path: str,
+        seg_path: str,
+        recursive: bool = False,
+    ):
         self._input_path = input_path or ""
         self._landmark_path = landmark_path or ""
         self._seg_path = seg_path or ""
+        self._recursive = bool(recursive)
+
+    def set_refresher(self, refresher) -> None:
+        """Register a callable to be invoked before each calibration run.
+
+        The refresher is expected to call :meth:`set_paths` with the
+        host's current input folder + model paths. Explicit registration
+        replaces the earlier ``self.parent()._refresh_calibrate_paths``
+        lookup, which silently no-op'd once Qt reparented the widget
+        into a QGroupBox (see the note on ``self._refresher`` in
+        ``__init__``).
+        """
+        self._refresher = refresher if callable(refresher) else None
 
     # ------------------------------------------------------------------
     # Calibration lifecycle
     # ------------------------------------------------------------------
     def _start_calibration(self):
-        # Re-pull state from the parent panel right before the prereq check.
-        # set_paths() was only called once at construction, so any folder /
-        # model change after the Settings tab was built (Browse... on the main
-        # window, OK in the settings dialog, Restore Defaults, ...) wouldn't
-        # otherwise be visible here. Parents that don't expose
-        # _refresh_calibrate_paths (e.g. the standalone help dialog that
-        # already calls set_paths itself) are silently skipped.
-        parent_panel = self.parent()
-        refresh = getattr(parent_panel, "_refresh_calibrate_paths", None)
-        if callable(refresh):
+        # Re-pull state from the host RIGHT before the prereq check.
+        # set_paths() was only called once at construction, so any folder
+        # / model change after the Settings tab was built (Browse on the
+        # main window, OK in the settings dialog, Restore Defaults, ...)
+        # wouldn't otherwise be visible here. Uses the explicit refresher
+        # registered via set_refresher; falling back to self.parent() as
+        # earlier code did is unsafe because Qt reparents this widget
+        # away from the constructor-time parent as soon as it's added
+        # to a QGroupBox / layout.
+        if self._refresher is not None:
             try:
-                refresh()
+                self._refresher()
             except Exception:
                 pass
 
@@ -143,7 +187,7 @@ class CalibrateWidget(QWidget):
         if not self._seg_path:
             missing.append("Segmentation model")
         if missing:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Calibration prerequisites missing",
                 "Set the following in the main window before calibrating:\n  - " + "\n  - ".join(missing),
@@ -160,6 +204,7 @@ class CalibrateWidget(QWidget):
             image_or_folder=Path(self._input_path),
             landmark_model=Path(self._landmark_path),
             segmentation_model=Path(self._seg_path),
+            recursive=self._recursive,
             parent=self,
         )
         thread.progress.connect(self._on_progress)

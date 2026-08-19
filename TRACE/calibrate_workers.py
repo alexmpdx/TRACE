@@ -26,21 +26,65 @@ import recommend_workers  # noqa: E402
 IMAGE_EXTS = (".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb")
 
 
-def pick_calibration_image(path: Path) -> Path:
-    """Resolve a folder-or-file argument to a single image path."""
+def pick_calibration_image(path: Path, recursive: bool = False) -> Path:
+    """Resolve a folder-or-file argument to a single image path.
+
+    Search order for a folder:
+      1. Direct children (always tried first, matches historical behavior
+         AND is the only path a user with ``Include subfolders`` OFF
+         wants scanned — a leaf folder with no images should raise, not
+         silently descend into subfolders they didn't select).
+      2. Recursive walk via ``rglob`` — only engaged when ``recursive=True``
+         AND the top-level scan returned nothing. This mirrors TRACE's
+         main-window "Include subfolders" checkbox; the calibration widget
+         forwards its state so calibration discovery matches what the
+         user sees in the image list.
+
+    Calibration only needs ONE image to measure Stage-2 peak RAM, so
+    picking the first sorted match at whichever depth actually contains
+    images is fine.
+    """
     p = Path(path).expanduser().resolve()
     if p.is_file():
         if p.suffix.lower() not in IMAGE_EXTS:
             raise ValueError(f"Not a supported image: {p.name}")
         return p
-    if p.is_dir():
-        for f in sorted(p.iterdir()):
+    if not p.is_dir():
+        raise FileNotFoundError(f"Path not found: {p}")
+
+    def _first_image(iterable):
+        for f in iterable:
+            if not f.is_file():
+                continue
             if f.name.startswith(".") or f.name.startswith("._"):
                 continue
             if f.suffix.lower() in IMAGE_EXTS:
                 return f
-        raise FileNotFoundError(f"No supported images in folder: {p}")
-    raise FileNotFoundError(f"Path not found: {p}")
+        return None
+
+    # 1. Top-level scan.
+    top = _first_image(sorted(p.iterdir()))
+    if top is not None:
+        return top
+
+    # 2. Recursive fallback — ONLY when the caller opted in via
+    # ``recursive=True`` (usually because the main-window Include
+    # subfolders checkbox is on). When off, a top-level miss really is
+    # a "wrong folder" mistake and we want to surface that instead of
+    # silently descending.
+    if recursive:
+        deep = _first_image(sorted(p.rglob("*")))
+        if deep is not None:
+            return deep
+
+    # Diagnostic error includes the raw input path so bug reports show
+    # exactly what the caller forwarded (helped pin down the widget-
+    # reparenting bug on the 2026-08-19 follow-up to issue #35 where
+    # the raw path differed from the currently-selected input folder).
+    raise FileNotFoundError(
+        f"No supported images in folder: {p}\n"
+        f"(raw path from caller: {path!r})"
+    )
 
 
 def calibrate_for_trace(
@@ -49,6 +93,7 @@ def calibrate_for_trace(
     segmentation_model_dir: Path,
     device=None,
     progress_callback: Optional[Callable[[str, str], None]] = None,
+    recursive: bool = False,
 ) -> dict:
     """Run Stage 1 on one image, measure Stage 2 peak RSS, return recommendation.
 
@@ -57,10 +102,16 @@ def calibrate_for_trace(
 
     `progress_callback(stage, detail)` is called with stage in
     {"preprocessing", "calibration"} when each phase begins. May be None.
+
+    ``recursive`` is forwarded to :func:`pick_calibration_image`; wire it
+    from the main-window "Include subfolders" checkbox so calibration
+    discovery matches what the user sees in the image list. When False,
+    a folder with no top-level images raises rather than silently
+    descending into subfolders the user didn't opt to include.
     """
     from preprocessing.pipeline import process_single_image
 
-    image_path = pick_calibration_image(Path(image_or_folder))
+    image_path = pick_calibration_image(Path(image_or_folder), recursive=recursive)
 
     landmark_checkpoint = Path(landmark_checkpoint).resolve()
     segmentation_model_dir = Path(segmentation_model_dir).resolve()

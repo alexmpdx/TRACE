@@ -149,16 +149,33 @@ def _read_um_per_px_from_tiff(path: Path, *, allow_implausible: bool = False) ->
 def autodetect_um_per_px_from_folder(folder: Path) -> tuple[Optional[float], int, int]:
     """Average µm/px over the TIFFs in `folder` that carry parseable metadata.
 
-    Walks the folder one level deep (no recursion) and only considers .tif /
-    .tiff files — other formats rarely carry physical-size metadata. Returns
-    (average_um_per_px or None, n_with_metadata, n_total). When zero images
-    yield a value the caller should treat the result as a soft failure.
+    Discovery order — matches the calibration and main-window "Include
+    subfolders" behavior so users can point at either a leaf folder full
+    of TIFFs or a parent whose TIFFs sit in subfolders:
+      1. Direct children (fast path; historical behavior).
+      2. Recursive walk via ``rglob`` — engaged only when the direct-child
+         scan returned zero TIFFs. This is what TRACE's main window does
+         when "Include subfolders" is checked, and it's what a user who
+         hands us a batch parent like
+         ``<batch>/40X_magnification_Leica_ome-tiff`` (whose TIFFs live
+         in ``part1/partA/…``) expects.
+
+    Returns (average_um_per_px or None, n_with_metadata, n_total). When
+    zero images yield a value the caller should treat the result as a
+    soft failure.
     """
     folder = Path(folder)
     if not folder.is_dir():
         raise NotADirectoryError(f"Not a directory: {folder}")
 
     candidates = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _TIFF_EXTS)
+    if not candidates:
+        # Nothing at top level → recurse. Fast to fall through on folders
+        # that DO have top-level TIFFs (rglob is skipped) and lets nested
+        # batches average their metadata correctly.
+        candidates = sorted(
+            p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _TIFF_EXTS
+        )
     n_total = len(candidates)
 
     values: list[float] = []

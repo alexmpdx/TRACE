@@ -770,6 +770,13 @@ class InlineGeneralPanel(QWidget):
         from TRACE.calibrate_widget import CalibrateWidget
 
         self._calibrate_widget = CalibrateWidget(self)
+        # Register an explicit refresher BEFORE addWidget reparents the
+        # widget into the QGroupBox — otherwise the widget's runtime
+        # parent() call at click time would return the QGroupBox, which
+        # doesn't have _refresh_calibrate_paths, and the widget would
+        # silently keep the stale path stashed at construction. See the
+        # 2026-08-19 follow-up on issue #35.
+        self._calibrate_widget.set_refresher(self._refresh_calibrate_paths)
         self._refresh_calibrate_paths()
         self._calibrate_widget.applied.connect(lambda val: self.workers_spin.setValue(int(val)))
         v.addWidget(self._calibrate_widget)
@@ -802,10 +809,18 @@ class InlineGeneralPanel(QWidget):
         """Re-seed the CalibrateWidget with the window's current input + model paths."""
         if not hasattr(self, "_calibrate_widget"):
             return
+        recursive = False
+        recursive_chk = getattr(self._window, "recursive_chk", None)
+        if recursive_chk is not None:
+            try:
+                recursive = bool(recursive_chk.isChecked())
+            except Exception:
+                recursive = False
         self._calibrate_widget.set_paths(
             self._window.input_edit.text() if hasattr(self._window, "input_edit") else "",
             getattr(self._window, "_landmark_model_path", ""),
             getattr(self._window, "_segmentation_model_path", ""),
+            recursive=recursive,
         )
 
     # -----------------------------------------------------------------------
@@ -1184,7 +1199,7 @@ class InlineGeneralPanel(QWidget):
     def _estimate_um_per_px_from_picked_image(self, host_dialog: QDialog | None = None) -> None:
         lm_path = (getattr(self._window, "_landmark_model_path", "") or "").strip()
         if not lm_path:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "No landmark model",
                 "Set the Landmark model in Settings → Models first — the estimator "
@@ -1252,7 +1267,7 @@ class InlineGeneralPanel(QWidget):
             )
         except ScaleEstimationError as exc:
             QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "Estimate failed", str(exc))
+            QMessageBox.critical(self, "Estimate failed", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             QApplication.restoreOverrideCursor()
@@ -1290,7 +1305,7 @@ class InlineGeneralPanel(QWidget):
     def _estimate_um_per_px_from_sample(self) -> None:
         lm_path = (getattr(self._window, "_landmark_model_path", "") or "").strip()
         if not lm_path:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "No landmark model",
                 "Set the Landmark model in Settings → Models first — the estimator "
@@ -1301,7 +1316,7 @@ class InlineGeneralPanel(QWidget):
             return
         input_path_str = (self._window.input_edit.text() or "").strip()
         if not input_path_str:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "No input folder",
                 "Pick an input image or folder on the main window first — the "
@@ -1321,17 +1336,31 @@ class InlineGeneralPanel(QWidget):
                     f"preprocessing.discover_images is not importable:\n{exc}",
                 )
                 return
-            discovered = discover_images(input_path, recursive=False)
+            # Honor the main-window "Include subfolders" checkbox so the
+            # estimator sees the same images the user does. Previously
+            # hardcoded recursive=False, which surfaced "No images
+            # found" on any batch where the user pointed at a parent
+            # whose images live in subfolders even with "Include
+            # subfolders" checked (reported 2026-08-19).
+            recursive = False
+            recursive_chk = getattr(self._window, "recursive_chk", None)
+            if recursive_chk is not None:
+                try:
+                    recursive = bool(recursive_chk.isChecked())
+                except Exception:
+                    recursive = False
+            discovered = discover_images(input_path, recursive=recursive)
             if not discovered:
-                QMessageBox.warning(
+                QMessageBox.critical(
                     self,
                     "No images found",
-                    f"No supported image files in:\n{input_path}",
+                    f"No supported image files in:\n{input_path}"
+                    + ("" if recursive else "\n\n(Check 'Include subfolders' on the main window if your images live in subfolders.)"),
                 )
                 return
             image_paths = discovered[: self._SCALE_ESTIMATOR_MAX_IMAGES]
         else:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Input not found",
                 f"Input path does not exist:\n{input_path_str}",
@@ -1373,7 +1402,7 @@ class InlineGeneralPanel(QWidget):
             )
         except ScaleEstimationError as exc:
             progress.close()
-            QMessageBox.warning(self, "Estimate failed", str(exc))
+            QMessageBox.critical(self, "Estimate failed", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             progress.close()
@@ -1649,7 +1678,7 @@ class InlineCustomDistancesPanel(QWidget):
         if self._picker is None:
             return
         if not self._CARTOON_IMAGE.is_file() or not self._CARTOON_LANDMARKS.is_file():
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Cartoon wing missing",
                 "The bundled cartoon-wing files weren't found in this install:\n"
@@ -2302,7 +2331,7 @@ class InlineHelpPanel(QWidget):
             return
         target = Path(sys.executable)
         if not target.is_file():
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Desktop shortcut",
                 f"Couldn't locate TRACE.exe at {target}. The shortcut wasn't created.",
@@ -2310,7 +2339,7 @@ class InlineHelpPanel(QWidget):
             return
         desktop_str = QStandardPaths.writableLocation(QStandardPaths.DesktopLocation)
         if not desktop_str:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Desktop shortcut",
                 "Couldn't find your Desktop folder. The shortcut wasn't created.",
@@ -2335,7 +2364,7 @@ class InlineHelpPanel(QWidget):
             sc.IconLocation = str(ico) if ico is not None else str(target)
             sc.save()
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Desktop shortcut",
                 f"Could not create the shortcut: {type(exc).__name__}: {exc}",

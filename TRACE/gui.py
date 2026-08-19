@@ -2216,7 +2216,21 @@ class TraceWindow(QMainWindow):
         layout.addWidget(msg)
 
         calib = CalibrateWidget(dlg)
-        calib.set_paths(self.input_edit.text(), self._landmark_model_path, self._segmentation_model_path)
+        # Explicit refresher so every Calibrate click re-reads the CURRENT
+        # main-window state — critical when the user Browses to a new
+        # input folder in between opening this dialog and clicking
+        # Calibrate. Directly writes to the widget via a bound
+        # set_paths call so it works even if the widget gets reparented
+        # by the layout system before the click.
+        def _refresh_from_main():
+            calib.set_paths(
+                self.input_edit.text(),
+                self._landmark_model_path,
+                self._segmentation_model_path,
+                recursive=self.recursive_chk.isChecked() if hasattr(self, "recursive_chk") else False,
+            )
+        calib.set_refresher(_refresh_from_main)
+        _refresh_from_main()
         calib.applied.connect(lambda v: self.inline_general_panel.workers_spin.setValue(int(v)))
         layout.addWidget(calib)
 
@@ -2983,7 +2997,7 @@ class TraceWindow(QMainWindow):
             if row is not None and 0 <= row < len(self._image_paths):
                 failed_paths.append(self._image_paths[row])
         if not failed_paths:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Review failed images",
                 "Couldn't locate the failed images. Has the input folder changed " "since the last run?",
@@ -3434,7 +3448,7 @@ class TraceWindow(QMainWindow):
 
             found = find_completed_manifest(Path(folder))
         except Exception as exc:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Load previous run",
                 f"Couldn't read run-state from {folder}:\n{type(exc).__name__}: {exc}",
@@ -3480,7 +3494,7 @@ class TraceWindow(QMainWindow):
         # current _image_paths universe doesn't match _last_run_failed_set.
         all_image_names = {p.name for p in self._image_paths}
         if not self._last_run_failed_set.issubset(all_image_names):
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Cannot rerun",
                 "The input folder doesn't contain all the images that failed in the "
@@ -3646,16 +3660,16 @@ class TraceWindow(QMainWindow):
         self.btn_rerun_failed_nogate.setVisible(False)
         # Validate required fields
         if not self.input_edit.text():
-            QMessageBox.warning(self, "Missing Input", "Please select an input folder.")
+            QMessageBox.critical(self, "Missing Input", "Please select an input folder.")
             return
         if not self.output_edit.text():
-            QMessageBox.warning(self, "Missing Output", "Please select an output folder.")
+            QMessageBox.critical(self, "Missing Output", "Please select an output folder.")
             return
         if not self._landmark_model_path:
-            QMessageBox.warning(self, "Missing Model", "Please select a landmark model in Settings → Models.")
+            QMessageBox.critical(self, "Missing Model", "Please select a landmark model in Settings → Models.")
             return
         if not self._segmentation_model_path:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self, "Missing Model", "Please select a segmentation model folder in Settings → Models."
             )
             return
@@ -3674,7 +3688,7 @@ class TraceWindow(QMainWindow):
             if not self._preflight_check_per_image_scale(effective_skips=preflight_skips):
                 return
         elif self.config.um_per_px is None:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Missing Scale",
                 "Please enter a µm/px conversion factor in the Scale field before running, "
@@ -3690,7 +3704,7 @@ class TraceWindow(QMainWindow):
         if self._image_paths:
             effective_skips = (self._resume_skip_set or set()) | self._user_skip_set
             if all(p.name in effective_skips for p in self._image_paths):
-                QMessageBox.warning(
+                QMessageBox.critical(
                     self,
                     "All images skipped",
                     "Every image in the input folder is either marked to skip or already "
@@ -4009,6 +4023,27 @@ class TraceWindow(QMainWindow):
             # self._run_folder was populated by _maybe_offer_resume.
             self._manifest.status = STATUS_RUNNING
         save_manifest(self._run_folder, self._manifest)
+        # One last log line before we hand off to the worker thread. The
+        # first user-visible progress event doesn't fire until the
+        # landmark predictor finishes loading + warming up (deep-learning
+        # checkpoint deserialization + a few dummy forward passes), which
+        # can take 15-60 seconds on the first Run of a session. Without
+        # this message the log falls quiet after the "Run settings:" YAML
+        # block and users have reported thinking the pipeline never
+        # actually started. The busy progress bar (setRange(0, 0) below)
+        # further reinforces "we're working on it".
+        self._log(
+            "Preparing images (loading models and running landmark warm-up)… "
+            "per-image progress will appear below shortly."
+        )
+        # Indeterminate progress bar until the first real event lands. Qt
+        # renders setRange(0, 0) as a scrolling animation so users can
+        # tell TRACE is alive during the pre-first-event window even
+        # when the log has fallen quiet. Restored to (0, 100) on the
+        # first _on_progress call so the smooth-interpolation math from
+        # _refresh_progress keeps working normally.
+        self._first_progress_seen = False
+        self.progress.setRange(0, 0)
         self.worker.start()
 
     def _confirm_ood_warnings(self, flagged: dict) -> bool:
@@ -4168,6 +4203,7 @@ class TraceWindow(QMainWindow):
         # all_done/error fallbacks) re-enables Run when the worker exits.
         self.btn_cancel.setEnabled(False)
         self.btn_run.setEnabled(False)
+        self.progress.setRange(0, 100)
         self.btn_run.setText("Cancelling…")
         self.transient_status_label.setText("Cancel requested — finishing the current image first.")
         self.transient_status_label.show()
@@ -4207,6 +4243,7 @@ class TraceWindow(QMainWindow):
         self._is_resuming = False
         self._run_folder = None
         self.btn_run.setEnabled(True)
+        self.progress.setRange(0, 100)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
         # Recolor the progress-bar fill red as a visual cue. _run_pipeline
@@ -4350,6 +4387,7 @@ class TraceWindow(QMainWindow):
         self.worker = None
         self._is_paused = True
         # The combo button now means "Resume" — click it to continue.
+        self.progress.setRange(0, 100)
         self.btn_run.setText("Resume")
         self.btn_run.setEnabled(True)
         # Recolor the progress-bar fill yellow as a visual cue. Reset back
@@ -4377,6 +4415,7 @@ class TraceWindow(QMainWindow):
             # Should never happen — _is_paused without a manifest is a bug,
             # not a state we should silently tolerate. Reset UI defensively.
             self._is_paused = False
+            self.progress.setRange(0, 100)
             self.btn_run.setText("Run Pipeline")
             self.btn_run.setEnabled(True)
             return
@@ -4773,6 +4812,14 @@ class TraceWindow(QMainWindow):
         _refresh_progress, which is called both here and from a 250ms QTimer
         so the bar interpolates smoothly between completion events.
         """
+        # First real progress event of this run — flip the progress bar
+        # out of the indeterminate "Preparing…" busy animation started
+        # in _run_pipeline and back into the (0, 100) percent-based mode
+        # _refresh_progress expects. Guarded so the flip only happens
+        # once per run (subsequent events use the normal path).
+        if not getattr(self, "_first_progress_seen", True):
+            self._first_progress_seen = True
+            self.progress.setRange(0, 100)
         # First progress event for a PENDING image flips it to IN_PROGRESS.
         # Never downgrade a terminal status (SUCCEEDED / FAILED / SKIPPED)
         # — substep events can fire after the image has been marked done.
@@ -4968,6 +5015,7 @@ class TraceWindow(QMainWindow):
         # first." status with no actual second run starting.
         self.worker = None
         self.btn_run.setEnabled(True)
+        self.progress.setRange(0, 100)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
         self._is_paused = False
@@ -5061,6 +5109,7 @@ class TraceWindow(QMainWindow):
         # as Pause.
         self.worker = None
         self.btn_run.setEnabled(True)
+        self.progress.setRange(0, 100)
         self.btn_run.setText("Run Pipeline")
         self.btn_cancel.setEnabled(False)
         self.transient_status_label.hide()
@@ -5631,6 +5680,41 @@ class TraceWindow(QMainWindow):
         super().resizeEvent(event)
         if self._walkthrough is not None:
             self._walkthrough.reposition()
+
+    def changeEvent(self, event):  # noqa: N802 — Qt API
+        """Force a full restore when Windows tells us to un-minimize.
+
+        Reported 2026-08-19: on Windows, minimizing TRACE during a
+        heavy pipeline run occasionally left the app stuck minimized —
+        clicking the taskbar icon caused Windows to send the un-minimize
+        message but Qt's default handler wasn't reliably calling
+        ``show()`` on the main window (a known Qt-on-Windows quirk when
+        the process is under sustained CPU load from a background
+        QThread + PyTorch's OpenMP threads: WM_ACTIVATE / SIZE_RESTORED
+        get queued but the paint / visibility toggle races).
+
+        Overriding ``changeEvent`` and, when the WindowMinimized bit
+        clears, calling ``showNormal`` / ``showMaximized`` explicitly
+        forces the paint. ``raise_`` + ``activateWindow`` bring the
+        window to the front on top of any other app the user may have
+        clicked to during the outage.
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            was_minimized = bool(event.oldState() & Qt.WindowMinimized)
+            is_minimized_now = bool(self.windowState() & Qt.WindowMinimized)
+            if was_minimized and not is_minimized_now:
+                # Windows just cleared the minimized flag. Force a
+                # visibility toggle so Qt actually paints the restored
+                # window rather than leaving us in a phantom state.
+                # showMaximized vs showNormal preserves whichever
+                # maximized bit the window had going into the minimize.
+                if self.windowState() & Qt.WindowMaximized:
+                    self.showMaximized()
+                else:
+                    self.showNormal()
+                self.raise_()
+                self.activateWindow()
 
     def closeEvent(self, event):  # noqa: N802 — Qt API
         # Persist the window geometry so the next launch reopens at the size

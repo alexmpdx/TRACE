@@ -489,7 +489,7 @@ class LandmarkPickerWidget(QWidget):
             landmarks_path = str(generated)
             self._lm_edit.setText(landmarks_path)
         if not image_path or not landmarks_path:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Pick both files",
                 "Choose a sample wing image AND a matching landmarks GeoJSON before loading.",
@@ -660,22 +660,22 @@ class LandmarkPickerWidget(QWidget):
 
     def _add_pair(self):
         if self._points_layer is None:
-            QMessageBox.warning(self, "Load a wing first", "Load a sample wing image + landmarks before adding pairs.")
+            QMessageBox.critical(self, "Load a wing first", "Load a sample wing image + landmarks before adding pairs.")
             return
         sel = self._selected_names()
         if len(sel) != 2:
-            QMessageBox.warning(
+            QMessageBox.critical(
                 self,
                 "Pick two landmarks",
                 f"Select exactly two landmarks first (currently {len(sel)} selected).",
             )
             return
         if sel[0] == sel[1]:
-            QMessageBox.warning(self, "Duplicate landmark", "Pick two distinct landmarks.")
+            QMessageBox.critical(self, "Duplicate landmark", "Pick two distinct landmarks.")
             return
         label = self._label_edit.text().strip()
         if not label:
-            QMessageBox.warning(self, "Missing name", "Type a name for this pair.")
+            QMessageBox.critical(self, "Missing name", "Type a name for this pair.")
             return
         self._pairs.append(LandmarkPair(name_a=sel[0], name_b=sel[1], label=label))
         self._label_edit.clear()
