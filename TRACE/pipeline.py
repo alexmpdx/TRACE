@@ -230,14 +230,23 @@ _OUTPUT_STAGE_REQUIREMENTS = {
     "csv": (True, True, True),
 }
 
-# Outputs that require running Stage 2 (identifyFeatures analysis), as opposed to
-# just copying / rendering preprocessing artifacts.
+# Outputs that require running Stage 2 (identifyFeatures analysis), as
+# opposed to just copying / rendering preprocessing artifacts.
+#
+# NOTE: cv_ratio_overlay used to be listed here but was moved out
+# (2026-08-19 pipeline-efficiency plan, Phase 1). Its render function
+# in identify_features/views/overlay.py:render_cv_ratio_overlay only
+# reads four landmark points (L1-Rs, DTip, ACV.p, PCV.a) off
+# wing_result.landmarks — no veins, no tissue, no intervein regions.
+# So it can render directly from the Stage-1 landmarks GeoJSON without
+# invoking identify_wing. The _analyze_one branch that renders the
+# overlay handles the fast-path construction of a landmarks-only
+# WingResult when the wing_result argument is None.
 _STAGE2_ANALYSIS_OUTPUTS = {
     "geojson",
     "vein_overlay",
     "intervein_overlay",
     "ap_overlay",
-    "cv_ratio_overlay",
     "csv",
 }
 
@@ -1143,17 +1152,47 @@ def _run(
                     ):
                         trace_result.ap_overlay_path = ap_path
 
-                if "cv_ratio_overlay" in outputs and base is not None and wing_result is not None:
-                    cv_path = output_dir / f"{stem}_cv_ratio_overlay.png"
-                    if render_cv_ratio_overlay_to_file(
-                        base,
-                        wing_result,
-                        cv_path,
-                        um_per_px=per_image_scale,
-                        landmark_size_scale=landmark_size_scale,
-                        show_landmark_labels=show_landmark_labels,
-                    ):
-                        trace_result.cv_ratio_overlay_path = cv_path
+                if "cv_ratio_overlay" in outputs and base is not None:
+                    # Fast path: when cv_ratio_overlay is selected but no
+                    # other Stage-2 output is, identify_wing was never
+                    # called and wing_result is None. Since
+                    # render_cv_ratio_overlay only reads four landmark
+                    # points off wing_result.landmarks (L1-Rs, DTip,
+                    # ACV.p, PCV.a), a WingResult constructed from just
+                    # the Stage-1 landmarks GeoJSON is sufficient — no
+                    # skeleton, tracing, tissue, or intervein work
+                    # needed. Saves minutes per image on batches where
+                    # CV-ratio is the only requested overlay. See the
+                    # 2026-08-19 pipeline-efficiency plan Phase 1.
+                    cv_wing_result = wing_result
+                    if cv_wing_result is None:
+                        lm_gj_fast = preproc_result.landmarks_geojson_path
+                        if lm_gj_fast and Path(lm_gj_fast).exists():
+                            from identify_features.models.datatypes import WingResult as _WingResult
+                            from identify_features.models.geojson_io import load_landmarks_geojson as _load_lm
+
+                            try:
+                                cv_wing_result = _WingResult(
+                                    specimen_id=stem,
+                                    landmarks=_load_lm(Path(lm_gj_fast)),
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "cv_ratio_overlay: could not build landmarks-only WingResult from %s",
+                                    lm_gj_fast,
+                                )
+                                cv_wing_result = None
+                    if cv_wing_result is not None:
+                        cv_path = output_dir / f"{stem}_cv_ratio_overlay.png"
+                        if render_cv_ratio_overlay_to_file(
+                            base,
+                            cv_wing_result,
+                            cv_path,
+                            um_per_px=per_image_scale,
+                            landmark_size_scale=landmark_size_scale,
+                            show_landmark_labels=show_landmark_labels,
+                        ):
+                            trace_result.cv_ratio_overlay_path = cv_path
 
                 # When Stage 1 rescaled, the saved GeoJSONs are in rescaled-pixel
                 # space; pass `inverse_scale = 1/sf` so coords match the resized
