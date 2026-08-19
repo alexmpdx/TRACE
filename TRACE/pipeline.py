@@ -102,6 +102,46 @@ from identify_features.views.csv_export import (  # noqa: E402
 # intervein requirement when their respective content flags are on.
 _INTERVEIN_DEPENDENT_OUTPUTS = frozenset({"intervein_overlay", "geojson", "csv"})
 
+# Number of images processed as one preprocess → analyze → wipe cycle.
+# Each image's Stage-1 pass writes intermediate OME-TIFFs (rescaled,
+# wing-isolated, hinge-chopped, rotated) + segmentation/landmarks
+# GeoJSONs to a shared TemporaryDirectory (see _run below). Before this
+# constant existed, that dir was written by every image up-front and
+# only cleaned up in the finally block, so a 4000+ image batch filled
+# the disk mid-run (reported at ~1700 images in the 2026-08-17 log).
+#
+# Chunking caps peak intermediate disk usage at roughly
+# CHUNK_SIZE × per-image-intermediates. With a conservative estimate of
+# ~15-30 MB per image (rescaled + isolated + chopped + rotated OME-TIFFs
+# for a typical wing), a size of 100 caps peak at ~1.5-3 GB — safe on
+# every desktop / laptop TRACE ships to. Landmark GPU batching still
+# fires within each chunk; the batching benefit is retained.
+_INTERMEDIATE_CHUNK_SIZE = 100
+
+
+def _wipe_preproc_dir(preproc_dir: Path) -> None:
+    """Delete every direct child of `preproc_dir` (files + subfolders).
+
+    Used between chunks to keep intermediate disk usage bounded. The
+    dir itself is preserved so the next chunk can write into it
+    without re-creating. Errors are logged and swallowed — a leaked
+    intermediate file will get cleaned up by the finally block's
+    TemporaryDirectory.cleanup() anyway; nothing about a cleanup
+    failure should abort the run.
+    """
+    import shutil
+
+    if not preproc_dir.is_dir():
+        return
+    for child in preproc_dir.iterdir():
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("chunk cleanup: could not remove %s: %s", child, exc)
+
 
 def _geojson_content_wanted(
     outputs: set[str],
@@ -713,52 +753,27 @@ def _run(
     # --- Stage 1: Preprocessing ---
     logger.info("=== Stage 1: Preprocessing (stages=%s) ===", stages)
 
-    def _preproc_progress(idx, total, name, status):
-        if progress_callback:
-            progress_callback(idx, total, name, "preprocessing", status)
-
     if not any(stages):
         # Nothing to preprocess and nothing to analyze — emit empty TraceResults per image.
         return [TraceResult(image_path=img) for img in discover_images(input_dir, recursive=recursive)]
 
-    preproc_results = process_folder(
-        input_dir=input_dir,
-        output_dir=preproc_dir,
-        landmark_checkpoint=landmark_checkpoint,
-        segmentation_model_dir=segmentation_model_dir,
-        stages=stages,
-        device=device,
-        keep_chopped=("chopped_image" in outputs),
-        progress_callback=_preproc_progress,
-        include_unreliable_landmarks=include_unreliable_landmarks,
-        landmark_batch_size=landmark_batch_size,
-        gate_override=gate_override,
-        max_workers=max_workers,
-        wing_model_dir=wing_isolation_model_dir,
-        wing_expand_fraction=wing_expand_fraction,
-        keep_intermediates=keep_intermediates,
-        recursive=recursive,
-        do_rotation=do_rotation,
-        rotation_mirror_correct=rotation_mirror_correct,
-        input_um_per_px=config.um_per_px,
-        target_um_per_px=target_um_per_px,
-        rescale_tolerance_low=rescale_tolerance_low,
-        rescale_tolerance_high=rescale_tolerance_high,
-        auto_detect_um_per_px=getattr(config, "auto_detect_um_per_px", False),
-        # Filter at Stage 1 itself rather than post-hoc, so the
-        # already-processed (or previously-failed-on-same-settings)
-        # images don't even go through landmark / hinge / segmentation.
-        skip_image_basenames=skip_image_basenames,
-        # Stage 1 now polls pause_event between images (and between
-        # landmark mini-batches), so a Pause click takes effect within
-        # seconds even on a 100+ image folder. The Stage 1→2 boundary
-        # check further down skips Stage 2 entirely when pause caught us
-        # here, so the user doesn't have to wait through analysis too.
-        pause_event=pause_event,
-    )
+    # -- Discover the full image list once so chunk slicing is stable and
+    #    progress numbering can span the whole batch instead of per-chunk. --
+    all_images = discover_images(input_dir, recursive=recursive)
+    if skip_image_basenames:
+        active_images = [im for im in all_images if im.name not in skip_image_basenames]
+    else:
+        active_images = list(all_images)
+    grand_total_active = len(active_images)
 
+    # OUTER accumulators — populated across chunks so the CSV block at the
+    # end of _run sees the whole batch, not just the last chunk.
     results: list[TraceResult] = []
-    successful_preproc: list[_PreprocResult] = []
+    batch_results: list[tuple[str, object]] = []
+    # specimen stem → path to its landmarks geojson, for post-CSV
+    # user-distance augmentation. Written from within _analyze_one; read
+    # by the CSV block after the chunk loop finishes.
+    user_dist_landmark_paths: dict[str, Path] = {}
     failed_preproc_lock = threading.Lock()
 
     def _signal_failed_preproc(image_basename: str, error_text: str) -> None:
@@ -780,85 +795,6 @@ def _run(
             except Exception:
                 logger.exception("on_image_failed_preproc callback raised")
 
-    for r in preproc_results:
-        missing_seg = needs_seg and not r.segmentation_geojson_path
-        if r.error is not None or missing_seg:
-            err_stage = r.error_stage or "preprocessing"
-            results.append(
-                TraceResult(
-                    image_path=r.image_path,
-                    error=r.error or "No segmentation output produced",
-                    error_stage=err_stage,
-                )
-            )
-            # Record the Stage-1 failure so the host's manifest grows a
-            # failed_preproc_images entry. On a same-settings resume the
-            # host adds this to the next Stage 1's skip set — gate
-            # failures aren't going to change without a settings change.
-            error_text = r.error or "No segmentation output produced"
-            _signal_failed_preproc(r.image_path.name, error_text)
-        else:
-            successful_preproc.append(r)
-
-    logger.info("Preprocessed %d/%d images successfully", len(successful_preproc), len(preproc_results))
-
-    # Stage 1 → Stage 2 boundary: if pause caught us inside or right after
-    # Stage 1, do NOT start identifyFeatures. The successful_preproc list
-    # may already be short (Stage 1 paused partway), but even the images
-    # that did finish Stage 1 here will be re-discovered on resume — they
-    # aren't in the manifest's completed_images yet, so the next run will
-    # re-preprocess them and analyze them in one pass. Honor the pause
-    # straight away so the user sees the button flip to "Resume" within
-    # seconds rather than after a Stage 2 sweep over whatever happened to
-    # finish Stage 1.
-    if pause_event is not None and pause_event.is_set():
-        logger.info(
-            "Pipeline paused after Stage 1: %d image(s) finished preprocessing this slice "
-            "but Stage 2 was skipped; they will be re-processed on resume",
-            len(successful_preproc),
-        )
-        return results
-
-    if not successful_preproc:
-        return results
-
-    if not outputs:
-        logger.info("=== Stage 2: skipped (no outputs selected) ===")
-        for preproc_result in successful_preproc:
-            results.append(TraceResult(image_path=preproc_result.image_path))
-        return results
-
-    # --- Stage 2: identifyFeatures ---
-    logger.info(
-        "=== Stage 2: identifyFeatures (outputs=%s, workers=%d) ===",
-        sorted(outputs),
-        max_workers,
-    )
-
-    import cv2
-    from identify_features.controllers.pipeline import identify_wing
-    from identify_features.garbage_detector import GarbageRejection
-    from identify_features.views.csv_export import export_csv_batch
-    from identify_features.views.geojson_export import export_geojson
-    from identify_features.views.overlay import (
-        render_ap_overlay_to_file,
-        render_cv_ratio_overlay_to_file,
-        render_overlay_to_file,
-    )
-
-    # `fast_csv_path` was computed at the top of _run and already trimmed the
-    # preprocessing stages. Here it just disables Stage 2 analysis.
-    needs_analysis = bool(requested_analysis_outputs) and not fast_csv_path
-    if fast_csv_path:
-        logger.info(
-            "=== Stage 2 fast path: writing user-distance CSV without identifyFeatures (%d pair(s)) ===",
-            len(user_landmark_distances),
-        )
-
-    scale = config.um_per_px
-    total = len(successful_preproc)
-    stage2_slots: list[Optional[TraceResult]] = [None] * total
-
     # Damp both size-slider deltas by 1/4 before handing them to the render
     # functions. The raw formulas (quadratic on landmark dot radius, linear
     # on ectopic font) grew far too fast per spinbox step — a bump from 1.0
@@ -867,386 +803,548 @@ def _run(
     # every displacement from 1.0 to 25% of its raw magnitude:
     #    effective = 1 + (raw - 1) * 0.25
     # so spin=2.0 → 1.25, spin=5.0 → 2.0, spin=10.0 → 3.25, spin=0.1 → 0.775.
-    # The spinbox range in the GUI is unchanged; users still type the same
-    # numbers, they just produce a smaller effect.
+    # Applied ONCE outside the chunk loop so the damping doesn't compound
+    # across chunks (which would silently shrink the effect on each chunk).
     _SIZE_SLIDER_DAMPING = 0.25
     landmark_size_scale = 1.0 + (landmark_size_scale - 1.0) * _SIZE_SLIDER_DAMPING
     ectopic_label_font_scale = 1.0 + (ectopic_label_font_scale - 1.0) * _SIZE_SLIDER_DAMPING
-    csv_slots: list[Optional[tuple[str, object]]] = [None] * total
-    # specimen stem → path to its landmarks geojson, for post-CSV user-distance augmentation.
-    user_dist_landmark_paths: dict[str, Path] = {}
-
-    progress_lock = threading.Lock()
-    cancel_event = threading.Event()
-    completion_lock = threading.Lock()
-
-    def _emit_progress(idx: int, stem: str, detail: str):
-        if progress_callback is None:
-            return
-        with progress_lock:
-            progress_callback(idx, total, stem, "analysis", detail)
-
-    def _signal_complete(image_basename: str, success: bool, error_text: str = "") -> None:
-        """Thread-safe wrapper around the per-image-completion callbacks.
-
-        Called once per image after Stage 2 attempt. Dispatches based on
-        outcome:
-          - success=True  → on_image_complete (resume bookkeeping + GUI
-            "Succeeded" status).
-          - success=False → on_image_failed_analysis (GUI "Failed"
-            status, with error_text) AND on_image_complete (the manifest
-            still records failed Stage 2 images as "done" so they're
-            not retried on resume without an explicit settings change).
-
-        ``error_text`` carries the human-readable error for the GUI to
-        surface next to the failed row. Ignored on success.
-        """
-        with completion_lock:
-            try:
-                if not success and on_image_failed_analysis is not None:
-                    on_image_failed_analysis(image_basename, error_text)
-                if on_image_complete is not None:
-                    on_image_complete(image_basename)
-            except Exception:
-                logger.exception("image-completion callback raised")
-
-    def _analyze_one(i: int, preproc_result) -> None:
-        if cancel_event.is_set():
-            return
-        # Pause: between images only — running images finish cleanly so
-        # the per-image artifacts aren't half-written. The Stage 2 caller
-        # below also checks the event before submitting more work, so
-        # ThreadPool workers stop being scheduled after the pause click.
-        if pause_event is not None and pause_event.is_set():
-            return
-        # When recursive discovery flattened the input path into a unique basename,
-        # `processed_image_path` points at the renamed copy in preproc_dir; otherwise
-        # we fall back to the original input basename for both stem and lookup.
-        if preproc_result.processed_image_path is not None:
-            stem = preproc_result.processed_image_path.stem
-            image_in_preproc = preproc_result.processed_image_path
-        else:
-            stem = preproc_result.image_path.stem
-            image_in_preproc = preproc_dir / preproc_result.image_path.name
-
-        # Per-image log context — handlers prefix records with [<image>].
-        # Keep the user's original basename so the log identifies the source file.
-        from preprocessing.pipeline import current_image as _current_image
-
-        _current_image.set(preproc_result.image_path.name)
-
-        _emit_progress(i, stem, "starting")
-        t0 = time.time()
-        # Per-image µm/px. Preprocessing stamps ``effective_um_per_px`` on
-        # the result: metadata-derived value when auto-detect was on and the
-        # image carried readable metadata, otherwise the caller's fallback
-        # (config.um_per_px). Every downstream converter uses this per-image
-        # value instead of the shared batch ``scale`` so measurements are
-        # accurate even when images came from different microscope sessions.
-        per_image_scale = getattr(preproc_result, "effective_um_per_px", None)
-        if per_image_scale is None or per_image_scale <= 0:
-            per_image_scale = scale
-        try:
-            wing_result = None
-            if needs_analysis:
-                # Build a config carrying this image's scale so identify_wing's
-                # µm-based thresholds (snap radius, sample distances, ectopic
-                # length cutoff, measurements) all convert through the right
-                # µm/px. Cheap dataclass replace; no downstream cache churn.
-                per_image_config = config
-                if per_image_scale is not None and per_image_scale != config.um_per_px:
-                    from dataclasses import replace as _replace
-
-                    per_image_config = _replace(config, um_per_px=per_image_scale)
-                wing_result = identify_wing(
-                    detection_geojson=preproc_result.segmentation_geojson_path,
-                    landmarks_geojson=preproc_result.landmarks_geojson_path,
-                    image_path=image_in_preproc if image_in_preproc.exists() else preproc_result.image_path,
-                    config=per_image_config,
-                    specimen_id=stem,
-                )
-                if wing_result is not None:
-                    # Stamp the effective µm/px so batch CSV export uses THIS
-                    # specimen's scale on its row instead of a shared batch value.
-                    wing_result.um_per_px = per_image_scale
-
-            # Stage 1 inverse: when preprocessing rescaled this image, identify_wing's
-            # outputs are in rescaled-pixel space. Map every geometry back to original
-            # pixels and recompute cached length/area so CSV + GeoJSON exporters can use
-            # this image's µm/px directly.
-            rescale_factor = getattr(preproc_result, "rescale_factor", 1.0)
-            if wing_result is not None and rescale_factor and rescale_factor != 1.0:
-                from resolutionAdjust import inverse_rescale_wing_result
-
-                inverse_rescale_wing_result(wing_result, rescale_factor, um_per_px=per_image_scale)
-
-            trace_result = TraceResult(image_path=preproc_result.image_path)
-
-            if "geojson" in outputs and wing_result is not None:
-                gj_path = output_dir / f"{stem}_output.geojson"
-                gj_write_veins, gj_write_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
-                export_geojson(
-                    wing_result.veins if gj_write_veins else [],
-                    wing_result.intervein_regions if gj_write_regions else [],
-                    gj_path,
-                    um_per_px=per_image_scale,
-                    show_vein_tissue=show_vein_tissue,
-                )
-                trace_result.output_geojson_path = gj_path
-
-            needs_base = bool(
-                {
-                    "vein_overlay",
-                    "intervein_overlay",
-                    "ap_overlay",
-                    "cv_ratio_overlay",
-                    "landmarks_overlay",
-                    "segmentation_overlay",
-                }
-                & outputs
-            )
-            base = None
-            if needs_base:
-                img_path = image_in_preproc if image_in_preproc.exists() else preproc_result.image_path
-                from TRACE.psd_loader import imread_any
-
-                base = imread_any(img_path)
-                if base is None:
-                    logger.warning("%s: could not read image for overlays, skipping PNG outputs", stem)
-                elif rescale_factor and rescale_factor != 1.0:
-                    # Geometries above were mapped back to original-pixel space; the
-                    # overlay base needs to follow so coordinates land on the right
-                    # pixels. Rotation (Stage 6) stays baked in — only resolution
-                    # is undone, not orientation.
-                    from resolutionAdjust import inverse_resize_image
-
-                    base = inverse_resize_image(base, rescale_factor)
-
-            want_vein = "vein_overlay" in outputs
-            want_intervein = "intervein_overlay" in outputs
-            if (want_vein or want_intervein) and base is not None and wing_result is not None:
-                ov_path = output_dir / f"{stem}_overlay.png"
-                render_overlay_to_file(
-                    base,
-                    wing_result.veins,
-                    wing_result.intervein_regions,
-                    ov_path,
-                    show_vein_tissue=show_vein_tissue,
-                    show_veins=want_vein,
-                    show_regions=want_intervein,
-                    vein_color_overrides=config.vein_colors,
-                    region_color_overrides=config.region_colors,
-                    vein_opacity=config.vein_opacity,
-                    intervein_opacity=config.intervein_opacity,
-                    show_color_key=show_color_key,
-                    show_ectopic_labels=show_ectopic_labels,
-                    show_region_labels=show_region_labels,
-                    vein_simplify_tolerance_px=vein_simplify_tolerance_px,
-                    ectopic_label_font_scale=ectopic_label_font_scale,
-                )
-                trace_result.overlay_path = ov_path
-
-            if "ap_overlay" in outputs and base is not None and wing_result is not None:
-                ap_path = output_dir / f"{stem}_ap_overlay.png"
-                if render_ap_overlay_to_file(
-                    base, wing_result, ap_path,
-                    show_compartment_labels=show_compartment_labels,
-                ):
-                    trace_result.ap_overlay_path = ap_path
-
-            if "cv_ratio_overlay" in outputs and base is not None and wing_result is not None:
-                cv_path = output_dir / f"{stem}_cv_ratio_overlay.png"
-                if render_cv_ratio_overlay_to_file(
-                    base,
-                    wing_result,
-                    cv_path,
-                    um_per_px=per_image_scale,
-                    landmark_size_scale=landmark_size_scale,
-                    show_landmark_labels=show_landmark_labels,
-                ):
-                    trace_result.cv_ratio_overlay_path = cv_path
-
-            # When Stage 1 rescaled, the saved GeoJSONs are in rescaled-pixel
-            # space; pass `inverse_scale = 1/sf` so coords match the resized
-            # original-resolution base.
-            overlay_inverse_scale = (1.0 / rescale_factor) if rescale_factor and rescale_factor != 1.0 else 1.0
-
-            if "landmarks_overlay" in outputs and base is not None:
-                lm_gj = preproc_result.landmarks_geojson_path
-                if lm_gj and Path(lm_gj).exists():
-                    lm_ov_path = output_dir / f"{stem}_landmarks_overlay.png"
-                    if _render_landmarks_overlay(
-                        base,
-                        Path(lm_gj),
-                        lm_ov_path,
-                        inverse_scale=overlay_inverse_scale,
-                        landmark_size_scale=landmark_size_scale,
-                        show_landmark_labels=show_landmark_labels,
-                    ):
-                        trace_result.landmarks_overlay_path = lm_ov_path
-
-            if "segmentation_overlay" in outputs and base is not None:
-                seg_gj = preproc_result.segmentation_geojson_path
-                if seg_gj and Path(seg_gj).exists():
-                    seg_ov_path = output_dir / f"{stem}_segmentation_overlay.png"
-                    if _render_segmentation_overlay(
-                        base, Path(seg_gj), seg_ov_path, inverse_scale=overlay_inverse_scale
-                    ):
-                        trace_result.segmentation_overlay_path = seg_ov_path
-
-            if "chopped_image" in outputs:
-                chopped_src = getattr(preproc_result, "chopped_image_path", None)
-                if chopped_src and Path(chopped_src).exists():
-                    chopped_dst = output_dir / Path(chopped_src).name
-                    try:
-                        shutil.copy2(chopped_src, chopped_dst)
-                        trace_result.chopped_image_path = chopped_dst
-                    except OSError as exc:
-                        logger.warning("%s: failed to copy chopped image: %s", stem, exc)
-                else:
-                    logger.warning("%s: chopped_image requested but no chopped file found", stem)
-
-            if "landmarks_geojson" in outputs:
-                # Stage 1 overwrites this file in-place after rotation, so the
-                # copy here picks up the post-rotation coordinates that align
-                # with the landmarks overlay PNG.
-                lm_src = getattr(preproc_result, "landmarks_geojson_path", None)
-                if lm_src and Path(lm_src).exists():
-                    lm_dst = output_dir / Path(lm_src).name
-                    try:
-                        shutil.copy2(lm_src, lm_dst)
-                        trace_result.landmarks_geojson_path = lm_dst
-                    except OSError as exc:
-                        logger.warning("%s: failed to copy landmarks GeoJSON: %s", stem, exc)
-                else:
-                    logger.warning("%s: landmarks_geojson requested but no source file found", stem)
-
-            if "segmentation_geojson" in outputs:
-                # The temp file is bare "<stem>.geojson"; rename on copy so the
-                # user's folder doesn't end up with an ambiguous name next to
-                # the analyzed "<stem>_output.geojson".
-                seg_src = getattr(preproc_result, "segmentation_geojson_path", None)
-                if seg_src and Path(seg_src).exists():
-                    seg_dst = output_dir / f"{stem}_segmentation.geojson"
-                    try:
-                        shutil.copy2(seg_src, seg_dst)
-                        trace_result.segmentation_geojson_path = seg_dst
-                    except OSError as exc:
-                        logger.warning("%s: failed to copy segmentation GeoJSON: %s", stem, exc)
-                else:
-                    logger.warning("%s: segmentation_geojson requested but no source file found", stem)
-
-            if "wing_isolated_image" in outputs:
-                wi_src = getattr(preproc_result, "wing_isolated_image_path", None)
-                if wi_src and Path(wi_src).exists():
-                    wi_dst = output_dir / Path(wi_src).name
-                    try:
-                        shutil.copy2(wi_src, wi_dst)
-                        trace_result.wing_isolated_image_path = wi_dst
-                    except OSError as exc:
-                        logger.warning("%s: failed to copy wing-isolated image: %s", stem, exc)
-                else:
-                    # Quietly skip — Stage 2 simply wasn't enabled for this run.
-                    pass
-
-            stage2_slots[i] = trace_result
-            if "csv" in outputs:
-                if wing_result is not None:
-                    csv_slots[i] = (stem, wing_result)
-                # Always record the landmark path when CSV is requested — both
-                # the augmenter (post-export_csv_batch) and the fast-path
-                # writer rely on it. wing_result may be None on the fast path.
-                lm_gj_path = preproc_result.landmarks_geojson_path
-                if lm_gj_path is not None:
-                    user_dist_landmark_paths[stem] = Path(lm_gj_path)
-
-            elapsed = time.time() - t0
-            _emit_progress(i, stem, f"done ({elapsed:.1f}s)")
-
-        except InterruptedError:
-            cancel_event.set()
-            raise
-        except GarbageRejection as e:
-            # Quality filter aborted this wing — a clean, expected rejection, not a crash.
-            # Record just the one-line reason (no traceback) and tag the failure with the
-            # specific filter (solidity / fragmentation / uncalled vein tissue / missing
-            # veins) so the GUI/log names what failed rather than a generic "quality".
-            # The "Aborted by quality gate" prefix is what the GUI's
-            # _classify_analysis_failure pattern-matches on to tag the failure as
-            # category="gate" — same bucket as landmark confidence-gate aborts, so the
-            # "Rerun failed (no quality gates)" button picks them up too.
-            from identify_features.garbage_detector import filter_label
-
-            elapsed = time.time() - t0
-            stage = filter_label(e.verdict.filter_name)
-            logger.info("Analysis aborted for %s (%.1fs) [%s]: %s", stem, elapsed, stage, e)
-            stage2_slots[i] = TraceResult(
-                image_path=preproc_result.image_path,
-                error=f"Aborted by quality gate ({stage}): {e}",
-                error_stage=stage,
-            )
-        except Exception as e:
-            elapsed = time.time() - t0
-            logger.exception("Analysis failed for %s (%.1fs)", stem, elapsed)
-            stage2_slots[i] = TraceResult(
-                image_path=preproc_result.image_path,
-                error=f"{e}\n{traceback.format_exc()}",
-                error_stage="analysis",
-            )
-        finally:
-            # Stage 2 attempt finished (success or per-image error) — tell
-            # the host this image is "done" for resume bookkeeping.
-            #
-            # Gate: signal only when stage2_slots[i] was populated. A None
-            # slot means either (a) the pause-event short-circuit at the
-            # top of _analyze_one fired before any work started, or (b) an
-            # InterruptedError unwound through the cancel path (in which
-            # case the manifest gets discarded anyway). Either way there's
-            # nothing to record. Notably this is NOT gated on pause_event
-            # itself — if the user clicked Pause mid-image, the image
-            # still finishes cleanly and its artifacts are on disk, so
-            # the manifest needs the completion entry to avoid
-            # re-processing on resume.
-            slot = stage2_slots[i]
-            if slot is not None:
-                success = slot.error is None
-                error_text = "" if success else (slot.error or "Stage 2 failed")
-                _signal_complete(preproc_result.image_path.name, success, error_text)
 
     interrupted = False
     paused = False
-    if max_workers <= 1:
-        for i, preproc_result in enumerate(successful_preproc):
-            if pause_event is not None and pause_event.is_set():
-                paused = True
-                break
-            try:
-                _analyze_one(i, preproc_result)
-            except InterruptedError:
-                interrupted = True
-                break
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="trace-stage2") as executor:
-            futures = {executor.submit(_analyze_one, i, pr): i for i, pr in enumerate(successful_preproc)}
-            for fut in as_completed(futures):
+    chunk_offset = 0
+    _total_chunks = max(1, (grand_total_active + _INTERMEDIATE_CHUNK_SIZE - 1) // _INTERMEDIATE_CHUNK_SIZE)
+
+    # ==================================================================
+    # Chunked preprocess → analyze → wipe cycle. See
+    # _INTERMEDIATE_CHUNK_SIZE (module-level constant) for the sizing
+    # derivation. Fixes the disk-full mid-run bug where every image's
+    # Stage-1 intermediates accumulated in a single TemporaryDirectory
+    # from run start to run end.
+    # ==================================================================
+    for _chunk_start in range(0, grand_total_active, _INTERMEDIATE_CHUNK_SIZE):
+        if interrupted:
+            break
+        if pause_event is not None and pause_event.is_set():
+            paused = True
+            break
+        _chunk_num = _chunk_start // _INTERMEDIATE_CHUNK_SIZE + 1
+        _chunk_images = active_images[_chunk_start : _chunk_start + _INTERMEDIATE_CHUNK_SIZE]
+        # Skip everything OUTSIDE this chunk (plus the caller's pre-existing
+        # skip set from resume / user unchecks). Reuses process_folder's
+        # existing skip filter, so no signature change was needed.
+        _chunk_names = {p.name for p in _chunk_images}
+        _inverted_skip = {p.name for p in all_images if p.name not in _chunk_names}
+        if skip_image_basenames:
+            _inverted_skip |= set(skip_image_basenames)
+
+        def _preproc_progress(idx, total, name, status, _offset=chunk_offset):
+            # Emit against the batch-wide total so the GUI progress bar
+            # doesn't reset each chunk. process_folder passes its own
+            # per-chunk `total` which we ignore in favor of grand_total_active.
+            if progress_callback:
+                progress_callback(_offset + idx, grand_total_active, name, "preprocessing", status)
+
+        logger.info(
+            "=== Chunk %d/%d: preprocessing %d image(s) ===",
+            _chunk_num, _total_chunks, len(_chunk_images),
+        )
+
+        chunk_preproc = process_folder(
+            input_dir=input_dir,
+            output_dir=preproc_dir,
+            landmark_checkpoint=landmark_checkpoint,
+            segmentation_model_dir=segmentation_model_dir,
+            stages=stages,
+            device=device,
+            keep_chopped=("chopped_image" in outputs),
+            progress_callback=_preproc_progress,
+            include_unreliable_landmarks=include_unreliable_landmarks,
+            landmark_batch_size=landmark_batch_size,
+            gate_override=gate_override,
+            max_workers=max_workers,
+            wing_model_dir=wing_isolation_model_dir,
+            wing_expand_fraction=wing_expand_fraction,
+            keep_intermediates=keep_intermediates,
+            recursive=recursive,
+            do_rotation=do_rotation,
+            rotation_mirror_correct=rotation_mirror_correct,
+            input_um_per_px=config.um_per_px,
+            target_um_per_px=target_um_per_px,
+            rescale_tolerance_low=rescale_tolerance_low,
+            rescale_tolerance_high=rescale_tolerance_high,
+            auto_detect_um_per_px=getattr(config, "auto_detect_um_per_px", False),
+            skip_image_basenames=_inverted_skip,
+            pause_event=pause_event,
+        )
+
+        successful_preproc: list[_PreprocResult] = []
+        for r in chunk_preproc:
+            missing_seg = needs_seg and not r.segmentation_geojson_path
+            if r.error is not None or missing_seg:
+                err_stage = r.error_stage or "preprocessing"
+                results.append(
+                    TraceResult(
+                        image_path=r.image_path,
+                        error=r.error or "No segmentation output produced",
+                        error_stage=err_stage,
+                    )
+                )
+                # Record the Stage-1 failure so the host's manifest grows a
+                # failed_preproc_images entry. On a same-settings resume the
+                # host adds this to the next Stage 1's skip set — gate
+                # failures aren't going to change without a settings change.
+                error_text = r.error or "No segmentation output produced"
+                _signal_failed_preproc(r.image_path.name, error_text)
+            else:
+                successful_preproc.append(r)
+
+        logger.info("Chunk %d/%d: preprocessed %d/%d image(s) successfully", _chunk_num, _total_chunks, len(successful_preproc), len(chunk_preproc))
+
+        # Stage 1 → Stage 2 boundary: if pause caught us inside or right after
+        # Stage 1, do NOT start identifyFeatures. The successful_preproc list
+        # may already be short (Stage 1 paused partway), but even the images
+        # that did finish Stage 1 here will be re-discovered on resume — they
+        # aren't in the manifest's completed_images yet, so the next run will
+        # re-preprocess them and analyze them in one pass. Honor the pause
+        # straight away so the user sees the button flip to "Resume" within
+        # seconds rather than after a Stage 2 sweep over whatever happened to
+        # finish Stage 1.
+        if pause_event is not None and pause_event.is_set():
+            logger.info(
+                "Pipeline paused after Stage 1: %d image(s) finished preprocessing this slice "
+                "but Stage 2 was skipped; they will be re-processed on resume",
+                len(successful_preproc),
+            )
+            paused = True
+            _wipe_preproc_dir(preproc_dir)
+            break
+
+        if not successful_preproc:
+            _wipe_preproc_dir(preproc_dir)
+            continue
+
+        if not outputs:
+            logger.info("=== Stage 2: skipped (no outputs selected) ===")
+            for preproc_result in successful_preproc:
+                results.append(TraceResult(image_path=preproc_result.image_path))
+            _wipe_preproc_dir(preproc_dir)
+            continue
+
+        # --- Stage 2: identifyFeatures ---
+        logger.info(
+            "=== Stage 2: identifyFeatures (outputs=%s, workers=%d) ===",
+            sorted(outputs),
+            max_workers,
+        )
+
+        import cv2
+        from identify_features.controllers.pipeline import identify_wing
+        from identify_features.garbage_detector import GarbageRejection
+        from identify_features.views.csv_export import export_csv_batch
+        from identify_features.views.geojson_export import export_geojson
+        from identify_features.views.overlay import (
+            render_ap_overlay_to_file,
+            render_cv_ratio_overlay_to_file,
+            render_overlay_to_file,
+        )
+
+        # `fast_csv_path` was computed at the top of _run and already trimmed the
+        # preprocessing stages. Here it just disables Stage 2 analysis.
+        needs_analysis = bool(requested_analysis_outputs) and not fast_csv_path
+        if fast_csv_path:
+            logger.info(
+                "=== Stage 2 fast path: writing user-distance CSV without identifyFeatures (%d pair(s)) ===",
+                len(user_landmark_distances),
+            )
+
+        scale = config.um_per_px
+        total = len(successful_preproc)
+        stage2_slots: list[Optional[TraceResult]] = [None] * total
+        csv_slots: list[Optional[tuple[str, object]]] = [None] * total
+        # user_dist_landmark_paths is initialized ONCE before the chunk loop
+        # so it accumulates across chunks. The CSV block (fires once after
+        # all chunks) needs paths from every image, not just the last chunk.
+
+        progress_lock = threading.Lock()
+        cancel_event = threading.Event()
+        completion_lock = threading.Lock()
+
+        def _emit_progress(idx: int, stem: str, detail: str):
+            if progress_callback is None:
+                return
+            with progress_lock:
+                progress_callback(idx, total, stem, "analysis", detail)
+
+        def _signal_complete(image_basename: str, success: bool, error_text: str = "") -> None:
+            """Thread-safe wrapper around the per-image-completion callbacks.
+
+            Called once per image after Stage 2 attempt. Dispatches based on
+            outcome:
+              - success=True  → on_image_complete (resume bookkeeping + GUI
+                "Succeeded" status).
+              - success=False → on_image_failed_analysis (GUI "Failed"
+                status, with error_text) AND on_image_complete (the manifest
+                still records failed Stage 2 images as "done" so they're
+                not retried on resume without an explicit settings change).
+
+            ``error_text`` carries the human-readable error for the GUI to
+            surface next to the failed row. Ignored on success.
+            """
+            with completion_lock:
                 try:
-                    fut.result()
-                except InterruptedError:
-                    interrupted = True
-                    cancel_event.set()
+                    if not success and on_image_failed_analysis is not None:
+                        on_image_failed_analysis(image_basename, error_text)
+                    if on_image_complete is not None:
+                        on_image_complete(image_basename)
                 except Exception:
-                    logger.exception("Unexpected error in Stage 2 worker")
+                    logger.exception("image-completion callback raised")
+
+        def _analyze_one(i: int, preproc_result) -> None:
+            if cancel_event.is_set():
+                return
+            # Pause: between images only — running images finish cleanly so
+            # the per-image artifacts aren't half-written. The Stage 2 caller
+            # below also checks the event before submitting more work, so
+            # ThreadPool workers stop being scheduled after the pause click.
+            if pause_event is not None and pause_event.is_set():
+                return
+            # When recursive discovery flattened the input path into a unique basename,
+            # `processed_image_path` points at the renamed copy in preproc_dir; otherwise
+            # we fall back to the original input basename for both stem and lookup.
+            if preproc_result.processed_image_path is not None:
+                stem = preproc_result.processed_image_path.stem
+                image_in_preproc = preproc_result.processed_image_path
+            else:
+                stem = preproc_result.image_path.stem
+                image_in_preproc = preproc_dir / preproc_result.image_path.name
+
+            # Per-image log context — handlers prefix records with [<image>].
+            # Keep the user's original basename so the log identifies the source file.
+            from preprocessing.pipeline import current_image as _current_image
+
+            _current_image.set(preproc_result.image_path.name)
+
+            _emit_progress(i, stem, "starting")
+            t0 = time.time()
+            # Per-image µm/px. Preprocessing stamps ``effective_um_per_px`` on
+            # the result: metadata-derived value when auto-detect was on and the
+            # image carried readable metadata, otherwise the caller's fallback
+            # (config.um_per_px). Every downstream converter uses this per-image
+            # value instead of the shared batch ``scale`` so measurements are
+            # accurate even when images came from different microscope sessions.
+            per_image_scale = getattr(preproc_result, "effective_um_per_px", None)
+            if per_image_scale is None or per_image_scale <= 0:
+                per_image_scale = scale
+            try:
+                wing_result = None
+                if needs_analysis:
+                    # Build a config carrying this image's scale so identify_wing's
+                    # µm-based thresholds (snap radius, sample distances, ectopic
+                    # length cutoff, measurements) all convert through the right
+                    # µm/px. Cheap dataclass replace; no downstream cache churn.
+                    per_image_config = config
+                    if per_image_scale is not None and per_image_scale != config.um_per_px:
+                        from dataclasses import replace as _replace
+
+                        per_image_config = _replace(config, um_per_px=per_image_scale)
+                    wing_result = identify_wing(
+                        detection_geojson=preproc_result.segmentation_geojson_path,
+                        landmarks_geojson=preproc_result.landmarks_geojson_path,
+                        image_path=image_in_preproc if image_in_preproc.exists() else preproc_result.image_path,
+                        config=per_image_config,
+                        specimen_id=stem,
+                    )
+                    if wing_result is not None:
+                        # Stamp the effective µm/px so batch CSV export uses THIS
+                        # specimen's scale on its row instead of a shared batch value.
+                        wing_result.um_per_px = per_image_scale
+
+                # Stage 1 inverse: when preprocessing rescaled this image, identify_wing's
+                # outputs are in rescaled-pixel space. Map every geometry back to original
+                # pixels and recompute cached length/area so CSV + GeoJSON exporters can use
+                # this image's µm/px directly.
+                rescale_factor = getattr(preproc_result, "rescale_factor", 1.0)
+                if wing_result is not None and rescale_factor and rescale_factor != 1.0:
+                    from resolutionAdjust import inverse_rescale_wing_result
+
+                    inverse_rescale_wing_result(wing_result, rescale_factor, um_per_px=per_image_scale)
+
+                trace_result = TraceResult(image_path=preproc_result.image_path)
+
+                if "geojson" in outputs and wing_result is not None:
+                    gj_path = output_dir / f"{stem}_output.geojson"
+                    gj_write_veins, gj_write_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
+                    export_geojson(
+                        wing_result.veins if gj_write_veins else [],
+                        wing_result.intervein_regions if gj_write_regions else [],
+                        gj_path,
+                        um_per_px=per_image_scale,
+                        show_vein_tissue=show_vein_tissue,
+                    )
+                    trace_result.output_geojson_path = gj_path
+
+                needs_base = bool(
+                    {
+                        "vein_overlay",
+                        "intervein_overlay",
+                        "ap_overlay",
+                        "cv_ratio_overlay",
+                        "landmarks_overlay",
+                        "segmentation_overlay",
+                    }
+                    & outputs
+                )
+                base = None
+                if needs_base:
+                    img_path = image_in_preproc if image_in_preproc.exists() else preproc_result.image_path
+                    from TRACE.psd_loader import imread_any
+
+                    base = imread_any(img_path)
+                    if base is None:
+                        logger.warning("%s: could not read image for overlays, skipping PNG outputs", stem)
+                    elif rescale_factor and rescale_factor != 1.0:
+                        # Geometries above were mapped back to original-pixel space; the
+                        # overlay base needs to follow so coordinates land on the right
+                        # pixels. Rotation (Stage 6) stays baked in — only resolution
+                        # is undone, not orientation.
+                        from resolutionAdjust import inverse_resize_image
+
+                        base = inverse_resize_image(base, rescale_factor)
+
+                want_vein = "vein_overlay" in outputs
+                want_intervein = "intervein_overlay" in outputs
+                if (want_vein or want_intervein) and base is not None and wing_result is not None:
+                    ov_path = output_dir / f"{stem}_overlay.png"
+                    render_overlay_to_file(
+                        base,
+                        wing_result.veins,
+                        wing_result.intervein_regions,
+                        ov_path,
+                        show_vein_tissue=show_vein_tissue,
+                        show_veins=want_vein,
+                        show_regions=want_intervein,
+                        vein_color_overrides=config.vein_colors,
+                        region_color_overrides=config.region_colors,
+                        vein_opacity=config.vein_opacity,
+                        intervein_opacity=config.intervein_opacity,
+                        show_color_key=show_color_key,
+                        show_ectopic_labels=show_ectopic_labels,
+                        show_region_labels=show_region_labels,
+                        vein_simplify_tolerance_px=vein_simplify_tolerance_px,
+                        ectopic_label_font_scale=ectopic_label_font_scale,
+                    )
+                    trace_result.overlay_path = ov_path
+
+                if "ap_overlay" in outputs and base is not None and wing_result is not None:
+                    ap_path = output_dir / f"{stem}_ap_overlay.png"
+                    if render_ap_overlay_to_file(
+                        base, wing_result, ap_path,
+                        show_compartment_labels=show_compartment_labels,
+                    ):
+                        trace_result.ap_overlay_path = ap_path
+
+                if "cv_ratio_overlay" in outputs and base is not None and wing_result is not None:
+                    cv_path = output_dir / f"{stem}_cv_ratio_overlay.png"
+                    if render_cv_ratio_overlay_to_file(
+                        base,
+                        wing_result,
+                        cv_path,
+                        um_per_px=per_image_scale,
+                        landmark_size_scale=landmark_size_scale,
+                        show_landmark_labels=show_landmark_labels,
+                    ):
+                        trace_result.cv_ratio_overlay_path = cv_path
+
+                # When Stage 1 rescaled, the saved GeoJSONs are in rescaled-pixel
+                # space; pass `inverse_scale = 1/sf` so coords match the resized
+                # original-resolution base.
+                overlay_inverse_scale = (1.0 / rescale_factor) if rescale_factor and rescale_factor != 1.0 else 1.0
+
+                if "landmarks_overlay" in outputs and base is not None:
+                    lm_gj = preproc_result.landmarks_geojson_path
+                    if lm_gj and Path(lm_gj).exists():
+                        lm_ov_path = output_dir / f"{stem}_landmarks_overlay.png"
+                        if _render_landmarks_overlay(
+                            base,
+                            Path(lm_gj),
+                            lm_ov_path,
+                            inverse_scale=overlay_inverse_scale,
+                            landmark_size_scale=landmark_size_scale,
+                            show_landmark_labels=show_landmark_labels,
+                        ):
+                            trace_result.landmarks_overlay_path = lm_ov_path
+
+                if "segmentation_overlay" in outputs and base is not None:
+                    seg_gj = preproc_result.segmentation_geojson_path
+                    if seg_gj and Path(seg_gj).exists():
+                        seg_ov_path = output_dir / f"{stem}_segmentation_overlay.png"
+                        if _render_segmentation_overlay(
+                            base, Path(seg_gj), seg_ov_path, inverse_scale=overlay_inverse_scale
+                        ):
+                            trace_result.segmentation_overlay_path = seg_ov_path
+
+                if "chopped_image" in outputs:
+                    chopped_src = getattr(preproc_result, "chopped_image_path", None)
+                    if chopped_src and Path(chopped_src).exists():
+                        chopped_dst = output_dir / Path(chopped_src).name
+                        try:
+                            shutil.copy2(chopped_src, chopped_dst)
+                            trace_result.chopped_image_path = chopped_dst
+                        except OSError as exc:
+                            logger.warning("%s: failed to copy chopped image: %s", stem, exc)
+                    else:
+                        logger.warning("%s: chopped_image requested but no chopped file found", stem)
+
+                if "landmarks_geojson" in outputs:
+                    # Stage 1 overwrites this file in-place after rotation, so the
+                    # copy here picks up the post-rotation coordinates that align
+                    # with the landmarks overlay PNG.
+                    lm_src = getattr(preproc_result, "landmarks_geojson_path", None)
+                    if lm_src and Path(lm_src).exists():
+                        lm_dst = output_dir / Path(lm_src).name
+                        try:
+                            shutil.copy2(lm_src, lm_dst)
+                            trace_result.landmarks_geojson_path = lm_dst
+                        except OSError as exc:
+                            logger.warning("%s: failed to copy landmarks GeoJSON: %s", stem, exc)
+                    else:
+                        logger.warning("%s: landmarks_geojson requested but no source file found", stem)
+
+                if "segmentation_geojson" in outputs:
+                    # The temp file is bare "<stem>.geojson"; rename on copy so the
+                    # user's folder doesn't end up with an ambiguous name next to
+                    # the analyzed "<stem>_output.geojson".
+                    seg_src = getattr(preproc_result, "segmentation_geojson_path", None)
+                    if seg_src and Path(seg_src).exists():
+                        seg_dst = output_dir / f"{stem}_segmentation.geojson"
+                        try:
+                            shutil.copy2(seg_src, seg_dst)
+                            trace_result.segmentation_geojson_path = seg_dst
+                        except OSError as exc:
+                            logger.warning("%s: failed to copy segmentation GeoJSON: %s", stem, exc)
+                    else:
+                        logger.warning("%s: segmentation_geojson requested but no source file found", stem)
+
+                if "wing_isolated_image" in outputs:
+                    wi_src = getattr(preproc_result, "wing_isolated_image_path", None)
+                    if wi_src and Path(wi_src).exists():
+                        wi_dst = output_dir / Path(wi_src).name
+                        try:
+                            shutil.copy2(wi_src, wi_dst)
+                            trace_result.wing_isolated_image_path = wi_dst
+                        except OSError as exc:
+                            logger.warning("%s: failed to copy wing-isolated image: %s", stem, exc)
+                    else:
+                        # Quietly skip — Stage 2 simply wasn't enabled for this run.
+                        pass
+
+                stage2_slots[i] = trace_result
+                if "csv" in outputs:
+                    if wing_result is not None:
+                        csv_slots[i] = (stem, wing_result)
+                    # Always record the landmark path when CSV is requested — both
+                    # the augmenter (post-export_csv_batch) and the fast-path
+                    # writer rely on it. wing_result may be None on the fast path.
+                    lm_gj_path = preproc_result.landmarks_geojson_path
+                    if lm_gj_path is not None:
+                        user_dist_landmark_paths[stem] = Path(lm_gj_path)
+
+                elapsed = time.time() - t0
+                _emit_progress(i, stem, f"done ({elapsed:.1f}s)")
+
+            except InterruptedError:
+                cancel_event.set()
+                raise
+            except GarbageRejection as e:
+                # Quality filter aborted this wing — a clean, expected rejection, not a crash.
+                # Record just the one-line reason (no traceback) and tag the failure with the
+                # specific filter (solidity / fragmentation / uncalled vein tissue / missing
+                # veins) so the GUI/log names what failed rather than a generic "quality".
+                # The "Aborted by quality gate" prefix is what the GUI's
+                # _classify_analysis_failure pattern-matches on to tag the failure as
+                # category="gate" — same bucket as landmark confidence-gate aborts, so the
+                # "Rerun failed (no quality gates)" button picks them up too.
+                from identify_features.garbage_detector import filter_label
+
+                elapsed = time.time() - t0
+                stage = filter_label(e.verdict.filter_name)
+                logger.info("Analysis aborted for %s (%.1fs) [%s]: %s", stem, elapsed, stage, e)
+                stage2_slots[i] = TraceResult(
+                    image_path=preproc_result.image_path,
+                    error=f"Aborted by quality gate ({stage}): {e}",
+                    error_stage=stage,
+                )
+            except Exception as e:
+                elapsed = time.time() - t0
+                logger.exception("Analysis failed for %s (%.1fs)", stem, elapsed)
+                stage2_slots[i] = TraceResult(
+                    image_path=preproc_result.image_path,
+                    error=f"{e}\n{traceback.format_exc()}",
+                    error_stage="analysis",
+                )
+            finally:
+                # Stage 2 attempt finished (success or per-image error) — tell
+                # the host this image is "done" for resume bookkeeping.
+                #
+                # Gate: signal only when stage2_slots[i] was populated. A None
+                # slot means either (a) the pause-event short-circuit at the
+                # top of _analyze_one fired before any work started, or (b) an
+                # InterruptedError unwound through the cancel path (in which
+                # case the manifest gets discarded anyway). Either way there's
+                # nothing to record. Notably this is NOT gated on pause_event
+                # itself — if the user clicked Pause mid-image, the image
+                # still finishes cleanly and its artifacts are on disk, so
+                # the manifest needs the completion entry to avoid
+                # re-processing on resume.
+                slot = stage2_slots[i]
+                if slot is not None:
+                    success = slot.error is None
+                    error_text = "" if success else (slot.error or "Stage 2 failed")
+                    _signal_complete(preproc_result.image_path.name, success, error_text)
+
+        interrupted = False
+        paused = False
+        if max_workers <= 1:
+            for i, preproc_result in enumerate(successful_preproc):
                 if pause_event is not None and pause_event.is_set():
                     paused = True
-                    # Don't cancel — let the in-flight workers finish their
-                    # current images cleanly. _analyze_one's own pause check
-                    # stops any not-yet-started worker from doing real work.
+                    break
+                try:
+                    _analyze_one(i, preproc_result)
+                except InterruptedError:
+                    interrupted = True
+                    break
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="trace-stage2") as executor:
+                futures = {executor.submit(_analyze_one, i, pr): i for i, pr in enumerate(successful_preproc)}
+                for fut in as_completed(futures):
+                    try:
+                        fut.result()
+                    except InterruptedError:
+                        interrupted = True
+                        cancel_event.set()
+                    except Exception:
+                        logger.exception("Unexpected error in Stage 2 worker")
+                    if pause_event is not None and pause_event.is_set():
+                        paused = True
+                        # Don't cancel — let the in-flight workers finish their
+                        # current images cleanly. _analyze_one's own pause check
+                        # stops any not-yet-started worker from doing real work.
 
-    for tr in stage2_slots:
-        if tr is not None:
-            results.append(tr)
+        for tr in stage2_slots:
+            if tr is not None:
+                results.append(tr)
 
-    batch_results: list[tuple[str, object]] = [entry for entry in csv_slots if entry is not None]
+        batch_results.extend(entry for entry in csv_slots if entry is not None)
+
+        # THE FIX: wipe intermediates so next chunk starts on a clean disk.
+        # Bounds peak intermediate usage at CHUNK_SIZE × per-image (a few GB max),
+        # instead of the whole batch's worth (which filled disk mid-run on 4000+ image runs).
+        _wipe_preproc_dir(preproc_dir)
+
+
+
+        chunk_offset += len(_chunk_images)
 
     if interrupted:
         raise InterruptedError("Cancelled by user")
