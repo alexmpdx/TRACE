@@ -25,6 +25,26 @@ import recommend_workers  # noqa: E402
 
 IMAGE_EXTS = (".tif", ".tiff", ".bmp", ".png", ".jpg", ".jpeg", ".psd", ".psb")
 
+# CLI flags forwarded to the Stage-2 identifyFeatures subprocess so
+# calibration measures peak RSS on the full pipeline instead of
+# aborting at whichever garbage-detector filter the test image happens
+# to trip. Disabling filters INCREASES (or leaves unchanged) peak RSS
+# — the solidity check fires at the earliest hook, before
+# skeletonization and region-splitting (the memory-heavy stages), so a
+# filter abort short-circuits ALL of that heavy work. Turning filters
+# off forces the pipeline to run through those stages, giving a safe
+# upper bound on per-image peak that the recommend_workers math wants
+# for a conservative worker count.
+#
+# Landmark confidence gates are handled separately at Stage 1 via
+# ``gate_override={"core_landmarks": []}`` below.
+_CALIBRATION_STAGE2_DISABLE_FILTERS = (
+    "--no-solidity-filter",
+    "--no-fragmentation-filter",
+    "--no-vein-association-filter",
+    "--no-intervein-association-filter",
+)
+
 
 def pick_calibration_image(path: Path, recursive: bool = False) -> Path:
     """Resolve a folder-or-file argument to a single image path.
@@ -157,7 +177,7 @@ def calibrate_for_trace(
             preproc.landmarks_geojson_path,
             preproc.image_path,
         )
-        stat = recommend_workers.calibrate(spec, cli_extra=[])
+        stat = recommend_workers.calibrate(spec, cli_extra=list(_CALIBRATION_STAGE2_DISABLE_FILTERS))
 
     if not stat.success:
         # Stage 2 subprocess crashed — surface the actual reason so the
@@ -190,6 +210,9 @@ def format_report(result: dict) -> str:
         f"Calibration image : {result['image_path'].name}",
         f"  wall            : {stat.wall_s:.1f} s",
         f"  peak RSS        : {stat.peak_rss_gb:.2f} GiB",
+        "                    (measured with garbage-detector filters disabled",
+        "                     so the run doesn't abort on a bad test image;",
+        "                     this is a safe upper bound for production peak)",
         f"  status          : {'OK' if stat.success else f'rc={stat.returncode}'}",
         "",
         "Recommendation:",
