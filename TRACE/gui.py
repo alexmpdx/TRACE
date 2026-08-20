@@ -791,6 +791,13 @@ class TraceWindow(QMainWindow):
     )
     _PARALLEL_WORKERS_WARNING_TEXT = "You are enabling parallel Stage 2 analysis.\n\n" + _PARALLEL_WORKERS_DETAILS_TEXT
 
+    # Log-buffer flush threshold. Balance between (a) flushing often
+    # enough that a crash loses at most this many lines of the run.log,
+    # and (b) not flushing so often that the syscall cost of the
+    # per-line design creeps back in. 100 lines = ~5-10 seconds of a
+    # busy run's log volume.
+    _LOG_FLUSH_MAX_LINES = 100
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TRACE — Wing Analysis Pipeline")
@@ -977,6 +984,17 @@ class TraceWindow(QMainWindow):
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(250)
         self._progress_timer.timeout.connect(self._refresh_progress)
+        # Log-buffer flush timer + state. Every _log() call appends to
+        # a list; the timer (or an over-cap _stream_log_line call)
+        # flushes the list to run.log with a single open/write/close
+        # instead of one syscall per line. Cuts GUI-thread I/O by
+        # ~99% on large runs — the #1 fix for "Not Responding" on
+        # Windows batches (reported 2026-08-20).
+        self._log_stream_buffer: list[str] = []
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(1000)
+        self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+        self._log_flush_timer.start()
         # Active walkthrough overlay (None when no walkthrough is showing).
         # Tracked so resizeEvent / splitterMoved can forward to it.
         self._walkthrough: Optional[WalkthroughOverlay] = None
@@ -1435,6 +1453,14 @@ class TraceWindow(QMainWindow):
         main_tab_layout.addWidget(QLabel("Log:"))
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        # Cap the log widget at a ring-buffer of the most-recent N
+        # blocks. QTextEdit document ops become O(n) in block count
+        # past ~10-20k blocks and reflow on every append starts
+        # stalling the GUI thread on multi-thousand-image runs. The
+        # full log is preserved on disk in run.log (see _stream_log_line
+        # + _flush_log_buffer) — this cap only limits what's visible in
+        # the widget. 10k lines ≈ hours of typical run output.
+        self.log_text.document().setMaximumBlockCount(10000)
         main_tab_layout.addWidget(self.log_text, stretch=1)
         self.right_tabs.addTab(main_tab, "Main")
 
@@ -4929,21 +4955,51 @@ class TraceWindow(QMainWindow):
         self._stream_log_line(line)
 
     def _stream_log_line(self, line: str) -> None:
-        """Append `line` to run.log in the active run folder.
+        """Append `line` to the run-log buffer; flush lazily.
 
-        No-op if the run folder isn't set (pre-run bookkeeping messages
-        land in the log widget only) or the write fails (disk full,
-        permissions, race with folder deletion). Silent failure is
-        intentional — a log-write hiccup must never derail a run.
+        Buffered because the previous per-line open/write/close pattern
+        was the #1 GUI-thread stall on large runs (800k+ syscalls on a
+        4000-image batch — reported 2026-08-20 as "Not Responding"
+        pop-ups on Windows). The buffer is flushed on a 1-second
+        QTimer and whenever the buffered line count crosses
+        ``_LOG_FLUSH_MAX_LINES``, whichever comes first — plus
+        explicitly on every terminal event via ``_flush_log_buffer``
+        (called from ``_write_run_metadata``, ``closeEvent``, etc.).
+
+        The buffer accumulates BEFORE ``_run_folder`` is set too, so
+        early messages (settings YAML, "Starting…" line, "Preparing
+        images…") don't get lost — the first flush after
+        ``_run_folder`` is populated writes them all.
         """
+        self._log_stream_buffer.append(line)
+        if len(self._log_stream_buffer) >= self._LOG_FLUSH_MAX_LINES:
+            self._flush_log_buffer()
+
+    def _flush_log_buffer(self) -> None:
+        """Write any buffered log lines to `run.log` in the active run folder.
+
+        No-op if the run folder isn't set (buffer keeps accumulating
+        until it is) or the write fails (disk full, permissions, race
+        with folder deletion). Silent failure is intentional — a
+        log-write hiccup must never derail a run.
+        """
+        if not self._log_stream_buffer:
+            return
         folder = self._run_folder
         if folder is None:
             return
+        buf = self._log_stream_buffer
+        self._log_stream_buffer = []
         try:
             with (folder / "run.log").open("a", encoding="utf-8") as fh:
-                fh.write(line)
-                fh.write("\n")
+                for line in buf:
+                    fh.write(line)
+                    fh.write("\n")
         except Exception:  # noqa: BLE001
+            # Best-effort — a failed flush drops those lines from
+            # `run.log` but leaves the run itself untouched. Don't
+            # re-buffer or the buffer would grow unboundedly on a
+            # persistently-failing disk.
             pass
 
     def _on_progress(self, idx, total, name, stage, detail):
@@ -4999,7 +5055,14 @@ class TraceWindow(QMainWindow):
             stage_elapsed = self._last_completion_time - self._stage_first_event_time
             self._avg_time_per_image = stage_elapsed / max(self._stage_completions, 1)
 
-        self._refresh_progress()
+        # _refresh_progress previously fired here on every event, doing
+        # ETA math + label repaints 40k+ times on a 4000-image run.
+        # Removed: the 250ms _progress_timer already refreshes and its
+        # smoothing interpolator was designed to fill the gaps between
+        # events. Cheap ETA updates now happen at most 4×/sec instead
+        # of ~40×/sec — big cut in GUI-thread work on heavy signal
+        # bursts (reported 2026-08-20 as contributing to Windows
+        # "Not Responding" pop-ups).
         msg = f"[{idx + 1}/{total}] {name}: {stage} - {detail}"
         self.statusBar().showMessage(msg)
         self._log(msg)
@@ -5120,7 +5183,7 @@ class TraceWindow(QMainWindow):
         self.eta_label.setText(self._format_eta(self._eta_smoothed_seconds))
 
     def _write_run_metadata(self, status: str) -> Optional[Path]:
-        """Flush the live Log panel contents to ``run.log`` in the run folder.
+        """Flush the pending log buffer to ``run.log`` in the run folder.
 
         The settings YAML(s) and the manifest are written at run START
         (and updated on resume drift) by _run_pipeline; this function no
@@ -5129,6 +5192,13 @@ class TraceWindow(QMainWindow):
         wasn't (e.g. validation failed before run-folder creation), this
         is a no-op.
 
+        Previously this function rewrote run.log from
+        ``log_text.toPlainText()`` as a canonical snapshot. That was
+        replaced with a simple buffer flush because (a) the log widget
+        is now capped at ``_LOG_MAX_BLOCKS`` and rewriting from it
+        would truncate the on-disk log, and (b) the buffered stream
+        already captures every line incrementally.
+
         Returns the run folder path, or None when nothing was written.
         """
         meta_dir = self._run_folder
@@ -5136,7 +5206,7 @@ class TraceWindow(QMainWindow):
             return None
         try:
             meta_dir.mkdir(parents=True, exist_ok=True)
-            (meta_dir / "run.log").write_text(self.log_text.toPlainText(), encoding="utf-8")
+            self._flush_log_buffer()
             return meta_dir
         except Exception as e:  # noqa: BLE001
             # Don't let a metadata-write failure mask the actual run result.
@@ -5871,6 +5941,13 @@ class TraceWindow(QMainWindow):
         # and position the user last left.
         self.settings.setValue("main_window_geometry", self.saveGeometry())
         self.settings.sync()
+        # Flush the pending run.log buffer so an in-progress or paused
+        # run's most-recent lines make it to disk before the process
+        # exits — otherwise up to _LOG_FLUSH_MAX_LINES could be lost.
+        try:
+            self._flush_log_buffer()
+        except Exception:  # noqa: BLE001
+            pass
         super().closeEvent(event)
 
 

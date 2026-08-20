@@ -17,6 +17,25 @@ import os
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# Cap OpenMP / MKL / OpenBLAS thread pools so PyTorch + ONNXRuntime
+# don't peg every CPU core at inference time. Default (=cpu_count) was
+# starving the Qt event loop of scheduler time on multi-core machines,
+# which showed up as "Not Responding" pop-ups on large runs (reported
+# 2026-08-20). Reserve 2 cores for the GUI / OS / IO. env-var route
+# (rather than torch.set_num_threads at Python level) so it takes
+# effect before torch/onnxruntime spin up their pools — those pools
+# are sized at library init from these env vars and can't be shrunk
+# afterward without recreating them. setdefault so a power user
+# exporting their own override still wins.
+try:
+    _cpu = os.cpu_count() or 1
+    _cap = str(max(1, _cpu - 2))
+    os.environ.setdefault("OMP_NUM_THREADS", _cap)
+    os.environ.setdefault("MKL_NUM_THREADS", _cap)
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", _cap)
+except Exception:
+    pass
+
 # multiprocessing.freeze_support() must be called BEFORE any code that
 # can spawn child processes. On Windows the default start method is
 # "spawn", which re-executes the frozen entry point in a child process
