@@ -265,6 +265,35 @@ def _required_stages(outputs: set[str]) -> tuple[bool, bool, bool]:
     return (needs_lm, needs_hinge, needs_seg)
 
 
+def resolve_skip_intervein_regions(
+    outputs: set[str],
+    csv_measurement_groups: set[str],
+) -> bool:
+    """Return True when the pipeline can skip §6.1/§6.2 intervein passes.
+
+    Shared between _run() (which sets `config.skip_intervein_regions` from
+    this at run start) and the GUI (which needs the SAME value to pick
+    the right Stage-2 wall-time share for progress-weight math). Before
+    this helper existed the two paths computed the flag independently and
+    the GUI always used the dataclass default (False) — inflating Stage 2's
+    share to 83% for csv-with-cv_ratio-only runs and blowing up the ETA
+    display by ~3× (spec'd 2026-08-20). Any change here MUST match what
+    the pipeline itself would do.
+
+    Skip logic:
+      - csv is intervein-dependent only when its "intervein_areas" group
+        is on.
+      - geojson is intervein-dependent only when its content — mirrored
+        from the user's other choices — actually wants regions.
+      - Any other _INTERVEIN_DEPENDENT_OUTPUTS member forces intervein on.
+    """
+    csv_needs_intervein = "csv" in outputs and "intervein_areas" in csv_measurement_groups
+    _, gj_writes_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
+    geojson_needs_intervein = "geojson" in outputs and gj_writes_regions
+    always_intervein = outputs & (_INTERVEIN_DEPENDENT_OUTPUTS - {"csv", "geojson"})
+    return not (always_intervein or csv_needs_intervein or geojson_needs_intervein)
+
+
 # ---------------------------------------------------------------------------
 # Progress-bar weight model
 # ---------------------------------------------------------------------------
@@ -626,11 +655,7 @@ def trace_folder(
     # here (rather than only writing True when nothing needs intervein) so that
     # a config passed in with skip_intervein_regions=True from a preset or
     # saved-settings JSON can't silently kill intervein_overlay output.
-    csv_needs_intervein = "csv" in outputs and "intervein_areas" in csv_measurement_groups
-    _, gj_writes_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
-    geojson_needs_intervein = "geojson" in outputs and gj_writes_regions
-    always_intervein = outputs & (_INTERVEIN_DEPENDENT_OUTPUTS - {"csv", "geojson"})
-    config.skip_intervein_regions = not (always_intervein or csv_needs_intervein or geojson_needs_intervein)
+    config.skip_intervein_regions = resolve_skip_intervein_regions(outputs, csv_measurement_groups)
 
     if keep_intermediates:
         preproc_dir = output_dir / "intermediates"

@@ -59,6 +59,7 @@ from TRACE.pipeline import (
     OUTPUT_TYPES,
     _required_stages,
     compute_progress_weights,
+    resolve_skip_intervein_regions,
     trace_folder,
 )
 from TRACE.run_state import (
@@ -963,12 +964,20 @@ class TraceWindow(QMainWindow):
         # Wall-clock + smoothed ETA tracking.
         self._run_start_time: Optional[float] = None
         self._eta_smoothed_seconds: Optional[float] = None
-        # Per-stage throughput tracking for the hybrid ETA. Reset on every
-        # stage transition (preprocessing → analysis).
+        # Per-stage throughput tracking for the hybrid ETA. Keyed by
+        # stage name ("preprocessing" / "analysis") so preprocessing
+        # samples aren't corrupted by analysis time and vice-versa.
+        # _stage_active_seconds accumulates ONLY time spent actively
+        # in that stage — cross-stage wall-clock time bled into the
+        # denominator on chunked runs before this fix (spec'd 2026-08-20
+        # Bug #2), making throughput look ~2-3× slower than reality by
+        # chunk 4 and beyond.
         self._current_stage: Optional[str] = None
-        self._stage_first_event_time: Optional[float] = None
-        self._stage_completions: int = 0
-        self._stage_total: int = 0
+        self._stage_first_event_time: dict[str, float] = {}
+        self._stage_completions: dict[str, int] = {}
+        self._stage_total: dict[str, int] = {}
+        self._stage_active_seconds: dict[str, float] = {}
+        self._last_stage_switch_time: Optional[float] = None
         # Populated per-run in _run_pipeline; kept here so the type is
         # defined at __init__ time (avoids AttributeError if a stray
         # _on_progress fires before _run_pipeline reset it).
@@ -3986,9 +3995,11 @@ class TraceWindow(QMainWindow):
         self._run_start_wall = _dt.now()
         self._eta_smoothed_seconds = None
         self._current_stage = None
-        self._stage_first_event_time = None
-        self._stage_completions = 0
-        self._stage_total = 0
+        self._stage_first_event_time = {}
+        self._stage_completions = {}
+        self._stage_total = {}
+        self._stage_active_seconds = {}
+        self._last_stage_switch_time = None
         self._last_completion_time = None
         self._avg_time_per_image = None
         # Set of stage names we've seen so far in this run. Reset once
@@ -4001,11 +4012,19 @@ class TraceWindow(QMainWindow):
         # Pre-compute the Stage1/Stage2 wall-time weight split for the chosen
         # outputs so per-image progress events land on a unified 0–100 scale
         # that reflects relative wall-time cost (Stage 2 dominates by ~5×).
+        # Compute skip_intervein_regions from the actual output selection
+        # via the shared resolver — NOT from self.config, which carries the
+        # dataclass default (False) until _run() flips it at run start.
+        # Before this fix, csv-only-with-cv_ratio runs got the wrong Stage 2
+        # share (83% instead of 13%), inflating displayed ETA by ~3×
+        # (spec'd 2026-08-20).
         outputs_now = self._selected_outputs()
+        csv_groups_now = {gkey for gkey, gchk in self.csv_group_checks.items() if gchk.isChecked()}
+        effective_skip_intervein = resolve_skip_intervein_regions(outputs_now, csv_groups_now)
         self._progress_stage1_share, self._progress_stage2_share = compute_progress_weights(
             outputs_now,
             wing_isolation_enabled=self._wing_isolation_enabled,
-            skip_intervein_regions=getattr(self.config, "skip_intervein_regions", False),
+            skip_intervein_regions=effective_skip_intervein,
         )
         # Preserve the existing log when resuming so the user can see what
         # happened in the prior slice. Fresh runs always start clean.
@@ -5068,25 +5087,38 @@ class TraceWindow(QMainWindow):
         # — substep events can fire after the image has been marked done.
         if self._image_status.get(name) == ImageStatus.PENDING:
             self._update_image_status(name, ImageStatus.IN_PROGRESS)
-        # Detect stage transitions so the hybrid ETA can reset its throughput
-        # tracker (Stage 2 per-image cost is wildly different from Stage 1).
-        # After the chunking refactor a run flips preprocessing↔analysis
-        # MULTIPLE times (once per chunk boundary), which used to reset
-        # every counter each flip and made the ETA nonsense. Now we reset
-        # only the FIRST time we see a given stage in this run — a
-        # re-entry keeps the accumulated completions + first-event
-        # timestamp so throughput math sees the whole run's samples.
+        # Detect stage transitions. Two things happen on a switch:
+        #  (a) Accumulate the wall-clock time we JUST spent in the
+        #      previous stage into that stage's active-time bucket, so
+        #      the throughput denominator excludes time spent in the
+        #      OTHER stage (chunked runs flip stages many times per
+        #      run — see 2026-08-20 spec Bug #2).
+        #  (b) Initialize per-stage state the first time we see a
+        #      given stage this run. Re-entries preserve accumulated
+        #      completions + active-seconds so throughput math sees
+        #      the whole run's samples, not just the current chunk's.
+        now = time.monotonic()
         if stage in ("preprocessing", "analysis"):
+            if stage != self._current_stage:
+                # Bank the previous stage's active time.
+                if self._current_stage is not None and self._last_stage_switch_time is not None:
+                    prev = self._current_stage
+                    self._stage_active_seconds[prev] = (
+                        self._stage_active_seconds.get(prev, 0.0)
+                        + (now - self._last_stage_switch_time)
+                    )
+                self._current_stage = stage
+                self._last_stage_switch_time = now
             first_time_seeing_stage = stage not in self._stages_seen_this_run
-            self._current_stage = stage
             if first_time_seeing_stage:
                 self._stages_seen_this_run.add(stage)
-                self._stage_first_event_time = time.monotonic()
-                self._stage_completions = 0
-                self._stage_total = total
+                self._stage_first_event_time[stage] = now
+                self._stage_completions[stage] = 0
+                self._stage_total[stage] = total
+                self._stage_active_seconds[stage] = 0.0
                 self._last_completion_time = None
                 self._avg_time_per_image = None
-        self._stage_total = max(self._stage_total, total)
+        self._stage_total[stage] = max(self._stage_total.get(stage, 0), total)
 
         # Each image fires multiple progress events ("starting", "landmarks: …",
         # "hinge: …", "segmentation: …", "done"). Only the "done" event
@@ -5095,11 +5127,18 @@ class TraceWindow(QMainWindow):
         # per-tick value (otherwise recomputing avg = elapsed/K every tick
         # forces fractional-progress-since-last-completion to 0).
         is_done = isinstance(detail, str) and detail.startswith("done")
-        if is_done and self._stage_first_event_time is not None:
-            self._stage_completions = max(self._stage_completions, idx + 1)
-            self._last_completion_time = time.monotonic()
-            stage_elapsed = self._last_completion_time - self._stage_first_event_time
-            self._avg_time_per_image = stage_elapsed / max(self._stage_completions, 1)
+        if is_done and stage in self._stage_first_event_time:
+            self._stage_completions[stage] = max(self._stage_completions.get(stage, 0), idx + 1)
+            self._last_completion_time = now
+            # For the per-image-average interpolator, use the stage's
+            # active seconds so far (banked + since last switch) so a
+            # stage that's been active for 60s across 3 chunks doesn't
+            # look 10s slow-per-image just because the wall-clock also
+            # covers 100s of the other stage.
+            active_so_far = self._stage_active_seconds.get(stage, 0.0)
+            if self._last_stage_switch_time is not None and self._current_stage == stage:
+                active_so_far += now - self._last_stage_switch_time
+            self._avg_time_per_image = active_so_far / max(self._stage_completions[stage], 1)
 
         # _refresh_progress previously fired here on every event, doing
         # ETA math + label repaints 40k+ times on a 4000-image run.
@@ -5192,19 +5231,29 @@ class TraceWindow(QMainWindow):
         percent_eta = elapsed * (100 - pct) / pct
 
         eta_raw = percent_eta
-        if self._stage_first_event_time is not None and self._stage_completions >= 2 and self._stage_total > 0:
-            stage_elapsed = time.monotonic() - self._stage_first_event_time
-            if stage_elapsed > 0:
-                throughput = self._stage_completions / stage_elapsed  # images/sec
-                stage_remaining = max(0, self._stage_total - self._stage_completions)
+        current = self._current_stage
+        current_completions = self._stage_completions.get(current, 0) if current else 0
+        current_total = self._stage_total.get(current, 0) if current else 0
+        if current is not None and current_completions >= 2 and current_total > 0:
+            # active_seconds = time actually spent in THIS stage (banked
+            # from prior visits + since the last stage switch). Ignores
+            # wall-clock time spent in the other stage across chunk
+            # boundaries, which used to deflate throughput by ~2-3× on
+            # chunked runs (spec'd 2026-08-20 Bug #2).
+            active_seconds = self._stage_active_seconds.get(current, 0.0)
+            if self._last_stage_switch_time is not None:
+                active_seconds += time.monotonic() - self._last_stage_switch_time
+            if active_seconds > 0:
+                throughput = current_completions / active_seconds  # images/sec (active-time-based)
+                stage_remaining = max(0, current_total - current_completions)
                 stage_remaining_seconds = stage_remaining / max(throughput, 1e-6)
 
-                if self._current_stage == "preprocessing":
+                if current == "preprocessing":
                     # Project full-Stage-1 wall time from observed throughput,
                     # then derive total run from the Stage 1 share prior. Stage 2
                     # remaining is what's left after now.
                     if self._progress_stage1_share > 0:
-                        full_stage1 = self._stage_total / max(throughput, 1e-6)
+                        full_stage1 = current_total / max(throughput, 1e-6)
                         total_predicted = full_stage1 / self._progress_stage1_share
                         throughput_eta = max(0.0, total_predicted - elapsed)
                     else:
@@ -5217,7 +5266,7 @@ class TraceWindow(QMainWindow):
                 # Full throughput-based at 3 completions; below that we blend
                 # in the percent-based prior to absorb sample noise.
                 threshold = 3.0
-                w = min(1.0, self._stage_completions / threshold)
+                w = min(1.0, current_completions / threshold)
                 eta_raw = w * throughput_eta + (1 - w) * percent_eta
 
         # Exponential moving average — α=0.3 favors stability over reactivity.
