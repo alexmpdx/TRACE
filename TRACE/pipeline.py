@@ -830,6 +830,16 @@ def _run(
     analysis_index_offset = 0
     _total_chunks = max(1, (grand_total_active + _INTERMEDIATE_CHUNK_SIZE - 1) // _INTERMEDIATE_CHUNK_SIZE)
 
+    # Cross-chunk model caches. process_folder used to init these as
+    # function-local dicts, meaning every chunk paid a full torch.load
+    # for the landmark predictor + segmentation model + optional
+    # wing-isolation model. On a 4843-image batch that's 49 reloads
+    # of each model (~25-50 s wasted per model). Hoisting the dicts
+    # here amortizes the load to once per run. See 2026-08-20 plan
+    # Phase 1.
+    landmark_predictor_cache: dict = {}
+    dl_model_cache: dict = {}
+
     # ==================================================================
     # Chunked preprocess → analyze → wipe cycle. See
     # _INTERMEDIATE_CHUNK_SIZE (module-level constant) for the sizing
@@ -891,6 +901,8 @@ def _run(
             auto_detect_um_per_px=getattr(config, "auto_detect_um_per_px", False),
             skip_image_basenames=_inverted_skip,
             pause_event=pause_event,
+            predictor_cache=landmark_predictor_cache,
+            model_cache=dl_model_cache,
         )
 
         successful_preproc: list[_PreprocResult] = []

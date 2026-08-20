@@ -1117,6 +1117,8 @@ def process_folder(
     auto_detect_um_per_px: bool = False,
     skip_image_basenames: Optional[set[str]] = None,
     pause_event: Optional[threading.Event] = None,
+    predictor_cache: Optional[dict] = None,
+    model_cache: Optional[dict] = None,
 ) -> list[PipelineResult]:
     """Process all images in a folder. Continues on per-image errors.
 
@@ -1170,8 +1172,15 @@ def process_folder(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    predictor_cache: dict = {}
-    model_cache: dict = {}
+    # Caller-supplied caches survive across process_folder calls; when
+    # unset (CLI / standalone caller), fall back to function-local
+    # dicts that die at return. The chunked run loop in
+    # TRACE.pipeline._run passes cross-chunk caches so a 49-chunk
+    # batch loads each model once instead of 49 times.
+    if predictor_cache is None:
+        predictor_cache = {}
+    if model_cache is None:
+        model_cache = {}
     results: list[PipelineResult] = []
 
     # If the landmark stage is enabled and we have a checkpoint, run landmarks in

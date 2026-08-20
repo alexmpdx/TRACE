@@ -995,6 +995,20 @@ class TraceWindow(QMainWindow):
         self._log_flush_timer.setInterval(1000)
         self._log_flush_timer.timeout.connect(self._flush_log_buffer)
         self._log_flush_timer.start()
+        # Manifest-save coalescer. Per-image signal handlers used to
+        # call save_manifest() directly (~4000 calls on a 4000-image
+        # batch, each doing JSON serialize + atomic rename on the GUI
+        # thread — ~20 s of cumulative I/O). Now they set
+        # _manifest_dirty=True and the timer flushes at most once per
+        # second. Terminal handlers (paused/cancelled/all_done/error)
+        # still call save_manifest directly so a crash right after
+        # doesn't lose the last state transition. See 2026-08-20 plan
+        # Phase 2.
+        self._manifest_dirty: bool = False
+        self._manifest_save_timer = QTimer(self)
+        self._manifest_save_timer.setInterval(1000)
+        self._manifest_save_timer.timeout.connect(self._flush_manifest_if_dirty)
+        self._manifest_save_timer.start()
         # Active walkthrough overlay (None when no walkthrough is showing).
         # Tracked so resizeEvent / splitterMoved can forward to it.
         self._walkthrough: Optional[WalkthroughOverlay] = None
@@ -4455,7 +4469,11 @@ class TraceWindow(QMainWindow):
         """
         if self._manifest is not None and self._run_folder is not None:
             self._manifest.mark_completed(basename)
-            save_manifest(self._run_folder, self._manifest)
+            # Coalesced write — see _flush_manifest_if_dirty. Save
+            # happens within 1 s via _manifest_save_timer instead of
+            # blocking the GUI thread on JSON serialize + atomic
+            # rename per image.
+            self._manifest_dirty = True
         if self._image_status.get(basename) == ImageStatus.FAILED:
             return
         self._update_image_status(basename, ImageStatus.SUCCEEDED)
@@ -4489,7 +4507,8 @@ class TraceWindow(QMainWindow):
             # can replay the same tooltip the user would have seen at the
             # end of the run.
             self._manifest.mark_failed_preproc(basename, translated)
-            save_manifest(self._run_folder, self._manifest)
+            # Coalesced — save within 1 s via _flush_manifest_if_dirty.
+            self._manifest_dirty = True
         self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_image_failed_analysis(self, basename: str, error_text: str = "") -> None:
@@ -4514,7 +4533,8 @@ class TraceWindow(QMainWindow):
             self._image_error_text[basename] = translated
         if self._manifest is not None and self._run_folder is not None:
             self._manifest.mark_failed_analysis(basename, translated)
-            save_manifest(self._run_folder, self._manifest)
+            # Coalesced — save within 1 s via _flush_manifest_if_dirty.
+            self._manifest_dirty = True
         self._update_image_status(basename, ImageStatus.FAILED)
 
     def _on_paused(self, results: list) -> None:
@@ -5001,6 +5021,32 @@ class TraceWindow(QMainWindow):
             # re-buffer or the buffer would grow unboundedly on a
             # persistently-failing disk.
             pass
+
+    def _flush_manifest_if_dirty(self) -> None:
+        """Save the manifest to disk if any per-image handler set the
+        dirty flag since the last flush.
+
+        Fired every 1 s by ``_manifest_save_timer``. No-op when the
+        flag is clear or when the run folder / manifest aren't set
+        (pre-run). Terminal event handlers (pause / cancel / done /
+        error) bypass this and call save_manifest directly so their
+        state transitions are visible on disk immediately.
+        """
+        if not self._manifest_dirty:
+            return
+        if self._manifest is None or self._run_folder is None:
+            self._manifest_dirty = False
+            return
+        try:
+            save_manifest(self._run_folder, self._manifest)
+        except Exception:  # noqa: BLE001
+            # Log-and-continue: a manifest write failure is diagnosable
+            # from the run.log stream but shouldn't stop the run.
+            logging.getLogger(__name__).exception("manifest coalesce: save failed")
+        finally:
+            # Clear regardless of success so we don't loop on a
+            # persistently-failing disk. Next signal will re-set.
+            self._manifest_dirty = False
 
     def _on_progress(self, idx, total, name, stage, detail):
         """Update internal stage-tracking state on each progress event.
@@ -5946,6 +5992,15 @@ class TraceWindow(QMainWindow):
         # exits — otherwise up to _LOG_FLUSH_MAX_LINES could be lost.
         try:
             self._flush_log_buffer()
+        except Exception:  # noqa: BLE001
+            pass
+        # Same for the manifest coalescer — if a per-image handler
+        # marked the manifest dirty within the last 1s, its state
+        # transitions haven't reached disk yet. Force the flush so
+        # the next launch's resume prompt sees the most-recent
+        # completed/failed counts.
+        try:
+            self._flush_manifest_if_dirty()
         except Exception:  # noqa: BLE001
             pass
         super().closeEvent(event)
