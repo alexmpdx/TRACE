@@ -1007,6 +1007,13 @@ class TraceWindow(QMainWindow):
         # visible before the dialog appears — otherwise the prompt
         # races the first paint and shows up against a blank background.
         QTimer.singleShot(0, self._maybe_offer_restore_post_run_state)
+        # Cross-restart resume prompt. Same deferral. Fires AFTER the
+        # completed-run prompt so if both a completed and a paused run
+        # exist in the remembered folder (rare but possible), the user
+        # sees the review prompt first and the resume prompt second —
+        # matches the natural "review THEN act" ordering. Either prompt
+        # can be Dismissed independently.
+        QTimer.singleShot(0, self._maybe_offer_resume_paused_run)
 
         # Theme live-switch wiring. _apply_theme_styles re-runs every
         # inline stylesheet that depends on theme tokens (eta_label,
@@ -3418,6 +3425,109 @@ class TraceWindow(QMainWindow):
         # check here.
         self._review_failed_images()
 
+    def _maybe_offer_resume_paused_run(self) -> None:
+        """On launch, ask the user if they want to continue a paused run.
+
+        Sibling of ``_maybe_offer_restore_post_run_state`` (which handles
+        the completed-run review flow). Only fires when the saved output
+        folder holds a resumable (paused / running) manifest AND no run
+        is currently in progress. Decline is silent and per-session; the
+        prompt refires on the next launch until the run is resumed or
+        the manifest status changes.
+        """
+        if self.worker is not None and self.worker.isRunning():
+            return
+        output_text = self.output_edit.text().strip()
+        if not output_text:
+            return
+        output_dir = Path(output_text)
+        if not output_dir.is_dir():
+            return
+        try:
+            from TRACE.run_state import find_resumable_manifest
+
+            found = find_resumable_manifest(output_dir)
+        except Exception:
+            return
+        if found is None:
+            return
+        manifest, run_folder = found
+        completed_count = len(set(manifest.completed_images or []))
+        total = getattr(manifest, "total_images", 0) or 0
+        started_at = getattr(manifest, "started_at", None) or ""
+        # started_at is an ISO string like "2026-08-20T14:32:11.…"; trim
+        # to HH:MM for the dialog blurb so the number is readable.
+        started_at_short = ""
+        if isinstance(started_at, str) and len(started_at) >= 16:
+            started_at_short = started_at[11:16]
+        parts = [f"You have a paused run in:\n  {output_dir}"]
+        if started_at_short:
+            parts.append(f"\nStarted at {started_at_short}.")
+        if total:
+            parts.append(f" {completed_count}/{total} images done.")
+        elif completed_count:
+            parts.append(f" {completed_count} images done.")
+        parts.append("\n\nResume it now?")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Resume paused run?")
+        box.setText("".join(parts))
+        btn_resume = box.addButton("Resume", QMessageBox.AcceptRole)
+        box.addButton("Dismiss", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_resume)
+        box.exec_()
+        if box.clickedButton() is not btn_resume:
+            return
+        # Restore GUI state to match the manifest, adopt the manifest,
+        # then delegate the actual restart to _resume_paused_run —
+        # which flips _is_paused back off and calls _run_pipeline.
+        # _maybe_offer_resume then takes the in-session branch (matching
+        # in-memory manifest → skip set from completed_images) and the
+        # worker starts immediately.
+        try:
+            self._populate_gui_from_paused_manifest(manifest, run_folder)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Resume paused run",
+                f"Couldn't restore the paused run's GUI state:\n{type(exc).__name__}: {exc}",
+            )
+            return
+        self._manifest = manifest
+        self._run_folder = run_folder
+        self._is_paused = True
+        self._log(f"Resuming paused run from {run_folder}.")
+        self._resume_paused_run()
+
+    def _populate_gui_from_paused_manifest(self, manifest, run_folder: Path) -> None:
+        """Restore the widgets a paused-run resume needs from disk state.
+
+        Shared between the auto-prompt (_maybe_offer_resume_paused_run)
+        and the picker-button callback. Sets input/output folder edits,
+        recursive flag, and refreshes the image list so downstream
+        _image_paths lookups resolve. Output-selection checkboxes are
+        NOT restored — the manifest's outputs_selected is authoritative
+        at worker-launch time (already passed through
+        _maybe_offer_resume), and touching the checkboxes mid-restore
+        would fire spurious dependent-hint pulses.
+        """
+        if manifest.input_dir:
+            self.input_edit.setText(str(manifest.input_dir))
+        # For paused runs the manifest lives in run_folder/_run_state.json
+        # under the batch output_dir; run_folder's parent is what the
+        # user actually picked as the "Save results to" folder.
+        legacy_layout = (run_folder / "_run_state.json").is_file() and not run_folder.name.startswith("run_")
+        if legacy_layout:
+            self.output_edit.setText(str(run_folder))
+        else:
+            self.output_edit.setText(str(run_folder.parent))
+        if hasattr(self, "recursive_chk"):
+            self.recursive_chk.setChecked(bool(getattr(manifest, "recursive", False)))
+        # Refresh so self._image_paths / _basename_to_row populate against
+        # the restored input folder — needed for any image-list lookups
+        # the resume flow may perform.
+        self._refresh_image_list()
+
     def _load_previous_run_dialog(self) -> None:
         """Picker for the Load-previous-run button below the Run row.
 
@@ -3448,9 +3558,13 @@ class TraceWindow(QMainWindow):
         if not folder:
             return
         try:
-            from TRACE.run_state import find_completed_manifest
+            from TRACE.run_state import find_completed_manifest, find_resumable_manifest
 
-            found = find_completed_manifest(Path(folder))
+            # Prefer resumable (paused/running) manifests over completed
+            # ones — a paused run is time-sensitive (the user is actively
+            # mid-batch), a completed run is just review-time.
+            resumable = find_resumable_manifest(Path(folder))
+            completed = None if resumable is not None else find_completed_manifest(Path(folder))
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -3458,18 +3572,36 @@ class TraceWindow(QMainWindow):
                 f"Couldn't read run-state from {folder}:\n{type(exc).__name__}: {exc}",
             )
             return
-        if found is None:
+        if resumable is not None:
+            manifest, run_folder = resumable
+            try:
+                self._populate_gui_from_paused_manifest(manifest, run_folder)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(
+                    self,
+                    "Load previous run",
+                    f"Couldn't restore the paused run's GUI state:\n{type(exc).__name__}: {exc}",
+                )
+                return
+            self._manifest = manifest
+            self._run_folder = run_folder
+            self._is_paused = True
+            self._log(f"Resuming paused run from {run_folder}.")
+            self._resume_paused_run()
+            return
+        if completed is None:
             QMessageBox.information(
                 self,
                 "Load previous run",
                 (
-                    f"No completed run with failed images was found under {folder}.\n\n"
-                    "A reloadable run needs (a) a finished TRACE run in that folder "
-                    "and (b) at least one image flagged as failed."
+                    f"No paused or reviewable run was found under {folder}.\n\n"
+                    "A loadable run needs either (a) a paused / in-progress "
+                    "TRACE run in that folder, or (b) a finished run with at "
+                    "least one image flagged as failed."
                 ),
             )
             return
-        manifest, run_folder = found
+        manifest, run_folder = completed
         self._restore_post_run_state(manifest, run_folder)
         self._review_failed_images()
 
