@@ -962,6 +962,10 @@ class TraceWindow(QMainWindow):
         self._stage_first_event_time: Optional[float] = None
         self._stage_completions: int = 0
         self._stage_total: int = 0
+        # Populated per-run in _run_pipeline; kept here so the type is
+        # defined at __init__ time (avoids AttributeError if a stray
+        # _on_progress fires before _run_pipeline reset it).
+        self._stages_seen_this_run: set[str] = set()
         # Locked-in (not recomputed every tick) timestamps + average so the
         # smoothed bar can interpolate between "done" events without
         # collapsing to zero on every refresh.
@@ -3815,6 +3819,11 @@ class TraceWindow(QMainWindow):
         self._stage_total = 0
         self._last_completion_time = None
         self._avg_time_per_image = None
+        # Set of stage names we've seen so far in this run. Reset once
+        # per Run click; consulted by _on_progress to distinguish the
+        # first entry into a stage (reset counters) from a chunk-boundary
+        # re-entry (preserve accumulated counts).
+        self._stages_seen_this_run = set()
         self.eta_label.setText("Estimating time until pipeline finishes…")
         self._progress_timer.start()
         # Pre-compute the Stage1/Stage2 wall-time weight split for the chosen
@@ -4827,13 +4836,22 @@ class TraceWindow(QMainWindow):
             self._update_image_status(name, ImageStatus.IN_PROGRESS)
         # Detect stage transitions so the hybrid ETA can reset its throughput
         # tracker (Stage 2 per-image cost is wildly different from Stage 1).
-        if stage in ("preprocessing", "analysis") and stage != self._current_stage:
+        # After the chunking refactor a run flips preprocessing↔analysis
+        # MULTIPLE times (once per chunk boundary), which used to reset
+        # every counter each flip and made the ETA nonsense. Now we reset
+        # only the FIRST time we see a given stage in this run — a
+        # re-entry keeps the accumulated completions + first-event
+        # timestamp so throughput math sees the whole run's samples.
+        if stage in ("preprocessing", "analysis"):
+            first_time_seeing_stage = stage not in self._stages_seen_this_run
             self._current_stage = stage
-            self._stage_first_event_time = time.monotonic()
-            self._stage_completions = 0
-            self._stage_total = total
-            self._last_completion_time = None
-            self._avg_time_per_image = None
+            if first_time_seeing_stage:
+                self._stages_seen_this_run.add(stage)
+                self._stage_first_event_time = time.monotonic()
+                self._stage_completions = 0
+                self._stage_total = total
+                self._last_completion_time = None
+                self._avg_time_per_image = None
         self._stage_total = max(self._stage_total, total)
 
         # Each image fires multiple progress events ("starting", "landmarks: …",

@@ -226,7 +226,7 @@ _OUTPUT_STAGE_REQUIREMENTS = {
     "vein_overlay": (True, True, True),
     "intervein_overlay": (True, True, True),
     "ap_overlay": (True, True, True),
-    "cv_ratio_overlay": (True, True, True),
+    "cv_ratio_overlay": (True, False, False),  # only landmarks — see fast-path in _analyze_one and 2026-08-19 plan Phase 1
     "csv": (True, True, True),
 }
 
@@ -821,6 +821,13 @@ def _run(
     interrupted = False
     paused = False
     chunk_offset = 0
+    # Cross-chunk offset for Stage-2 (analysis) progress emission. Each
+    # chunk's _emit_progress reads this value and adds its per-chunk idx,
+    # so the GUI sees a continuous 1..grand_total counter across chunks
+    # rather than the counter resetting to 1 at every chunk boundary
+    # (which broke the ETA math after the chunking refactor). Advanced
+    # by len(successful_preproc) at the end of each chunk's Stage 2.
+    analysis_index_offset = 0
     _total_chunks = max(1, (grand_total_active + _INTERMEDIATE_CHUNK_SIZE - 1) // _INTERMEDIATE_CHUNK_SIZE)
 
     # ==================================================================
@@ -979,10 +986,22 @@ def _run(
         completion_lock = threading.Lock()
 
         def _emit_progress(idx: int, stem: str, detail: str):
+            # Emit against the batch-wide counter, not the per-chunk one,
+            # so the GUI's stage-throughput math sees a continuous count
+            # across chunks. grand_total_active is an upper bound (some
+            # images may fail Stage 1 and never reach Stage 2), which is
+            # fine — the counter simply asymptotes below 100% at the end
+            # of the run, and the CSV block still fires as usual.
             if progress_callback is None:
                 return
             with progress_lock:
-                progress_callback(idx, total, stem, "analysis", detail)
+                progress_callback(
+                    analysis_index_offset + idx,
+                    grand_total_active,
+                    stem,
+                    "analysis",
+                    detail,
+                )
 
         def _signal_complete(image_basename: str, success: bool, error_text: str = "") -> None:
             """Thread-safe wrapper around the per-image-completion callbacks.
@@ -1381,9 +1400,11 @@ def _run(
         # instead of the whole batch's worth (which filled disk mid-run on 4000+ image runs).
         _wipe_preproc_dir(preproc_dir)
 
-
-
+        # Advance both cross-chunk offsets so the next chunk's progress
+        # events (both preproc and analysis) continue the batch-wide
+        # counter instead of restarting from 1.
         chunk_offset += len(_chunk_images)
+        analysis_index_offset += total
 
     if interrupted:
         raise InterruptedError("Cancelled by user")
