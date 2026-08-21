@@ -5165,8 +5165,19 @@ class TraceWindow(QMainWindow):
         expected completion based on the locked-in average time per image,
         so the bar doesn't sit frozen for tens of seconds when parallel
         workers complete in clustered bursts.
+
+        Keys `_stage_total` / `_stage_completions` / `_stage_first_event_time`
+        by `_current_stage` — those three are per-stage dicts as of v0.2.21's
+        chunked-run ETA fix. Reading them as scalars raised TypeError on the
+        first tick, which killed the QTimer-driven ETA refresh silently and
+        left the bar stuck at 0% with the ETA on "Estimating…" (regression
+        found post-v0.2.21 on a 4527-image run).
         """
-        if self._stage_total <= 0 or self._stage_first_event_time is None:
+        current = self._current_stage
+        if current is None:
+            return 0.0
+        stage_total = self._stage_total.get(current, 0)
+        if stage_total <= 0 or current not in self._stage_first_event_time:
             return 0.0
         if self._last_completion_time is None or self._avg_time_per_image is None:
             # No completions yet in this stage — bar stays at the previous
@@ -5177,8 +5188,9 @@ class TraceWindow(QMainWindow):
         # Fractional advance toward the next completion (0 → 1 over avg).
         # Cap at 1.0 so we never appear to have completed an image we haven't.
         fractional = min(1.0, time_since_last / max(self._avg_time_per_image, 0.01))
-        estimated = min(float(self._stage_total), self._stage_completions + fractional)
-        return estimated / self._stage_total
+        stage_completions = self._stage_completions.get(current, 0)
+        estimated = min(float(stage_total), stage_completions + fractional)
+        return estimated / stage_total
 
     def _refresh_progress(self) -> None:
         """Compute the smoothed pct + ETA from current state. Called both
