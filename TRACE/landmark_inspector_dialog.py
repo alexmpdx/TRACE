@@ -26,7 +26,9 @@ napari API (``border_color``/``border_width``, ``features=``, ``size=90``).
 
 from __future__ import annotations
 
+import html
 import json
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -45,12 +47,22 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QShortcut,
+    QSlider,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
+# Landmark point / label colors. Unreliable (gate-failed) points are drawn in a
+# distinct color so the user can see at a glance which ones need correcting;
+# the currently-selected point (and its label) turns the "selected" color.
+LM_FACE_COLOR = "cyan"  # reliable, unselected point
+LM_TEXT_COLOR = "yellow"  # reliable, unselected label
+LM_SELECTED_COLOR = "orange"  # selected point + label (matches Custom Measurements tab)
+LM_FAILED_COLOR = "#FF2D2D"  # gate-failed point + label
 
 # Vein/intervein vocabulary + colors (class indices from the segmentation
 # model's metadata.json). Only vein and intervein are user-editable: "hinge
@@ -86,6 +98,26 @@ def _parse_landmarks_geojson(path: Path) -> dict:
             continue
         out[str(name)] = (float(coords[0]), float(coords[1]))
     return out
+
+
+def _parse_failed_gate_landmarks(message: str) -> set:
+    """Extract the failed landmark names from a confidence-gate error message.
+
+    The main GUI already records each failed image's (landmark-name-translated)
+    error string on the TraceWindow; for a landmark confidence-gate abort it reads
+    ``Core landmarks failed confidence gate: <name> (<reason>), <name> (<reason>)``
+    (see LandmarkLocator ``LowConfidenceLandmarkError``). We parse the ``<name>``
+    tokens so those exact points can be colored red on the canvas.
+
+    Returns an empty set for any other message (quality-gate aborts, preprocessing
+    or analysis failures) — those name no landmarks, so nothing is colored. Reasons
+    join their sub-parts with ``; `` and never contain ``,`` or ``()``, so entries
+    split cleanly on the ``name (reason)`` shape.
+    """
+    if not message or "Core landmarks failed confidence gate" not in message:
+        return set()
+    _, _, tail = message.partition(":")
+    return {m.group(1).strip() for m in re.finditer(r"([^,]+?)\s*\(([^)]*)\)", tail) if m.group(1).strip()}
 
 
 class _TaskSignals(QObject):
@@ -553,7 +585,18 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         self._viewer = None  # napari.Viewer, lazy
         self._points_layer = None
         self._predicted_positions: dict = {}  # {raw_name: (x, y)} for Restore
+        # Per-image failure info, sourced from the GUI's already-extracted
+        # TraceWindow._image_error_text (NOT the regenerated GeoJSON, whose gate
+        # flags are wiped by disable_gates). Populated in _render on the GUI thread.
+        self._failure_text: str = ""
+        self._failed_names: set = set()  # landmark names (raw + display) that tripped the gate
         self._last_saved_snapshot: Optional[tuple] = None
+        # Point size defaults to an image-adaptive value on first render (None
+        # here). A user drag on the slider pins an absolute size that then carries
+        # across cohort images. Label size is image-independent, so it's restored
+        # from settings in _build_ui.
+        self._point_size: Optional[int] = None
+        self._label_size = 12
         self._loaded = False
         self._init_async()
         self._build_ui()
@@ -567,6 +610,8 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         self._image_path = Path(new_image_path)
         self._points_layer = None
         self._predicted_positions = {}
+        self._failure_text = ""
+        self._failed_names = set()
         self._last_saved_snapshot = None
         self._loaded = False
         self._bump_load_token()  # discard any in-flight load for the old image
@@ -610,6 +655,47 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         controls.addStretch(1)
         layout.addLayout(controls)
 
+        # Second row: live point-size + label-size sliders. Point size seeds from
+        # an image-adaptive default at render; both apply to the layer live.
+        sizes = QHBoxLayout()
+        sizes.addWidget(QLabel("Point size:"))
+        self.sld_point_size = QSlider(Qt.Horizontal)
+        self.sld_point_size.setRange(2, 400)
+        self.sld_point_size.setMinimumWidth(140)
+        self.sld_point_size.setToolTip("Diameter of the landmark points, in pixels.")
+        self.sld_point_size.valueChanged.connect(self._on_point_size_changed)
+        sizes.addWidget(self.sld_point_size)
+        self.lbl_point_size_val = QLabel("—")
+        self.lbl_point_size_val.setMinimumWidth(34)
+        sizes.addWidget(self.lbl_point_size_val)
+
+        sizes.addSpacing(20)
+        sizes.addWidget(QLabel("Label size:"))
+        self.sld_label_size = QSlider(Qt.Horizontal)
+        self.sld_label_size.setRange(4, 48)
+        self.sld_label_size.setMinimumWidth(120)
+        self.sld_label_size.setToolTip("Font size of the landmark name labels.")
+        self.sld_label_size.valueChanged.connect(self._on_label_size_changed)
+        sizes.addWidget(self.sld_label_size)
+        self.lbl_label_size_val = QLabel("—")
+        self.lbl_label_size_val.setMinimumWidth(28)
+        sizes.addWidget(self.lbl_label_size_val)
+        sizes.addStretch(1)
+        layout.addLayout(sizes)
+
+        # Per-image failure summary: which landmarks failed the confidence gate
+        # and why. Kept short (scrolls if it overflows) so it doesn't eat canvas.
+        self.failures_scroll = QScrollArea()
+        self.failures_scroll.setWidgetResizable(True)
+        self.failures_scroll.setMaximumHeight(72)
+        self.failures_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.lbl_failures = QLabel("")
+        self.lbl_failures.setWordWrap(True)
+        self.lbl_failures.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_failures.setStyleSheet("padding: 2px 4px;")
+        self.failures_scroll.setWidget(self.lbl_failures)
+        layout.addWidget(self.failures_scroll)
+
         self._viewer_placeholder = QLabel(
             "Loading image and predicted landmarks…\n\n"
             "First open may take a few seconds while LandmarkLocator initializes."
@@ -630,7 +716,16 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
                 i = self.cmb_add_name.findData(saved)
                 if i >= 0:
                     self.cmb_add_name.setCurrentIndex(i)
+            self._label_size = int(s.value("inspector/landmark_label_size", 12, type=int))
         self.cmb_add_name.currentIndexChanged.connect(self._save_toolbar_settings)
+
+        # Seed the label slider from the restored value (blocked so it doesn't
+        # try to touch the not-yet-created layer). The point slider is seeded at
+        # render time, once the adaptive default is known.
+        self.sld_label_size.blockSignals(True)
+        self.sld_label_size.setValue(self._label_size)
+        self.sld_label_size.blockSignals(False)
+        self.lbl_label_size_val.setText(str(self._label_size))
 
     def _save_toolbar_settings(self, *_args) -> None:
         s = self._settings()
@@ -748,59 +843,152 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         self._viewer.add_image(image, name=self._image_path.name, rgb=image.ndim == 3)
 
         raw_names = list(landmarks_dict.keys())
+        labels = [landmark_display_name(n) for n in raw_names]
         # napari expects (row, col) = (y, x) ordering for point coordinates.
         coords_yx = np.array([[y, x] for (x, y) in landmarks_dict.values()], dtype=float)
         if coords_yx.size == 0:
             coords_yx = np.empty((0, 2), dtype=float)
+        # Pull the already-extracted failure reason for THIS image off the GUI
+        # window (GUI thread — safe here). The regenerated GeoJSON's own gate
+        # flags are unusable (disable_gates wipes them), so this is the source of
+        # both the failure list and the red points.
+        err_map = getattr(self._window, "_image_error_text", {}) or {}
+        self._failure_text = err_map.get(self._image_path.name, "")
+        self._failed_names = _parse_failed_gate_landmarks(self._failure_text)
         # Scale the point size to the image, mirroring the landmark-overlay output
         # (visualize.py: radius = min(h, w) / 125). napari `size` is a diameter, so
         # double the overlay radius — points then look the same relative to the wing
         # regardless of image resolution, instead of a fixed 90 px that dwarfs small
-        # images and vanishes on large ones.
+        # images and vanishes on large ones. Only used as the slider's default; a
+        # user-set point size (self._point_size) overrides it and carries across
+        # cohort images.
         h, w = image.shape[:2]
-        point_size = max(20, int(min(h, w) / 125 * 2))
+        if self._point_size is None:
+            self._point_size = max(20, int(min(h, w) / 125 * 2))
+        point_size = int(self._point_size)
+        # Per-point reliability lives in a feature column so it stays in lockstep
+        # with the point data across add/delete, driving the failed-point color. A
+        # point is "failed" when its raw name or display label is in the parsed
+        # gate-failure set (match both so un-translated keys still land).
+        reliable_flags = self._reliable_flags(raw_names, labels)
         self._points_layer = self._viewer.add_points(
             coords_yx,
             name="landmarks",
             size=point_size,
-            face_color="cyan",
+            face_color=LM_FACE_COLOR,
             border_color="black",
             border_width=0.15,
             features={
                 "name": list(raw_names),
-                "label": [landmark_display_name(n) for n in raw_names],
+                "label": labels,
+                "reliable": reliable_flags,
             },
             text={
                 "string": "{label}",
-                "size": 12,
-                "color": "yellow",
+                "size": int(self._label_size),
+                "color": LM_TEXT_COLOR,
                 "translation": [-30, 0],
             },
         )
+        # Seed the point-size slider from whatever size was actually applied.
+        self.sld_point_size.blockSignals(True)
+        self.sld_point_size.setValue(point_size)
+        self.sld_point_size.blockSignals(False)
+        self.lbl_point_size_val.setText(str(point_size))
         # CRITICAL DIFFERENCE from LandmarkPickerWidget: select mode stays on
         # and NO snap-back callback is installed. The user is here to edit.
         self._points_layer.mode = "select"
-        # Selected landmarks turn orange (matches the Custom Measurements tab).
+        # Selected point + label turn orange; gate-failed points stay red until
+        # corrected (matches the Custom Measurements tab's selection color).
         try:
-            self._points_layer.events.highlight.connect(self._update_face_colors)
+            self._points_layer.events.highlight.connect(self._update_colors)
         except Exception:
             pass
-        self._update_face_colors()
+        self._update_colors()
+        self._update_failures_panel()
         try:
             self._viewer.layers.selection.active = self._points_layer
         except Exception:
             pass
 
-    def _update_face_colors(self, _event=None) -> None:
-        """Recolor the selected landmark(s) orange; unselected stay cyan."""
-        if self._points_layer is None:
+    def _reliable_flags(self, raw_names, labels) -> list:
+        """Per-point reliability: False iff the point's raw name or display label
+        is in the parsed gate-failure set (match both so un-translated keys land)."""
+        failed = self._failed_names
+        return [(n not in failed and lbl not in failed) for n, lbl in zip(raw_names, labels)]
+
+    def _update_colors(self, _event=None) -> None:
+        """Recolor points AND their labels by selection + gate state.
+
+        Selected → orange (point + label); gate-failed (unreliable) → red;
+        otherwise the reliable defaults (cyan point / yellow label). Selection
+        takes precedence so the active point always reads as selected.
+        """
+        layer = self._points_layer
+        if layer is None:
             return
         try:
-            sel = self._points_layer.selected_data
-            n = len(self._points_layer.data)
-            self._points_layer.face_color = ["orange" if i in sel else "cyan" for i in range(n)]
+            sel = layer.selected_data
+            n = len(layer.data)
+            reliable = list(layer.features.get("reliable", [True] * n))
+            face_colors, text_colors = [], []
+            for i in range(n):
+                if i in sel:
+                    face_colors.append(LM_SELECTED_COLOR)
+                    text_colors.append(LM_SELECTED_COLOR)
+                elif i < len(reliable) and not reliable[i]:
+                    face_colors.append(LM_FAILED_COLOR)
+                    text_colors.append(LM_FAILED_COLOR)
+                else:
+                    face_colors.append(LM_FACE_COLOR)
+                    text_colors.append(LM_TEXT_COLOR)
+            layer.face_color = face_colors
+            # napari coerces a sequence of colors into a per-point (manual) text
+            # color encoding; skip when empty so it doesn't fall back to constant.
+            if n:
+                layer.text.color = text_colors
         except Exception:
             pass
+
+    def _on_point_size_changed(self, value: int) -> None:
+        self._point_size = int(value)
+        self.lbl_point_size_val.setText(str(int(value)))
+        if self._points_layer is not None:
+            try:
+                self._points_layer.size = int(value)
+                self._points_layer.current_size = int(value)
+            except Exception:
+                pass
+
+    def _on_label_size_changed(self, value: int) -> None:
+        self._label_size = int(value)
+        self.lbl_label_size_val.setText(str(int(value)))
+        if self._points_layer is not None:
+            try:
+                self._points_layer.text.size = int(value)
+            except Exception:
+                pass
+        s = self._settings()
+        if s is not None:
+            s.setValue("inspector/landmark_label_size", int(value))
+
+    def _update_failures_panel(self) -> None:
+        """Show this image's failure reason(s), as already extracted by the GUI.
+
+        Reads the TraceWindow's per-image error text (translated, human-readable)
+        rather than re-deriving anything — this covers ALL failure types (landmark
+        confidence gate, quality gate, no-wing, analysis crash, etc.). The message
+        is HTML-escaped because gate reasons contain '<' (e.g. peak=0.12<0.20).
+        """
+        text = (self._failure_text or "").strip()
+        if not text:
+            self.lbl_failures.setText(
+                "<span style='color:#888'>No recorded failure for this image.</span>"
+            )
+            return
+        header = "<span style='color:#FF6B6B'>&#9888; This image failed:</span>"
+        body = html.escape(text).replace("\n", "<br>")
+        self.lbl_failures.setText(f"{header}<br>{body}")
 
     def _set_points_mode(self, mode: str) -> None:
         if self._points_layer is None:
@@ -834,11 +1022,13 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         else:
             new_coords = center
         labels = list(self._points_layer.features.get("label", []))
+        reliable = list(self._points_layer.features.get("reliable", []))
         current.append(raw_name)
         labels.append(landmark_display_name(raw_name))
+        reliable.append(True)  # a hand-placed point is reliable by definition
         self._points_layer.data = new_coords
-        self._points_layer.features = {"name": current, "label": labels}
-        self._update_face_colors()
+        self._points_layer.features = {"name": current, "label": labels, "reliable": reliable}
+        self._update_colors()
 
     def _on_delete_selected(self) -> None:
         if self._points_layer is None:
@@ -851,7 +1041,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             return
         # napari keeps features in lockstep with data on removal.
         self._points_layer.remove_selected()
-        self._update_face_colors()
+        self._update_colors()
 
     def restore_predictions(self) -> None:
         if self._points_layer is None:
@@ -860,15 +1050,17 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         from measurement_maker.landmark_names import landmark_display_name
 
         raw_names = list(self._predicted_positions.keys())
+        labels = [landmark_display_name(n) for n in raw_names]
         coords_yx = np.array([[y, x] for (x, y) in self._predicted_positions.values()], dtype=float)
         if coords_yx.size == 0:
             coords_yx = np.empty((0, 2), dtype=float)
         self._points_layer.data = coords_yx
         self._points_layer.features = {
             "name": list(raw_names),
-            "label": [landmark_display_name(n) for n in raw_names],
+            "label": labels,
+            "reliable": self._reliable_flags(raw_names, labels),
         }
-        self._update_face_colors()
+        self._update_colors()
 
     # -- saving -----------------------------------------------------------
     def save_override(self) -> Optional[Path]:
