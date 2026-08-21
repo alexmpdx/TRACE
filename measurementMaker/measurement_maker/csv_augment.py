@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,11 @@ from measurement_maker.distance import compute_pair_distance_px, load_landmarks_
 from measurement_maker.types import LandmarkPair, safe_label
 
 logger = logging.getLogger(__name__)
+
+# Measurement groups the landmarks-only fast path knows how to emit without
+# invoking identifyFeatures. wing_area / wing_shape need wing_outline (which
+# requires the segmentation Stage-1 sub-stage), so they don't qualify.
+LANDMARK_ONLY_MEASUREMENT_GROUPS = frozenset({"cv_ratio"})
 
 
 def _column_names(pair: LandmarkPair, has_scale: bool) -> tuple[str, Optional[str]]:
@@ -221,4 +227,154 @@ def write_distances_csv(
         csv_path.name,
         len(pair_cols),
         len(rows),
+    )
+
+
+def _cv_ratio_row(landmarks: dict[str, tuple[float, float]], um_per_px: Optional[float]) -> dict[str, str]:
+    """Compute cv_ratio group values from a landmarks dict.
+
+    Mirrors identify_features.views.csv_export._wing_measurements' cv_ratio
+    block (wing length L1-Rs→DTip, crossvein distance ACV.p→PCV.a, ratio).
+    Column names match identify_features' wide-format output.
+    """
+    has_scale = um_per_px is not None and um_per_px > 0
+    vals: dict[str, str] = {
+        "wing length_px": "",
+        "wing length_um": "",
+        "crossvein distance_px": "",
+        "crossvein distance_um": "",
+        "CV ratio": "",
+    }
+    l1rs = landmarks.get("L1-Rs")
+    dtip = landmarks.get("DTip")
+    wl_px: Optional[float] = None
+    if l1rs is not None and dtip is not None:
+        wl_px = math.hypot(dtip[0] - l1rs[0], dtip[1] - l1rs[1])
+        vals["wing length_px"] = f"{wl_px:.1f}"
+        if has_scale:
+            vals["wing length_um"] = f"{wl_px * um_per_px:.1f}"
+    acvp = landmarks.get("ACV.p")
+    pcva = landmarks.get("PCV.a")
+    cv_px: Optional[float] = None
+    if acvp is not None and pcva is not None:
+        cv_px = math.hypot(pcva[0] - acvp[0], pcva[1] - acvp[1])
+        vals["crossvein distance_px"] = f"{cv_px:.1f}"
+        if has_scale:
+            vals["crossvein distance_um"] = f"{cv_px * um_per_px:.1f}"
+    if wl_px is not None and cv_px is not None and wl_px > 0:
+        vals["CV ratio"] = f"{cv_px / wl_px:.4f}"
+    return vals
+
+
+def write_landmark_csv_batch(
+    csv_path: Path,
+    specimen_landmarks: dict[str, Path],
+    pairs: list[LandmarkPair],
+    measurement_groups: Optional[set[str]] = None,
+    um_per_px: Optional[float] = None,
+) -> None:
+    """Write a landmarks-only CSV: user distances + cv_ratio measurement group.
+
+    Extends write_distances_csv's landmarks-only fast path to also emit CSV
+    columns for the cv_ratio measurement group when it's the only selected
+    group (wing_area / wing_shape need the wing outline and don't qualify).
+
+    The output columns and specimen key match identify_features' wide-format
+    export (``export_csv_batch``) so a fast-path CSV is drop-in comparable to
+    a full-pipeline CSV filtered to the same groups.
+
+    Args:
+        csv_path: Output path; parent dirs are created if missing.
+        specimen_landmarks: {specimen_id: path to *_landmarks.geojson}. One
+            CSV row is written per entry, in insertion order.
+        pairs: User-configured distance pairs. May be empty when only
+            cv_ratio was requested.
+        measurement_groups: Subset of LANDMARK_ONLY_MEASUREMENT_GROUPS to
+            include as columns. None or empty = no landmark-only groups
+            (behaves like write_distances_csv).
+        um_per_px: Scale; when None only `_px` columns are written.
+
+    Missing landmarks on a particular wing produce blank cells for the
+    affected columns on that wing (logged at WARNING).
+    """
+    groups = set(measurement_groups) if measurement_groups else set()
+    include_cv_ratio = "cv_ratio" in groups
+    if not pairs and not include_cv_ratio:
+        logger.info("write_landmark_csv_batch: nothing to emit; skipping write")
+        return
+    if not specimen_landmarks:
+        logger.info("write_landmark_csv_batch: no specimens; skipping write")
+        return
+
+    has_scale = um_per_px is not None and um_per_px > 0
+    fieldnames: list[str] = ["specimen"]
+    if include_cv_ratio:
+        fieldnames.append("wing length_px")
+        if has_scale:
+            fieldnames.append("wing length_um")
+        fieldnames.append("crossvein distance_px")
+        if has_scale:
+            fieldnames.append("crossvein distance_um")
+        fieldnames.append("CV ratio")
+
+    taken: set[str] = set(fieldnames)
+    pair_cols: list[tuple[LandmarkPair, str, Optional[str]]] = []
+    for pair in pairs:
+        px_col, um_col = _column_names(pair, has_scale)
+        px_col = _dedupe_suffix(px_col, taken)
+        taken.add(px_col)
+        fieldnames.append(px_col)
+        if um_col is not None:
+            um_col = _dedupe_suffix(um_col, taken)
+            taken.add(um_col)
+            fieldnames.append(um_col)
+        pair_cols.append((pair, px_col, um_col))
+
+    rows: list[dict[str, str]] = []
+    for specimen_id, lm_path in specimen_landmarks.items():
+        landmarks: dict[str, tuple[float, float]] = {}
+        if lm_path is not None and lm_path.exists():
+            landmarks = load_landmarks_from_geojson(lm_path)
+        row: dict[str, str] = {"specimen": specimen_id}
+        if include_cv_ratio:
+            cv_vals = _cv_ratio_row(landmarks, um_per_px)
+            for col in ("wing length_px", "wing length_um", "crossvein distance_px", "crossvein distance_um", "CV ratio"):
+                if col in fieldnames:
+                    row[col] = cv_vals[col]
+            if not cv_vals["CV ratio"]:
+                logger.warning(
+                    "write_landmark_csv_batch: %s missing landmark(s) needed for cv_ratio", specimen_id
+                )
+        for pair, px_col, um_col in pair_cols:
+            dist_px = compute_pair_distance_px(landmarks, pair.name_a, pair.name_b)
+            if dist_px is None:
+                row[px_col] = ""
+                if um_col is not None:
+                    row[um_col] = ""
+                logger.warning(
+                    "write_landmark_csv_batch: %s missing landmark(s) %r/%r for pair %r",
+                    specimen_id,
+                    pair.name_a,
+                    pair.name_b,
+                    pair.label,
+                )
+                continue
+            row[px_col] = f"{dist_px:.1f}"
+            if um_col is not None:
+                row[um_col] = f"{dist_px * um_per_px:.1f}"
+        rows.append(row)
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    logger.info(
+        "write_landmark_csv_batch: wrote %s (%d wing(s); groups=%s; %d pair(s))",
+        csv_path.name,
+        len(rows),
+        sorted(groups & LANDMARK_ONLY_MEASUREMENT_GROUPS),
+        len(pair_cols),
     )

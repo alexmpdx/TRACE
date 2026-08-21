@@ -160,6 +160,11 @@ class PipelineConfig:
         False  # When True, skip §6.1 polygon splitting and §6.2 region naming (saves resources when only vein outputs are needed). §6.3 vein tissue assignment still runs so overlays and exports retain vein tissue polygons.
     )
 
+    # -- Tier-2 fast path --
+    skip_vein_tracing: bool = (
+        False  # When True, identify_wing returns after Step 1 (wing outline + landmarks + wing_solidity) — no skeleton, no tracing, no tissue, no intervein. For outputs that only need the wing outline (wing_area, wing_shape) or landmarks (cv_ratio, custom distances). Implies skip_intervein_regions.
+    )
+
     # -- Intervein naming --
     vein_buffer_vw: float = 1.1  # Buffer radius around vein centerlines (× median vein width)
     adjacency_min_length_vw: float = 1.3  # Min shared boundary length (× median vein width)

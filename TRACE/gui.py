@@ -60,6 +60,7 @@ from TRACE.pipeline import (
     _required_stages,
     compute_progress_weights,
     resolve_skip_intervein_regions,
+    resolve_skip_vein_tracing,
     trace_folder,
 )
 from TRACE.run_state import (
@@ -4021,10 +4022,15 @@ class TraceWindow(QMainWindow):
         outputs_now = self._selected_outputs()
         csv_groups_now = {gkey for gkey, gchk in self.csv_group_checks.items() if gchk.isChecked()}
         effective_skip_intervein = resolve_skip_intervein_regions(outputs_now, csv_groups_now)
+        # Tier-2 fast path: mirrors what _run() sets on config.skip_vein_tracing.
+        # Feed it into compute_progress_weights so the ETA math doesn't reserve
+        # a Stage-2 wall-time share that the pipeline won't actually consume.
+        effective_skip_vein_tracing = resolve_skip_vein_tracing(outputs_now, csv_groups_now)
         self._progress_stage1_share, self._progress_stage2_share = compute_progress_weights(
             outputs_now,
             wing_isolation_enabled=self._wing_isolation_enabled,
             skip_intervein_regions=effective_skip_intervein,
+            skip_vein_tracing=effective_skip_vein_tracing,
         )
         # Preserve the existing log when resuming so the user can see what
         # happened in the prior slice. Fresh runs always start clean.

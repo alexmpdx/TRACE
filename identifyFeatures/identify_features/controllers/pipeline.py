@@ -170,6 +170,14 @@ def identify_wing(
     run_stage_filters(FilterStage.WING_OUTLINE, gd_ctx)
     result.wing_solidity = gd_ctx.scratch.get("wing_solidity")
 
+    # Tier-2 fast path: outputs that only need wing outline + landmarks + wing_solidity
+    # (wing_area / wing_shape / cv_ratio / custom landmark distances) skip Steps 2-6
+    # entirely — no image read, no skeleton, no tracing, no tissue, no intervein.
+    if config.skip_vein_tracing:
+        logger.info("Steps 2-6 skipped (skip_vein_tracing=True)")
+        result.warnings = warnings
+        return result
+
     if image_path is not None:
         from identify_features.utils.psd_loader import imread_any
 

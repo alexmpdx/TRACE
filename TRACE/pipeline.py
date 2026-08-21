@@ -22,6 +22,12 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from identify_features.config import PipelineConfig
 
+# Landmarks-only measurement groups that qualify for the fast-CSV path
+# (identify_wing skipped entirely — no segmentation needed). Imported at
+# module top so _run()'s fast_csv_path calculation can reference it without
+# a lazy import. See measurement_maker.csv_augment.
+from measurement_maker.csv_augment import LANDMARK_ONLY_MEASUREMENT_GROUPS  # noqa: E402
+
 logger = logging.getLogger("TRACE")
 
 # User-selectable Stage 2 outputs. Keys are internal IDs; values are GUI labels.
@@ -101,6 +107,22 @@ from identify_features.views.csv_export import (  # noqa: E402
 # geojson via _geojson_content_wanted()) so they only contribute to the
 # intervein requirement when their respective content flags are on.
 _INTERVEIN_DEPENDENT_OUTPUTS = frozenset({"intervein_overlay", "geojson", "csv"})
+
+# Outputs that require Steps 2-6 of identify_wing (skeleton, landmark anchor,
+# vein tracing, tissue assignment, intervein). Used to set
+# PipelineConfig.skip_vein_tracing when the requested outputs only need Step 1
+# artifacts (wing outline + landmarks + wing_solidity).
+#
+# csv / geojson are content-gated (csv via csv_measurement_groups, geojson via
+# _geojson_content_wanted()); they only need vein tracing when their content
+# does. Anything else in this set forces the full pipeline.
+_VEIN_TRACING_DEPENDENT_OUTPUTS = frozenset(
+    {"vein_overlay", "intervein_overlay", "ap_overlay", "geojson", "csv"}
+)
+# CSV measurement groups whose columns require vein tracing. wing_area /
+# wing_shape read only wing_outline + wing_solidity; cv_ratio reads only
+# landmarks. Everything else needs traced veins.
+_VEIN_TRACING_DEPENDENT_CSV_GROUPS = frozenset({"vein_lengths", "intervein_areas", "ap_areas"})
 
 # Number of images processed as one preprocess → analyze → wipe cycle.
 # Each image's Stage-1 pass writes intermediate OME-TIFFs (rescaled,
@@ -294,6 +316,37 @@ def resolve_skip_intervein_regions(
     return not (always_intervein or csv_needs_intervein or geojson_needs_intervein)
 
 
+def resolve_skip_vein_tracing(
+    outputs: set[str],
+    csv_measurement_groups: set[str],
+) -> bool:
+    """Return True when identify_wing can stop after Step 1 (Tier-2 fast path).
+
+    Steps 2-6 (skeleton graph, landmark anchor, wing axis, vein tracing, tissue
+    assignment, intervein splitting/naming) become pure waste when the requested
+    outputs only consume wing outline + landmarks + wing_solidity — e.g. a
+    CSV containing only wing_area / wing_shape / cv_ratio columns.
+
+    Shared between _run() (which sets config.skip_vein_tracing from this at
+    run start) and the GUI (which needs the same value to pick the right
+    Stage-2 wall-time share for progress-weight math). Must stay in sync with
+    the identify_wing Step-1 guard.
+
+    Skip logic:
+      - csv is vein-tracing-dependent only when at least one selected
+        measurement group needs traced veins (vein_lengths / intervein_areas /
+        ap_areas). wing_area / wing_shape / cv_ratio are Step-1-only.
+      - geojson is vein-tracing-dependent only when its content (mirrored from
+        the user's other choices) actually wants veins or regions.
+      - Any other _VEIN_TRACING_DEPENDENT_OUTPUTS member forces the full pipeline.
+    """
+    csv_needs_veins = "csv" in outputs and bool(csv_measurement_groups & _VEIN_TRACING_DEPENDENT_CSV_GROUPS)
+    gj_writes_veins, gj_writes_regions = _geojson_content_wanted(outputs, csv_measurement_groups)
+    geojson_needs_veins = "geojson" in outputs and (gj_writes_veins or gj_writes_regions)
+    always_veins = outputs & (_VEIN_TRACING_DEPENDENT_OUTPUTS - {"csv", "geojson"})
+    return not (always_veins or csv_needs_veins or geojson_needs_veins)
+
+
 # ---------------------------------------------------------------------------
 # Progress-bar weight model
 # ---------------------------------------------------------------------------
@@ -327,15 +380,22 @@ def compute_progress_weights(
     *,
     wing_isolation_enabled: bool,
     skip_intervein_regions: bool,
+    skip_vein_tracing: bool = False,
 ) -> tuple[float, float]:
     """Return (stage1_share, stage2_share) summing to 1.0.
 
     Used by the GUI progress bar to place Stage 1 and Stage 2 events on a
     unified 0–100 scale that reflects their relative wall-time cost. Falls
-    back to (1.0, 0.0) when no Stage 2 outputs are selected.
+    back to (1.0, 0.0) when no Stage 2 outputs are selected — or when Stage 2
+    is running in the Tier-2 fast path (skip_vein_tracing=True), whose Step-1-
+    only cost is a rounding error compared to Stage 1.
     """
     has_stage2 = bool(_STAGE2_ANALYSIS_OUTPUTS & outputs)
-    if not has_stage2:
+    # Tier-2 fast path: identify_wing returns after Step 1 (a few ms per
+    # image). Treat it like no-Stage-2 for progress purposes — the ETA math
+    # otherwise inflates the remaining time by assigning Stage 2 a share it
+    # won't actually consume.
+    if not has_stage2 or skip_vein_tracing:
         return (1.0, 0.0)
 
     s1 = _PROGRESS_STAGE1_TOTAL_SHARE
@@ -656,6 +716,13 @@ def trace_folder(
     # a config passed in with skip_intervein_regions=True from a preset or
     # saved-settings JSON can't silently kill intervein_overlay output.
     config.skip_intervein_regions = resolve_skip_intervein_regions(outputs, csv_measurement_groups)
+    # Tier-2 fast path: skip identify_wing Steps 2-6 when nothing selected
+    # actually needs traced veins. See resolve_skip_vein_tracing docstring —
+    # it must stay in sync with the guard at
+    # identifyFeatures/identify_features/controllers/pipeline.py:identify_wing.
+    # The GUI computes the same value at run start via the shared resolver so
+    # its progress-weight math matches what the pipeline will actually do.
+    config.skip_vein_tracing = resolve_skip_vein_tracing(outputs, csv_measurement_groups)
 
     if keep_intermediates:
         preproc_dir = output_dir / "intermediates"
@@ -765,12 +832,24 @@ def _run(
     from preprocessing.pipeline import PipelineResult as _PreprocResult
     from preprocessing.pipeline import discover_images, process_folder
 
-    # Fast path: only the batch CSV is requested and the user has configured
-    # custom landmark-distance pairs. We can skip identifyFeatures entirely
-    # AND skip hinge chopping + segmentation, since measurementMaker only
-    # needs the landmark GeoJSONs to compute distances.
+    # Fast path: only the batch CSV is requested and every selected column is
+    # derivable from landmarks alone — either user-configured landmark-distance
+    # pairs, or landmark-only measurement groups (cv_ratio). We can skip
+    # identifyFeatures entirely AND skip hinge chopping + segmentation, since
+    # measurementMaker only needs the landmark GeoJSONs to compute distances.
+    #
+    # wing_area / wing_shape don't qualify — they need the wing outline
+    # (segmentation-derived). Those cases go through Phase B's Tier-2 fast
+    # path inside identify_wing instead (skip_vein_tracing=True; identify_wing
+    # returns after Step 1, still needing segmentation to build the outline).
     requested_analysis_outputs = _STAGE2_ANALYSIS_OUTPUTS & outputs
-    fast_csv_path = bool(user_landmark_distances) and requested_analysis_outputs == {"csv"}
+    _landmark_only_groups_selected = bool(
+        csv_measurement_groups
+        and csv_measurement_groups.issubset(LANDMARK_ONLY_MEASUREMENT_GROUPS)
+    )
+    fast_csv_path = requested_analysis_outputs == {"csv"} and (
+        bool(user_landmark_distances) or _landmark_only_groups_selected
+    )
 
     if fast_csv_path:
         # Landmarks only — measurementMaker doesn't need vein tissue or hinge masks.
@@ -1005,9 +1084,13 @@ def _run(
         # preprocessing stages. Here it just disables Stage 2 analysis.
         needs_analysis = bool(requested_analysis_outputs) and not fast_csv_path
         if fast_csv_path:
+            _fp_pairs = len(user_landmark_distances) if user_landmark_distances else 0
+            _fp_groups = sorted((csv_measurement_groups or set()) & LANDMARK_ONLY_MEASUREMENT_GROUPS)
             logger.info(
-                "=== Stage 2 fast path: writing user-distance CSV without identifyFeatures (%d pair(s)) ===",
-                len(user_landmark_distances),
+                "=== Stage 2 fast path: writing landmarks-only CSV without identifyFeatures "
+                "(%d pair(s), groups=%s) ===",
+                _fp_pairs,
+                _fp_groups,
             )
 
         scale = config.um_per_px
@@ -1508,20 +1591,25 @@ def _run(
         if fast_csv_path:
             # Fast path: identifyFeatures did not run, so there is no
             # measurements.csv to augment. Write one from scratch using only
-            # the landmark coordinates + configured pairs.
+            # the landmark coordinates + configured pairs and/or the
+            # cv_ratio measurement group (both landmarks-only). Any other
+            # selection wouldn't reach this branch (fast_csv_path guard
+            # requires either user pairs or a fully landmark-only group set).
             try:
-                from measurement_maker import pairs_from_dicts, write_distances_csv
+                from measurement_maker import pairs_from_dicts, write_landmark_csv_batch
 
-                pairs = pairs_from_dicts(user_landmark_distances)
-                if pairs:
-                    write_distances_csv(
-                        csv_path,
-                        user_dist_landmark_paths,
-                        pairs,
-                        um_per_px=scale,
-                    )
+                pairs = pairs_from_dicts(user_landmark_distances) if user_landmark_distances else []
+                write_landmark_csv_batch(
+                    csv_path,
+                    user_dist_landmark_paths,
+                    pairs,
+                    measurement_groups=(csv_measurement_groups & LANDMARK_ONLY_MEASUREMENT_GROUPS)
+                    if csv_measurement_groups
+                    else None,
+                    um_per_px=scale,
+                )
             except Exception:
-                logger.exception("Fast-path: failed to write user-distance CSV")
+                logger.exception("Fast-path: failed to write landmarks-only CSV")
         elif batch_results:
             try:
                 export_csv_batch(batch_results, csv_path, um_per_px=scale, groups=csv_measurement_groups)

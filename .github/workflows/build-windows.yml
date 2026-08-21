@@ -163,6 +163,30 @@ jobs:
           path: TRACE/build/Output/TRACE-Setup.exe
           retention-days: 30
 
+      - name: Extract tag commit body as release notes
+        # softprops/action-gh-release accepts a `body_path` file whose
+        # contents become the human-readable Release description shown on
+        # the GitHub Releases page (and in the Help-tab updater). The
+        # project's convention is to write a detailed body on every
+        # release commit (what changed + why); this step surfaces that
+        # body as the release description so users don't have to click
+        # through to the commit. `generate_release_notes: true` below
+        # then APPENDS the auto-generated "Full Changelog" link.
+        if: startsWith(github.ref, 'refs/tags/windows-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Skip the subject (first line) — softprops uses `name` for that;
+          # duplicating it in the body reads noisily.
+          git log -1 --format=%b "${{ github.ref_name }}" > RELEASE_NOTES.md
+          # If the body is empty (no body on the tag commit), leave a
+          # placeholder so the release doesn't render with an empty section.
+          if ! [ -s RELEASE_NOTES.md ]; then
+            echo "_No release notes written on the tag commit._" > RELEASE_NOTES.md
+          fi
+          echo "--- RELEASE_NOTES.md ---"
+          cat RELEASE_NOTES.md
+
       - name: Attach to GitHub Release
         # Only when triggered by a windows-v* tag — uploads the installer
         # as a release asset so end users can download it from the
@@ -172,4 +196,8 @@ jobs:
         with:
           files: TRACE/build/Output/TRACE-Setup.exe
           fail_on_unmatched_files: true
+          body_path: RELEASE_NOTES.md
+          # `generate_release_notes: true` appends the "Full Changelog"
+          # comparison link + auto-summarized merged PRs (if any) beneath
+          # the body_path contents.
           generate_release_notes: true
