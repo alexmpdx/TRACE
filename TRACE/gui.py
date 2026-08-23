@@ -3448,6 +3448,16 @@ class TraceWindow(QMainWindow):
         """
         if self.worker is not None and self.worker.isRunning():
             return
+        # Defer while the update-available dialog is showing. That dialog
+        # is a QDialog(self, WindowStaysOnTopHint) — visually on top of
+        # everything else. QMessageBox.question below is WindowModal on
+        # the same parent (self), so its modality steals input from
+        # `self` AND its transient children — including the update
+        # dialog. Result before this guard: the update dialog was visible
+        # on top but unclickable because the QMessageBox behind it had
+        # grabbed the input focus.
+        if self._defer_until_update_dialog_closes(self._maybe_offer_restore_post_run_state):
+            return
         output_text = self.output_edit.text().strip()
         if not output_text:
             return
@@ -3497,6 +3507,10 @@ class TraceWindow(QMainWindow):
         the manifest status changes.
         """
         if self.worker is not None and self.worker.isRunning():
+            return
+        # See _maybe_offer_restore_post_run_state for the modality trap
+        # this guards against.
+        if self._defer_until_update_dialog_closes(self._maybe_offer_resume_paused_run):
             return
         output_text = self.output_edit.text().strip()
         if not output_text:
@@ -5731,6 +5745,36 @@ class TraceWindow(QMainWindow):
             painter.end()
             self._cached_update_badge_icon = QIcon(pix)
         return self._cached_update_badge_icon
+
+    def _defer_until_update_dialog_closes(self, callback) -> bool:
+        """If the update dialog is showing, re-schedule ``callback`` after it closes.
+
+        Returns True when the caller should return early (deferred),
+        False when the caller can proceed immediately (no pending dialog).
+
+        Used by the launch-time resume prompts
+        (_maybe_offer_restore_post_run_state /
+        _maybe_offer_resume_paused_run) to avoid a modality collision:
+        the update dialog is a QDialog(self, WindowStaysOnTopHint) —
+        visually on top of everything else. A QMessageBox opened on
+        `self` at the same time is WindowModal on the same parent, so
+        its modality steals input from `self` and its transient
+        children — including the update dialog. The user then sees the
+        update dialog on top but can't click it, because the QMessageBox
+        sitting behind has grabbed the focus (bug reported 2026-08-23).
+
+        Chains via ``finished`` so the deferred callback fires once the
+        user Dismisses / Updates the dialog, or as soon as it's torn
+        down for any other reason. QTimer.singleShot(0, ...) inside the
+        finished handler puts us back in the event loop before the next
+        callback fires — matches the launch-time deferral style used
+        elsewhere in _run_pipeline.
+        """
+        dlg = getattr(self, "_pending_update_dialog", None)
+        if dlg is None:
+            return False
+        dlg.finished.connect(lambda _result: QTimer.singleShot(0, callback))
+        return True
 
     def show_update_available_indicator(self, latest_version: str) -> None:
         """Mark the Help tab so the user notices an update.
