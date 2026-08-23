@@ -5223,8 +5223,25 @@ class TraceWindow(QMainWindow):
         if self._current_stage is None:
             return
         within_stage = self._smoothed_within_stage_fraction()
-        if self._current_stage == "analysis":
+        # Three cases:
+        #   1. Normal analysis event, weights have a real Stage-2 share
+        #      → interpolate across (Stage1 done fraction + Stage2 within-share).
+        #   2. Fast-path run (Tier-1 cv_ratio_overlay, or Tier-2
+        #      wing_area / wing_shape / cv_ratio) where compute_progress_weights
+        #      returns (1.0, 0.0). _analyze_one still emits analysis events but
+        #      does negligible work; without this guard the first analysis event
+        #      computed `(1.0 + 0.0*x) * 100 = 100 → min(99,100) = 99`, locking
+        #      the bar at 99% for the rest of the run. Drive the bar from
+        #      preprocessing completions directly instead.
+        #   3. Preprocessing stage of a normal run → the classic
+        #      stage1_share * within_stage path.
+        if self._progress_stage2_share > 0 and self._current_stage == "analysis":
             pct_float = (self._progress_stage1_share + self._progress_stage2_share * within_stage) * 100.0
+        elif self._progress_stage2_share <= 0:
+            prep_total = self._stage_total.get("preprocessing", 0)
+            prep_completions = self._stage_completions.get("preprocessing", 0)
+            within_prep = prep_completions / prep_total if prep_total > 0 else 0.0
+            pct_float = within_prep * 100.0
         else:
             pct_float = self._progress_stage1_share * within_stage * 100.0
         pct = min(99, int(pct_float))
@@ -5275,42 +5292,73 @@ class TraceWindow(QMainWindow):
 
         eta_raw = percent_eta
         current = self._current_stage
-        current_completions = self._stage_completions.get(current, 0) if current else 0
-        current_total = self._stage_total.get(current, 0) if current else 0
-        if current is not None and current_completions >= 2 and current_total > 0:
-            # active_seconds = time actually spent in THIS stage (banked
-            # from prior visits + since the last stage switch). Ignores
-            # wall-clock time spent in the other stage across chunk
-            # boundaries, which used to deflate throughput by ~2-3× on
-            # chunked runs (spec'd 2026-08-20 Bug #2).
-            active_seconds = self._stage_active_seconds.get(current, 0.0)
-            if self._last_stage_switch_time is not None:
-                active_seconds += time.monotonic() - self._last_stage_switch_time
-            if active_seconds > 0:
-                throughput = current_completions / active_seconds  # images/sec (active-time-based)
-                stage_remaining = max(0, current_total - current_completions)
-                stage_remaining_seconds = stage_remaining / max(throughput, 1e-6)
 
-                if current == "preprocessing":
-                    # Project full-Stage-1 wall time from observed throughput,
-                    # then derive total run from the Stage 1 share prior. Stage 2
-                    # remaining is what's left after now.
-                    if self._progress_stage1_share > 0:
-                        full_stage1 = current_total / max(throughput, 1e-6)
-                        total_predicted = full_stage1 / self._progress_stage1_share
-                        throughput_eta = max(0.0, total_predicted - elapsed)
-                    else:
-                        throughput_eta = stage_remaining_seconds
-                else:
-                    # Stage 2 (analysis) — empirical throughput on remaining images.
-                    throughput_eta = stage_remaining_seconds
+        # Per-stage active-time samples. `_stage_active_seconds` banks
+        # time-actively-in-stage across chunk boundaries (v0.2.21) so
+        # per-stage per-image cost is stable regardless of how many
+        # chunk switches happened. Include time-since-last-switch on the
+        # CURRENT stage so mid-chunk math sees the wall-clock elapsed
+        # since the last bank.
+        prep_completions = self._stage_completions.get("preprocessing", 0)
+        prep_active = self._stage_active_seconds.get("preprocessing", 0.0)
+        anal_completions = self._stage_completions.get("analysis", 0)
+        anal_active = self._stage_active_seconds.get("analysis", 0.0)
+        if self._last_stage_switch_time is not None:
+            _delta = time.monotonic() - self._last_stage_switch_time
+            if current == "preprocessing":
+                prep_active += _delta
+            elif current == "analysis":
+                anal_active += _delta
 
-                # Blend: w grows with completed samples in the current stage.
-                # Full throughput-based at 3 completions; below that we blend
-                # in the percent-based prior to absorb sample noise.
-                threshold = 3.0
-                w = min(1.0, current_completions / threshold)
-                eta_raw = w * throughput_eta + (1 - w) * percent_eta
+        # Batch-wide total; both stages carry the same count.
+        grand_total = max(
+            self._stage_total.get("preprocessing", 0),
+            self._stage_total.get("analysis", 0),
+        )
+
+        # Per-image active-time cost — needs ≥2 samples for the ratio
+        # to be non-degenerate.
+        prep_per_img: Optional[float] = prep_active / prep_completions if prep_completions >= 2 else None
+        anal_per_img: Optional[float] = anal_active / anal_completions if anal_completions >= 2 else None
+
+        remaining_prep = max(0, grand_total - prep_completions)
+        remaining_anal = max(0, grand_total - anal_completions)
+
+        # Preferred path (addendum #2, 2026-08-23): sum per-stage
+        # remaining work using EMPIRICALLY observed per-stage costs.
+        # Chunk-boundary invariant because per-stage per-image active-
+        # time cost stabilizes across chunks — no fixed prior amplifying
+        # throughput noise into ETA drift.
+        #
+        # Fast-path runs (Tier-1 cv_ratio_overlay, Tier-2
+        # wing_area/wing_shape/cv_ratio) still fire analysis events, but
+        # anal_per_img → very small, so remaining_anal * anal_per_img is
+        # a rounding error and the ETA correctly tracks preprocessing.
+        if prep_per_img is not None and (anal_per_img is not None or remaining_anal == 0):
+            throughput_eta = remaining_prep * prep_per_img + remaining_anal * (anal_per_img or 0.0)
+            # Blend with percent_eta while sample counts are small so
+            # outlier images can't whiplash the ETA. Weight grows with
+            # the SMALLER of the two counts (both stages have to be
+            # sampled to trust the sum).
+            threshold = 3.0
+            min_samples = min(prep_completions, anal_completions or prep_completions)
+            w = min(1.0, min_samples / threshold)
+            eta_raw = w * throughput_eta + (1 - w) * percent_eta
+        elif prep_per_img is not None:
+            # First-chunk fallback: preprocessing has samples but
+            # analysis hasn't been visited yet (or has <2 completions).
+            # Use the old fixed-prior extrapolation so we have SOME value
+            # to show — the empirical path takes over once chunk 1's
+            # analysis produces ≥2 samples.
+            if self._progress_stage1_share > 0:
+                full_stage1 = grand_total * prep_per_img
+                fallback_eta = max(0.0, full_stage1 / self._progress_stage1_share - elapsed)
+            else:
+                fallback_eta = remaining_prep * prep_per_img
+            threshold = 3.0
+            w = min(1.0, prep_completions / threshold)
+            eta_raw = w * fallback_eta + (1 - w) * percent_eta
+        # else: no usable samples yet — eta_raw stays at percent_eta.
 
         # Exponential moving average — α=0.3 favors stability over reactivity.
         alpha = 0.3

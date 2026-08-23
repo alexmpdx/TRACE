@@ -191,3 +191,183 @@ and eyeball every hit that isn't a dict-shaped read (`.get`, `[stage]`, `in`, `.
 ## Files touched
 
 - `TRACE/gui.py` — one function body: `_smoothed_within_stage_fraction`. Plus any other scalar-vs-dict readers grep turns up.
+
+---
+
+# Addendum #2 — ETA still drifts up each chunk (2026-08-23)
+
+Post-v0.2.21 the ETA is in the right ballpark and no longer goes to 13h+ on a 4h-real run. But the reported new symptom: it **still climbs across chunk boundaries** on all-outputs runs (all six measurement groups selected, wing iso on, ~4500 images).
+
+## Root cause
+
+`_update_eta` at `TRACE/gui.py:5294-5303` extrapolates the entire run from preprocessing throughput alone, dividing by the fixed prior `_progress_stage1_share`:
+
+```python
+if current == "preprocessing":
+    if self._progress_stage1_share > 0:
+        full_stage1 = current_total / max(throughput, 1e-6)
+        total_predicted = full_stage1 / self._progress_stage1_share   # <-- fixed prior
+        throughput_eta = max(0.0, total_predicted - elapsed)
+```
+
+`_progress_stage1_share` comes from `compute_progress_weights` (pipeline.py:378-402), which uses the constants `_PROGRESS_STAGE1_TOTAL_SHARE=17.0` and `_PROGRESS_STAGE2_TOTAL_SHARE=83.0` calibrated on a 133-image / 47-min reference. For an all-outputs run those give `stage1_share=0.17` — i.e. "Stage 2 is ~5× Stage 1".
+
+When the actual run's Stage 2 is faster or slower than that ratio, the extrapolation is off by a matching factor. Each chunk boundary re-samples preprocessing throughput slightly differently (small warm-up drift), and the fixed-prior amplifier turns a small throughput drift into a large ETA drift. It also means the ETA is systematically wrong from the start on any workload that doesn't match the reference — the fix in v0.2.21 only removed the drift caused by `stage_elapsed` bleeding, not the drift caused by the wrong prior.
+
+The Stage 2 branch (line 5304-5306) has the mirror-image bug: it computes `stage_remaining_seconds = analysis_remaining / analysis_throughput` — but during chunked runs there are ALSO more preprocessing chunks to come after this analysis chunk. Sum-of-two-stages is closer to reality than either alone.
+
+## Fix design — per-stage empirical extrapolation, no prior
+
+Once BOTH stages have completions, extrapolate each stage independently from its own observed active-time throughput and sum:
+
+```python
+# In _update_eta, after computing `current` and `active_seconds` for the current stage:
+prep_completions = self._stage_completions.get("preprocessing", 0)
+prep_active      = self._stage_active_seconds.get("preprocessing", 0.0)
+anal_completions = self._stage_completions.get("analysis", 0)
+anal_active      = self._stage_active_seconds.get("analysis", 0.0)
+# Include time-since-last-switch on the CURRENT stage so mid-chunk math accounts
+# for wall-clock elapsed since we last banked.
+if self._last_stage_switch_time is not None:
+    delta = time.monotonic() - self._last_stage_switch_time
+    if current == "preprocessing":
+        prep_active += delta
+    elif current == "analysis":
+        anal_active += delta
+
+grand_total = <the batch-wide image count — see below>
+
+# Per-image active-time cost for each stage.
+prep_per_img = prep_active / prep_completions if prep_completions >= 2 else None
+anal_per_img = anal_active / anal_completions if anal_completions >= 2 else None
+
+remaining_prep = max(0, grand_total - prep_completions)
+remaining_anal = max(0, grand_total - anal_completions)
+
+if prep_per_img is not None and (anal_per_img is not None or remaining_anal == 0):
+    # Both stages sampled (or no analysis needed) → sum of remaining active time
+    # per stage. Chunk-boundary invariant because per-stage active-time cost
+    # stabilizes across chunks — no fixed prior amplifying throughput noise.
+    throughput_eta = (
+        remaining_prep * prep_per_img
+        + remaining_anal * (anal_per_img or 0.0)
+    )
+elif prep_per_img is not None:
+    # Analysis hasn't been sampled yet (very first chunk still preprocessing).
+    # Fall back to the current fixed-prior extrapolation so we have SOME number
+    # to show. It'll get replaced by the empirical path once chunk 1 analysis
+    # produces its first samples.
+    full_stage1 = grand_total * prep_per_img
+    if self._progress_stage1_share > 0:
+        throughput_eta = max(0.0, full_stage1 / self._progress_stage1_share - elapsed)
+    else:
+        throughput_eta = full_stage1 - prep_active
+else:
+    # No usable samples yet — leave eta_raw as percent_eta.
+    ... (unchanged path)
+```
+
+`grand_total` should be `max(self._stage_total.get(s, 0) for s in ("preprocessing", "analysis"))`, or just `self._stage_total.get(current, 0)` since both stages carry the same batch-wide count.
+
+The blend with `percent_eta` (lines 5308-5313) can stay — it damps early-run noise. But once analysis has ≥2 samples the empirical path is authoritative; consider dropping the blend once both stages are fully sampled.
+
+## Numeric sanity check (on the reported 4527-image run)
+
+At start of chunk 3 preprocessing (t≈19min elapsed, chunks 1+2 fully done):
+- `prep_completions=200`, `prep_active≈780s` → prep_per_img ≈ 3.9s
+- `anal_completions=200`, `anal_active≈360s` → anal_per_img ≈ 1.8s
+- `remaining_prep = remaining_anal = 4527 - 200 = 4327`
+- `throughput_eta = 4327 × 3.9 + 4327 × 1.8 = 16875 + 7789 = 24664s ≈ 6h51m`
+- Real remaining: ~4h × (4327/4327) minus 19 min elapsed ≈ (10min/100img × 43 chunks) − 19 min ≈ 4h11m.
+- Ballpark, not exact — the reference numbers above are guesses. Reality: same math re-run at chunks 4, 5, 6 should give **similar** results (small monotonic decrease), not steadily-climbing values.
+
+vs current v0.2.21 same moment:
+- `full_stage1 = 4527 × 3.9 = 17,655s ≈ 294 min`
+- `total_predicted = 294/0.17 = 1731 min ≈ 28h51m`
+- `throughput_eta = 28h32m` — matches "still counting up between batches" symptom.
+
+## Verification
+
+- Steady-state monotonicity: on a 200-image test run (2 chunks), log `throughput_eta` and `_stage_active_seconds` at every ETA tick. Confirm `throughput_eta` at the START of chunk 2 preprocessing is **within 5%** of the value at the END of chunk 1 preprocessing. It should NOT step up.
+- Full-outputs regression: run the same all-groups + wing-iso config on ~500 images and confirm ETA at 50% mark is within ±25% of `elapsed × (total/done) − elapsed`.
+- CV-ratio-only regression: re-run the original 2573-image cv_ratio-only config (target of v0.2.21). Should still track reality — the empirical path handles it too.
+- First-chunk behavior: for the very first chunk preprocessing, before any analysis samples exist, the fallback prior path is active. ETA can be wrong here — that's OK. Log a debug line noting "fallback: no analysis samples yet" so it's diagnosable.
+
+## Files touched
+
+- `TRACE/gui.py` — rewrite the throughput branch in `_update_eta` (roughly lines 5276-5313). No pipeline.py changes needed. `compute_progress_weights` and the 17/83 constants stay put — they're used only as the first-chunk fallback now, not as the primary extrapolator.
+
+## What NOT to do
+
+- **Don't** touch `_PROGRESS_STAGE1_TOTAL_SHARE`/`_PROGRESS_STAGE2_TOTAL_SHARE` values. They're the reference-calibration prior; the fix is to stop relying on them as the primary path once empirical data is available.
+- **Don't** re-introduce cross-stage `stage_elapsed`. The banked-active-time model from v0.2.21 is correct — this fix builds on top of it.
+- **Don't** try to detect "current chunk boundaries" and reset — that goes back to the pre-v0.2.16 chunk-reset bug the original comment warned against.
+
+---
+
+# Addendum #3 — progress bar locks to 99% on first analysis event (2026-08-23)
+
+Independent from the ETA drift, the progress **bar** is stuck at 99% at ~140/4527 on a run where the v0.2.22 Tier-2 fast path is active. The ETA reads a plausible ~7h58m, so the throughput branch is behaving. Only the bar is broken.
+
+## Root cause
+
+`_refresh_progress` at `TRACE/gui.py:5225-5229`:
+
+```python
+if self._current_stage == "analysis":
+    pct_float = (self._progress_stage1_share + self._progress_stage2_share * within_stage) * 100.0
+else:
+    pct_float = self._progress_stage1_share * within_stage * 100.0
+pct = min(99, int(pct_float))
+```
+
+The Tier-2 fast path in v0.2.22 makes `compute_progress_weights` return `(1.0, 0.0)` — the whole run is Stage 1 wall time; Stage 2 is a rounding error. But `_analyze_one` still runs and still emits `_emit_progress(i, stem, "starting")` for each image (pipeline.py:1175), which flips `_current_stage` to `"analysis"`.
+
+At that moment:
+- `s1=1.0`, `s2=0.0`.
+- `pct_float = (1.0 + 0.0 × within_stage) × 100 = 100`.
+- `pct = min(99, 100) = 99`.
+- `_progress_pct_high` monotonic-maxes to 99 and never comes down.
+
+The rest of the run alternates between "preprocessing" and "analysis" stages, but the bar can only go up, so it stays at 99%.
+
+The Tier-1 (`cv_ratio_overlay`) fast path from v0.2.16 has the same shape — anywhere weights are `(1.0, 0.0)` and analysis events still fire, this bug bites.
+
+## Fix
+
+Guard the analysis-stage branch on `stage2_share > 0`. When there's no real Stage-2 wall time reserved, drive the bar purely from preprocessing completions — the "analysis" events during a fast-path run represent negligible work and shouldn't advance the bar independently.
+
+Replacement for `_refresh_progress` lines ~5225-5232:
+
+```python
+if self._progress_stage2_share > 0 and self._current_stage == "analysis":
+    pct_float = (self._progress_stage1_share + self._progress_stage2_share * within_stage) * 100.0
+elif self._progress_stage2_share <= 0:
+    # Fast-path runs: weights are (1.0, 0.0) — analysis events fire but do
+    # negligible work. Drive the bar purely from preprocessing completions
+    # so it climbs proportionally across the run instead of jumping to 99%
+    # on the first _analyze_one "starting" event.
+    prep_total = self._stage_total.get("preprocessing", 0)
+    prep_completions = self._stage_completions.get("preprocessing", 0)
+    within_prep = prep_completions / prep_total if prep_total > 0 else 0.0
+    pct_float = within_prep * 100.0
+else:
+    # Normal preprocessing branch during a run that does have real Stage 2 work.
+    pct_float = self._progress_stage1_share * within_stage * 100.0
+```
+
+`within_stage` (from `_smoothed_within_stage_fraction`) is still used when Stage 2 has real work — leave that path untouched.
+
+## Why this is safe for the ETA path
+
+`_update_eta` (line 5255+) reads `_stage_completions` and `_stage_active_seconds` directly, not `_progress_pct_high`. It won't be affected by this bar-only fix. The addendum #2 empirical-throughput rewrite for ETA is orthogonal — do that separately.
+
+## Verification
+
+- Fast-path smoke test (biggest fix target): run `outputs={csv}` + `csv_measurement_groups={cv_ratio}` (or `{wing_area}`, or `{wing_shape}` — anything in `LANDMARK_ONLY_MEASUREMENT_GROUPS`) on ~200 images. The bar should climb linearly from 0% to ~99% as preprocessing progresses. It should NOT jump to 99% on the first analysis event.
+- Cv-ratio-overlay-only smoke test (Tier-1 fast path): outputs={cv_ratio_overlay}, no CSV. Same shape as above — bar climbs with preprocessing.
+- Full-run regression: outputs=all, all csv groups. Weights should be (0.17, 0.83). Preprocessing bar climbs to ~17%, then jumps to ~17% + analysis progress. No regression from this fix.
+
+## Files touched
+
+- `TRACE/gui.py` — `_refresh_progress` only. No changes to `_on_progress`, `_smoothed_within_stage_fraction`, `_update_eta`, or pipeline.py.
