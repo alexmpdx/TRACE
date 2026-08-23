@@ -1315,6 +1315,24 @@ def _run(
                                     specimen_id=stem,
                                     landmarks=_load_lm(Path(lm_gj_fast)),
                                 )
+                                # The Stage-1 landmarks GeoJSON is in RESCALED-pixel
+                                # space, but `base` was inverse-resized back to
+                                # original-pixel space above. The normal path gets
+                                # this mapping for free from
+                                # inverse_rescale_wing_result() further up; the fast
+                                # path never went through identify_wing, so it has to
+                                # do the same mapping itself — otherwise the points
+                                # and their connecting lines are drawn off-canvas and
+                                # the overlay shows only the fixed-position "CV ratio"
+                                # text. (Regression introduced with this fast path in
+                                # v0.2.16, which assumed the two paths were
+                                # byte-identical; they are only so at scale 1.0.)
+                                if rescale_factor and rescale_factor != 1.0:
+                                    from resolutionAdjust import inverse_rescale_wing_result
+
+                                    inverse_rescale_wing_result(
+                                        cv_wing_result, rescale_factor, um_per_px=per_image_scale
+                                    )
                             except Exception:
                                 logger.exception(
                                     "cv_ratio_overlay: could not build landmarks-only WingResult from %s",
