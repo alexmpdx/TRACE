@@ -8,10 +8,14 @@ Three entry points (Main tab), all converging on
 
 The dialog hosts two tabs in a ``QTabWidget``:
   - **Landmarks** — drag/add/delete landmark points, save
-    ``<image_dir>/<stem>_landmarks_override.geojson`` (Stage-3 short-circuit).
+    ``<image_dir>/manual_overrides/<stem>_landmarks_override.geojson`` (Stage-3
+    short-circuit).
   - **Veins / Interveins** — reclassify / delete / draw vein & intervein
-    polygons, save ``<image_dir>/<stem>_segmentation_override.geojson``
+    polygons, save
+    ``<image_dir>/manual_overrides/<stem>_segmentation_override.geojson``
     (Stage-5 short-circuit). Both short-circuits live in preprocessing/pipeline.py.
+Override paths come from ``preprocessing.pipeline.{landmarks,segmentation}_override_path``
+so the write side here and the read side there never drift.
 
 Cohort mode (>=2 images) shows prev/next navigation + a clickable image list so
 images can be edited in any order. Each tab owns one napari Viewer, created
@@ -56,11 +60,20 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+# Canonical override sidecar locations (a dedicated manual_overrides/ subfolder
+# next to each image, with legacy loose-file fallback) live in preprocessing so
+# the inspector's write side and the pipeline's read side share ONE definition.
+from preprocessing.pipeline import (
+    find_landmarks_override,
+    find_segmentation_override,
+    landmarks_override_path,
+    segmentation_override_path,
+)
+
 # Landmark point / label colors. Unreliable (gate-failed) points are drawn in a
 # distinct color so the user can see at a glance which ones need correcting;
 # the currently-selected point (and its label) turns the "selected" color.
-LM_FACE_COLOR = "cyan"  # reliable, unselected point
-LM_TEXT_COLOR = "yellow"  # reliable, unselected label
+LM_FACE_COLOR = "cyan"  # reliable, unselected point + label
 LM_SELECTED_COLOR = "orange"  # selected point + label (matches Custom Measurements tab)
 LM_FAILED_COLOR = "#FF2D2D"  # gate-failed point + label
 
@@ -747,7 +760,8 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         (busy progress bar), then the napari layers are built on the GUI thread.
         Search order — reopening a previously-edited image starts from the
         override so iterative refinement works:
-          1. <image_dir>/<stem>_landmarks_override.geojson  ← prior corrections
+          1. <image_dir>/manual_overrides/<stem>_landmarks_override.geojson
+             (legacy loose location too) ← prior corrections
           2. <output_folder>/<stem>_landmarks.geojson       ← post-run output
           3. <image_dir>/<stem>_landmarks.geojson           ← Stage-3 sidecar
           4. Generate via _generate_landmarks_for_image()    ← on-demand model
@@ -768,7 +782,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             stem = image_path.stem
             image_dir = image_path.parent
             candidates = [
-                image_dir / f"{stem}_landmarks_override.geojson",
+                find_landmarks_override(image_path),  # subfolder, then legacy loose file
                 (Path(out_text) / f"{stem}_landmarks.geojson") if out_text else None,
                 image_dir / f"{stem}_landmarks.geojson",
             ]
@@ -886,7 +900,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             text={
                 "string": "{label}",
                 "size": int(self._label_size),
-                "color": LM_TEXT_COLOR,
+                "color": LM_FACE_COLOR,
                 "translation": [-30, 0],
             },
         )
@@ -920,9 +934,9 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
     def _update_colors(self, _event=None) -> None:
         """Recolor points AND their labels by selection + gate state.
 
-        Selected → orange (point + label); gate-failed (unreliable) → red;
-        otherwise the reliable defaults (cyan point / yellow label). Selection
-        takes precedence so the active point always reads as selected.
+        Each label takes the SAME color as its point: selected → orange,
+        gate-failed (unreliable) → red, otherwise cyan. Selection takes
+        precedence so the active point always reads as selected.
         """
         layer = self._points_layer
         if layer is None:
@@ -931,22 +945,20 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             sel = layer.selected_data
             n = len(layer.data)
             reliable = list(layer.features.get("reliable", [True] * n))
-            face_colors, text_colors = [], []
+            colors = []
             for i in range(n):
                 if i in sel:
-                    face_colors.append(LM_SELECTED_COLOR)
-                    text_colors.append(LM_SELECTED_COLOR)
+                    colors.append(LM_SELECTED_COLOR)
                 elif i < len(reliable) and not reliable[i]:
-                    face_colors.append(LM_FAILED_COLOR)
-                    text_colors.append(LM_FAILED_COLOR)
+                    colors.append(LM_FAILED_COLOR)
                 else:
-                    face_colors.append(LM_FACE_COLOR)
-                    text_colors.append(LM_TEXT_COLOR)
-            layer.face_color = face_colors
-            # napari coerces a sequence of colors into a per-point (manual) text
-            # color encoding; skip when empty so it doesn't fall back to constant.
+                    colors.append(LM_FACE_COLOR)
+            layer.face_color = colors
+            # Labels mirror the point colors. napari coerces a sequence of colors
+            # into a per-point (manual) text color encoding; skip when empty so it
+            # doesn't fall back to a single constant.
             if n:
-                layer.text.color = text_colors
+                layer.text.color = list(colors)
         except Exception:
             pass
 
@@ -1096,7 +1108,8 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
                 }
             )
         payload = {"type": "FeatureCollection", "features": features}
-        override_path = self._image_path.parent / f"{self._image_path.stem}_landmarks_override.geojson"
+        override_path = landmarks_override_path(self._image_path)
+        override_path.parent.mkdir(parents=True, exist_ok=True)
         override_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self._last_saved_snapshot = self._snapshot_current()
         return override_path
@@ -1358,14 +1371,15 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
 
         image_path = self._image_path
         window = self._window
-        override_path = image_path.parent / f"{image_path.stem}_segmentation_override.geojson"
+        # Resolve now (new subfolder, then legacy loose file); None when neither exists.
+        override_path = find_segmentation_override(image_path)
 
         def work():
             import numpy as np
 
             from TRACE.psd_loader import imread_any
 
-            have_override = override_path.is_file()
+            have_override = override_path is not None
             tmp_dir = Path(tempfile.mkdtemp(prefix="trace_seg_inspect_"))
             try:
                 # Always run preprocessing so we have the exact image the model
@@ -1578,7 +1592,8 @@ class SegmentationEditorWidget(QWidget, _AsyncLoadMixin):
                 return None
 
         payload = {"type": "FeatureCollection", "features": features_out}
-        override_path = self._image_path.parent / f"{self._image_path.stem}_segmentation_override.geojson"
+        override_path = segmentation_override_path(self._image_path)
+        override_path.parent.mkdir(parents=True, exist_ok=True)
         override_path.write_text(json.dumps(payload), encoding="utf-8")
         self._last_saved_mask = mask.copy()
         return override_path

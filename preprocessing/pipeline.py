@@ -342,10 +342,82 @@ def save_landmarks_geojson(
         json.dump(fc, f, indent=2)
 
 
+# Manual override sidecars (written by TRACE's landmark inspector) live in a
+# dedicated subfolder next to the source image, rather than loose beside it, so
+# they stay organized and aren't accidentally deleted when tidying the image
+# folder. Keyed on the image's OWN parent (not the run's output folder) so an
+# override is found regardless of which output folder a later run uses. The
+# ``find_*`` helpers fall back to the pre-0.2.x loose location so overrides saved
+# by older builds keep working.
+OVERRIDE_SUBDIR = "manual_overrides"
+
+
+def overrides_dir(image_path: Path) -> Path:
+    """Directory holding an image's manual override sidecars."""
+    return Path(image_path).parent / OVERRIDE_SUBDIR
+
+
+def landmarks_override_path(image_path: Path) -> Path:
+    """Canonical write location for an image's landmark override sidecar."""
+    return overrides_dir(image_path) / f"{Path(image_path).stem}_landmarks_override.geojson"
+
+
+def segmentation_override_path(image_path: Path) -> Path:
+    """Canonical write location for an image's segmentation override sidecar."""
+    return overrides_dir(image_path) / f"{Path(image_path).stem}_segmentation_override.geojson"
+
+
+def _relocate_legacy_override(legacy: Path, new: Path) -> Path:
+    """Best-effort one-time move of an older build's loose override into the
+    ``manual_overrides/`` subfolder, so existing overrides migrate automatically
+    as they're first accessed (by a run or the inspector) after the upgrade.
+
+    Idempotent and safe: returns the new path once the file lives there, or the
+    legacy path if the move can't happen (permissions, cross-device, a race) — a
+    failed migration must never break override loading.
+    """
+    try:
+        if new.exists():
+            return new  # already migrated by a concurrent access; don't clobber
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy), str(new))
+        return new
+    except Exception:
+        return legacy if legacy.is_file() else (new if new.is_file() else legacy)
+
+
+def find_landmarks_override(image_path: Path) -> Optional[Path]:
+    """Return the landmark override to use, or ``None`` when none exists.
+
+    Prefers the ``manual_overrides/`` subfolder; if only the legacy loose file
+    next to the image exists, it is migrated there (see ``_relocate_legacy_override``)
+    and the new path returned.
+    """
+    p = landmarks_override_path(image_path)
+    if p.is_file():
+        return p
+    legacy = Path(image_path).parent / f"{Path(image_path).stem}_landmarks_override.geojson"
+    return _relocate_legacy_override(legacy, p) if legacy.is_file() else None
+
+
+def find_segmentation_override(image_path: Path) -> Optional[Path]:
+    """Return the segmentation override to use, or ``None`` when none exists.
+
+    Prefers the ``manual_overrides/`` subfolder; if only the legacy loose file
+    next to the image exists, it is migrated there and the new path returned.
+    """
+    p = segmentation_override_path(image_path)
+    if p.is_file():
+        return p
+    legacy = Path(image_path).parent / f"{Path(image_path).stem}_segmentation_override.geojson"
+    return _relocate_legacy_override(legacy, p) if legacy.is_file() else None
+
+
 def load_landmarks_override(path: Path) -> tuple[dict, dict]:
     """Load a manual landmark override GeoJSON into (landmarks, metadata).
 
-    Written by TRACE's landmark inspector dialog next to the source image as
+    Written by TRACE's landmark inspector dialog into the image's
+    ``manual_overrides/`` subfolder as
     ``<stem>_landmarks_override.geojson``. Tolerant of either the inspector's
     minimal schema (classification.name + coordinates) or the full Stage-3
     schema (confidence/sharpness/etc.).
@@ -942,12 +1014,13 @@ def process_single_image(
         if progress_callback:
             progress_callback("landmarks", f"Predicting landmarks for {image_path.name}")
         # Manual override: if the user inspected/corrected this image's landmarks
-        # via TRACE's landmark inspector dialog, a sidecar lives next to the
-        # original input. Trust it and skip the predictor (and its cache)
-        # entirely — the corrected positions are written to the canonical
-        # landmarks_geojson below so Stages 4-6 see the same data.
-        override_path = original_input_path.parent / f"{original_input_path.stem}_landmarks_override.geojson"
-        if override_path.is_file():
+        # via TRACE's landmark inspector dialog, a sidecar lives in the image's
+        # manual_overrides/ subfolder (legacy: loose next to the input). Trust it
+        # and skip the predictor (and its cache) entirely — the corrected
+        # positions are written to the canonical landmarks_geojson below so
+        # Stages 4-6 see the same data.
+        override_path = find_landmarks_override(original_input_path)
+        if override_path is not None:
             import logging as _logging
 
             _logging.getLogger(__name__).info("%s: using manual landmark override from %s", stem, override_path)
@@ -1018,12 +1091,12 @@ def process_single_image(
     # Stage 5: Segmentation
     if do_segment:
         # Manual override: if the user corrected this image's vein/intervein
-        # polygons via TRACE's inspector dialog, a sidecar lives next to the
-        # original input (in original-image pixel space, which is what seg_input
-        # is too — Stage 2/4 only mask pixels, never crop/translate). Trust it
-        # and skip the segmentation model.
-        seg_override_path = original_input_path.parent / f"{original_input_path.stem}_segmentation_override.geojson"
-        if seg_override_path.is_file():
+        # polygons via TRACE's inspector dialog, a sidecar lives in the image's
+        # manual_overrides/ subfolder (legacy: loose next to the input), in
+        # original-image pixel space (which is what seg_input is too — Stage 2/4
+        # only mask pixels, never crop/translate). Trust it and skip the model.
+        seg_override_path = find_segmentation_override(original_input_path)
+        if seg_override_path is not None:
             import logging as _logging
 
             _logging.getLogger(__name__).info("%s: using manual segmentation override from %s", stem, seg_override_path)
