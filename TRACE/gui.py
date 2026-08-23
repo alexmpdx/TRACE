@@ -2065,18 +2065,27 @@ class TraceWindow(QMainWindow):
         """Compute the batch CSV's filename for this launch.
 
         Precedence:
-          - No run folder yet → None (pipeline falls back to legacy
-            "measurements.csv"; happens only in edge paths where the run
-            folder isn't set before the worker is built).
-          - _pending_append_csv set → "<prev_stem>_<run_folder_name>.csv"
-            per user spec: new run name appended to previous run name.
-            Chains cleanly: appending twice yields
+          - _run_folder set → derive the run id from its folder name.
+          - _run_folder not yet set but _run_start_wall is → reconstruct
+            the same "run_YYYYMMDD-HHMMSS" name the fresh-run branch will
+            use later in _run_pipeline. This fallback matters because the
+            TraceWorker is instantiated (with csv_filename passed as a
+            kwarg) BEFORE _run_pipeline assigns _run_folder — pre-fix,
+            _resolve_run_csv_filename saw None on every fresh run and
+            emitted the legacy "measurements.csv" without the run stamp.
+          - Neither → None (pipeline falls back to legacy
+            "measurements.csv").
+          - _pending_append_csv set → "<prev_stem>_<run_id>.csv" per user
+            spec. Chains cleanly:
             "measurements_run_A_run_B_run_C.csv".
-          - Otherwise → "measurements_<run_folder_name>.csv".
+          - Otherwise → "measurements_<run_id>.csv".
         """
-        if self._run_folder is None:
+        if self._run_folder is not None:
+            new_run_id = self._run_folder.name
+        elif self._run_start_wall is not None:
+            new_run_id = f"run_{self._run_start_wall.strftime('%Y%m%d-%H%M%S')}"
+        else:
             return None
-        new_run_id = self._run_folder.name
         if self._pending_append_csv is not None:
             prev_stem = self._pending_append_csv.stem
             return f"{prev_stem}_{new_run_id}.csv"

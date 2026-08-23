@@ -245,6 +245,8 @@ def _cv_ratio_row(landmarks: dict[str, tuple[float, float]], um_per_px: Optional
     block (wing length L1-Rs→DTip, crossvein distance ACV.p→PCV.a, ratio).
     Column names match identify_features' wide-format output.
     """
+    from measurement_maker.distance import resolve_landmark_key
+
     has_scale = um_per_px is not None and um_per_px > 0
     vals: dict[str, str] = {
         "wing length_px": "",
@@ -253,16 +255,24 @@ def _cv_ratio_row(landmarks: dict[str, tuple[float, float]], um_per_px: Optional
         "crossvein distance_um": "",
         "CV ratio": "",
     }
-    l1rs = landmarks.get("L1-Rs")
-    dtip = landmarks.get("DTip")
+
+    def _get(short_name: str) -> Optional[tuple[float, float]]:
+        # Resolve short GeoJSON name against whatever key the trained
+        # model wrote (short OR display OR display-with-extra-suffix).
+        # See resolve_landmark_key.
+        key = resolve_landmark_key(landmarks, short_name)
+        return landmarks.get(key) if key is not None else None
+
+    l1rs = _get("L1-Rs")
+    dtip = _get("DTip")
     wl_px: Optional[float] = None
     if l1rs is not None and dtip is not None:
         wl_px = math.hypot(dtip[0] - l1rs[0], dtip[1] - l1rs[1])
         vals["wing length_px"] = f"{wl_px:.1f}"
         if has_scale:
             vals["wing length_um"] = f"{wl_px * um_per_px:.1f}"
-    acvp = landmarks.get("ACV.p")
-    pcva = landmarks.get("PCV.a")
+    acvp = _get("ACV.p")
+    pcva = _get("PCV.a")
     cv_px: Optional[float] = None
     if acvp is not None and pcva is not None:
         cv_px = math.hypot(pcva[0] - acvp[0], pcva[1] - acvp[1])
