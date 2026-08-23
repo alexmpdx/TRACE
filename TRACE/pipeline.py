@@ -596,6 +596,53 @@ def _render_landmarks_overlay(
     return bool(cv2.imwrite(str(out_path), rendered))
 
 
+def build_cv_ratio_wing_result(
+    landmarks_geojson_path: Path,
+    specimen_id: str,
+    rescale_factor: float = 1.0,
+    um_per_px: Optional[float] = None,
+):
+    """Build a landmarks-only ``WingResult`` for the CV-ratio overlay fast path.
+
+    When ``cv_ratio_overlay`` is the only Stage-2 output selected, ``identify_wing``
+    never runs and there is no ``WingResult`` to draw from. ``render_cv_ratio_overlay``
+    only reads four landmark points (L1-Rs, DTip, ACV.p, PCV.a), so the Stage-1
+    landmarks GeoJSON alone is enough — no skeleton, tracing, tissue or intervein
+    work needed.
+
+    **Coordinate-space contract.** The Stage-1 GeoJSON is written in RESCALED-pixel
+    space, but the overlay base image is inverse-resized back to ORIGINAL-pixel space
+    before drawing. So the landmarks must be mapped back too, via the same
+    ``inverse_rescale_wing_result`` the normal path applies to its ``WingResult``.
+    Skipping that draws every point and line off-canvas, leaving an overlay that
+    shows only the fixed-position "CV ratio" readout — the v0.2.16 regression fixed
+    in v0.2.29. ``tests/test_cv_ratio_fast_path.py`` pins this.
+
+    Returns the WingResult, or None if the GeoJSON is missing or unreadable.
+    """
+    from identify_features.models.datatypes import WingResult as _WingResult
+    from identify_features.models.geojson_io import load_landmarks_geojson as _load_lm
+
+    if not landmarks_geojson_path or not Path(landmarks_geojson_path).exists():
+        return None
+    try:
+        wing_result = _WingResult(
+            specimen_id=specimen_id,
+            landmarks=_load_lm(Path(landmarks_geojson_path)),
+        )
+        if rescale_factor and rescale_factor != 1.0:
+            from resolutionAdjust import inverse_rescale_wing_result
+
+            inverse_rescale_wing_result(wing_result, rescale_factor, um_per_px=um_per_px)
+        return wing_result
+    except Exception:
+        logger.exception(
+            "cv_ratio_overlay: could not build landmarks-only WingResult from %s",
+            landmarks_geojson_path,
+        )
+        return None
+
+
 def trace_folder(
     input_dir: Path,
     output_dir: Path,
@@ -1305,40 +1352,15 @@ def _run(
                     # 2026-08-19 pipeline-efficiency plan Phase 1.
                     cv_wing_result = wing_result
                     if cv_wing_result is None:
-                        lm_gj_fast = preproc_result.landmarks_geojson_path
-                        if lm_gj_fast and Path(lm_gj_fast).exists():
-                            from identify_features.models.datatypes import WingResult as _WingResult
-                            from identify_features.models.geojson_io import load_landmarks_geojson as _load_lm
-
-                            try:
-                                cv_wing_result = _WingResult(
-                                    specimen_id=stem,
-                                    landmarks=_load_lm(Path(lm_gj_fast)),
-                                )
-                                # The Stage-1 landmarks GeoJSON is in RESCALED-pixel
-                                # space, but `base` was inverse-resized back to
-                                # original-pixel space above. The normal path gets
-                                # this mapping for free from
-                                # inverse_rescale_wing_result() further up; the fast
-                                # path never went through identify_wing, so it has to
-                                # do the same mapping itself — otherwise the points
-                                # and their connecting lines are drawn off-canvas and
-                                # the overlay shows only the fixed-position "CV ratio"
-                                # text. (Regression introduced with this fast path in
-                                # v0.2.16, which assumed the two paths were
-                                # byte-identical; they are only so at scale 1.0.)
-                                if rescale_factor and rescale_factor != 1.0:
-                                    from resolutionAdjust import inverse_rescale_wing_result
-
-                                    inverse_rescale_wing_result(
-                                        cv_wing_result, rescale_factor, um_per_px=per_image_scale
-                                    )
-                            except Exception:
-                                logger.exception(
-                                    "cv_ratio_overlay: could not build landmarks-only WingResult from %s",
-                                    lm_gj_fast,
-                                )
-                                cv_wing_result = None
+                        # See build_cv_ratio_wing_result for the coordinate-space
+                        # contract — the Stage-1 GeoJSON is in rescaled-pixel space
+                        # and has to be mapped back to match `base`.
+                        cv_wing_result = build_cv_ratio_wing_result(
+                            preproc_result.landmarks_geojson_path,
+                            stem,
+                            rescale_factor=rescale_factor,
+                            um_per_px=per_image_scale,
+                        )
                     if cv_wing_result is not None:
                         cv_path = output_dir / f"{stem}_cv_ratio_overlay.png"
                         if render_cv_ratio_overlay_to_file(
