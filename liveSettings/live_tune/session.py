@@ -157,6 +157,13 @@ APPEARANCE_FIELDS = {
 #                                any pixel or geometry the preview draws.
 _INERT_FIELDS = {
     "auto_detect_um_per_px",
+    # Tier-2 fast path (added in v0.2.22 as PipelineConfig.skip_vein_tracing).
+    # Gates whether identify_wing runs Steps 2-6 at all — but the live
+    # preview always renders the full pipeline output, so from the
+    # preview's perspective this flag is inert. Missing entry here caused
+    # the v0.2.22–v0.2.24 startup AssertionError
+    # ("CORE/FINISH must partition Tier A: missing={'skip_vein_tracing'}").
+    "skip_vein_tracing",
     # Solidity filter
     "solidity_filter_enabled",
     "solidity_min",

@@ -1635,15 +1635,37 @@ def _run(
         # Fold prior-slice rows back in for resume cases. Done after any
         # post-processing (user-distance augmentation) so the appended rows
         # are matched against the final column set written by this slice.
+        #
+        # DATA-LOSS GUARD (v0.2.25 fix, bug report #36): only unlink the
+        # .append_source AFTER a successful merge. Pre-v0.2.25 code
+        # unlinked unconditionally inside the try block; merge_resume_csv
+        # swallows its own exceptions and returns 0, so on ANY read
+        # failure (e.g. Windows-cp1252 CSV vs UTF-8 reader — the reported
+        # 0xba/º-in-"29ºC" case), the source got deleted with the merge
+        # having done nothing, destroying every un-re-processed row.
         if csv_append_source is not None and csv_append_source.is_file():
-            try:
-                from TRACE.run_state import merge_resume_csv
+            from TRACE.run_state import count_csv_rows, merge_resume_csv
 
+            source_had_rows = count_csv_rows(csv_append_source) > 0
+            try:
                 appended = merge_resume_csv(csv_path, csv_append_source)
-                if appended:
-                    logger.info("CSV resume: folded %d row(s) from prior slice into %s", appended, csv_path)
-                csv_append_source.unlink(missing_ok=True)
             except Exception:
-                logger.exception("CSV resume: merge failed; leaving %s in place", csv_append_source)
+                appended = 0
+                logger.exception("CSV resume: merge raised")
+            if appended:
+                logger.info("CSV resume: folded %d row(s) from prior slice into %s", appended, csv_path)
+                csv_append_source.unlink(missing_ok=True)
+            elif source_had_rows:
+                logger.warning(
+                    "CSV resume: merge appended 0 rows despite the prior-slice CSV having data "
+                    "(this can happen if every specimen in the prior CSV was also re-processed "
+                    "this slice, OR if the merger silently dropped rows for a reason logged by "
+                    "TRACE.run_state above). PRESERVING %s so no prior data is lost — you can "
+                    "inspect it directly, or rename it back to .csv to recover.",
+                    csv_append_source,
+                )
+            else:
+                # Empty source (header-only or missing) — safe to delete.
+                csv_append_source.unlink(missing_ok=True)
 
     return results

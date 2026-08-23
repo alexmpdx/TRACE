@@ -312,6 +312,62 @@ def find_resumable_manifest(output_dir: Path) -> Optional[tuple["RunManifest", P
     return candidates[0]
 
 
+# Encodings tried in order when reading CSVs for merge. UTF-8 with BOM
+# handles anything TRACE ≥ v0.2.25 wrote (utf-8-sig with the BOM stripped
+# by the reader), plain UTF-8 handles ≥ v0.2.22 fast-path CSVs written on
+# macOS/Linux, cp1252 handles anything TRACE ≤ v0.2.24 wrote on Windows
+# (default locale before the explicit-encoding fix), and latin-1 is a
+# never-fails safety net that at worst mis-renders 0x80-0xFF bytes but
+# preserves every row so the merge succeeds.
+_CSV_READ_ENCODINGS: tuple[str, ...] = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+
+def _read_csv_with_fallback(path: Path) -> tuple[list[dict[str, str]], str]:
+    """Read a CSV, falling back through _CSV_READ_ENCODINGS on UnicodeDecodeError.
+
+    Returns (rows, encoding_used). Raises the last encoding's error only if
+    every attempt failed, which can't happen for latin-1 (it decodes any
+    byte sequence). Caller can treat this as "guaranteed to return rows
+    given a readable file".
+    """
+    import csv
+
+    last_exc: Exception | None = None
+    for enc in _CSV_READ_ENCODINGS:
+        try:
+            with open(path, newline="", encoding=enc) as fh:
+                return list(csv.DictReader(fh)), enc
+        except UnicodeDecodeError as exc:
+            last_exc = exc
+            continue
+    # Should be unreachable — latin-1 never raises. Defensive re-raise
+    # anyway so callers see a real error rather than a silent success
+    # on an empty list.
+    raise last_exc  # type: ignore[misc]
+
+
+def count_csv_rows(path: Path) -> int:
+    """Return the number of data rows (excluding header) in a CSV.
+
+    Uses the same encoding-fallback ladder as merge_resume_csv, so a file
+    that TRACE ≤ v0.2.24 wrote in cp1252 (or a corrupt file) still gets a
+    real count instead of 0. Used by the pipeline's append-source unlink
+    guard to distinguish "source was empty, safe to delete" from "source
+    had rows but the merge dropped them, PRESERVE the file".
+
+    Returns 0 for a nonexistent file. Never raises — silent failures fall
+    back to 0 so a broken count doesn't itself cause data loss upstream.
+    """
+    if not path.is_file():
+        return 0
+    try:
+        rows, _ = _read_csv_with_fallback(path)
+    except Exception as exc:
+        logger.warning("run_state: cannot count rows in %s: %s", path, exc)
+        return 0
+    return len(rows)
+
+
 def merge_resume_csv(new_csv: Path, append_source: Path) -> int:
     """Append rows from ``append_source`` whose specimen isn't already in ``new_csv``.
 
@@ -324,23 +380,35 @@ def merge_resume_csv(new_csv: Path, append_source: Path) -> int:
     Matching is by the "specimen" column (the image stem, not basename).
     Returns the number of rows appended, or 0 if nothing to merge.
 
+    Read encoding is fallback-tolerant (utf-8-sig → utf-8 → cp1252 →
+    latin-1). Before the ladder was in place (TRACE ≤ v0.2.24), a
+    Windows-authored CSV containing bytes like 0xba (º in cp1252, from
+    specimen names like "29ºC") would silently fail to decode as UTF-8
+    here, the merge would return 0, and the caller's unconditional
+    unlink() would delete the source — losing every un-re-processed row.
+
     Errors are logged and swallowed — never raises. The new CSV stays as
     written by export_csv_batch even if the merge fails; the worst case
     is a resumed run's CSV missing rows from a prior slice, recoverable
-    by re-running the affected images.
+    by re-running the affected images (or via tools/recover_landmark_csv.py
+    for landmarks-only fast-path CSVs).
     """
     import csv
 
     if not append_source.is_file() or not new_csv.is_file():
         return 0
     try:
-        with open(new_csv, newline="", encoding="utf-8") as f:
-            new_rows = list(csv.DictReader(f))
-        with open(append_source, newline="", encoding="utf-8") as f:
-            old_rows = list(csv.DictReader(f))
+        new_rows, new_enc = _read_csv_with_fallback(new_csv)
+        old_rows, old_enc = _read_csv_with_fallback(append_source)
     except Exception as exc:
         logger.warning("run_state: cannot read CSVs for merge: %s", exc)
         return 0
+    if new_enc != "utf-8-sig" or old_enc != "utf-8-sig":
+        logger.debug(
+            "run_state: merge read encodings — new=%s, append_source=%s",
+            new_enc,
+            old_enc,
+        )
     if not old_rows:
         return 0
     new_specimens = {row.get("specimen", "") for row in new_rows}
@@ -351,6 +419,10 @@ def merge_resume_csv(new_csv: Path, append_source: Path) -> int:
     # output-group selections; the old one might have stale columns).
     fieldnames = list(new_rows[0].keys()) if new_rows else list(old_rows[0].keys())
     try:
+        # Plain utf-8 (not utf-8-sig) for append — the BOM should sit at
+        # the file start only, written by the initial CSV writer. Adding
+        # utf-8-sig here would embed a BOM in the middle of the file at
+        # every merge, breaking Excel and any UTF-8-aware reader.
         with open(new_csv, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             for row in to_append:

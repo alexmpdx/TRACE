@@ -479,7 +479,11 @@ def export_csv(
             )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="") as f:
+    # utf-8-sig so Excel on Windows auto-detects UTF-8 on double-click
+    # (specimen names like "29ºC" would otherwise mangle). TRACE's
+    # merge_resume_csv reads via utf-8-sig fallback ladder so this is
+    # also merge-safe. See v0.2.25 CSV-encoding fix.
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=_LONG_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
@@ -653,7 +657,11 @@ def export_csv_batch(
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="") as f:
+    # utf-8-sig so Excel on Windows auto-detects UTF-8 on double-click
+    # (specimen names like "29ºC" would otherwise mangle). TRACE's
+    # merge_resume_csv reads via utf-8-sig fallback ladder so this is
+    # also merge-safe. See v0.2.25 CSV-encoding fix.
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)

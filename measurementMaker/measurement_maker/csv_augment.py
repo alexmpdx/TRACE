@@ -70,7 +70,10 @@ def augment_csv_with_user_distances(
         logger.warning("augment_csv: %s does not exist; skipping user-distance columns", csv_path)
         return
 
-    with open(csv_path, newline="") as fh:
+    # utf-8-sig on read tolerates both TRACE ≥ v0.2.25 writes (BOM-prefixed
+    # UTF-8) and any legacy fallback path — the "-sig" variant transparently
+    # strips a leading BOM if present, so plain-UTF-8 files also work.
+    with open(csv_path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         existing_fieldnames = list(reader.fieldnames or [])
         rows = list(reader)
@@ -132,7 +135,11 @@ def augment_csv_with_user_distances(
         if um_col is not None:
             augmented_fieldnames.append(um_col)
 
-    with open(csv_path, "w", newline="") as fh:
+    # utf-8-sig on write so Excel on Windows auto-detects UTF-8 when the
+    # user double-clicks the CSV. Without the BOM, Excel treats the file
+    # as cp1252 and any non-ASCII in specimen names (e.g. "29ºC") gets
+    # mangled on display. See v0.2.25 CSV-encoding fix.
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=augmented_fieldnames)
         writer.writeheader()
         for row in rows:
@@ -216,7 +223,8 @@ def write_distances_csv(
         rows.append(row)
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(csv_path, "w", newline="") as fh:
+    # utf-8-sig — see augment_csv_with_user_distances for rationale.
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
@@ -365,7 +373,8 @@ def write_landmark_csv_batch(
         rows.append(row)
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(csv_path, "w", newline="") as fh:
+    # utf-8-sig — see augment_csv_with_user_distances for rationale.
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:

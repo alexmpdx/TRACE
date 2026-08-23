@@ -80,7 +80,18 @@ from TRACE.walkthrough import WalkthroughOverlay, WalkthroughStep
 # ---------------------------------------------------------------------------
 
 
-_CAPTURED_LOGGERS = ("identify_features", "TRACE", "preprocessing", "scale_estimator")
+# Loggers whose INFO+ records get routed into the per-run log.
+# measurement_maker was added in v0.2.25 — before that, write_landmark_csv_batch's
+# WARNING (missing landmarks) and INFO (wrote %d wing(s)) messages went nowhere
+# the user could see, which is why bug report #36 needed cross-referencing the
+# frozen-exe stderr capture (startup.log) to diagnose the CSV data loss.
+_CAPTURED_LOGGERS = (
+    "identify_features",
+    "TRACE",
+    "preprocessing",
+    "scale_estimator",
+    "measurement_maker",
+)
 
 
 class _PlaceholderSpinBox(QDoubleSpinBox):
