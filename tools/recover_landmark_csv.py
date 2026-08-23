@@ -63,32 +63,43 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def _bootstrap_sys_path() -> None:
-    """Add the sibling package directories to sys.path so measurement_maker imports.
+    """Add sibling package directories to sys.path so recovery imports work.
 
-    Mirrors the minimal subset of TRACE/run_gui.py's path setup. Only
-    measurement_maker is needed (no torch, no napari, no identify_features).
+    Needs measurement_maker (for write_landmark_csv_batch) and resolutionAdjust
+    (for the optional --images TIFF-metadata re-read). Neither pulls in torch,
+    napari, or identify_features — this stays a light-touch script.
+
+    Two import shapes to accommodate (matches TRACE/run_gui.py):
+      - measurement_maker: package inside measurementMaker/ — add
+        ``measurementMaker/`` to sys.path so ``import measurement_maker`` works.
+      - resolutionAdjust: package at the top level (its __init__.py imports
+        siblings as ``resolutionAdjust.auto_detect``) — add the PARENT of
+        resolutionAdjust/ to sys.path so ``import resolutionAdjust`` works.
     """
     here = Path(__file__).resolve().parent
     # Handle both source layout (repo_root/tools/) and bundled layout
-    # (bundle_root/tools/ alongside bundle_root/measurementMaker/).
+    # (bundle_root/tools/ alongside the sibling packages).
     for candidate in (here.parent, here.parent.parent):
-        mm_dir = candidate / "measurementMaker"
-        if mm_dir.is_dir():
-            for name in ("measurementMaker",):
-                p = str(candidate / name)
-                if p not in sys.path:
-                    sys.path.insert(0, p)
+        if (candidate / "measurementMaker").is_dir():
+            _p = str(candidate / "measurementMaker")
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+            # resolutionAdjust needs its PARENT on sys.path.
+            if (candidate / "resolutionAdjust").is_dir() and str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
             return
-    # Frozen-Windows layout: measurementMaker sits next to TRACE.exe / the tools folder.
+    # Frozen-Windows layout.
     bundle_root = Path(sys.executable).resolve().parent
-    mm_dir = bundle_root / "measurementMaker"
-    if mm_dir.is_dir():
-        p = str(mm_dir)
-        if p not in sys.path:
-            sys.path.insert(0, p)
+    if (bundle_root / "measurementMaker").is_dir():
+        _p = str(bundle_root / "measurementMaker")
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+    if (bundle_root / "resolutionAdjust").is_dir() and str(bundle_root) not in sys.path:
+        sys.path.insert(0, str(bundle_root))
 
 
 _bootstrap_sys_path()
@@ -132,6 +143,85 @@ def _find_landmark_files(root: Path, recursive: bool) -> dict[str, Path]:
     return out
 
 
+# Supported image extensions for the --images backfill. Kept aligned with
+# preprocessing.pipeline.discover_images so we scan for the same file set.
+_IMAGE_EXTS = (".tif", ".tiff", ".ome.tif", ".ome.tiff", ".psd", ".bmp", ".png", ".jpg", ".jpeg")
+
+
+def _subpath_target_stem(image_path: Path, images_root: Path) -> str:
+    """Mirror preprocessing.pipeline._subpath_target_name, minus the extension.
+
+    ``images_root=/dir1, image_path=/dir1/folderA/sub/img.tif`` →
+    ``folderA_sub_img``.
+    """
+    parts = image_path.relative_to(images_root).parts
+    if not parts:
+        return image_path.stem
+    # Reconstruct the flattened basename, then strip its extension.
+    flat_name = "_".join(parts)
+    return Path(flat_name).stem
+
+
+def _index_images_by_flat_stem(images_root: Path) -> dict[str, Path]:
+    """Build a {flat_stem: image_path} map by recursively walking images_root.
+
+    Uses the same flattening as preprocessing so a landmark whose stem was
+    derived from ``folderA_sub_img_resampled`` matches the original image at
+    ``folderA/sub/img.tif`` (the ``_resampled`` suffix is stripped by the
+    caller when looking up).
+    """
+    out: dict[str, Path] = {}
+    for path in images_root.rglob("*"):
+        if not path.is_file():
+            continue
+        # rglob("*") is case-sensitive on some platforms; do a lowercase suffix check.
+        low = path.name.lower()
+        if not any(low.endswith(ext) for ext in _IMAGE_EXTS):
+            continue
+        stem = _subpath_target_stem(path, images_root)
+        # Later occurrences overwrite earlier ones for same flat_stem —
+        # collisions are unlikely (that's the whole point of flattening
+        # in the first place) but if they happen we can't do better than
+        # picking one.
+        out[stem] = path
+    return out
+
+
+def _landmark_stem_to_image_stem(landmark_stem: str) -> list[str]:
+    """Candidate flattened image stems for a given landmark stem.
+
+    The pipeline can produce landmarks from either the original image or its
+    resolutionAdjust-rescaled sibling (with a `_resampled` suffix). Return
+    both candidates (with-suffix first, without) so the caller can try each
+    against the pre-built flat_stem index.
+    """
+    candidates = [landmark_stem]
+    if landmark_stem.endswith("_resampled"):
+        candidates.append(landmark_stem[: -len("_resampled")])
+    return candidates
+
+
+def _read_image_um_per_px(path: Path) -> Optional[float]:
+    """Best-effort read of µm/px from a single image file.
+
+    Uses resolutionAdjust.auto_detect._read_um_per_px_from_tiff for TIFF-family
+    files (returns None for anything else — PSD/BMP/etc. don't carry
+    resolution metadata in a form we support).
+    """
+    low = path.name.lower()
+    if not any(low.endswith(ext) for ext in (".tif", ".tiff", ".ome.tif", ".ome.tiff")):
+        return None
+    try:
+        from resolutionAdjust.auto_detect import _read_um_per_px_from_tiff
+    except ImportError:
+        return None
+    try:
+        return _read_um_per_px_from_tiff(path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] TIFF metadata read failed for {path}: {exc}", file=sys.stderr)
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Recover a landmarks-only measurements CSV from a TRACE run folder.",
@@ -154,7 +244,17 @@ def main(argv: list[str] | None = None) -> int:
         "--um-per-px",
         type=float,
         default=None,
-        help="Override the µm/px scale from settings.yaml. Set to 0 to emit px-only columns.",
+        help="Override the DEFAULT µm/px scale from settings.yaml. Set to 0 to emit px-only "
+        "columns. Per-specimen scale from --images / geojson fc_props still wins over this.",
+    )
+    parser.add_argument(
+        "--images",
+        type=Path,
+        default=None,
+        help="Path to the ORIGINAL input images folder. Enables per-image µm/px re-detection "
+        "from TIFF metadata — matches auto_detect_um_per_px=True runs where every image can "
+        "have a different scale. Landmark geojsons written by TRACE >= v0.2.27 already carry "
+        "their effective_um_per_px, so this arg is only needed for older runs.",
     )
     parser.add_argument(
         "--include-cv-ratio",
@@ -227,11 +327,45 @@ def main(argv: list[str] | None = None) -> int:
 
     out_path = args.out.expanduser().resolve() if args.out else (run_folder / "measurements_recovered.csv")
 
+    # Optional per-specimen scale backfill from TIFF metadata. Only used
+    # for landmark geojsons that don't already carry effective_um_per_px
+    # (pre-v0.2.27 runs), and only for image extensions that carry the
+    # metadata (TIFF family).
+    um_per_px_by_specimen: dict[str, float] = {}
+    if args.images is not None:
+        images_root = args.images.expanduser().resolve()
+        if not images_root.is_dir():
+            print(f"error: --images {images_root} is not a directory", file=sys.stderr)
+            return 2
+        print(f"Indexing images under {images_root} for per-image µm/px re-detection…")
+        image_index = _index_images_by_flat_stem(images_root)
+        print(f"  indexed {len(image_index)} image file(s)")
+
+        hits = misses = 0
+        for stem in specimens:
+            found_scale: Optional[float] = None
+            for candidate in _landmark_stem_to_image_stem(stem):
+                img_path = image_index.get(candidate)
+                if img_path is None:
+                    continue
+                found_scale = _read_image_um_per_px(img_path)
+                if found_scale is not None:
+                    break
+            if found_scale is not None:
+                um_per_px_by_specimen[stem] = found_scale
+                hits += 1
+            else:
+                misses += 1
+        print(f"  per-image µm/px resolved for {hits}/{len(specimens)} specimen(s) via image metadata")
+        if misses:
+            print(f"  ({misses} fell back to geojson fc_props / --um-per-px default)")
+
     print(f"Recovering CSV from {len(specimens)} landmark geojson(s) under {run_folder}")
-    print(f"  scale (µm/px):        {um_per_px if um_per_px else '(none — px only)'}")
-    print(f"  include cv_ratio:     {include_cv_ratio}")
-    print(f"  user distance pairs:  {len(pairs)}")
-    print(f"  output:               {out_path}")
+    print(f"  default scale (µm/px): {um_per_px if um_per_px else '(none — px only)'}")
+    print(f"  include cv_ratio:      {include_cv_ratio}")
+    print(f"  user distance pairs:   {len(pairs)}")
+    print(f"  --images backfill:     {len(um_per_px_by_specimen)} specimen(s)")
+    print(f"  output:                {out_path}")
 
     write_landmark_csv_batch(
         out_path,
@@ -239,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         pairs,
         measurement_groups=measurement_groups,
         um_per_px=um_per_px,
+        um_per_px_by_specimen=um_per_px_by_specimen or None,
     )
     if not out_path.is_file():
         print("error: write_landmark_csv_batch did not produce an output file", file=sys.stderr)

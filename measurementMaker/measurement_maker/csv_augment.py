@@ -280,6 +280,7 @@ def write_landmark_csv_batch(
     pairs: list[LandmarkPair],
     measurement_groups: Optional[set[str]] = None,
     um_per_px: Optional[float] = None,
+    um_per_px_by_specimen: Optional[dict[str, float]] = None,
 ) -> None:
     """Write a landmarks-only CSV: user distances + cv_ratio measurement group.
 
@@ -300,11 +301,28 @@ def write_landmark_csv_batch(
         measurement_groups: Subset of LANDMARK_ONLY_MEASUREMENT_GROUPS to
             include as columns. None or empty = no landmark-only groups
             (behaves like write_distances_csv).
-        um_per_px: Scale; when None only `_px` columns are written.
+        um_per_px: Default µm/px scale used for every specimen that
+            doesn't have a per-specimen override or a persisted
+            effective_um_per_px in its landmark geojson. When None AND
+            no per-specimen scale resolves for a given wing, only the
+            `_px` columns are populated for that wing.
+        um_per_px_by_specimen: Optional explicit per-specimen scale
+            overrides (e.g. re-detected from image metadata via
+            tools/recover_landmark_csv.py --images). Takes precedence
+            over the geojson's persisted effective_um_per_px, which in
+            turn takes precedence over ``um_per_px``.
+
+    Scale precedence (per specimen):
+        um_per_px_by_specimen[stem] > geojson fc props effective_um_per_px > um_per_px
 
     Missing landmarks on a particular wing produce blank cells for the
-    affected columns on that wing (logged at WARNING).
+    affected columns on that wing (logged at WARNING). The _um columns
+    are ALWAYS written when any specimen has a resolvable scale — wings
+    without a scale get blank _um cells rather than dropping the column
+    (a mixed batch shouldn't hide µm data for the wings that have it).
     """
+    from measurement_maker.distance import load_landmark_geojson_fc_props
+
     groups = set(measurement_groups) if measurement_groups else set()
     include_cv_ratio = "cv_ratio" in groups
     if not pairs and not include_cv_ratio:
@@ -314,21 +332,49 @@ def write_landmark_csv_batch(
         logger.info("write_landmark_csv_batch: no specimens; skipping write")
         return
 
-    has_scale = um_per_px is not None and um_per_px > 0
+    um_by_specimen = dict(um_per_px_by_specimen or {})
+    default_scale = float(um_per_px) if um_per_px is not None and um_per_px > 0 else None
+
+    # First pass: resolve per-specimen scale from (a) explicit override,
+    # (b) geojson-persisted effective_um_per_px, (c) default_scale.
+    per_specimen_scale: dict[str, Optional[float]] = {}
+    scale_source_counts = {"override": 0, "geojson": 0, "default": 0, "none": 0}
+    for specimen_id, lm_path in specimen_landmarks.items():
+        s: Optional[float] = None
+        if specimen_id in um_by_specimen and um_by_specimen[specimen_id] and um_by_specimen[specimen_id] > 0:
+            s = float(um_by_specimen[specimen_id])
+            scale_source_counts["override"] += 1
+        else:
+            fc_props = {}
+            if lm_path is not None and lm_path.exists():
+                fc_props = load_landmark_geojson_fc_props(lm_path)
+            fc_scale = fc_props.get("effective_um_per_px")
+            if fc_scale is not None and float(fc_scale) > 0:
+                s = float(fc_scale)
+                scale_source_counts["geojson"] += 1
+            elif default_scale is not None:
+                s = default_scale
+                scale_source_counts["default"] += 1
+            else:
+                scale_source_counts["none"] += 1
+        per_specimen_scale[specimen_id] = s
+
+    has_any_scale = any(s is not None for s in per_specimen_scale.values())
+
     fieldnames: list[str] = ["specimen"]
     if include_cv_ratio:
         fieldnames.append("wing length_px")
-        if has_scale:
+        if has_any_scale:
             fieldnames.append("wing length_um")
         fieldnames.append("crossvein distance_px")
-        if has_scale:
+        if has_any_scale:
             fieldnames.append("crossvein distance_um")
         fieldnames.append("CV ratio")
 
     taken: set[str] = set(fieldnames)
     pair_cols: list[tuple[LandmarkPair, str, Optional[str]]] = []
     for pair in pairs:
-        px_col, um_col = _column_names(pair, has_scale)
+        px_col, um_col = _column_names(pair, has_any_scale)
         px_col = _dedupe_suffix(px_col, taken)
         taken.add(px_col)
         fieldnames.append(px_col)
@@ -343,9 +389,10 @@ def write_landmark_csv_batch(
         landmarks: dict[str, tuple[float, float]] = {}
         if lm_path is not None and lm_path.exists():
             landmarks = load_landmarks_from_geojson(lm_path)
+        scale_for_this = per_specimen_scale[specimen_id]
         row: dict[str, str] = {"specimen": specimen_id}
         if include_cv_ratio:
-            cv_vals = _cv_ratio_row(landmarks, um_per_px)
+            cv_vals = _cv_ratio_row(landmarks, scale_for_this)
             for col in ("wing length_px", "wing length_um", "crossvein distance_px", "crossvein distance_um", "CV ratio"):
                 if col in fieldnames:
                     row[col] = cv_vals[col]
@@ -369,7 +416,7 @@ def write_landmark_csv_batch(
                 continue
             row[px_col] = f"{dist_px:.1f}"
             if um_col is not None:
-                row[um_col] = f"{dist_px * um_per_px:.1f}"
+                row[um_col] = f"{dist_px * scale_for_this:.1f}" if scale_for_this else ""
         rows.append(row)
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -381,9 +428,14 @@ def write_landmark_csv_batch(
             writer.writerow(row)
 
     logger.info(
-        "write_landmark_csv_batch: wrote %s (%d wing(s); groups=%s; %d pair(s))",
+        "write_landmark_csv_batch: wrote %s (%d wing(s); groups=%s; %d pair(s); "
+        "scale sources: override=%d, geojson=%d, default=%d, none=%d)",
         csv_path.name,
         len(rows),
         sorted(groups & LANDMARK_ONLY_MEASUREMENT_GROUPS),
         len(pair_cols),
+        scale_source_counts["override"],
+        scale_source_counts["geojson"],
+        scale_source_counts["default"],
+        scale_source_counts["none"],
     )

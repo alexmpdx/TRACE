@@ -50,6 +50,26 @@ def load_landmarks_from_geojson(path: Path) -> dict[str, tuple[float, float]]:
     return out
 
 
+def load_landmark_geojson_fc_props(path: Path) -> dict:
+    """Return the top-level FeatureCollection ``properties`` dict, or {} when absent.
+
+    v0.2.27+ stamps ``effective_um_per_px`` here (the per-image µm/px the
+    pipeline actually used, after auto-detect / resolutionAdjust — which
+    can differ from any single UI-set value). Older geojsons return {}
+    and callers should fall back to a passed-in default scale.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("load_landmark_geojson_fc_props: cannot read %s: %s", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    props = data.get("properties")
+    return props if isinstance(props, dict) else {}
+
+
 def compute_pair_distance_px(
     landmarks: dict[str, tuple[float, float]],
     name_a: str,

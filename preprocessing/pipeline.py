@@ -286,11 +286,21 @@ def run_landmarks(
     return _shape_predict_result(predictor, result)
 
 
-def landmarks_to_geojson(landmarks: dict, metadata: Optional[dict] = None) -> dict:
+def landmarks_to_geojson(
+    landmarks: dict,
+    metadata: Optional[dict] = None,
+    fc_props: Optional[dict] = None,
+) -> dict:
     """Convert landmarks dict to GeoJSON FeatureCollection.
 
     metadata (if provided) maps name -> {reliable, gate_reason, confidence, sharpness,
     second_peak_ratio} and is embedded into each feature's properties.
+
+    fc_props (if provided) is merged into the top-level FeatureCollection
+    under a ``properties`` key — used to persist per-image pipeline state
+    that isn't attached to any single landmark (e.g. the effective µm/px
+    the pipeline used for this image after resolutionAdjust or metadata
+    auto-detect, needed to convert landmark distances to µm downstream).
     """
     features = []
     metadata = metadata or {}
@@ -314,13 +324,21 @@ def landmarks_to_geojson(landmarks: dict, metadata: Optional[dict] = None) -> di
                 "properties": props,
             }
         )
-    return {"type": "FeatureCollection", "features": features}
+    fc: dict = {"type": "FeatureCollection", "features": features}
+    if fc_props:
+        fc["properties"] = dict(fc_props)
+    return fc
 
 
-def save_landmarks_geojson(landmarks: dict, output_path: Path, metadata: Optional[dict] = None) -> None:
+def save_landmarks_geojson(
+    landmarks: dict,
+    output_path: Path,
+    metadata: Optional[dict] = None,
+    fc_props: Optional[dict] = None,
+) -> None:
     """Save landmarks dict as GeoJSON file."""
-    fc = landmarks_to_geojson(landmarks, metadata)
-    with open(output_path, "w") as f:
+    fc = landmarks_to_geojson(landmarks, metadata, fc_props=fc_props)
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(fc, f, indent=2)
 
 
@@ -958,7 +976,17 @@ def process_single_image(
         result.landmarks = landmarks
         result.landmark_metadata = landmark_metadata
         lm_path = output_dir / f"{stem}_landmarks.geojson"
-        save_landmarks_geojson(landmarks, lm_path, landmark_metadata)
+        # Persist the per-image effective µm/px so downstream tools that
+        # only get the landmarks geojson (e.g. tools/recover_landmark_csv.py,
+        # or a future write_landmark_csv_batch call) can convert px→µm
+        # accurately even when auto-detect gives every image a different
+        # scale. Pre-v0.2.27 landmark geojsons lack this and fall back to
+        # the pipeline's global um_per_px, which produces wrong µm values
+        # on auto-detect runs where per-image metadata varies.
+        _fc_props: Optional[dict] = None
+        if result.effective_um_per_px is not None and result.effective_um_per_px > 0:
+            _fc_props = {"effective_um_per_px": float(result.effective_um_per_px)}
+        save_landmarks_geojson(landmarks, lm_path, landmark_metadata, fc_props=_fc_props)
         result.landmarks_geojson_path = lm_path
         result.stages_completed.append("landmarks")
 
