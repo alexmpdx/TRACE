@@ -141,7 +141,44 @@ _VEIN_TRACING_DEPENDENT_CSV_GROUPS = frozenset({"vein_lengths", "intervein_areas
 _INTERMEDIATE_CHUNK_SIZE = 100
 
 
-def _wipe_preproc_dir(preproc_dir: Path) -> None:
+# Files the per-chunk wipe must NOT delete. The landmark GeoJSONs are read
+# AFTER the chunk loop finishes — the batch CSV block (both the identifyFeatures
+# augmentation path and the landmarks-only fast path) resolves
+# ``user_dist_landmark_paths`` at that point, and every one of those paths
+# points into ``preproc_dir``. Wiping them left the writers with paths whose
+# ``.exists()`` was False, and both writers treat "file gone" exactly like
+# "landmark absent": every cell blank, one WARNING per wing per pair, no error.
+# That was bug report #37 (v0.2.30, every measurement column empty for a
+# 97-image run) — introduced by the chunking refactor (13ea8fb0), which added
+# the wipe without noticing the cross-chunk read.
+#
+# Keeping them costs nothing against the disk-full problem the wipe exists to
+# solve: a landmarks GeoJSON is ~13 points (a couple of KB), versus the
+# multi-MB OME-TIFFs that actually filled the disk. Even a 5000-image batch
+# retains only a few MB, and the run-end TemporaryDirectory.cleanup() (or the
+# user's own intermediates folder, when keep_intermediates is on) removes them.
+#
+# Covers both Stage-3 output (``<stem>_landmarks.geojson``) and Stage-6's
+# rotated rewrite (``<stem>_rotated_landmarks.geojson``); PipelineResult
+# rebinds ``landmarks_geojson_path`` to the latter when rotation runs.
+_WIPE_KEEP_SUFFIXES = ("_landmarks.geojson",)
+
+# Second net, under the containment check in _wipe_preproc_dir. Nothing the
+# pipeline writes into preproc_dir uses any of these names or extensions —
+# every final artifact goes to `output_dir` directly (the CSV at
+# `output_dir / csv_filename`, overlays at `output_dir / f"{stem}_*.png"`,
+# GeoJSONs copied out of preproc_dir into `output_dir`), and the GUI's run
+# bookkeeping (`run.log`, `settings.yaml`, `_run_state.json`) sits in the run
+# folder alongside them. So these entries can only ever fire if preproc_dir
+# has come to point somewhere it shouldn't, in which case not deleting is
+# strictly the right answer. `.csv.append_source` is the resume/append staging
+# copy — the one file whose loss silently destroys prior-slice rows (the
+# v0.2.25 / bug #36 data-loss guard exists for exactly that).
+_WIPE_NEVER_DELETE_SUFFIXES = (".csv", ".csv.append_source", ".log", ".yaml")
+_WIPE_NEVER_DELETE_NAMES = ("_run_state.json",)
+
+
+def _wipe_preproc_dir(preproc_dir: Path, output_dir: Optional[Path] = None) -> None:
     """Delete every direct child of `preproc_dir` (files + subfolders).
 
     Used between chunks to keep intermediate disk usage bounded. The
@@ -150,15 +187,66 @@ def _wipe_preproc_dir(preproc_dir: Path) -> None:
     intermediate file will get cleaned up by the finally block's
     TemporaryDirectory.cleanup() anyway; nothing about a cleanup
     failure should abort the run.
+
+    Only DIRECT children are touched — never `preproc_dir` itself, and
+    the iteration never walks upward — so nothing outside the
+    intermediates dir is reachable in the first place.
+
+    Args:
+        preproc_dir: The intermediates dir to empty.
+        output_dir: The run's final-output dir, when known. Passing it
+            enables the containment check below; omitting it (tests,
+            older callers) only skips that check.
+
+    Safety, in three layers:
+
+      1. Containment. `preproc_dir` must be strictly INSIDE `output_dir`
+         (the keep_intermediates case, `output_dir / "intermediates"`) or
+         entirely outside it (the TemporaryDirectory case). If it ever
+         resolves to `output_dir` itself or to one of its parents, this
+         wipe would take the run's own CSV, overlays and manifest with it,
+         so we log an error and delete nothing. That can't happen today —
+         `preproc_dir` is assigned in exactly one place — but it is the
+         failure mode that would cost a user their whole run, and a
+         refactor is all it would take.
+      2. `_WIPE_KEEP_SUFFIXES` — files a later stage of THIS run still
+         needs to read (see that constant).
+      3. `_WIPE_NEVER_DELETE_*` — final-output / run-bookkeeping names
+         that must never be deleted by a cleanup pass (see above).
     """
     import shutil
 
     if not preproc_dir.is_dir():
         return
+
+    if output_dir is not None:
+        try:
+            resolved_preproc = preproc_dir.resolve()
+            resolved_output = output_dir.resolve()
+            if resolved_preproc == resolved_output or resolved_preproc in resolved_output.parents:
+                logger.error(
+                    "chunk cleanup: refusing to wipe %s — it is the output dir %s (or a parent of it). "
+                    "Wiping would delete this run's CSV, overlays and manifest. Intermediates will "
+                    "accumulate for the rest of this run instead.",
+                    resolved_preproc,
+                    resolved_output,
+                )
+                return
+        except OSError as exc:
+            logger.warning("chunk cleanup: cannot resolve %s / %s: %s", preproc_dir, output_dir, exc)
+            return
+
     for child in preproc_dir.iterdir():
         try:
             if child.is_dir() and not child.is_symlink():
                 shutil.rmtree(child, ignore_errors=True)
+            elif child.name.endswith(_WIPE_KEEP_SUFFIXES):
+                continue
+            elif child.name.endswith(_WIPE_NEVER_DELETE_SUFFIXES) or child.name in _WIPE_NEVER_DELETE_NAMES:
+                logger.warning(
+                    "chunk cleanup: not deleting %s — it looks like a final output, not an intermediate",
+                    child,
+                )
             else:
                 child.unlink(missing_ok=True)
         except OSError as exc:
@@ -1095,18 +1183,18 @@ def _run(
                 len(successful_preproc),
             )
             paused = True
-            _wipe_preproc_dir(preproc_dir)
+            _wipe_preproc_dir(preproc_dir, output_dir)
             break
 
         if not successful_preproc:
-            _wipe_preproc_dir(preproc_dir)
+            _wipe_preproc_dir(preproc_dir, output_dir)
             continue
 
         if not outputs:
             logger.info("=== Stage 2: skipped (no outputs selected) ===")
             for preproc_result in successful_preproc:
                 results.append(TraceResult(image_path=preproc_result.image_path))
-            _wipe_preproc_dir(preproc_dir)
+            _wipe_preproc_dir(preproc_dir, output_dir)
             continue
 
         # --- Stage 2: identifyFeatures ---
@@ -1558,7 +1646,7 @@ def _run(
         # THE FIX: wipe intermediates so next chunk starts on a clean disk.
         # Bounds peak intermediate usage at CHUNK_SIZE × per-image (a few GB max),
         # instead of the whole batch's worth (which filled disk mid-run on 4000+ image runs).
-        _wipe_preproc_dir(preproc_dir)
+        _wipe_preproc_dir(preproc_dir, output_dir)
 
         # Advance both cross-chunk offsets so the next chunk's progress
         # events (both preproc and analysis) continue the batch-wide
@@ -1628,6 +1716,23 @@ def _run(
                         "CSV append: cannot move %s to %s: %s", append_from_csv, csv_append_source, exc
                     )
                     csv_append_source = None
+        # Both CSV writers below read the landmark GeoJSONs lazily, here, long
+        # after Stage 2 recorded their paths — and both degrade silently when a
+        # path no longer resolves (blank cells + a per-pair "missing landmark(s)"
+        # warning that reads like a detection failure, not a missing file).
+        # Bug #37 was exactly that, so name the real cause loudly instead.
+        if user_dist_landmark_paths:
+            _lm_missing = [_stem for _stem, _lm_p in user_dist_landmark_paths.items() if not Path(_lm_p).exists()]
+            if _lm_missing:
+                logger.error(
+                    "CSV: %d of %d landmark GeoJSON(s) no longer exist at CSV-writing time "
+                    "(e.g. %s) — every measurement column for those wings will be blank. "
+                    "The intermediates they live in were deleted before the CSV was written.",
+                    len(_lm_missing),
+                    len(user_dist_landmark_paths),
+                    user_dist_landmark_paths[_lm_missing[0]],
+                )
+
         if fast_csv_path:
             # Fast path: identifyFeatures did not run, so there is no
             # measurements.csv to augment. Write one from scratch using only
