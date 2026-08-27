@@ -62,10 +62,13 @@ def load_landmarks(path):
 
 # Priority-ordered fallbacks for a "distal-side reference point" used to tell
 # which side of the hinge line is anatomically distal (kept) vs proximal (chopped).
-# All five are distal-margin landmarks; DTip is preferred but any one of them
-# suffices for the side-test, so a single low-confidence dtip prediction no
-# longer aborts the whole image when other distal landmarks are reliable.
-_DISTAL_REFERENCE_PRIORITY = ("DTip", "L4.d", "L2.d", "L5.d", "L4-L5", "L1-Rs")
+# Every entry must lie on the DISTAL side of the hinge line, so only wing-blade
+# landmarks qualify: DTip is preferred, then the distal vein endpoints, then the
+# L2-L3 junction. L4-L5 and L1-Rs are deliberately excluded — the hinge line is
+# built through them, so they sit on the line and give a degenerate side-test.
+# Any one of these suffices, so a single low-confidence DTip prediction no longer
+# aborts the whole image when another distal landmark is reliable.
+_DISTAL_REFERENCE_PRIORITY = ("DTip", "L4.d", "L2.d", "L5.d", "L2-L3")
 
 
 def _pick_distal_reference(landmarks):
