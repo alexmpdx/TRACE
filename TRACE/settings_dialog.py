@@ -49,9 +49,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from TRACE.theme import current_theme as _ct
 
 from TRACE.presets_loader import load_presets
+from TRACE.theme import current_theme as _ct
 
 # Friendly display names for the GateConfigPanel landmark labels. The shorthand
 # is what LandmarkLocator stores internally; the right-hand text is what the
@@ -68,7 +68,17 @@ _FIELD_TOOLTIPS: dict[str, str] = {
         "Which skeletonization method(s) to run when extracting vein centerlines from "
         "the vein-tissue mask. RIDGE (Frangi-like ridge response) is the production default."
     ),
-    "smooth_sigma": "Gaussian sigma (px) used to smooth the vein-tissue mask before skeletonization.",
+    "enable_boundary_smooth": (
+        "Gaussian-blur and re-threshold the vein-tissue mask before skeletonizing, to soften a "
+        "ragged segmentation boundary. Applies on top of the chosen skeletonization method rather "
+        "than replacing it. Off by default."
+    ),
+    "smooth_sigma": (
+        "Gaussian sigma (px). On the default RIDGE method this smooths the distance field before "
+        "its Hessian is taken — i.e. how much the terrain is flattened before its ridge is traced — "
+        "NOT the mask itself. It additionally sets the blur radius for boundary smoothing (when "
+        "that option is enabled) and for the multi-scale / single-scale pruning methods."
+    ),
     "enable_basic_prune": (
         "Step 4: length-based pruning of skeleton branches. Disable to keep every short "
         "branch the skeletonizer produces (useful for debugging)."
@@ -226,8 +236,7 @@ _FIELD_TOOLTIPS: dict[str, str] = {
         "tracer identified — i.e. hallucinated vein tissue or failed tracing. Runs after tracing."
     ),
     "max_unassigned_vein_frac": (
-        "Abort when this fraction of segmented vein area is not associated with any traced vein. "
-        "Default 0.10 (10%)."
+        "Abort when this fraction of segmented vein area is not associated with any traced vein. " "Default 0.10 (10%)."
     ),
     "intervein_association_filter_enabled": (
         "Reject wings where too much of the segmented intervein tissue isn't covered by any named "
@@ -416,7 +425,9 @@ class PipelineConfigDialog(QDialog):
 
             _slog_lp(
                 "settings_dialog: live preview unavailable, continuing without it\n"
-                + "".join(_tb_lp.format_exception(type(_live_preview_exc), _live_preview_exc, _live_preview_exc.__traceback__))
+                + "".join(
+                    _tb_lp.format_exception(type(_live_preview_exc), _live_preview_exc, _live_preview_exc.__traceback__)
+                )
             )
 
     def done(self, result: int) -> None:  # noqa: N802 — Qt API
@@ -1276,6 +1287,7 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Skeletonization")
         form = QFormLayout(gb)
         self._add_enum_list(form, "skeleton_methods", "Methods", SkeletonMethod, allowed_values={"ridge"})
+        self._add_bool(form, "enable_boundary_smooth", "Smooth mask boundary before skeletonizing")
         self._add_float(form, "smooth_sigma", "Smoothing sigma", 0.0, 100.0, 2, 0.1)
         layout.addWidget(gb)
 
@@ -1485,9 +1497,7 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Fragmentation (disconnected regions)")
         form = QFormLayout(gb)
         self._add_bool(form, "fragmentation_filter_enabled", "Enable fragmentation filter")
-        self._add_float(
-            form, "fragmentation_max_secondary_frac", "Max secondary-region fraction", 0.0, 1.0, 4, 0.005
-        )
+        self._add_float(form, "fragmentation_max_secondary_frac", "Max secondary-region fraction", 0.0, 1.0, 4, 0.005)
         layout.addWidget(gb)
 
         gb = QGroupBox("Vein association (unexplained vein tissue)")
@@ -1499,9 +1509,7 @@ class PipelineConfigDialog(QDialog):
         gb = QGroupBox("Intervein association (unexplained intervein tissue)")
         form = QFormLayout(gb)
         self._add_bool(form, "intervein_association_filter_enabled", "Enable intervein-association filter")
-        self._add_float(
-            form, "max_unassigned_intervein_frac", "Max unassigned intervein fraction", 0.0, 1.0, 3, 0.01
-        )
+        self._add_float(form, "max_unassigned_intervein_frac", "Max unassigned intervein fraction", 0.0, 1.0, 3, 0.01)
         layout.addWidget(gb)
 
         gb = QGroupBox("Required veins (abort if missing)")

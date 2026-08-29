@@ -18,12 +18,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from TRACE.config_io import _ENUM_FIELDS
+from TRACE.config_io import _ENUM_FIELDS, _migrate_boundary_smooth
 
 PRESETS_DIR = Path(__file__).resolve().parent / "presets"
 
 
 def _convert_enum_lists(data: dict[str, Any]) -> dict[str, Any]:
+    data = _migrate_boundary_smooth(data)
     out: dict[str, Any] = {}
     for key, val in data.items():
         if key in _ENUM_FIELDS and val is not None:

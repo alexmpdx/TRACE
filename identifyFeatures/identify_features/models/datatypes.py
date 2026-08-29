@@ -34,11 +34,16 @@ class VeinType(Enum):
 
 
 class SkeletonMethod(Enum):
-    """Available skeletonization methods."""
+    """Available skeletonization methods.
+
+    Boundary smoothing is deliberately NOT a member here: it is a mask
+    preprocessing step that composes with whichever skeletonizer is chosen,
+    not an alternative to one. It lives on ``PipelineConfig`` as the
+    ``enable_boundary_smooth`` flag (with ``smooth_sigma``).
+    """
 
     MEDIAL_AXIS = "medial-axis"
     VORONOI = "voronoi"
-    BOUNDARY_SMOOTH = "boundary-smooth"
     RIDGE = "ridge"  # Hessian-based distance-map ridge extraction
     PATH_TRACE = "path-trace"  # Weighted path tracing on medial axis
 

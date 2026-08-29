@@ -194,8 +194,9 @@ def _build_skeleton_core(
     if dbg:
         dbg.dump_mask(vein_mask, "vein_mask")
 
-    # Step 2: Optional boundary smoothing (preprocessing)
-    if SkeletonMethod.BOUNDARY_SMOOTH in methods:
+    # Step 2: Optional boundary smoothing (mask preprocessing — composes with
+    # whichever skeletonizer runs below, rather than replacing one)
+    if config.enable_boundary_smooth:
         vein_mask = _boundary_smooth(vein_mask, sigma=smooth_sigma)
         logger.info("After boundary smoothing (sigma=%.1f): %d pixels", smooth_sigma, np.count_nonzero(vein_mask))
         if dbg:

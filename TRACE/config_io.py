@@ -39,6 +39,7 @@ def config_to_dict(config: PipelineConfig) -> dict[str, Any]:
 def config_from_dict(data: dict[str, Any]) -> PipelineConfig:
     """Build a PipelineConfig from a dict. Unknown keys are ignored."""
     known = {f.name for f in fields(PipelineConfig)}
+    data = _migrate_boundary_smooth(data)
     kwargs: dict[str, Any] = {}
     for key, val in data.items():
         if key not in known:
@@ -49,6 +50,29 @@ def config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         else:
             kwargs[key] = val
     return PipelineConfig(**kwargs)
+
+
+def _migrate_boundary_smooth(data: dict[str, Any]) -> dict[str, Any]:
+    """Translate the retired ``"boundary-smooth"`` skeleton method to its flag.
+
+    Boundary smoothing used to be a ``SkeletonMethod`` enum member even though
+    it is mask preprocessing that composes with a skeletonizer rather than an
+    alternative to one. It now lives on PipelineConfig as
+    ``enable_boundary_smooth``. Configs saved before that change still carry the
+    string in ``skeleton_methods``, where it would raise ValueError on the enum
+    lookup — so strip it here and set the flag instead.
+
+    An explicit ``enable_boundary_smooth`` already in the dict wins, so a config
+    written by a current build round-trips untouched.
+    """
+    methods = data.get("skeleton_methods")
+    if not isinstance(methods, list) or "boundary-smooth" not in methods:
+        return data
+
+    data = dict(data)
+    data["skeleton_methods"] = [m for m in methods if m != "boundary-smooth"]
+    data.setdefault("enable_boundary_smooth", True)
+    return data
 
 
 def load_config(path: Path) -> PipelineConfig:

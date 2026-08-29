@@ -32,7 +32,15 @@ class PipelineConfig:
 
     # -- Skeletonization --
     skeleton_methods: list[SkeletonMethod] = field(default_factory=lambda: [SkeletonMethod.RIDGE])
-    smooth_sigma: float = 2.0  # Gaussian sigma for boundary smoothing
+    # Optional mask preprocessing: Gaussian-blur + re-threshold the binary vein
+    # mask before skeletonizing. Composes with any skeletonizer rather than
+    # replacing one, which is why it is a flag and not a SkeletonMethod member.
+    enable_boundary_smooth: bool = False
+    # Gaussian sigma (px). Used by boundary smoothing when enabled, and — on the
+    # default ridge path — as the sigma applied to the DISTANCE FIELD before its
+    # Hessian is taken in _skeletonize_ridge. Also feeds the multi-scale and
+    # single-scale pruning methods.
+    smooth_sigma: float = 2.0
 
     # -- Pruning --
     # Defaults match the "distance-map" preset (see PIPELINE_PRESETS below).

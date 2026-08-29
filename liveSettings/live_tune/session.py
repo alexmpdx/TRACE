@@ -231,6 +231,7 @@ assert set(FIELD_TIER) == _ALL_FIELDS, (
 CORE_FIELDS = {
     "um_per_px",  # feeds every um->px conversion, including prune thresholds (core)
     "skeleton_methods",
+    "enable_boundary_smooth",
     "smooth_sigma",
     "enable_basic_prune",
     "prune_methods",
@@ -560,9 +561,7 @@ class LiveTuneSession:
         return "none"
 
     # -- tier implementations --------------------------------------------
-    def _recompute_skeleton_tier(
-        self, cfg: PipelineConfig, changed: set, timings: dict
-    ) -> None:
+    def _recompute_skeleton_tier(self, cfg: PipelineConfig, changed: set, timings: dict) -> None:
         """Recompute the skeleton with the minimal work the change requires.
 
         Decision order:
@@ -649,9 +648,7 @@ class LiveTuneSession:
         self._anchored_skel = skel
         timings["B_trace"] = (time.perf_counter() - t0) * 1000
 
-    def _render(
-        self, cfg: PipelineConfig, appearance: Appearance, view: str, timings: dict
-    ) -> np.ndarray:
+    def _render(self, cfg: PipelineConfig, appearance: Appearance, view: str, timings: dict) -> np.ndarray:
         t0 = time.perf_counter()
         if view == VIEW_SKELETON:
             overlay = render_skeleton(self._base_image, self._pristine_skel)
@@ -722,8 +719,6 @@ class LiveTuneSession:
         self._regions_stale = False
         return regions
 
-    def render_current(
-        self, config: PipelineConfig, appearance: Appearance, view: str = VIEW_FINAL
-    ) -> np.ndarray:
+    def render_current(self, config: PipelineConfig, appearance: Appearance, view: str = VIEW_FINAL) -> np.ndarray:
         """Re-render with current caches (used after compute_intervein)."""
         return self._render(self._effective(config), appearance, view, {})
