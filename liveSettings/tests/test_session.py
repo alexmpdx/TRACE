@@ -34,6 +34,7 @@ from live_tune import (  # noqa: E402
     Appearance,
     LiveTuneSession,
 )
+from live_tune.session import _INERT_FIELDS  # noqa: E402
 
 # Real specimen 0003: detection + landmarks + image all present in the repo.
 _IDF = ROOT / "identifyFeatures"
@@ -48,8 +49,7 @@ def _make_session() -> LiveTuneSession:
     wing_outline = _compute_wing_outline(vein_polys + intervein_polys)
     img = imread_any(IMG)
     s = LiveTuneSession()
-    s.set_input(img, vein_polys, intervein_polys, landmarks, wing_outline,
-                (img.shape[0], img.shape[1]))
+    s.set_input(img, vein_polys, intervein_polys, landmarks, wing_outline, (img.shape[0], img.shape[1]))
     return s
 
 
@@ -68,7 +68,14 @@ def test_known_field_tiers():
     assert FIELD_TIER["intervein_split_h_vw"] == TIER_C
     assert FIELD_TIER["skip_intervein_regions"] == TIER_C
     assert FIELD_TIER["vein_opacity"] == TIER_D
-    assert set(APPEARANCE_FIELDS) == {n for n, t in FIELD_TIER.items() if t == TIER_D}
+    # Tier D holds two disjoint groups, not just the appearance fields:
+    # _build_field_tier routes APPEARANCE_FIELDS *and* _INERT_FIELDS there
+    # (session.py), the latter being fields that never change a pixel the
+    # preview draws (garbage-detector filters, auto_detect_um_per_px,
+    # skip_vein_tracing). Asserting on APPEARANCE_FIELDS alone went stale the
+    # moment the first inert field was added.
+    assert set(APPEARANCE_FIELDS) | set(_INERT_FIELDS) == {n for n, t in FIELD_TIER.items() if t == TIER_D}
+    assert not (set(APPEARANCE_FIELDS) & set(_INERT_FIELDS)), "a field is both appearance and inert"
 
 
 # -- tier selection ------------------------------------------------------
@@ -127,10 +134,7 @@ def test_no_change_is_noop():
 
 # -- idempotence (the anchor_landmarks mutation trap) --------------------
 def _vein_signature(session):
-    return [
-        (v.vein_id, None if v.centerline is None else round(v.centerline.length, 3))
-        for v in session._veins
-    ]
+    return [(v.vein_id, None if v.centerline is None else round(v.centerline.length, 3)) for v in session._veins]
 
 
 def test_tier_b_idempotent_round_trip():
@@ -231,12 +235,12 @@ def test_finish_only_matches_full_rebuild():
     tuned = replace(cfg, bridge_max_gap_um=250.0)
 
     s1 = _make_session()
-    s1.update(cfg)            # builds core
-    s1.update(tuned)          # finish-only fast path (reuses core)
+    s1.update(cfg)  # builds core
+    s1.update(tuned)  # finish-only fast path (reuses core)
     fast = s1._pristine_skel
 
     s2 = _make_session()
-    s2.update(tuned)          # full rebuild from scratch with the tuned config
+    s2.update(tuned)  # full rebuild from scratch with the tuned config
     full = s2._pristine_skel
 
     # Same graph structure + same edge geometry.
@@ -252,9 +256,9 @@ def test_revisiting_config_is_instant():
     """Returning to a previously-seen config hits the LRU — no core/finish work."""
     s = _make_session()
     cfg = PipelineConfig()
-    s.update(cfg)                                   # cache config A
-    s.update(replace(cfg, smooth_sigma=4.0))        # move to config B (core rebuild)
-    r = s.update(cfg)                               # back to A → full skeleton LRU hit
+    s.update(cfg)  # cache config A
+    s.update(replace(cfg, smooth_sigma=4.0))  # move to config B (core rebuild)
+    r = s.update(cfg)  # back to A → full skeleton LRU hit
     assert "A_core" not in r.timings_ms and "A_finish" not in r.timings_ms
     assert "A_cached" in r.timings_ms
 
