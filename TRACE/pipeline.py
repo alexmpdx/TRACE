@@ -1502,9 +1502,13 @@ def _run(
                         logger.warning("%s: chopped_image requested but no chopped file found", stem)
 
                 if "landmarks_geojson" in outputs:
-                    # Stage 1 overwrites this file in-place after rotation, so the
-                    # copy here picks up the post-rotation coordinates that align
-                    # with the landmarks overlay PNG.
+                    # When Stage 6 rotation runs it writes a separate
+                    # ``<stem>_rotated_landmarks.geojson`` and rebinds
+                    # ``landmarks_geojson_path`` to it, so this copy picks up the
+                    # post-rotation coordinates that align with the landmarks
+                    # overlay PNG (the non-rotated ``<stem>_landmarks.geojson``
+                    # stays behind in the preproc dir). Copied under the source
+                    # name, so a rotated run emits ``_rotated_landmarks.geojson``.
                     lm_src = getattr(preproc_result, "landmarks_geojson_path", None)
                     if lm_src and Path(lm_src).exists():
                         lm_dst = output_dir / Path(lm_src).name
