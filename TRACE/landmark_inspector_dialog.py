@@ -90,12 +90,28 @@ SEG_CLASS_INDEX = {"intervein": 2, "vein": 3}
 
 
 def _parse_landmarks_geojson(path: Path) -> dict:
-    """Load a landmarks GeoJSON into ``{name: (x, y)}`` (raw names, pixel coords).
+    """Load a landmarks GeoJSON into ``{name: (x, y)}`` in ORIGINAL-image pixel
+    space (raw landmark names).
 
     Tolerant of either Stage-3's full schema (confidence/sharpness/etc.) or the
     minimal override schema (just classification.name + coordinates).
+
+    Automated pipeline outputs store their coordinates in RESCALED-pixel space
+    (Stage 1 rescales the image before landmark detection) and record the run's
+    ``rescale_factor`` in the FeatureCollection's top-level ``properties``. This
+    tab displays landmarks over the ORIGINAL image, so those coordinates are
+    mapped back to original space here — multiply by ``1 / rescale_factor``, the
+    same inverse the overlay renderers and ``build_cv_ratio_wing_result`` apply.
+    Manual overrides and on-demand regenerations carry no ``rescale_factor``
+    (they are already in original space), so they pass through unchanged.
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    fc_props = data.get("properties") or {}
+    try:
+        rescale_factor = float(fc_props.get("rescale_factor", 1.0)) or 1.0
+    except (TypeError, ValueError):
+        rescale_factor = 1.0
+    inv = 1.0 / rescale_factor if rescale_factor != 1.0 else 1.0
     out: dict = {}
     for feat in data.get("features", []):
         geom = feat.get("geometry") or {}
@@ -109,7 +125,7 @@ def _parse_landmarks_geojson(path: Path) -> dict:
         name = cls.get("name") or props.get("name")
         if not name:
             continue
-        out[str(name)] = (float(coords[0]), float(coords[1]))
+        out[str(name)] = (float(coords[0]) * inv, float(coords[1]) * inv)
     return out
 
 

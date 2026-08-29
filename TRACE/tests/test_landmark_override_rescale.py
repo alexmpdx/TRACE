@@ -40,8 +40,10 @@ for _p in (
 from preprocessing.pipeline import (  # noqa: E402
     _scale_geojson_coords,
     _scale_landmarks,
+    landmarks_to_geojson,
     load_landmarks_override,
 )
+from TRACE.landmark_inspector_dialog import _parse_landmarks_geojson  # noqa: E402
 
 
 def _write_override(path: Path, coords: dict) -> None:
@@ -112,3 +114,62 @@ def test_landmark_and_segmentation_overrides_use_same_direction(tmp_path):
     scaled_vertex = fc["features"][0]["geometry"]["coordinates"][0][0]
 
     assert list(landmarks["DTip"]) == list(scaled_vertex) == [400.0, 320.0]
+
+
+# --- Bug B: the inspector displays landmarks over the ORIGINAL image, so it must
+# map rescaled-space automated outputs back to original space via the stored
+# rescale_factor. Overrides / on-demand geojsons carry no factor and pass through.
+
+
+def _write_fc(path: Path, coords: dict, fc_props=None) -> None:
+    fc = landmarks_to_geojson({n: (x, y) for n, (x, y) in coords.items()}, fc_props=fc_props)
+    path.write_text(json.dumps(fc), encoding="utf-8")
+
+
+def test_parser_inverse_scales_rescaled_output(tmp_path):
+    """An automated `_landmarks.geojson` stored in rescaled space, tagged with
+    its rescale_factor, is mapped back to original space for display."""
+    rescale_factor = 0.4
+    # Coordinates as written to disk by the pipeline: rescaled-pixel space.
+    rescaled_coords = {"DTip": (400.0, 320.0), "L4-L5": (48.0, 256.0)}
+    path = tmp_path / "wing_0001_landmarks.geojson"
+    _write_fc(path, rescaled_coords, fc_props={"rescale_factor": rescale_factor})
+
+    parsed = _parse_landmarks_geojson(path)
+
+    # Back in original-image pixel space, aligned with the original image shown.
+    assert parsed == {"DTip": (1000.0, 800.0), "L4-L5": (120.0, 640.0)}
+
+
+def test_parser_passes_through_when_no_rescale_factor(tmp_path):
+    """Overrides and on-demand regenerations are already in original space and
+    carry no rescale_factor — the parser must not touch their coordinates."""
+    coords = {"DTip": (1000.0, 800.0)}
+    path = tmp_path / "wing_0001_landmarks_override.geojson"
+    _write_fc(path, coords, fc_props=None)  # no rescale_factor
+
+    assert _parse_landmarks_geojson(path) == coords
+
+
+def test_parser_noop_at_unity_factor(tmp_path):
+    coords = {"DTip": (1000.0, 800.0)}
+    path = tmp_path / "wing_0001_landmarks.geojson"
+    _write_fc(path, coords, fc_props={"rescale_factor": 1.0})
+
+    assert _parse_landmarks_geojson(path) == coords
+
+
+def test_display_roundtrip_survives_rescale(tmp_path):
+    """End-to-end: a landmark truly at an original pixel, put through the
+    pipeline's write (rescaled coords + stored factor), comes back to the same
+    original pixel in the inspector — so the predicted point lands on the wing."""
+    original_pixel = {"DTip": (1000.0, 800.0)}
+    rescale_factor = 0.4
+
+    # What the pipeline writes: coords scaled into rescaled space + the factor.
+    rescaled = _scale_landmarks(original_pixel, rescale_factor)
+    path = tmp_path / "wing_0001_landmarks.geojson"
+    _write_fc(path, rescaled, fc_props={"rescale_factor": rescale_factor})
+
+    # What the inspector reads back for display over the original image.
+    assert _parse_landmarks_geojson(path) == original_pixel

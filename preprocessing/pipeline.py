@@ -1080,9 +1080,16 @@ def process_single_image(
         # scale. Pre-v0.2.27 landmark geojsons lack this and fall back to
         # the pipeline's global um_per_px, which produces wrong µm values
         # on auto-detect runs where per-image metadata varies.
-        _fc_props: Optional[dict] = None
+        _fc_props: dict = {}
         if result.effective_um_per_px is not None and result.effective_um_per_px > 0:
-            _fc_props = {"effective_um_per_px": float(result.effective_um_per_px)}
+            _fc_props["effective_um_per_px"] = float(result.effective_um_per_px)
+        # Persist the rescale factor so the landmark inspector — which displays
+        # these coordinates over the ORIGINAL image — can map them back from the
+        # rescaled space they are stored in (Stage 1 rescales before landmark
+        # detection) to original-input space for display. The pipeline itself
+        # keeps working in rescaled space; only consumers that draw on the
+        # original-resolution image inverse-scale by this factor.
+        _fc_props["rescale_factor"] = float(result.rescale_factor or 1.0)
         save_landmarks_geojson(landmarks, lm_path, landmark_metadata, fc_props=_fc_props)
         result.landmarks_geojson_path = lm_path
         result.stages_completed.append("landmarks")
