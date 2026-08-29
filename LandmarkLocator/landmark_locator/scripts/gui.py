@@ -3245,6 +3245,8 @@ class LandmarkGUI(QMainWindow):
         Peak/Sharpness/SP-ratio cells are colored against their active threshold so
         the user can see at a glance which metric is near the edge.
         """
+        from landmark_locator.inference.predict import gate_metric_passes
+
         pred = entry.prediction
         gate_cfg = self._predictor.gate_config if self._predictor else None
         core = set((gate_cfg or {}).get("core_landmarks", []))
@@ -3254,7 +3256,8 @@ class LandmarkGUI(QMainWindow):
         warn_fg = QColor(255, 200, 80)
         dim_fg = QColor(160, 160, 160)
 
-        def _threshold_cell(value: float | None, threshold: float | None, higher_is_better: bool) -> QTableWidgetItem:
+        def _threshold_cell(value: float | None, threshold: float | None, metric_name: str) -> QTableWidgetItem:
+            higher_is_better = metric_name != "second_peak_ratio"
             if value is None:
                 item = QTableWidgetItem("N/A")
                 item.setForeground(dim_fg)
@@ -3263,7 +3266,9 @@ class LandmarkGUI(QMainWindow):
             item = QTableWidgetItem(text)
             if threshold is None:
                 return item
-            passes = value >= threshold if higher_is_better else value <= threshold
+            # Same predicate the pipeline gate uses, so the colours can't disagree
+            # with the pass/fail the run actually produced.
+            passes = gate_metric_passes(metric_name, value, threshold)
             # Flag cells within 15% of the threshold on the passing side as "close"
             if not passes:
                 item.setForeground(fail_fg)
@@ -3303,9 +3308,9 @@ class LandmarkGUI(QMainWindow):
             gate_item.setForeground(pass_fg if reliable else fail_fg)
             self._info_table.setItem(i, 1, gate_item)
 
-            self._info_table.setItem(i, 2, _threshold_cell(peak, peak_thr, higher_is_better=True))
-            self._info_table.setItem(i, 3, _threshold_cell(sharp, sharp_thr, higher_is_better=True))
-            self._info_table.setItem(i, 4, _threshold_cell(spr, spr_thr, higher_is_better=False))
+            self._info_table.setItem(i, 2, _threshold_cell(peak, peak_thr, "peak"))
+            self._info_table.setItem(i, 3, _threshold_cell(sharp, sharp_thr, "sharpness"))
+            self._info_table.setItem(i, 4, _threshold_cell(spr, spr_thr, "second_peak_ratio"))
 
             core_item = QTableWidgetItem("core" if name in core else "")
             if name in core:

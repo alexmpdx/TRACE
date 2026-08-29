@@ -11,7 +11,9 @@ from landmark_locator.inference.predict import (
     _assemble_gate_result,
     _deep_merge,
     _extract_coords_and_peaks,
+    _gate_landmark,
     compute_heatmap_metrics,
+    gate_metric_passes,
 )
 
 
@@ -261,3 +263,57 @@ def test_compute_heatmap_metrics_matches_expected_sharpness():
     assert metrics[0]["sharpness"] > 1.5
     # Only one peak → second-peak ratio should be very small after suppression
     assert metrics[0]["second_peak_ratio"] < 0.2
+
+
+# ---- Threshold precision (regression: "sharpness=1.18<1.18") ----
+
+
+def test_metric_at_threshold_precision_passes():
+    """A metric below the threshold by less than its stored precision still passes.
+
+    Regression for the report `sharpness=1.18<1.18`: the observed sharpness was
+    1.17903 against a threshold of 1.18 (itself `round(<calibrated percentile>, 2)`),
+    so the run failed on a difference finer than the threshold is even specified to,
+    and the message rendered both sides identically.
+    """
+    assert gate_metric_passes("sharpness", 1.1790256484259554, 1.18) is True
+    assert gate_metric_passes("sharpness", 1.174, 1.18) is False
+    assert gate_metric_passes("peak", 0.02051, 0.021) is True
+    assert gate_metric_passes("peak", 0.0203, 0.021) is False
+    # second_peak_ratio is a ceiling, so tolerance applies on the other side
+    assert gate_metric_passes("second_peak_ratio", 0.9549, 0.95) is True
+    assert gate_metric_passes("second_peak_ratio", 0.96, 0.95) is False
+
+
+def test_exact_equality_passes():
+    for metric, value in (("peak", 0.021), ("sharpness", 1.18), ("second_peak_ratio", 0.95)):
+        assert gate_metric_passes(metric, value, value) is True
+
+
+def test_gate_reason_never_shows_equal_sides():
+    """When a gate does fail, the two formatted sides must differ."""
+    cfg = _gate_cfg()
+    stack, names = _make_heatmap_stack()
+    coords, peaks = _extract_coords_and_peaks(stack)
+    metrics = compute_heatmap_metrics(stack, peaks, suppression_radius_px=10)
+    for name, metric in zip(names, metrics):
+        passed, reason = _gate_landmark(name, metric, cfg)
+        if passed:
+            continue
+        for part in reason.split("; "):
+            body = part.partition("=")[2]
+            op = "<" if "<" in body else ">"
+            lhs, _, rhs = body.partition(op)
+            assert lhs != rhs, f"{name}: gate reason compares identical strings: {part}"
+
+
+def test_sub_precision_failure_does_not_reach_the_pipeline():
+    """A landmark 0.0009 under threshold is reliable, so a core landmark won't abort."""
+    cfg = _deep_merge(_gate_cfg(core=["sharp"]), {"sharpness": {"global": 1.5, "per_landmark": {}}})
+    stack, names = _make_heatmap_stack()
+    metrics = compute_heatmap_metrics(stack, _extract_coords_and_peaks(stack)[1], suppression_radius_px=10)
+    sharp_metric = dict(metrics[0])
+    # Push sharpness to just under the threshold, inside the 2-dp quantum
+    sharp_metric["sharpness"] = 1.4990
+    passed, reason = _gate_landmark("sharp", sharp_metric, cfg)
+    assert passed is True, reason

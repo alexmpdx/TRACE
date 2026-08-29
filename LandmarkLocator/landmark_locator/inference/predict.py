@@ -27,6 +27,31 @@ DEFAULT_GATE_CONFIG = {
     "min_metric_failures_to_reject": 1,
 }
 
+# Precision each gate threshold is authored at. `calibrate_gate._build_yaml` rounds
+# its percentiles to these decimals and the gate-config editor spinboxes use the same
+# `setDecimals`, so a threshold is only ever *specified* to this many places.
+# Comparisons therefore round the metric to the same precision before testing it —
+# otherwise a threshold of 1.18 (stored from a calibrated 1.176) rejects a metric of
+# 1.179 while the log renders both sides as "sharpness=1.18<1.18".
+GATE_METRIC_DECIMALS = {"peak": 3, "sharpness": 2, "second_peak_ratio": 2}
+
+
+def gate_metric_passes(metric_name: str, value: float, threshold: float) -> bool:
+    """Whether `value` clears `threshold` for a gate metric, compared at stored precision."""
+    decimals = GATE_METRIC_DECIMALS[metric_name]
+    v = round(float(value), decimals)
+    t = round(float(threshold), decimals)
+    # second_peak_ratio is a ceiling; peak and sharpness are floors.
+    return v <= t if metric_name == "second_peak_ratio" else v >= t
+
+
+def _gate_metric_text(metric_name: str, value: float, threshold: float) -> str:
+    """Render "<name>=<value><op><threshold>" at the metric's stored precision."""
+    d = GATE_METRIC_DECIMALS[metric_name]
+    label = "second_peak" if metric_name == "second_peak_ratio" else metric_name
+    op = ">" if metric_name == "second_peak_ratio" else "<"
+    return f"{label}={value:.{d}f}{op}{threshold:.{d}f}"
+
 
 class LowConfidenceLandmarkError(RuntimeError):
     """One or more core landmarks failed the confidence gate."""
@@ -199,24 +224,22 @@ def _gate_landmark(
     `min_metric_failures_to_reject` threshold (default 1). Disabled gates
     (`enabled: false`) never contribute a failure. When multiple gates fail,
     the reason string joins them with "; " so the log shows the full picture.
+
+    Each metric is compared at the precision its threshold is stored at (see
+    `GATE_METRIC_DECIMALS`), so a metric that agrees with the threshold to that
+    precision passes rather than failing on sub-quantum noise.
     """
     peak_cfg = gate_cfg["peak"]
     sharp_cfg = gate_cfg["sharpness"]
     sp_cfg = gate_cfg["second_peak_ratio"]
     reasons: list[str] = []
 
-    if peak_cfg.get("enabled", True):
-        peak_thr = peak_cfg["per_landmark"].get(name, peak_cfg["global"])
-        if metric["peak"] < peak_thr:
-            reasons.append(f"peak={metric['peak']:.3f}<{peak_thr:.3f}")
-    if sharp_cfg.get("enabled", True):
-        sharp_thr = sharp_cfg["per_landmark"].get(name, sharp_cfg["global"])
-        if metric["sharpness"] < sharp_thr:
-            reasons.append(f"sharpness={metric['sharpness']:.2f}<{sharp_thr:.2f}")
-    if sp_cfg.get("enabled", True):
-        sp_thr = sp_cfg["per_landmark"].get(name, sp_cfg["global"])
-        if metric["second_peak_ratio"] > sp_thr:
-            reasons.append(f"second_peak={metric['second_peak_ratio']:.2f}>{sp_thr:.2f}")
+    for metric_name, cfg in (("peak", peak_cfg), ("sharpness", sharp_cfg), ("second_peak_ratio", sp_cfg)):
+        if not cfg.get("enabled", True):
+            continue
+        thr = cfg["per_landmark"].get(name, cfg["global"])
+        if not gate_metric_passes(metric_name, metric[metric_name], thr):
+            reasons.append(_gate_metric_text(metric_name, metric[metric_name], thr))
 
     min_fails = max(1, int(gate_cfg.get("min_metric_failures_to_reject", 1)))
     if len(reasons) >= min_fails:
