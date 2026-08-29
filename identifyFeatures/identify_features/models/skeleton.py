@@ -1753,60 +1753,78 @@ def _merge_close_nodes(G: nx.Graph, min_dist: float) -> None:
     If there's an edge between the two close nodes, it's removed
     (it's a tiny connecting segment). Other edges from the removed
     node are reconnected to the kept node.
+
+    Close pairs are found once with a KD-tree rather than by rescanning every
+    node pair after each merge. That is safe because a merge only ever REMOVES
+    a node — the kept node keeps its own coordinates, so no node ever moves and
+    the close-pair set can only shrink. Pairs are then processed in the same
+    node order the old restart-from-scratch loop visited them in, and both
+    endpoints are re-checked for existence at merge time, so the resulting
+    graph is identical. The old loop was O(merges × n²) and dominated the whole
+    skeleton finish half (~570s of 571s on a 3.9k-node graph).
     """
     import math
 
-    changed = True
-    while changed:
-        changed = False
-        nodes = list(G.nodes())
+    from scipy.spatial import cKDTree
 
-        for i, n1 in enumerate(nodes):
-            if n1 not in G:
+    if min_dist <= 0:
+        return
+
+    nodes = [n for n in G.nodes() if "x" in G.nodes[n] and "y" in G.nodes[n]]
+    if len(nodes) < 2:
+        return
+
+    coords = np.array([(G.nodes[n]["x"], G.nodes[n]["y"]) for n in nodes], dtype=np.float64)
+    # query_pairs is inclusive (<= r); the original test was strict (< min_dist),
+    # so filter the boundary case out below.
+    candidate_pairs = cKDTree(coords).query_pairs(r=min_dist, output_type="ndarray")
+    if len(candidate_pairs) == 0:
+        return
+
+    # Sort by node-list position so pairs are visited in the same order the
+    # old nested loop encountered them (it always restarted from index 0 and
+    # merged the first close pair it found).
+    order = np.lexsort((candidate_pairs[:, 1], candidate_pairs[:, 0]))
+
+    for i, j in candidate_pairs[order]:
+        n1, n2 = nodes[i], nodes[j]
+        if n1 not in G or n2 not in G:
+            continue
+
+        nd1, nd2 = G.nodes[n1], G.nodes[n2]
+        dist = math.hypot(nd1["x"] - nd2["x"], nd1["y"] - nd2["y"])
+        if dist >= min_dist:
+            continue
+
+        # Keep the higher-degree node (more likely at a real junction).
+        # Degrees shift as merges land, so this is evaluated at merge time,
+        # exactly as the original did.
+        if G.degree(n2) > G.degree(n1):
+            keep, drop = n2, n1
+        else:
+            keep, drop = n1, n2
+
+        # Remove any direct edge between the pair
+        if G.has_edge(keep, drop):
+            G.remove_edge(keep, drop)
+
+        # Reconnect drop's remaining neighbors to keep
+        for neighbor in list(G.neighbors(drop)):
+            if neighbor == keep:
                 continue
-            nd1 = G.nodes[n1]
+            edge_data = G[drop][neighbor].copy()
+            G.remove_edge(drop, neighbor)
+            if not G.has_edge(keep, neighbor):
+                G.add_edge(keep, neighbor, **edge_data)
 
-            for n2 in nodes[i + 1 :]:
-                if n2 not in G:
-                    continue
-                nd2 = G.nodes[n2]
-
-                dist = math.hypot(nd1["x"] - nd2["x"], nd1["y"] - nd2["y"])
-                if dist >= min_dist:
-                    continue
-
-                # Keep the higher-degree node (more likely at a real junction)
-                if G.degree(n2) > G.degree(n1):
-                    keep, drop = n2, n1
-                else:
-                    keep, drop = n1, n2
-
-                # Remove any direct edge between the pair
-                if G.has_edge(keep, drop):
-                    G.remove_edge(keep, drop)
-
-                # Reconnect drop's remaining neighbors to keep
-                for neighbor in list(G.neighbors(drop)):
-                    if neighbor == keep:
-                        continue
-                    edge_data = G[drop][neighbor].copy()
-                    G.remove_edge(drop, neighbor)
-                    if not G.has_edge(keep, neighbor):
-                        G.add_edge(keep, neighbor, **edge_data)
-
-                G.remove_node(drop)
-                changed = True
-                logger.debug(
-                    "Merged node %d into %d (dist=%.0fpx, kept deg=%d)",
-                    drop,
-                    keep,
-                    dist,
-                    G.degree(keep),
-                )
-                break  # restart after modification
-
-            if changed:
-                break
+        G.remove_node(drop)
+        logger.debug(
+            "Merged node %d into %d (dist=%.0fpx, kept deg=%d)",
+            drop,
+            keep,
+            dist,
+            G.degree(keep),
+        )
 
 
 def _remove_small_fragments(G: nx.Graph, min_length: float) -> None:
