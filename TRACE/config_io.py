@@ -4,12 +4,15 @@ Used by both the GUI (QSettings persistence + Import/Export buttons) and
 the CLI (--config flag) to round-trip the full PipelineConfig dataclass.
 
 Unknown keys in input JSON are silently ignored so old saved configs keep
-working when PipelineConfig gains new fields.
+working when PipelineConfig gains new fields. Unknown *values* in enum-list
+fields are dropped with a warning for the same reason: a stored config must
+never be unloadable just because an enum member was renamed or retired.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -17,11 +20,64 @@ from typing import Any
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 
+logger = logging.getLogger(__name__)
+
 # Dataclass field name -> enum class for enum-list fields.
 _ENUM_FIELDS: dict[str, type] = {
     "skeleton_methods": SkeletonMethod,
     "prune_methods": PruneMethod,
 }
+
+# Sentinel: this field could not be coerced at all, so the caller should omit
+# it and let PipelineConfig's own default stand.
+_DROP = object()
+
+
+def coerce_enum_list(enum_cls: type, value: Any, field_name: str, source: str = "config") -> Any:
+    """Convert a list of enum *values* to enum members, dropping bad entries.
+
+    ``enum_cls(item)`` raises ValueError on an unrecognized string, which used
+    to make a single stale or typo'd entry blow up the whole load — and in
+    ``load_presets`` that took down every preset, not just the bad one. Saved
+    settings and presets are user data that outlives any given build, so an
+    unknown value is treated as skew to be logged, not an error.
+
+    Returns ``_DROP`` when nothing usable survives from a non-empty input, so
+    the caller omits the key and PipelineConfig's default applies rather than
+    an empty list — ``skeleton_methods: []`` silently means plain Zhang-Suen
+    thinning, which is not what a user with one bad entry meant. An input that
+    was *already* empty is preserved, since ``prune_methods: []`` is a
+    legitimate, meaningful setting (it is what the length-based preset ships).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        logger.warning(
+            "%s: %r should be a list of %s values, got %r — ignoring", source, field_name, enum_cls.__name__, value
+        )
+        return _DROP
+
+    out, bad = [], []
+    for item in value:
+        try:
+            out.append(enum_cls(item))
+        except (ValueError, KeyError):
+            bad.append(item)
+
+    if bad:
+        valid = ", ".join(m.value for m in enum_cls)
+        logger.warning(
+            "%s: ignoring unrecognized %s value(s) %s — valid values are: %s",
+            source,
+            field_name,
+            ", ".join(repr(b) for b in bad),
+            valid,
+        )
+
+    if not out and value:
+        logger.warning("%s: no usable %s values left; falling back to the built-in default", source, field_name)
+        return _DROP
+    return out
 
 
 def config_to_dict(config: PipelineConfig) -> dict[str, Any]:
@@ -45,8 +101,9 @@ def config_from_dict(data: dict[str, Any]) -> PipelineConfig:
         if key not in known:
             continue
         if key in _ENUM_FIELDS:
-            enum_cls = _ENUM_FIELDS[key]
-            kwargs[key] = [enum_cls(v) for v in val]
+            coerced = coerce_enum_list(_ENUM_FIELDS[key], val, key)
+            if coerced is not _DROP:
+                kwargs[key] = coerced
         else:
             kwargs[key] = val
     return PipelineConfig(**kwargs)

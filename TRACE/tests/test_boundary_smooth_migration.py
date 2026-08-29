@@ -79,3 +79,60 @@ def test_roundtrip_is_stable():
     data = config_to_dict(cfg)
     assert "boundary-smooth" not in data["skeleton_methods"]
     assert config_from_dict(data).enable_boundary_smooth is True
+
+
+# -- tolerant enum coercion -------------------------------------------------
+# Stored configs and presets are user data that outlive the build that wrote
+# them. An enum member that gets renamed or retired must degrade to a warning,
+# never a ValueError that makes saved settings unloadable — and in load_presets
+# it must not take down every preset over one bad file.
+
+
+def test_unrecognized_value_is_dropped_not_raised():
+    cfg = config_from_dict({"skeleton_methods": ["ridge", "nonsense"]})
+    assert cfg.skeleton_methods == [SkeletonMethod.RIDGE]
+
+
+def test_all_values_bad_falls_back_to_default():
+    """Key is omitted so PipelineConfig's default applies, not an empty list.
+
+    ``skeleton_methods: []`` silently means plain Zhang-Suen thinning, which is
+    not what a user with one misspelled entry meant.
+    """
+    cfg = config_from_dict({"skeleton_methods": ["nope"]})
+    assert cfg.skeleton_methods == PipelineConfig().skeleton_methods
+
+
+def test_legitimately_empty_list_is_preserved():
+    """``prune_methods: []`` is meaningful — it is what length-based ships."""
+    cfg = config_from_dict({"prune_methods": []})
+    assert cfg.prune_methods == []
+
+
+def test_wrong_type_is_ignored():
+    """A bare string where a list belongs must not iterate into characters."""
+    cfg = config_from_dict({"skeleton_methods": "ridge"})
+    assert cfg.skeleton_methods == PipelineConfig().skeleton_methods
+
+
+def test_other_fields_survive_a_bad_enum():
+    cfg = config_from_dict({"skeleton_methods": ["bogus"], "smooth_sigma": 3.0})
+    assert cfg.smooth_sigma == 3.0
+
+
+def test_one_corrupt_preset_does_not_kill_the_listing(tmp_path, monkeypatch):
+    """A single bad preset file must cost one entry, not the whole GUI list."""
+    import TRACE.presets_loader as pl
+
+    (tmp_path / "good.json").write_text('{"skeleton_methods": ["ridge"]}')
+    (tmp_path / "bad_enum.json").write_text('{"skeleton_methods": ["boundary-smooth", "gibberish"]}')
+    (tmp_path / "not_json.json").write_text("{ this is not json")
+    (tmp_path / "not_an_object.json").write_text("[1, 2, 3]")
+    monkeypatch.setattr(pl, "PRESETS_DIR", tmp_path)
+
+    presets = pl.load_presets()
+    assert "good" in presets
+    assert presets["good"]["skeleton_methods"] == [SkeletonMethod.RIDGE]
+    # the retired value migrated, the gibberish was dropped, the preset survived
+    assert presets["bad_enum"]["enable_boundary_smooth"] is True
+    assert "not_json" not in presets and "not_an_object" not in presets
