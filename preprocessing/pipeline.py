@@ -717,6 +717,21 @@ def _scale_geojson_coords(fc: dict, factor: float) -> dict:
     return fc
 
 
+def _scale_landmarks(landmarks: dict, factor: float) -> dict:
+    """Scale every ``{name: (x, y)}`` landmark coordinate by ``factor``.
+
+    The landmark analogue of :func:`_scale_geojson_coords`. The inspector's
+    Landmarks tab edits over the ORIGINAL image, so a manual landmark override
+    is written in original-input pixel space; when Stage 1 rescaled the image
+    the rest of the pipeline (Stages 4-6 and the Stage-2 analysis) works in
+    rescaled space, so the override is scaled by the same factor before use.
+    A ``factor`` of 1.0 returns the coordinates unchanged.
+    """
+    if factor == 1.0:
+        return landmarks
+    return {name: (x * factor, y * factor) for name, (x, y) in landmarks.items()}
+
+
 # ---------------------------------------------------------------------------
 # Pipeline result and orchestration
 # ---------------------------------------------------------------------------
@@ -1025,6 +1040,15 @@ def process_single_image(
 
             _logging.getLogger(__name__).info("%s: using manual landmark override from %s", stem, override_path)
             landmarks, landmark_metadata = load_landmarks_override(override_path)
+            # The override is in original-input pixel space (the inspector's
+            # Landmarks tab edits over the ORIGINAL image), whereas Stages 4-6
+            # and the Stage-2 analysis all operate in the rescaled space Stage 1
+            # produced. If Stage 1 rescaled, bring the override into that space —
+            # mirroring the segmentation-override short-circuit below (Stage 5).
+            # Without this, a hand-corrected landmark is misplaced by
+            # rescale_factor on every rescaling run (silently corrupting exactly
+            # the images the user took the trouble to correct).
+            landmarks = _scale_landmarks(landmarks, result.rescale_factor or 1.0)
         else:
             cached = None
             if prefetched_landmarks is not None:
