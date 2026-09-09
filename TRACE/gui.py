@@ -2297,6 +2297,7 @@ class TraceWindow(QMainWindow):
         layout.addWidget(msg)
 
         calib = CalibrateWidget(dlg)
+
         # Explicit refresher so every Calibrate click re-reads the CURRENT
         # main-window state — critical when the user Browses to a new
         # input folder in between opening this dialog and clicking
@@ -2310,6 +2311,7 @@ class TraceWindow(QMainWindow):
                 self._segmentation_model_path,
                 recursive=self.recursive_chk.isChecked() if hasattr(self, "recursive_chk") else False,
             )
+
         calib.set_refresher(_refresh_from_main)
         _refresh_from_main()
         calib.applied.connect(lambda v: self.inline_general_panel.workers_spin.setValue(int(v)))
@@ -4327,6 +4329,14 @@ class TraceWindow(QMainWindow):
         - Otherwise (idle) → kick off a new run via _run_pipeline.
         """
         if self.worker is not None:
+            if not self._confirm_pause():
+                return
+            # The confirm box spins the event loop, so the run may have
+            # finished (or been cancelled / errored) while it was open —
+            # its terminal handler already cleared self.worker. Nothing
+            # to pause in that case; the button label has moved on too.
+            if self.worker is None:
+                return
             self.worker.pause()
             msg = "Pause requested — finishing the current image first."
             self._log(msg)
@@ -4345,6 +4355,31 @@ class TraceWindow(QMainWindow):
         if not self._confirm_no_pending_settings_edits():
             return
         self._run_pipeline()
+
+    def _confirm_pause(self) -> bool:
+        """Yes/No guard in front of Pause.
+
+        The Run button turns into Pause the instant a run starts, so a
+        double-click (or a stray click while the mouse is still over the
+        button) used to pause the run with no way to say "no, I didn't
+        mean that". Pausing is harmless data-wise — the slice's completed
+        images are kept and Resume picks up where it left off — but it
+        still costs the user a click plus the resume bookkeeping, and
+        on a long batch a silent pause can go unnoticed for a while.
+        """
+        n_done = len(self._manifest.completed_images) if self._manifest is not None else 0
+        n_total = self._manifest.total_images if self._manifest is not None else 0
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Pause run?")
+        box.setText(f"Pause this run? ({n_done} of {n_total} images completed so far.)")
+        box.setInformativeText(
+            "The image currently being processed will finish first. "
+            "Click Resume afterwards to continue from where it stopped."
+        )
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        return box.exec_() == QMessageBox.Yes
 
     def _confirm_no_pending_settings_edits(self) -> bool:
         """Warn the user if the Advanced Settings dialog is open when Run
@@ -5143,9 +5178,8 @@ class TraceWindow(QMainWindow):
                 # Bank the previous stage's active time.
                 if self._current_stage is not None and self._last_stage_switch_time is not None:
                     prev = self._current_stage
-                    self._stage_active_seconds[prev] = (
-                        self._stage_active_seconds.get(prev, 0.0)
-                        + (now - self._last_stage_switch_time)
+                    self._stage_active_seconds[prev] = self._stage_active_seconds.get(prev, 0.0) + (
+                        now - self._last_stage_switch_time
                     )
                 self._current_stage = stage
                 self._last_stage_switch_time = now
