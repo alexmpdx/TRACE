@@ -244,10 +244,24 @@ def render_overlay(
             if v.centerline is None or not v.vein_id.startswith("EV"):
                 continue
             mx, my = int(v.centerline.centroid.x), int(v.centerline.centroid.y)
-            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                        ectopic_label_font_scale, (255, 255, 255), ev_bg_thickness)
-            cv2.putText(text_target, v.vein_id, (mx + 20, my - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                        ectopic_label_font_scale, ev_text_color, ev_fg_thickness)
+            cv2.putText(
+                text_target,
+                v.vein_id,
+                (mx + 20, my - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                ectopic_label_font_scale,
+                (255, 255, 255),
+                ev_bg_thickness,
+            )
+            cv2.putText(
+                text_target,
+                v.vein_id,
+                (mx + 20, my - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                ectopic_label_font_scale,
+                ev_text_color,
+                ev_fg_thickness,
+            )
         if vein_opacity < 1.0:
             img = cv2.addWeighted(text_target, vein_opacity, img, 1.0 - vein_opacity, 0)
 
@@ -486,8 +500,14 @@ def render_cv_ratio_overlay(
     pt_l1rs = (int(l1rs.x), int(l1rs.y))
     pt_dtip = (int(dtip.x), int(dtip.y))
     cv2.line(img, pt_l1rs, pt_dtip, _WL_LINE_BGR, _LINE_THICKNESS)
-    _draw_labeled_point(img, *pt_l1rs, "L1-Rs", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
-    _draw_labeled_point(img, *pt_dtip, "DTip", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
+    _draw_labeled_point(
+        img, *pt_l1rs, "L1-Rs", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels
+    )
+    # Painted as "L3.d" (distal end of L3) to match the other distal-end
+    # labels; the landmark's data key stays "DTip" everywhere else.
+    _draw_labeled_point(
+        img, *pt_dtip, "L3.d", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels
+    )
 
     # Wing length label at midpoint
     wing_length_px = math.hypot(dtip.x - l1rs.x, dtip.y - l1rs.y)
@@ -505,8 +525,12 @@ def render_cv_ratio_overlay(
         pt_acvp = (int(acvp.x), int(acvp.y))
         pt_pcva = (int(pcva.x), int(pcva.y))
         cv2.line(img, pt_acvp, pt_pcva, _CV_LINE_BGR, _LINE_THICKNESS)
-        _draw_labeled_point(img, *pt_acvp, "ACV.p", _CV_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
-        _draw_labeled_point(img, *pt_pcva, "PCV.a", _CV_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels)
+        _draw_labeled_point(
+            img, *pt_acvp, "ACV.p", _CV_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels
+        )
+        _draw_labeled_point(
+            img, *pt_pcva, "PCV.a", _CV_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels
+        )
 
         # CV distance label at midpoint
         cv_dist_px = math.hypot(pcva.x - acvp.x, pcva.y - acvp.y)

@@ -115,6 +115,27 @@ def _ensure_colors(names: list[str]) -> dict[str, tuple[int, int, int]]:
     return LANDMARK_COLORS
 
 
+# Overlay-only display names. Keys are the raw GeoJSON landmark names that
+# flow through every data path (GeoJSON sidecars, CSV lookups, custom
+# measurement pairs, wing_rotator's canonical layout) — those stay as-is.
+# This map only changes what gets *painted* next to the dot, so a legacy
+# name can be shown in the same style as its neighbours without a
+# repo-wide rename. "DTip" is the distal end of L3, so it reads as "L3.d"
+# alongside "L2.d", "L4.d", "L5.d".
+LANDMARK_DISPLAY_NAMES: dict[str, str] = {
+    "DTip": "L3.d",
+}
+
+
+def landmark_display_label(name: str) -> str:
+    """Text painted next to a landmark dot on an overlay.
+
+    Applies ``LANDMARK_DISPLAY_NAMES`` and turns snake_case internal names
+    into spaced words (``alula_notch`` → ``alula notch``).
+    """
+    return LANDMARK_DISPLAY_NAMES.get(name, name).replace("_", " ")
+
+
 def draw_landmarks_on_image(
     image: np.ndarray,
     predictions: dict[str, tuple[float, float]],
@@ -173,7 +194,7 @@ def draw_landmarks_on_image(
 
             # Optional: landmark name as a labeled chip next to the point.
             if show_labels:
-                label = name.replace("_", " ")
+                label = landmark_display_label(name)
                 tx = px + radius + max(3, radius)
                 ty = py + max(3, radius // 2)
                 # Black halo first, then colored text on top — readable on any tissue color.
