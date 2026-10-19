@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 import torch
 import yaml
-
 from landmark_locator.models.unet import LandmarkUNet
 from landmark_locator.names import canonical_landmark_name
 

@@ -403,13 +403,17 @@ def write_landmark_csv_batch(
         row: dict[str, str] = {"specimen": specimen_id}
         if include_cv_ratio:
             cv_vals = _cv_ratio_row(landmarks, scale_for_this)
-            for col in ("wing length_px", "wing length_um", "crossvein distance_px", "crossvein distance_um", "CV ratio"):
+            for col in (
+                "wing length_px",
+                "wing length_um",
+                "crossvein distance_px",
+                "crossvein distance_um",
+                "CV ratio",
+            ):
                 if col in fieldnames:
                     row[col] = cv_vals[col]
             if not cv_vals["CV ratio"]:
-                logger.warning(
-                    "write_landmark_csv_batch: %s missing landmark(s) needed for cv_ratio", specimen_id
-                )
+                logger.warning("write_landmark_csv_batch: %s missing landmark(s) needed for cv_ratio", specimen_id)
         for pair, px_col, um_col in pair_cols:
             dist_px = compute_pair_distance_px(landmarks, pair.name_a, pair.name_b)
             if dist_px is None:

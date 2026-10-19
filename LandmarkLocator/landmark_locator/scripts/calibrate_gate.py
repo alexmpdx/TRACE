@@ -34,7 +34,6 @@ import cv2
 import numpy as np
 import torch
 import yaml
-
 from landmark_locator.data.dataset import _normalize_name
 from landmark_locator.inference.predict import (
     DEFAULT_GATE_CONFIG,

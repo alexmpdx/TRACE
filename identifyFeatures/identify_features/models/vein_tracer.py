@@ -1003,8 +1003,7 @@ def _label_landmark_edges(
                 # (L4.d vs L5.d) but mask the same junction from the same G.
                 shared_Gm = None
                 if remaining and (
-                    (_reliable_snap(lm_l4d) and not _l4_assigned())
-                    or (_reliable_snap(lm_l5d) and not _l5_assigned())
+                    (_reliable_snap(lm_l4d) and not _l4_assigned()) or (_reliable_snap(lm_l5d) and not _l5_assigned())
                 ):
                     shared_Gm = G.copy()
                     if shared_Gm.has_node(node):
@@ -2842,9 +2841,7 @@ def _assign_absent_and_partial(
     search_radius = median_vein_width_px * config.partial_endpoint_search_vw
 
     def _edges_for(vid: str) -> list[tuple]:
-        return [
-            (u, w) for (u, w), lbl in edge_labels.items() if lbl == vid and G.has_edge(u, w)
-        ]
+        return [(u, w) for (u, w), lbl in edge_labels.items() if lbl == vid and G.has_edge(u, w)]
 
     # ---- PARTIAL: downgrade IDENTIFIED veins that are truncated or gapped ----
     for v in veins:
@@ -2865,8 +2862,7 @@ def _assign_absent_and_partial(
                 if lm is None or not getattr(lm, "reliable", False):
                     continue  # can't judge this endpoint
                 reaches = any(
-                    G[u][w].get("line") is not None
-                    and G[u][w]["line"].distance(lm.point) <= search_radius
+                    G[u][w].get("line") is not None and G[u][w]["line"].distance(lm.point) <= search_radius
                     for u, w in edges
                 )
                 if not reaches:

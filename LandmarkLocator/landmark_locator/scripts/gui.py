@@ -15,11 +15,16 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
-
 from landmark_locator.data.dataset import _normalize_name, canonical_landmark_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
+)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -63,13 +68,6 @@ from PyQt5.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
-)
-
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
 )
 
 # ---------------------------------------------------------------------------
@@ -1732,7 +1730,6 @@ def read_gate_config(path: Path) -> tuple[dict, list[str]]:
         from a live `Predictor` instance instead.
     """
     import yaml
-
     from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge, canonicalize_gate_config
 
     p = Path(path).resolve()
@@ -2179,7 +2176,6 @@ class AugPreviewDialog(QDialog):
 
     def _on_generate(self) -> None:
         import albumentations as A
-
         from landmark_locator.data.augmentation import get_train_transform
         from landmark_locator.data.psd_loader import imread_any
 
@@ -2363,9 +2359,7 @@ class LandmarkGUI(QMainWindow):
         act_single.setToolTip("Pick one best_fold*.pt checkpoint. No ensembling.")
         act_single.triggered.connect(self._on_load_single_fold)
         act_ensemble = model_menu.addAction("Ensemble folder…")
-        act_ensemble.setToolTip(
-            "Pick a folder containing best_fold*.pt checkpoints. Predictions average all folds."
-        )
+        act_ensemble.setToolTip("Pick a folder containing best_fold*.pt checkpoints. Predictions average all folds.")
         act_ensemble.triggered.connect(self._on_load_ensemble_folder)
         self._load_model_btn.setMenu(model_menu)
         tb.addWidget(self._load_model_btn)
@@ -3473,9 +3467,7 @@ class LandmarkGUI(QMainWindow):
         elif n_unknown == 0:
             self._pass_count_label.setText(f"{n_pass} / {total} passed · {n_fail} failed")
         else:
-            self._pass_count_label.setText(
-                f"{n_pass} passed · {n_fail} failed · {n_unknown} unpredicted"
-            )
+            self._pass_count_label.setText(f"{n_pass} passed · {n_fail} failed · {n_unknown} unpredicted")
 
     def _on_toggle_highlight_failed(self, _checked: bool) -> None:
         """Re-apply list styling when the user toggles the highlight checkbox."""

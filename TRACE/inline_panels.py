@@ -1091,9 +1091,7 @@ class InlineGeneralPanel(QWidget):
             self.show_color_key_chk.setChecked(bool(self._window._show_color_key))
             self.show_ectopic_labels_chk.setChecked(bool(self._window._show_ectopic_labels))
             self.show_region_labels_chk.setChecked(bool(self._window._show_region_labels))
-            self.show_landmark_labels_chk.setChecked(
-                bool(getattr(self._window, "_show_landmark_labels", True))
-            )
+            self.show_landmark_labels_chk.setChecked(bool(getattr(self._window, "_show_landmark_labels", True)))
             self.show_compartment_labels_chk.setChecked(bool(self._window._show_compartment_labels))
             self._update_keys_and_labels_master_state()
             self.ectopic_label_scale_spin.setValue(float(self._window._ectopic_label_font_scale))
@@ -1355,7 +1353,11 @@ class InlineGeneralPanel(QWidget):
                     self,
                     "No images found",
                     f"No supported image files in:\n{input_path}"
-                    + ("" if recursive else "\n\n(Check 'Include subfolders' on the main window if your images live in subfolders.)"),
+                    + (
+                        ""
+                        if recursive
+                        else "\n\n(Check 'Include subfolders' on the main window if your images live in subfolders.)"
+                    ),
                 )
                 return
             image_paths = discovered[: self._SCALE_ESTIMATOR_MAX_IMAGES]

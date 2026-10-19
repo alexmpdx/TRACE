@@ -76,9 +76,7 @@ def test_fast_path_maps_landmarks_back_to_original_space(tmp_path, rescale_facto
     coordinates are the originals we started from, not a re-derivation through
     the same helper the implementation uses.
     """
-    gj = _write_landmarks_geojson(
-        tmp_path / "wing_landmarks.geojson", _LANDMARKS_ORIGINAL_SPACE, scale=rescale_factor
-    )
+    gj = _write_landmarks_geojson(tmp_path / "wing_landmarks.geojson", _LANDMARKS_ORIGINAL_SPACE, scale=rescale_factor)
 
     result = build_cv_ratio_wing_result(gj, "wing", rescale_factor=rescale_factor)
 
@@ -110,12 +108,11 @@ def test_fast_path_agrees_with_normal_path(tmp_path):
     """
     from identify_features.models.datatypes import WingResult
     from identify_features.models.geojson_io import load_landmarks_geojson
+
     from resolutionAdjust import inverse_rescale_wing_result
 
     rescale_factor = 2.0704
-    gj = _write_landmarks_geojson(
-        tmp_path / "wing_landmarks.geojson", _LANDMARKS_ORIGINAL_SPACE, scale=rescale_factor
-    )
+    gj = _write_landmarks_geojson(tmp_path / "wing_landmarks.geojson", _LANDMARKS_ORIGINAL_SPACE, scale=rescale_factor)
 
     fast = build_cv_ratio_wing_result(gj, "wing", rescale_factor=rescale_factor)
 
@@ -136,14 +133,11 @@ def test_landmarks_land_on_canvas_when_rendered(tmp_path):
     changed to account for lines and dots rather than just the ratio readout.
     """
     import numpy as np
-
     from identify_features.views.overlay import render_cv_ratio_overlay
 
     rescale_factor = 3.5  # large enough that unmapped points leave the canvas entirely
     base = np.full((2500, 6000, 3), 200, np.uint8)
-    gj = _write_landmarks_geojson(
-        tmp_path / "wing_landmarks.geojson", _LANDMARKS_ORIGINAL_SPACE, scale=rescale_factor
-    )
+    gj = _write_landmarks_geojson(tmp_path / "wing_landmarks.geojson", _LANDMARKS_ORIGINAL_SPACE, scale=rescale_factor)
 
     result = build_cv_ratio_wing_result(gj, "wing", rescale_factor=rescale_factor)
     assert result is not None

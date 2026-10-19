@@ -8,9 +8,8 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset
-
 from landmark_locator.names import LEGACY_LANDMARK_NAMES, canonical_landmark_name  # noqa: F401  (re-exported)
+from torch.utils.data import Dataset
 
 # ImageNet normalization stats
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)

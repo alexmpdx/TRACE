@@ -1012,9 +1012,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         """
         text = (self._failure_text or "").strip()
         if not text:
-            self.lbl_failures.setText(
-                "<span style='color:#888'>No recorded failure for this image.</span>"
-            )
+            self.lbl_failures.setText("<span style='color:#888'>No recorded failure for this image.</span>")
             return
         header = "<span style='color:#FF6B6B'>&#9888; This image failed:</span>"
         body = html.escape(text).replace("\n", "<br>")

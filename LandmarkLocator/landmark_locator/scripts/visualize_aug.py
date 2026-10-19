@@ -9,7 +9,6 @@ import albumentations as A
 import cv2
 import numpy as np
 import yaml
-
 from landmark_locator.data.augmentation import get_train_transform
 from landmark_locator.data.dataset import discover_landmarks
 from landmark_locator.data.psd_loader import imread_any

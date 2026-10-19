@@ -630,6 +630,7 @@ def export_csv_batch(
     back to the caller-supplied ``um_per_px`` for specimens without a
     per-image scale.
     """
+
     # µm columns are included whenever ANY row has a resolvable scale — either
     # the batch-wide arg OR at least one specimen carrying its own um_per_px.
     def _resolve_scale(wing_result: WingResult) -> Optional[float]:

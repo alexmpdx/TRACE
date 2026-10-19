@@ -946,8 +946,7 @@ def process_single_image(
             )
         else:
             _log.info(
-                "%s: no readable µm/px metadata and no fallback scale — "
-                "measurements will be in pixels",
+                "%s: no readable µm/px metadata and no fallback scale — " "measurements will be in pixels",
                 image_path.name,
             )
     result.effective_um_per_px = input_um_per_px

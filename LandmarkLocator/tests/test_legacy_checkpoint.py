@@ -2,7 +2,6 @@
 
 import torch
 import yaml
-
 from landmark_locator.inference.predict import LandmarkPredictor
 from landmark_locator.models.unet import LandmarkUNet
 

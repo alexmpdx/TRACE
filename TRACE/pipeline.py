@@ -116,9 +116,7 @@ _INTERVEIN_DEPENDENT_OUTPUTS = frozenset({"intervein_overlay", "geojson", "csv"}
 # csv / geojson are content-gated (csv via csv_measurement_groups, geojson via
 # _geojson_content_wanted()); they only need vein tracing when their content
 # does. Anything else in this set forces the full pipeline.
-_VEIN_TRACING_DEPENDENT_OUTPUTS = frozenset(
-    {"vein_overlay", "intervein_overlay", "ap_overlay", "geojson", "csv"}
-)
+_VEIN_TRACING_DEPENDENT_OUTPUTS = frozenset({"vein_overlay", "intervein_overlay", "ap_overlay", "geojson", "csv"})
 # CSV measurement groups whose columns require vein tracing. wing_area /
 # wing_shape read only wing_outline + wing_solidity; cv_ratio reads only
 # landmarks. Everything else needs traced veins.
@@ -336,7 +334,11 @@ _OUTPUT_STAGE_REQUIREMENTS = {
     "vein_overlay": (True, True, True),
     "intervein_overlay": (True, True, True),
     "ap_overlay": (True, True, True),
-    "cv_ratio_overlay": (True, False, False),  # only landmarks — see fast-path in _analyze_one and 2026-08-19 plan Phase 1
+    "cv_ratio_overlay": (
+        True,
+        False,
+        False,
+    ),  # only landmarks — see fast-path in _analyze_one and 2026-08-19 plan Phase 1
     "csv": (True, True, True),
 }
 
@@ -980,8 +982,7 @@ def _run(
     # returns after Step 1, still needing segmentation to build the outline).
     requested_analysis_outputs = _STAGE2_ANALYSIS_OUTPUTS & outputs
     _landmark_only_groups_selected = bool(
-        csv_measurement_groups
-        and csv_measurement_groups.issubset(LANDMARK_ONLY_MEASUREMENT_GROUPS)
+        csv_measurement_groups and csv_measurement_groups.issubset(LANDMARK_ONLY_MEASUREMENT_GROUPS)
     )
     fast_csv_path = requested_analysis_outputs == {"csv"} and (
         bool(user_landmark_distances) or _landmark_only_groups_selected
@@ -1112,7 +1113,9 @@ def _run(
 
         logger.info(
             "=== Chunk %d/%d: preprocessing %d image(s) ===",
-            _chunk_num, _total_chunks, len(_chunk_images),
+            _chunk_num,
+            _total_chunks,
+            len(_chunk_images),
         )
 
         chunk_preproc = process_folder(
@@ -1166,7 +1169,13 @@ def _run(
             else:
                 successful_preproc.append(r)
 
-        logger.info("Chunk %d/%d: preprocessed %d/%d image(s) successfully", _chunk_num, _total_chunks, len(successful_preproc), len(chunk_preproc))
+        logger.info(
+            "Chunk %d/%d: preprocessed %d/%d image(s) successfully",
+            _chunk_num,
+            _total_chunks,
+            len(successful_preproc),
+            len(chunk_preproc),
+        )
 
         # Stage 1 → Stage 2 boundary: if pause caught us inside or right after
         # Stage 1, do NOT start identifyFeatures. The successful_preproc list
@@ -1422,7 +1431,9 @@ def _run(
                 if "ap_overlay" in outputs and base is not None and wing_result is not None:
                     ap_path = output_dir / f"{stem}_ap_overlay.png"
                     if render_ap_overlay_to_file(
-                        base, wing_result, ap_path,
+                        base,
+                        wing_result,
+                        ap_path,
                         show_compartment_labels=show_compartment_labels,
                     ):
                         trace_result.ap_overlay_path = ap_path
@@ -1712,14 +1723,16 @@ def _run(
                 except OSError as exc:
                     logger.warning("CSV resume: cannot move %s aside: %s", csv_path, exc)
                     csv_append_source = None
-            elif append_from_csv is not None and append_from_csv.is_file() and append_from_csv.resolve() != csv_path.resolve():
+            elif (
+                append_from_csv is not None
+                and append_from_csv.is_file()
+                and append_from_csv.resolve() != csv_path.resolve()
+            ):
                 csv_append_source = csv_path.with_suffix(".csv.append_source")
                 try:
                     append_from_csv.replace(csv_append_source)
                 except OSError as exc:
-                    logger.warning(
-                        "CSV append: cannot move %s to %s: %s", append_from_csv, csv_append_source, exc
-                    )
+                    logger.warning("CSV append: cannot move %s to %s: %s", append_from_csv, csv_append_source, exc)
                     csv_append_source = None
         # Both CSV writers below read the landmark GeoJSONs lazily, here, long
         # after Stage 2 recorded their paths — and both degrade silently when a
@@ -1753,9 +1766,9 @@ def _run(
                     csv_path,
                     user_dist_landmark_paths,
                     pairs,
-                    measurement_groups=(csv_measurement_groups & LANDMARK_ONLY_MEASUREMENT_GROUPS)
-                    if csv_measurement_groups
-                    else None,
+                    measurement_groups=(
+                        (csv_measurement_groups & LANDMARK_ONLY_MEASUREMENT_GROUPS) if csv_measurement_groups else None
+                    ),
                     um_per_px=scale,
                 )
             except Exception:
