@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Internal LandmarkLocator names (snake_case, as used in the predictor's
 # `landmarks` dict). The user-facing names are "L3 distal end" and "L1-Rs junction".
-_LANDMARK_A = "dtip"
+_LANDMARK_A = "l3_d"
 _LANDMARK_B = "l1_rs"
 _LANDMARK_A_DISPLAY = "L3 distal end"
 _LANDMARK_B_DISPLAY = "L1-Rs junction"
@@ -29,9 +29,9 @@ class ScaleEstimate:
     um_per_px: float
     distance_px: float
     reference_distance_um: float
-    dtip_xy: tuple[float, float]
+    l3_d_xy: tuple[float, float]
     l1_rs_xy: tuple[float, float]
-    dtip_reliable: bool
+    l3_d_reliable: bool
     l1_rs_reliable: bool
 
 
@@ -84,9 +84,9 @@ def _result_to_estimate(
         um_per_px=reference_distance_um / distance_px,
         distance_px=distance_px,
         reference_distance_um=reference_distance_um,
-        dtip_xy=(float(pa[0]), float(pa[1])),
+        l3_d_xy=(float(pa[0]), float(pa[1])),
         l1_rs_xy=(float(pb[0]), float(pb[1])),
-        dtip_reliable=bool(reliable.get(_LANDMARK_A, True)),
+        l3_d_reliable=bool(reliable.get(_LANDMARK_A, True)),
         l1_rs_reliable=bool(reliable.get(_LANDMARK_B, True)),
     )
 

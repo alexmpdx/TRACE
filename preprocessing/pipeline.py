@@ -428,6 +428,8 @@ def load_landmarks_override(path: Path) -> tuple[dict, dict]:
                    second_peak_ratio}}`` — defaults force the override through
                    any downstream confidence gate (reliable=True, confidence=1.0).
     """
+    from landmark_locator.names import canonical_landmark_name
+
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     landmarks: dict = {}
     metadata: dict = {}
@@ -443,7 +445,7 @@ def load_landmarks_override(path: Path) -> tuple[dict, dict]:
         name = cls.get("name") or props.get("name")
         if not name:
             continue
-        name = str(name)
+        name = canonical_landmark_name(str(name))
         landmarks[name] = (float(coords[0]), float(coords[1]))
         metadata[name] = {
             "reliable": props.get("reliable", True),

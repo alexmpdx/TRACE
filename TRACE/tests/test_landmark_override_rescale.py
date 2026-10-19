@@ -61,22 +61,22 @@ def _write_override(path: Path, coords: dict) -> None:
 
 
 def test_scale_landmarks_noop_at_unity():
-    lms = {"DTip": (100.0, 200.0), "L2-L3": (50.5, 60.5)}
+    lms = {"L3.d": (100.0, 200.0), "L2-L3": (50.5, 60.5)}
     # rescale_factor 1.0 (no Stage-1 rescale) must leave coordinates untouched.
     assert _scale_landmarks(lms, 1.0) == lms
 
 
 def test_scale_landmarks_multiplies_by_factor():
-    lms = {"DTip": (100.0, 200.0), "L4-L5": (10.0, 20.0)}
+    lms = {"L3.d": (100.0, 200.0), "L4-L5": (10.0, 20.0)}
     out = _scale_landmarks(lms, 0.5)
-    assert out == {"DTip": (50.0, 100.0), "L4-L5": (5.0, 10.0)}
+    assert out == {"L3.d": (50.0, 100.0), "L4-L5": (5.0, 10.0)}
 
 
 def test_override_roundtrip_lands_in_rescaled_space(tmp_path):
     """The core regression: a landmark placed at an original-image pixel reaches
     the pipeline (which now scales by rescale_factor) at the rescaled pixel."""
     rescale_factor = 0.4  # Stage 1 downscaled the image to 40% linear size.
-    original_coords = {"DTip": (1000.0, 800.0), "subcostal break": (120.0, 640.0)}
+    original_coords = {"L3.d": (1000.0, 800.0), "subcostal break": (120.0, 640.0)}
 
     override_path = tmp_path / "wing_0001_landmarks_override.geojson"
     _write_override(override_path, original_coords)
@@ -86,7 +86,7 @@ def test_override_roundtrip_lands_in_rescaled_space(tmp_path):
     landmarks = _scale_landmarks(landmarks, rescale_factor)
 
     assert landmarks == {
-        "DTip": (400.0, 320.0),
+        "L3.d": (400.0, 320.0),
         "subcostal break": (48.0, 256.0),
     }
 
@@ -98,7 +98,7 @@ def test_landmark_and_segmentation_overrides_use_same_direction(tmp_path):
     rescale_factor = 0.4
     pt = (1000.0, 800.0)
 
-    landmarks = _scale_landmarks({"DTip": pt}, rescale_factor)
+    landmarks = _scale_landmarks({"L3.d": pt}, rescale_factor)
 
     fc = {
         "type": "FeatureCollection",
@@ -113,7 +113,7 @@ def test_landmark_and_segmentation_overrides_use_same_direction(tmp_path):
     _scale_geojson_coords(fc, rescale_factor)
     scaled_vertex = fc["features"][0]["geometry"]["coordinates"][0][0]
 
-    assert list(landmarks["DTip"]) == list(scaled_vertex) == [400.0, 320.0]
+    assert list(landmarks["L3.d"]) == list(scaled_vertex) == [400.0, 320.0]
 
 
 # --- Bug B: the inspector displays landmarks over the ORIGINAL image, so it must
@@ -131,20 +131,20 @@ def test_parser_inverse_scales_rescaled_output(tmp_path):
     its rescale_factor, is mapped back to original space for display."""
     rescale_factor = 0.4
     # Coordinates as written to disk by the pipeline: rescaled-pixel space.
-    rescaled_coords = {"DTip": (400.0, 320.0), "L4-L5": (48.0, 256.0)}
+    rescaled_coords = {"L3.d": (400.0, 320.0), "L4-L5": (48.0, 256.0)}
     path = tmp_path / "wing_0001_landmarks.geojson"
     _write_fc(path, rescaled_coords, fc_props={"rescale_factor": rescale_factor})
 
     parsed = _parse_landmarks_geojson(path)
 
     # Back in original-image pixel space, aligned with the original image shown.
-    assert parsed == {"DTip": (1000.0, 800.0), "L4-L5": (120.0, 640.0)}
+    assert parsed == {"L3.d": (1000.0, 800.0), "L4-L5": (120.0, 640.0)}
 
 
 def test_parser_passes_through_when_no_rescale_factor(tmp_path):
     """Overrides and on-demand regenerations are already in original space and
     carry no rescale_factor — the parser must not touch their coordinates."""
-    coords = {"DTip": (1000.0, 800.0)}
+    coords = {"L3.d": (1000.0, 800.0)}
     path = tmp_path / "wing_0001_landmarks_override.geojson"
     _write_fc(path, coords, fc_props=None)  # no rescale_factor
 
@@ -152,7 +152,7 @@ def test_parser_passes_through_when_no_rescale_factor(tmp_path):
 
 
 def test_parser_noop_at_unity_factor(tmp_path):
-    coords = {"DTip": (1000.0, 800.0)}
+    coords = {"L3.d": (1000.0, 800.0)}
     path = tmp_path / "wing_0001_landmarks.geojson"
     _write_fc(path, coords, fc_props={"rescale_factor": 1.0})
 
@@ -163,7 +163,7 @@ def test_display_roundtrip_survives_rescale(tmp_path):
     """End-to-end: a landmark truly at an original pixel, put through the
     pipeline's write (rescaled coords + stored factor), comes back to the same
     original pixel in the inspector — so the predicted point lands on the wing."""
-    original_pixel = {"DTip": (1000.0, 800.0)}
+    original_pixel = {"L3.d": (1000.0, 800.0)}
     rescale_factor = 0.4
 
     # What the pipeline writes: coords scaled into rescaled space + the factor.

@@ -346,7 +346,7 @@ _OUTPUT_STAGE_REQUIREMENTS = {
 # NOTE: cv_ratio_overlay used to be listed here but was moved out
 # (2026-08-19 pipeline-efficiency plan, Phase 1). Its render function
 # in identify_features/views/overlay.py:render_cv_ratio_overlay only
-# reads four landmark points (L1-Rs, DTip, ACV.p, PCV.a) off
+# reads four landmark points (L1-Rs, L3.d, ACV.p, PCV.a) off
 # wing_result.landmarks — no veins, no tissue, no intervein regions.
 # So it can render directly from the Stage-1 landmarks GeoJSON without
 # invoking identify_wing. The _analyze_one branch that renders the
@@ -643,6 +643,7 @@ def _render_landmarks_overlay(
     More output options.
     """
     import cv2
+    from landmark_locator.names import canonical_landmark_name
 
     try:
         with open(landmarks_geojson_path) as fh:
@@ -661,7 +662,7 @@ def _render_landmarks_overlay(
             continue
         props = feat.get("properties", {}) or {}
         name = props.get("classification", {}).get("name") if isinstance(props.get("classification"), dict) else None
-        name = name or props.get("name") or props.get("class") or f"lm_{len(predictions)}"
+        name = canonical_landmark_name(name or props.get("name") or props.get("class") or f"lm_{len(predictions)}")
         predictions[name] = (float(coords[0]) * inverse_scale, float(coords[1]) * inverse_scale)
 
     if not predictions:
@@ -694,7 +695,7 @@ def build_cv_ratio_wing_result(
 
     When ``cv_ratio_overlay`` is the only Stage-2 output selected, ``identify_wing``
     never runs and there is no ``WingResult`` to draw from. ``render_cv_ratio_overlay``
-    only reads four landmark points (L1-Rs, DTip, ACV.p, PCV.a), so the Stage-1
+    only reads four landmark points (L1-Rs, L3.d, ACV.p, PCV.a), so the Stage-1
     landmarks GeoJSON alone is enough — no skeleton, tracing, tissue or intervein
     work needed.
 
@@ -1431,7 +1432,7 @@ def _run(
                     # other Stage-2 output is, identify_wing was never
                     # called and wing_result is None. Since
                     # render_cv_ratio_overlay only reads four landmark
-                    # points off wing_result.landmarks (L1-Rs, DTip,
+                    # points off wing_result.landmarks (L1-Rs, L3.d,
                     # ACV.p, PCV.a), a WingResult constructed from just
                     # the Stage-1 landmarks GeoJSON is sufficient — no
                     # skeleton, tracing, tissue, or intervein work

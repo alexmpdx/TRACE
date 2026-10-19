@@ -475,7 +475,7 @@ def render_cv_ratio_overlay(
     """Render wing length and crossvein distance measurement lines with landmarks.
 
     Shows:
-    - Orange line: wing length (L1-Rs to DTip)
+    - Orange line: wing length (L1-Rs to L3.d)
     - Cobalt line: crossvein distance (ACV.p to PCV.a)
     - Labeled landmark dots at each endpoint
     - CV ratio value
@@ -487,32 +487,30 @@ def render_cv_ratio_overlay(
 
     landmarks = wing_result.landmarks
     l1rs = landmarks.get("L1-Rs")
-    dtip = landmarks.get("DTip")
+    l3_d = landmarks.get("L3.d")
     acvp = landmarks.get("ACV.p")
     pcva = landmarks.get("PCV.a")
 
-    if not l1rs or not dtip:
+    if not l1rs or not l3_d:
         return None
 
     img = base_image.copy()
 
     # Wing length line
     pt_l1rs = (int(l1rs.x), int(l1rs.y))
-    pt_dtip = (int(dtip.x), int(dtip.y))
-    cv2.line(img, pt_l1rs, pt_dtip, _WL_LINE_BGR, _LINE_THICKNESS)
+    pt_l3_d = (int(l3_d.x), int(l3_d.y))
+    cv2.line(img, pt_l1rs, pt_l3_d, _WL_LINE_BGR, _LINE_THICKNESS)
     _draw_labeled_point(
         img, *pt_l1rs, "L1-Rs", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels
     )
-    # Painted as "L3.d" (distal end of L3) to match the other distal-end
-    # labels; the landmark's data key stays "DTip" everywhere else.
     _draw_labeled_point(
-        img, *pt_dtip, "L3.d", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels
+        img, *pt_l3_d, "L3.d", _WL_LINE_BGR, size_scale=landmark_size_scale, show_label=show_landmark_labels
     )
 
     # Wing length label at midpoint
-    wing_length_px = math.hypot(dtip.x - l1rs.x, dtip.y - l1rs.y)
-    wl_mx = (pt_l1rs[0] + pt_dtip[0]) // 2
-    wl_my = (pt_l1rs[1] + pt_dtip[1]) // 2 - 25
+    wing_length_px = math.hypot(l3_d.x - l1rs.x, l3_d.y - l1rs.y)
+    wl_mx = (pt_l1rs[0] + pt_l3_d[0]) // 2
+    wl_my = (pt_l1rs[1] + pt_l3_d[1]) // 2 - 25
     wl_text = f"wing length: {wing_length_px:.0f} px"
     if um_per_px:
         wl_text += f" ({wing_length_px * um_per_px:.0f} um)"

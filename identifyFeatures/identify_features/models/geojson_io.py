@@ -12,6 +12,11 @@ from shapely.geometry import MultiPolygon, Point, Polygon, shape
 
 logger = logging.getLogger(__name__)
 
+# Legacy landmark names, renamed on read so existing GeoJSONs keep working.
+# Local copy of LandmarkLocator's landmark_locator/names.py (this module stays
+# independent of LandmarkLocator); update them together.
+_LEGACY_LANDMARK_NAMES = {"DTip": "L3.d", "dtip": "l3_d"}
+
 
 def load_detection_geojson(path: Path) -> tuple[list[Polygon | MultiPolygon], list[Polygon | MultiPolygon]]:
     """Parse a detection GeoJSON into vein and intervein polygon lists.
@@ -62,6 +67,7 @@ def load_landmarks_geojson(path: Path) -> dict[str, Landmark]:
         if name is None:
             logger.warning("Landmark feature missing classification.name — skipping")
             continue
+        name = _LEGACY_LANDMARK_NAMES.get(name, name)
 
         coords = feat.get("geometry", {}).get("coordinates")
         if coords is None or len(coords) < 2:

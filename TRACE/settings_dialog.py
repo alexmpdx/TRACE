@@ -271,7 +271,7 @@ _LANDMARK_DISPLAY_NAMES: dict[str, str] = {
     "acv_a": "ACV-L3 junction",
     "acv_p": "ACV-L4 junction",
     "alula_notch": "alula notch",
-    "dtip": "L3 distal end",
+    "l3_d": "L3 distal end",
     "l1_rs": "L1-Rs junction",
     "l2_d": "L2 distal end",
     "l2_l3": "L2-L3-Rs junction",
@@ -294,9 +294,10 @@ def _merge_gate_override(base: dict, override: dict) -> dict:
     predictor itself performs at runtime, so the UI's initial state stays
     consistent with what the pipeline will actually apply.
     """
-    from landmark_locator.inference.predict import _deep_merge
+    from landmark_locator.inference.predict import _deep_merge, canonicalize_gate_config
 
-    return _deep_merge(base, override)
+    # Overrides saved before a landmark rename still use the old names.
+    return _deep_merge(base, canonicalize_gate_config(override))
 
 
 class PipelineConfigDialog(QDialog):

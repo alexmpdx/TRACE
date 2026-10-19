@@ -611,7 +611,7 @@ class InlineGeneralPanel(QWidget):
         self.show_landmark_labels_chk = QCheckBox("Show landmark point labels")
         self.show_landmark_labels_chk.setToolTip(
             "When on (default), landmark points on the landmarks overlay AND the CV "
-            "ratio overlay are annotated with their names (D-Tip, L1-Rs, ACV.p, "
+            "ratio overlay are annotated with their names (L3.d, L1-Rs, ACV.p, "
             "PCV.a, …). Turn off to keep the colored dots without the text."
         )
         self.show_landmark_labels_chk.toggled.connect(self._on_show_landmark_labels_toggled)
@@ -1285,7 +1285,7 @@ class InlineGeneralPanel(QWidget):
 
         self.scale_spin.setValue(float(estimate.um_per_px))
         flags = []
-        if not estimate.dtip_reliable:
+        if not estimate.l3_d_reliable:
             flags.append("L3 distal end low confidence")
         if not estimate.l1_rs_reliable:
             flags.append("L1-Rs junction low confidence")
@@ -1420,7 +1420,7 @@ class InlineGeneralPanel(QWidget):
         if result.cancelled:
             notes.append("Cancelled by user — median computed over the images processed so far.")
         n_low_conf = sum(
-            1 for _, est, _ in result.per_image if est is not None and (not est.dtip_reliable or not est.l1_rs_reliable)
+            1 for _, est, _ in result.per_image if est is not None and (not est.l3_d_reliable or not est.l1_rs_reliable)
         )
         if n_low_conf:
             notes.append(f"{n_low_conf} of {result.n_used} estimate(s) had a low-confidence landmark.")

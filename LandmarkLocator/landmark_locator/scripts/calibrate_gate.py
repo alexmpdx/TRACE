@@ -317,7 +317,7 @@ def main() -> None:
             "l1_rs",
             "l2_l3",
             "l4_l5",
-            "dtip",
+            "l3_d",
         ],
         help="Landmark name(s) that abort on failure (repeatable). Default: core hinge+tip set.",
     )

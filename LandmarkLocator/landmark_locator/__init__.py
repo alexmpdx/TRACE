@@ -11,6 +11,7 @@ Model:
 
 Data utilities:
     discover_landmarks — scan GeoJSON annotations to find landmark names
+    canonical_landmark_name — map a legacy landmark name (e.g. "DTip") to its current one
     LandmarkDataset    — PyTorch Dataset for training
 
 Training (imported from landmark_locator.training):
@@ -55,6 +56,15 @@ def __getattr__(name: str):
         return LandmarkUNet
 
     # Data
+    # Naming (torch-free)
+    if name in ("canonical_landmark_name", "LEGACY_LANDMARK_NAMES"):
+        from landmark_locator.names import LEGACY_LANDMARK_NAMES, canonical_landmark_name
+
+        return {
+            "canonical_landmark_name": canonical_landmark_name,
+            "LEGACY_LANDMARK_NAMES": LEGACY_LANDMARK_NAMES,
+        }[name]
+
     if name in ("LandmarkDataset", "discover_landmarks", "extract_genotype", "IMAGENET_MEAN", "IMAGENET_STD"):
         from landmark_locator.data.dataset import (
             IMAGENET_MEAN,
@@ -114,6 +124,8 @@ __all__ = [
     "LandmarkUNet",
     "LandmarkDataset",
     "discover_landmarks",
+    "canonical_landmark_name",
+    "LEGACY_LANDMARK_NAMES",
     "extract_genotype",
     "IMAGENET_MEAN",
     "IMAGENET_STD",

@@ -9,6 +9,7 @@ import torch
 import yaml
 
 from landmark_locator.models.unet import LandmarkUNet
+from landmark_locator.names import canonical_landmark_name
 
 SIDECAR_GATE_FILENAME = "gate_config.yaml"
 
@@ -82,6 +83,27 @@ def canonical_sidecar_gate_path(checkpoint_path: Path) -> Path:
     """
     p = Path(checkpoint_path).resolve()
     return (p if p.is_dir() else p.parent) / SIDECAR_GATE_FILENAME
+
+
+def canonicalize_gate_config(gate: dict) -> dict:
+    """Return a copy of a gate-config block with legacy landmark names renamed.
+
+    Renames the keys of every ``per_landmark`` dict and the entries of every
+    ``core_landmarks`` list, including the ones nested under ``tiers``, so a
+    sidecar YAML or override written before a landmark rename still applies
+    to the right channel.
+    """
+    out: dict = {}
+    for key, value in gate.items():
+        if key == "per_landmark" and isinstance(value, dict):
+            out[key] = {canonical_landmark_name(n): v for n, v in value.items()}
+        elif key == "core_landmarks" and isinstance(value, list):
+            out[key] = [canonical_landmark_name(n) for n in value]
+        elif isinstance(value, dict):
+            out[key] = canonicalize_gate_config(value)
+        else:
+            out[key] = value
+    return out
 
 
 def find_sidecar_gate_path(checkpoint_path: Path) -> Optional[Path]:
@@ -275,8 +297,14 @@ class LandmarkPredictor:
         cfg = checkpoint["config"]
         self.input_w = cfg["input"]["width"]
         self.input_h = cfg["input"]["height"]
-        self.landmark_order: list[str] = cfg["heatmap"]["landmark_order"]
-        self.geojson_to_landmark: dict[str, str] = cfg["heatmap"].get("geojson_to_landmark", {})
+        # Legacy landmark names in the checkpoint are renamed here, in place and
+        # in order: output channel i stays landmark_order[i], so checkpoints
+        # trained before a rename keep working without retraining.
+        self.landmark_order: list[str] = [canonical_landmark_name(n) for n in cfg["heatmap"]["landmark_order"]]
+        self.geojson_to_landmark: dict[str, str] = {
+            canonical_landmark_name(k): canonical_landmark_name(v)
+            for k, v in cfg["heatmap"].get("geojson_to_landmark", {}).items()
+        }
 
         # Gate-config precedence (lowest → highest):
         #   DEFAULT_GATE_CONFIG  ←  sidecar gate_config.yaml  ←  runtime override
@@ -287,7 +315,7 @@ class LandmarkPredictor:
         self.sidecar_gate_path, sidecar_gate = _load_sidecar_gate(checkpoint_path)
         if sidecar_gate:
             base_gate = _deep_merge(base_gate, sidecar_gate)
-        self.gate_config = _deep_merge(base_gate, confidence_override or {})
+        self.gate_config = canonicalize_gate_config(_deep_merge(base_gate, confidence_override or {}))
 
         self.model = LandmarkUNet(
             num_landmarks=cfg["heatmap"]["num_landmarks"],
@@ -299,7 +327,7 @@ class LandmarkPredictor:
 
     def update_gate_config(self, override: dict) -> None:
         """Deep-merge override into the active gate config (no checkpoint mutation)."""
-        self.gate_config = _deep_merge(self.gate_config, override)
+        self.gate_config = canonicalize_gate_config(_deep_merge(self.gate_config, override))
 
     def _preprocess(self, image: np.ndarray) -> tuple[torch.Tensor, float, float]:
         """Resize and normalize image for model input."""
@@ -532,7 +560,7 @@ class EnsemblePredictor:
 
     def update_gate_config(self, override: dict) -> None:
         """Deep-merge override into every fold predictor's gate config."""
-        self.gate_config = _deep_merge(self.gate_config, override)
+        self.gate_config = canonicalize_gate_config(_deep_merge(self.gate_config, override))
         for pred in self._predictors:
             pred.gate_config = self.gate_config
 

@@ -5,7 +5,7 @@ confidence:
       acv_a: 0.69
       acv_p: 0.527
       alula_notch: 0.356
-      dtip: 0.745
+      l3_d: 0.745
       l1_rs: 0.483
       l2_d: 0.583
       l2_l3: 0.606
@@ -21,7 +21,7 @@ confidence:
       acv_a: 1.35
       acv_p: 1.32
       alula_notch: 1.22
-      dtip: 1.33
+      l3_d: 1.33
       l1_rs: 1.33
       l2_d: 1.31
       l2_l3: 1.29
@@ -37,7 +37,7 @@ confidence:
       acv_a: 0.07
       acv_p: 0.07
       alula_notch: 0.12
-      dtip: 0.13
+      l3_d: 0.13
       l1_rs: 0.1
       l2_d: 0.09
       l2_l3: 0.06
@@ -50,8 +50,7 @@ confidence:
   second_peak_suppression_radius_px: 30
   core_landmarks:
   - alula_notch
-  - dtip
+  - l3_d
   - l1_rs
-  - l2_l3
   - l4_l5
   - subcostal_break

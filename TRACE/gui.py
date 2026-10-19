@@ -421,8 +421,8 @@ def _build_landmark_name_pattern():
 
     Built lazily and cached on the function so the (cheap) compile happens
     at most once. Uses ALL_LANDMARK_KEY_DISPLAY_NAMES so both GeoJSON-style
-    keys (``DTip``, ``L2-L3``, …) and gate-config snake_case keys
-    (``dtip``, ``l4_l5``, …) get translated — the latter surface in
+    keys (``L3.d``, ``L2-L3``, …) and gate-config snake_case keys
+    (``l3_d``, ``l4_l5``, …) get translated — the latter surface in
     ``LowConfidenceLandmarkError`` messages when a confidence gate trips.
 
     Sorted longest-first so multi-token keys ("L2-L3", "subcostal break",
@@ -456,7 +456,7 @@ _build_landmark_name_pattern.cached = None
 def _translate_landmark_names(text: str) -> str:
     """Swap raw GeoJSON landmark keys in a log line for their anatomical names.
 
-    Used by _SignalLogHandler.emit so messages like ``Landmark 'DTip'
+    Used by _SignalLogHandler.emit so messages like ``Landmark 'L3.d'
     snapped to node 42`` surface in the TRACE GUI log as ``Landmark 'L3
     distal end' snapped to node 42``. identifyFeatures' own log output
     (CLI mode, no TRACE handler attached) is unaffected — only the GUI

@@ -11,7 +11,7 @@ class LandmarkPair:
     """One user-defined distance: straight line between landmarks `name_a` and `name_b`.
 
     `name_a` / `name_b` are the raw GeoJSON `properties.classification.name`
-    values (e.g. "DTip", "L1-Rs", "ACV.p", "alula notch") — i.e. the keys
+    values (e.g. "L3.d", "L1-Rs", "ACV.p", "alula notch") — i.e. the keys
     used by identifyFeatures' csv_export when looking up landmarks.
 
     `label` is the user-supplied identifier used as the CSV column suffix

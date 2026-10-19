@@ -30,7 +30,7 @@ _DOUBLE_JUNCTION_LANDMARKS = {"L1-Rs", "L4-L5"}
 _JUNCTION_LANDMARKS = _TRIPLE_JUNCTION_LANDMARKS | _DOUBLE_JUNCTION_LANDMARKS
 
 # Landmarks that represent endpoints (prefer degree-1 nodes)
-_ENDPOINT_LANDMARKS = {"subcostal break", "DTip"}
+_ENDPOINT_LANDMARKS = {"subcostal break", "L3.d"}
 
 
 def anchor_landmarks(
@@ -41,7 +41,7 @@ def anchor_landmarks(
     """Snap each reliable landmark to the nearest appropriate graph node.
 
     Junction landmarks (L1-Rs, L2-L3, L4-L5) prefer high-degree nodes (≥3).
-    Endpoint landmarks (subcostal break, DTip) prefer degree-1 nodes.
+    Endpoint landmarks (subcostal break, L3.d) prefer degree-1 nodes.
 
     Snap radius is read from *config* (``snap_radius_vw`` × median vein width,
     falling back to ``snap_radius_um`` when vein width is unavailable).

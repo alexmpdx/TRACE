@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 import yaml
 
-from landmark_locator.data.dataset import _normalize_name, discover_landmarks
+from landmark_locator.data.dataset import _normalize_name, canonical_landmark_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
@@ -1733,7 +1733,7 @@ def read_gate_config(path: Path) -> tuple[dict, list[str]]:
     """
     import yaml
 
-    from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge
+    from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge, canonicalize_gate_config
 
     p = Path(path).resolve()
     # Search for the sidecar YAML in two folders: alongside the model files
@@ -1759,7 +1759,7 @@ def read_gate_config(path: Path) -> tuple[dict, list[str]]:
     data = yaml.safe_load(sidecar.read_text()) or {}
     # Accept both shapes: full doc with `confidence:` block, or just the block itself.
     sidecar_block = data.get("confidence", data)
-    gate_config = _deep_merge(DEFAULT_GATE_CONFIG, sidecar_block or {})
+    gate_config = canonicalize_gate_config(_deep_merge(DEFAULT_GATE_CONFIG, sidecar_block or {}))
 
     # Derive landmark_order from the YAML — every per-landmark block lists
     # every landmark, so taking the keys of `peak.per_landmark` gives a
@@ -2227,6 +2227,7 @@ class AugPreviewDialog(QDialog):
                     props = feat.get("properties", {})
                     classification = props.get("classification") or {}
                     name = classification.get("name", "")
+                    name = canonical_landmark_name(name)
                     internal = geojson_to_landmark.get(name) or geojson_to_landmark.get(_normalize_name(name))
                     if not internal:
                         continue

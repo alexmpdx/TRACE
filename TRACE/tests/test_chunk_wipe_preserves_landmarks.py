@@ -100,7 +100,7 @@ def test_landmark_csv_is_populated_after_a_wipe(tmp_path):
         lm_path,
         {
             "L1-Rs": (753.0, 1285.0),
-            "DTip": (5153.0, 1968.0),
+            "L3.d": (5153.0, 1968.0),
             "ACV.p": (1839.0, 1678.0),
             "PCV.a": (2655.0, 1990.0),
             "L2.d": (4100.0, 900.0),
@@ -115,7 +115,7 @@ def test_landmark_csv_is_populated_after_a_wipe(tmp_path):
     write_landmark_csv_batch(
         csv_path,
         specimen_landmarks,
-        pairs_from_dicts([{"name_a": "L2.d", "name_b": "DTip", "label": "L2d_dtip"}]),
+        pairs_from_dicts([{"name_a": "L2.d", "name_b": "L3.d", "label": "L2d_L3d"}]),
         measurement_groups={"cv_ratio"},
         um_per_px=4.1828,
     )
@@ -125,8 +125,8 @@ def test_landmark_csv_is_populated_after_a_wipe(tmp_path):
     assert row["wing length_px"]
     assert row["crossvein distance_px"]
     assert row["CV ratio"]
-    assert row["custom_L2d_dtip_px"]
-    assert row["custom_L2d_dtip_um"]
+    assert row["custom_L2d_L3d_px"]
+    assert row["custom_L2d_L3d_um"]
 
 
 def _write_landmarks(path: Path, points: dict) -> None:

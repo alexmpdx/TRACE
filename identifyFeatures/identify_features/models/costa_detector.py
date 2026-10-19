@@ -281,7 +281,7 @@ def _cut_at_subcostal_break(
     # use < 0 for the opposite. Need to determine which sign is proximal.
     # Proximal = toward the hinge = toward AN from SC.
     # dot(pixel-SC, tangent) tells us position along the tangent.
-    # We want pixels on the side AWAY from DTip (distal).
+    # We want pixels on the side AWAY from L3.d (distal).
     # Simpler: proximal = dot(pixel-SC, SC→AN direction) > 0
     dot_proximal = dx * ax + dy * ay
     is_proximal = dot_proximal > 0

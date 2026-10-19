@@ -651,8 +651,8 @@ def _label_landmark_edges(
                 logger.info("Labeled edge %s as %s (from %s landmark)", key, vein_id, landmark_name)
                 break
 
-    # DTip → the edge there is L3's distal end
-    _label_endpoint_edge("DTip", "L3")
+    # L3.d → the edge there is L3's distal end
+    _label_endpoint_edge("L3.d", "L3")
 
     # Helper: get non-costa neighbors at a junction node
     def _unlabeled_neighbors(node):
@@ -750,9 +750,9 @@ def _label_landmark_edges(
             and lm.snap_distance <= max_lm_dist
         )
 
-    # L2-L3 junction: simultaneous matching with L2.d and DTip
+    # L2-L3 junction: simultaneous matching with L2.d and L3.d
     lm_l2l3 = landmarks.get("L2-L3")
-    lm_dtip = landmarks.get("DTip")
+    lm_l3_d = landmarks.get("L3.d")
     lm_l1rs = landmarks.get("L1-Rs")
     lm_l2d = landmarks.get("L2.d")
     max_lm_dist = config.snap_radius_px(median_vein_width)
@@ -764,21 +764,21 @@ def _label_landmark_edges(
             sample_px = config.departure_sample_px(median_vein_width)
 
             if len(neighbors) >= 1:
-                # Check if L3 already labeled at this junction (from DTip endpoint)
+                # Check if L3 already labeled at this junction (from L3.d endpoint)
                 l3_already = any(edge_labels.get(_edge_key(node, n)) == "L3" for n in G.neighbors(node))
 
-                # Simultaneous: for each edge, compute distance to L2.d and DTip
-                # Assign L2 to edge nearest L2.d, L3 to edge nearest DTip
+                # Simultaneous: for each edge, compute distance to L2.d and L3.d
+                # Assign L2 to edge nearest L2.d, L3 to edge nearest L3.d
                 l2_assigned = False
                 l3_assigned = l3_already
 
-                if not l3_already and lm_l2d and lm_l2d.snapped_node is not None and lm_dtip:
+                if not l3_already and lm_l2d and lm_l2d.snapped_node is not None and lm_l3_d:
                     # Score all edges against both landmarks
                     scores = []
                     for n in neighbors:
                         _, dist_l2d = _nearest_edge_to_landmark(node, [n], lm_l2d)
-                        _, dist_dtip = _nearest_edge_to_landmark(node, [n], lm_dtip)
-                        scores.append((n, dist_l2d, dist_dtip))
+                        _, dist_l3_d = _nearest_edge_to_landmark(node, [n], lm_l3_d)
+                        scores.append((n, dist_l2d, dist_l3_d))
 
                     # L2: edge with smallest dist to L2.d (if within snap radius)
                     scores_l2 = sorted(scores, key=lambda s: s[1])
@@ -792,7 +792,7 @@ def _label_landmark_edges(
                             )
                             l2_assigned = True
 
-                    # L3: edge with smallest dist to DTip (excluding L2 edge)
+                    # L3: edge with smallest dist to L3.d (excluding L2 edge)
                     remaining_scores = [s for s in scores if _edge_key(node, s[0]) not in edge_labels]
                     if remaining_scores:
                         scores_l3 = sorted(remaining_scores, key=lambda s: s[2])
@@ -801,12 +801,12 @@ def _label_landmark_edges(
                         if key not in edge_labels:
                             _label_with_chain(key, "L3")
                             logger.info(
-                                "Labeled edge %s as L3 (from L2-L3, nearest to DTip, dist=%.0f)", key, scores_l3[0][2]
+                                "Labeled edge %s as L3 (from L2-L3, nearest to L3.d, dist=%.0f)", key, scores_l3[0][2]
                             )
                             l3_assigned = True
 
                 elif lm_l2d and lm_l2d.snapped_node is not None:
-                    # Only L2.d available (L3 already labeled or no DTip)
+                    # Only L2.d available (L3 already labeled or no L3.d)
                     best_l2, dist = _nearest_edge_to_landmark(node, neighbors, lm_l2d)
                     if best_l2 is not None and dist <= max_lm_dist:
                         key = _edge_key(node, best_l2)
@@ -815,22 +815,22 @@ def _label_landmark_edges(
                             logger.info("Labeled edge %s as L2 (from L2-L3, nearest to L2.d, dist=%.0f)", key, dist)
                             l2_assigned = True
 
-                elif not l3_already and lm_dtip:
-                    # Only DTip available (no L2.d)
-                    toward_dtip = direction_toward(
+                elif not l3_already and lm_l3_d:
+                    # Only L3.d available (no L2.d)
+                    toward_l3_d = direction_toward(
                         (G.nodes[node]["x"], G.nodes[node]["y"]),
-                        (lm_dtip.x, lm_dtip.y),
+                        (lm_l3_d.x, lm_l3_d.y),
                     )
                     scored = []
                     for n in neighbors:
                         dep = edge_departure_direction(G, node, n, sample_px)
-                        angle = angle_between_vectors(dep, toward_dtip)
+                        angle = angle_between_vectors(dep, toward_l3_d)
                         scored.append((n, angle))
                     scored.sort(key=lambda s: s[1])
                     key = _edge_key(node, scored[0][0])
                     if key not in edge_labels:
                         _label_with_chain(key, "L3")
-                        logger.info("Labeled edge %s as L3 (from L2-L3, toward DTip fallback)", key)
+                        logger.info("Labeled edge %s as L3 (from L2-L3, toward L3.d fallback)", key)
 
                 # Remaining → Rs
                 remaining = [n for n in neighbors if _edge_key(node, n) not in edge_labels]
@@ -1450,7 +1450,7 @@ def _extend_to_distal_landmarks(
     """Extend longitudinal veins to their distal landmark if they don't reach.
 
     For each of L2/L3/L4/L5, checks if the labeled edges reach the
-    corresponding distal landmark (L2.d, DTip, L4.d, L5.d). If not,
+    corresponding distal landmark (L2.d, L3.d, L4.d, L5.d). If not,
     finds the nearest unlabeled edge within search_radius of the
     landmark and labels it.
     """
@@ -1459,7 +1459,7 @@ def _extend_to_distal_landmarks(
     # Vein → distal landmark mapping
     vein_landmarks = {
         "L2": "L2.d",
-        "L3": "DTip",
+        "L3": "L3.d",
         "L4": "L4.d",
         "L5": "L5.d",
     }

@@ -13,9 +13,8 @@ confidence:
   - subcostal_break
   - alula_notch
   - l1_rs
-  - l2_l3
   - l4_l5
-  - dtip
+  - l3_d
 data:
   annotation_dir: trainingdata_new3
   image_dir: training_data_pics

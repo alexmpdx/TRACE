@@ -23,7 +23,7 @@ def _normalize_landmark_key(name: str) -> str:
         "L1-Rs"                        → "l1_rs"
         "L1-Rs junction"               → "l1_rs_junction"
         "L1-Rs junction junction"      → "l1_rs_junction_junction"
-        "DTip"                         → "dtip"
+        "L3.d"                         → "l3_d"
         "L3 distal end"                → "l3_distal_end"
     """
     return re.sub(r"[\s.\-]+", "_", name.strip()).lower()
@@ -33,7 +33,7 @@ def resolve_landmark_key(landmarks: dict, name: str) -> Optional[str]:
     """Find the actual key in ``landmarks`` that corresponds to ``name``.
 
     Handles the gap between the short GeoJSON key form the user configures
-    (``DTip``, ``L1-Rs``, ``ACV.p``, ``L2.d``) and whatever the training-
+    (``L3.d``, ``L1-Rs``, ``ACV.p``, ``L2.d``) and whatever the training-
     set-derived model actually wrote into the landmark geojson — which in
     practice is often the display-name form (``L3 distal end``,
     ``L1-Rs junction junction``, ``ACV-L4 junction``, ``L2 distal end``).
@@ -41,10 +41,10 @@ def resolve_landmark_key(landmarks: dict, name: str) -> Optional[str]:
 
       1. Exact key match.
       2. LANDMARK_DISPLAY_NAMES[name] — canonical display name for a known
-         short key (e.g. ``DTip`` → ``L3 distal end``). This handles the
+         short key (e.g. ``L3.d`` → ``L3 distal end``). This handles the
          canonical case in the mapping table.
       3. Normalized-substring match — normalize the target(s) to
-         snake_case (``dtip``, ``l3_distal_end``) and find any landmark
+         snake_case (``l3_d``, ``l3_distal_end``) and find any landmark
          key whose normalized form contains one as a prefix or the entire
          key contains the target. Handles training-set variants like
          ``L1-Rs junction junction`` where the display name matches as a
@@ -55,14 +55,16 @@ def resolve_landmark_key(landmarks: dict, name: str) -> Optional[str]:
     """
     if not landmarks:
         return None
-    # 1. Exact match.
-    if name in landmarks:
-        return name
-
     # Lazy import to avoid a circular measurement_maker.distance ↔
     # measurement_maker.__init__ ↔ measurement_maker.landmark_names loop
     # at module import time.
-    from measurement_maker.landmark_names import LANDMARK_DISPLAY_NAMES
+    from measurement_maker.landmark_names import LANDMARK_DISPLAY_NAMES, canonical_landmark_name
+
+    # Pairs saved before a landmark rename still name the old landmark.
+    name = canonical_landmark_name(name)
+    # 1. Exact match.
+    if name in landmarks:
+        return name
 
     # 2. Canonical display name.
     display = LANDMARK_DISPLAY_NAMES.get(name)
@@ -106,13 +108,16 @@ def load_landmarks_from_geojson(path: Path) -> dict[str, tuple[float, float]]:
     """Read a *_landmarks.geojson and return {raw_name: (x, y)}.
 
     Uses the raw `properties.classification.name` as the key so callers can
-    match names exactly as identifyFeatures' csv_export does (e.g. "DTip",
+    match names exactly as identifyFeatures' csv_export does (e.g. "L3.d",
     "L1-Rs", "ACV.p"). Falls back to `properties.name` then `properties.class`
-    when classification.name is absent.
+    when classification.name is absent. Legacy names are renamed on read
+    (see ``landmark_names.canonical_landmark_name``).
 
     Returns an empty dict if the file is unreadable or contains no Point
     features.
     """
+    from measurement_maker.landmark_names import canonical_landmark_name
+
     try:
         with open(path) as fh:
             data = json.load(fh)
@@ -137,7 +142,7 @@ def load_landmarks_from_geojson(path: Path) -> dict[str, tuple[float, float]]:
             name = props.get("name") or props.get("class")
         if not name:
             continue
-        out[str(name)] = (float(coords[0]), float(coords[1]))
+        out[canonical_landmark_name(str(name))] = (float(coords[0]), float(coords[1]))
     return out
 
 
@@ -169,7 +174,7 @@ def compute_pair_distance_px(
     """Straight-line distance in pixels between landmarks `name_a` and `name_b`.
 
     Names are resolved through :func:`resolve_landmark_key` so short
-    (``DTip``, ``L1-Rs``) and display (``L3 distal end``,
+    (``L3.d``, ``L1-Rs``) and display (``L3 distal end``,
     ``L1-Rs junction junction``) forms both work — the user's saved pairs
     always use the short form, but the geojson can carry either
     depending on the trained model's naming convention.

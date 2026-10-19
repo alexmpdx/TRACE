@@ -41,6 +41,12 @@ def _write_chopped_image(path: Path, image: np.ndarray) -> None:
     cv2.imwrite(str(path), image)
 
 
+# Legacy landmark names, renamed on read so existing GeoJSONs keep working.
+# Local copy of LandmarkLocator's landmark_locator/names.py (this module stays
+# independent of LandmarkLocator); update them together.
+_LEGACY_LANDMARK_NAMES = {"DTip": "L3.d", "dtip": "l3_d"}
+
+
 def load_landmarks(path):
     """Parse GeoJSON landmarks, return dict of name → (x, y).
 
@@ -55,6 +61,7 @@ def load_landmarks(path):
         if props.get("reliable") is False:
             continue
         name = props["classification"]["name"]
+        name = _LEGACY_LANDMARK_NAMES.get(name, name)
         x, y = feat["geometry"]["coordinates"]
         landmarks[name] = (x, y)
     return landmarks
@@ -63,12 +70,12 @@ def load_landmarks(path):
 # Priority-ordered fallbacks for a "distal-side reference point" used to tell
 # which side of the hinge line is anatomically distal (kept) vs proximal (chopped).
 # Every entry must lie on the DISTAL side of the hinge line, so only wing-blade
-# landmarks qualify: DTip is preferred, then the distal vein endpoints, then the
+# landmarks qualify: L3.d is preferred, then the distal vein endpoints, then the
 # L2-L3 junction. L4-L5 and L1-Rs are deliberately excluded — the hinge line is
 # built through them, so they sit on the line and give a degenerate side-test.
-# Any one of these suffices, so a single low-confidence DTip prediction no longer
+# Any one of these suffices, so a single low-confidence L3.d prediction no longer
 # aborts the whole image when another distal landmark is reliable.
-_DISTAL_REFERENCE_PRIORITY = ("DTip", "L4.d", "L2.d", "L5.d", "L2-L3")
+_DISTAL_REFERENCE_PRIORITY = ("L3.d", "L4.d", "L2.d", "L5.d", "L2-L3")
 
 
 def _pick_distal_reference(landmarks):
@@ -84,7 +91,7 @@ def build_hinge_line(landmarks):
 
     When both L1-Rs and L4-L5 are present, the segment between them is shifted
     proximally (away from a distal-side reference point) by 30% of the distance
-    between them, perpendicular to their connecting line. DTip is the preferred
+    between them, perpendicular to their connecting line. L3.d is the preferred
     reference but any distal-margin landmark in `_DISTAL_REFERENCE_PRIORITY` works.
     """
     for req in ("subcostal break", "alula notch"):
@@ -101,20 +108,20 @@ def build_hinge_line(landmarks):
     if "L1-Rs" in landmarks and "L4-L5" in landmarks:
         l1rs = np.array(landmarks["L1-Rs"], dtype=np.float64)
         l4l5 = np.array(landmarks["L4-L5"], dtype=np.float64)
-        dtip = np.array(distal_ref, dtype=np.float64)
+        l3_d = np.array(distal_ref, dtype=np.float64)
 
         seg_vec = l4l5 - l1rs
         seg_len = np.linalg.norm(seg_vec)
         offset_dist = 0.30 * seg_len
 
-        # Perpendicular direction (two options — pick the one away from DTip)
+        # Perpendicular direction (two options — pick the one away from L3.d)
         perp = np.array([-seg_vec[1], seg_vec[0]], dtype=np.float64)
         perp = perp / np.linalg.norm(perp)
 
-        # Test which perpendicular direction is proximal (away from DTip)
+        # Test which perpendicular direction is proximal (away from L3.d)
         midpoint = (l1rs + l4l5) / 2
-        if np.dot(perp, dtip - midpoint) > 0:
-            perp = -perp  # flip so it points away from DTip
+        if np.dot(perp, l3_d - midpoint) > 0:
+            perp = -perp  # flip so it points away from L3.d
 
         shifted_l1rs = l1rs + perp * offset_dist
         shifted_l4l5 = l4l5 + perp * offset_dist
@@ -194,39 +201,39 @@ def extend_to_image_edges(points, landmarks, width, height):
     return points
 
 
-def make_proximal_mask(hinge_points, dtip, width, height):
+def make_proximal_mask(hinge_points, l3_d, width, height):
     """Create binary mask where True = proximal side (to be blacked out).
 
-    The hinge line splits the image. DTip is on the distal side (keep).
+    The hinge line splits the image. L3.d is on the distal side (keep).
     We black out the opposite side.
     """
     pts = np.array(hinge_points, dtype=np.float64)
 
     # Build a polygon covering one side of the hinge line by extending to corners.
     # Strategy: the hinge line goes from one edge to another. We need to figure out
-    # which side DTip is on, then fill the OTHER side.
+    # which side L3.d is on, then fill the OTHER side.
 
     # Use cv2.fillPoly: build polygon for each side by tracing line + image boundary.
     # Simpler approach: use the sign of the cross product to determine which side
-    # DTip is on relative to the hinge line direction.
+    # L3.d is on relative to the hinge line direction.
 
     # Create mask by filling below/above the hinge polyline
-    # First, determine which side of the line DTip falls on
+    # First, determine which side of the line L3.d falls on
     # Use the signed area / cross product test with the line's overall direction
 
     # Overall direction: first point to last point
     line_dx = pts[-1][0] - pts[0][0]
     line_dy = pts[-1][1] - pts[0][1]
 
-    # Vector from line start to DTip
-    to_dtip_x = dtip[0] - pts[0][0]
-    to_dtip_y = dtip[1] - pts[0][1]
+    # Vector from line start to L3.d
+    to_l3_d_x = l3_d[0] - pts[0][0]
+    to_l3_d_y = l3_d[1] - pts[0][1]
 
-    # Cross product: positive = DTip is on the left of the line direction
-    cross = line_dx * to_dtip_y - line_dy * to_dtip_x
+    # Cross product: positive = L3.d is on the left of the line direction
+    cross = line_dx * to_l3_d_y - line_dy * to_l3_d_x
 
     # Build proximal polygon: hinge line + image boundary on the proximal side
-    # The proximal side is opposite to DTip
+    # The proximal side is opposite to L3.d
     line_pts_int = np.round(pts).astype(np.int32)
 
     # We need to close the polygon along the image edges.
@@ -241,17 +248,17 @@ def make_proximal_mask(hinge_points, dtip, width, height):
         dtype=np.int32,
     )
 
-    # DTip side has cross > 0 (left) or cross < 0 (right)
+    # L3.d side has cross > 0 (left) or cross < 0 (right)
     # We want the OTHER side for the proximal mask.
     # Build polygon: hinge line points + corners on the proximal side
 
-    # Determine which corners are on the proximal side (opposite of DTip)
+    # Determine which corners are on the proximal side (opposite of L3.d)
     proximal_corners = []
     for corner in corners:
         to_corner_x = corner[0] - pts[0][0]
         to_corner_y = corner[1] - pts[0][1]
         corner_cross = line_dx * to_corner_y - line_dy * to_corner_x
-        # Proximal = opposite sign of DTip's cross
+        # Proximal = opposite sign of L3.d's cross
         if (cross > 0 and corner_cross <= 0) or (cross < 0 and corner_cross >= 0):
             proximal_corners.append(corner)
 
@@ -301,7 +308,7 @@ def make_proximal_mask(hinge_points, dtip, width, height):
     ]
 
     # We can go clockwise or counterclockwise from end to start.
-    # One path is on the DTip side, the other on the proximal side.
+    # One path is on the L3.d side, the other on the proximal side.
     # Collect corners for both paths and check which is proximal.
 
     def collect_corners_cw(from_pos, to_pos):
@@ -336,7 +343,7 @@ def make_proximal_mask(hinge_points, dtip, width, height):
         to_test_x = test_pt[0] - pts[0][0]
         to_test_y = test_pt[1] - pts[0][1]
         test_cross = line_dx * to_test_y - line_dy * to_test_x
-        # Proximal = opposite sign of DTip
+        # Proximal = opposite sign of L3.d
         return (cross > 0 and test_cross <= 0) or (cross < 0 and test_cross >= 0)
 
     if is_proximal_path(path_cw):
@@ -363,8 +370,8 @@ def chop_hinge(image_path, landmarks_path, output_path):
     landmarks = load_landmarks(landmarks_path)
     hinge_pts = build_hinge_line(landmarks)
     extended_pts = extend_to_image_edges(hinge_pts, landmarks, width, height)
-    dtip = _pick_distal_reference(landmarks)
-    proximal_mask = make_proximal_mask(extended_pts, dtip, width, height)
+    l3_d = _pick_distal_reference(landmarks)
+    proximal_mask = make_proximal_mask(extended_pts, l3_d, width, height)
 
     # Black out proximal region
     image[proximal_mask] = 0
@@ -427,8 +434,8 @@ def chop_hinge_from_landmarks(image_path, landmarks, output_path):
     height, width = image.shape[:2]
     hinge_pts = build_hinge_line(landmarks)
     extended_pts = extend_to_image_edges(hinge_pts, landmarks, width, height)
-    dtip = _pick_distal_reference(landmarks)
-    proximal_mask = make_proximal_mask(extended_pts, dtip, width, height)
+    l3_d = _pick_distal_reference(landmarks)
+    proximal_mask = make_proximal_mask(extended_pts, l3_d, width, height)
 
     image[proximal_mask] = 0
 

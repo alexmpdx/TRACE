@@ -29,7 +29,7 @@ LONGITUDINAL_ENDPOINTS: dict[str, tuple[str, str]] = {
     "L1": ("subcostal break", "L1-Rs"),
     "Rs": ("L1-Rs", "L2-L3"),
     "L2": ("L2-L3", "L2.d"),
-    "L3": ("L2-L3", "DTip"),
+    "L3": ("L2-L3", "L3.d"),
     "L4": ("L4-L5", "L4.d"),
     "L5": ("L4-L5", "L5.d"),
 }
@@ -67,7 +67,7 @@ JUNCTION_TOPOLOGY: dict[str, dict[str, list[str]]] = {
     },
     "L2-L3": {
         "incoming": ["Rs"],  # Rs arrives from L1-Rs
-        "outgoing": ["L2", "L3"],  # L2 departs anterior, L3 toward DTip
+        "outgoing": ["L2", "L3"],  # L2 departs anterior, L3 toward L3.d
     },
     "L4-L5": {
         "incoming": [],  # Proximal convergence (from wing base)

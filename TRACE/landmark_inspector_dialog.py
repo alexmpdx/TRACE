@@ -112,6 +112,8 @@ def _parse_landmarks_geojson(path: Path) -> dict:
     except (TypeError, ValueError):
         rescale_factor = 1.0
     inv = 1.0 / rescale_factor if rescale_factor != 1.0 else 1.0
+    from landmark_locator.names import canonical_landmark_name
+
     out: dict = {}
     for feat in data.get("features", []):
         geom = feat.get("geometry") or {}
@@ -125,7 +127,7 @@ def _parse_landmarks_geojson(path: Path) -> dict:
         name = cls.get("name") or props.get("name")
         if not name:
             continue
-        out[str(name)] = (float(coords[0]) * inv, float(coords[1]) * inv)
+        out[canonical_landmark_name(str(name))] = (float(coords[0]) * inv, float(coords[1]) * inv)
     return out
 
 

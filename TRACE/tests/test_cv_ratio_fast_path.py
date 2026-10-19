@@ -47,7 +47,7 @@ from TRACE.pipeline import build_cv_ratio_wing_result  # noqa: E402
 # The only four landmarks render_cv_ratio_overlay reads.
 _LANDMARKS_ORIGINAL_SPACE = {
     "L1-Rs": (753.0, 1285.0),
-    "DTip": (5153.0, 1968.0),
+    "L3.d": (5153.0, 1968.0),
     "ACV.p": (1839.0, 1678.0),
     "PCV.a": (2655.0, 1990.0),
 }

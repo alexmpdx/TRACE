@@ -134,9 +134,9 @@ def compute_ap_split(
         else:
             perp = perp_b
         landmarks = wing_result.landmarks if wing_result else {}
-        dtip = landmarks.get("DTip")
-        dtip_pt = np.array([dtip.x, dtip.y]) if dtip else np.array(l4_line.coords[-1])
-        if np.linalg.norm(p1 - dtip_pt) < np.linalg.norm(p2 - dtip_pt):
+        l3_d = landmarks.get("L3.d")
+        l3_d_pt = np.array([l3_d.x, l3_d.y]) if l3_d else np.array(l4_line.coords[-1])
+        if np.linalg.norm(p1 - l3_d_pt) < np.linalg.norm(p2 - l3_d_pt):
             p1 = p1 + perp * median_width * 0.5
         else:
             p2 = p2 + perp * median_width * 0.5
@@ -251,11 +251,11 @@ def _wing_measurements(
 
     # CV ratio block: wing length + crossvein distance + CV ratio
     if "cv_ratio" in g:
-        # Wing length: L1-Rs to DTip
+        # Wing length: L1-Rs to L3.d
         l1rs = landmarks.get("L1-Rs")
-        dtip = landmarks.get("DTip")
-        if l1rs and dtip:
-            dist = math.hypot(dtip.x - l1rs.x, dtip.y - l1rs.y)
+        l3_d = landmarks.get("L3.d")
+        if l1rs and l3_d:
+            dist = math.hypot(l3_d.x - l1rs.x, l3_d.y - l1rs.y)
             vals["wing_length_px"] = f"{dist:.1f}"
             vals["wing_length_um"] = f"{dist * scale:.1f}" if scale else ""
 

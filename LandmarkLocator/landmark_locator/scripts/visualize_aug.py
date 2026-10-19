@@ -40,7 +40,7 @@ def _parse_geojson(path: Path, geojson_to_landmark: dict[str, str]) -> dict[str,
         class_name = classification.get("name")
         if not class_name:
             continue
-        internal = geojson_to_landmark.get(class_name)
+        internal = geojson_to_landmark.get(canonical_landmark_name(class_name))
         if internal is None:
             continue
         if geom.get("type") == "Point":

@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from landmark_locator.names import LEGACY_LANDMARK_NAMES, canonical_landmark_name  # noqa: F401  (re-exported)
+
 # ImageNet normalization stats
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -17,7 +19,7 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 def _normalize_name(geojson_name: str) -> str:
     """Convert a GeoJSON classification name to a snake_case internal name."""
-    name = geojson_name.strip()
+    name = canonical_landmark_name(geojson_name)
     # Replace dots, hyphens, spaces with underscores
     name = re.sub(r"[\s.\-]+", "_", name)
     return name.lower()
@@ -46,6 +48,7 @@ def discover_landmarks(annotation_dir: Path) -> tuple[list[str], dict[str, str]]
             geom = feature.get("geometry", {})
             if geom.get("type") not in ("Point", "MultiPoint"):
                 continue
+            geojson_name = canonical_landmark_name(geojson_name)
             if geojson_name not in geojson_to_landmark:
                 geojson_to_landmark[geojson_name] = _normalize_name(geojson_name)
 
@@ -185,7 +188,7 @@ class LandmarkDataset(Dataset):
             if not class_name:
                 continue
 
-            internal_name = self.geojson_to_landmark.get(class_name)
+            internal_name = self.geojson_to_landmark.get(canonical_landmark_name(class_name))
             if internal_name is None:
                 continue
 

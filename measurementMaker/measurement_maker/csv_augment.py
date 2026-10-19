@@ -242,7 +242,7 @@ def _cv_ratio_row(landmarks: dict[str, tuple[float, float]], um_per_px: Optional
     """Compute cv_ratio group values from a landmarks dict.
 
     Mirrors identify_features.views.csv_export._wing_measurements' cv_ratio
-    block (wing length L1-Rs→DTip, crossvein distance ACV.p→PCV.a, ratio).
+    block (wing length L1-Rs→L3.d, crossvein distance ACV.p→PCV.a, ratio).
     Column names match identify_features' wide-format output.
     """
     from measurement_maker.distance import resolve_landmark_key
@@ -264,10 +264,10 @@ def _cv_ratio_row(landmarks: dict[str, tuple[float, float]], um_per_px: Optional
         return landmarks.get(key) if key is not None else None
 
     l1rs = _get("L1-Rs")
-    dtip = _get("DTip")
+    l3_d = _get("L3.d")
     wl_px: Optional[float] = None
-    if l1rs is not None and dtip is not None:
-        wl_px = math.hypot(dtip[0] - l1rs[0], dtip[1] - l1rs[1])
+    if l1rs is not None and l3_d is not None:
+        wl_px = math.hypot(l3_d[0] - l1rs[0], l3_d[1] - l1rs[1])
         vals["wing length_px"] = f"{wl_px:.1f}"
         if has_scale:
             vals["wing length_um"] = f"{wl_px * um_per_px:.1f}"

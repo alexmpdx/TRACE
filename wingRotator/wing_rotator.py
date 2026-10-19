@@ -24,12 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 # Canonical landmark positions in image coordinates (origin top-left, +y down).
-# Layout: alula notch at origin, DTip on +X axis, anterior margin at -y (top).
+# Layout: alula notch at origin, L3.d on +X axis, anterior margin at -y (top).
 # Derived from one representative wing in testdata/testwings — only the relative
 # geometry matters because the Procrustes fit absorbs scale and translation.
 CANONICAL_LANDMARKS: dict[str, tuple[float, float]] = {
     "alula notch": (0.0, 0.0),
-    "DTip": (4584.0, 0.0),
+    "L3.d": (4584.0, 0.0),
     "subcostal break": (836.0, -808.0),
     "L1-Rs": (94.0, -532.0),
     "L2-L3": (542.0, -472.0),
@@ -40,8 +40,13 @@ CANONICAL_LANDMARKS: dict[str, tuple[float, float]] = {
     "PCV.p": (1959.0, 480.0),
 }
 
+# Legacy landmark names, renamed on read so existing GeoJSONs keep working.
+# Local copy of LandmarkLocator's landmark_locator/names.py (this module stays
+# independent of LandmarkLocator); update them together.
+_LEGACY_LANDMARK_NAMES = {"DTip": "L3.d", "dtip": "l3_d"}
+
 # Pixel span used to scale the residual sanity-check threshold.
-_CANONICAL_PD_SPAN = abs(CANONICAL_LANDMARKS["DTip"][0] - CANONICAL_LANDMARKS["alula notch"][0])
+_CANONICAL_PD_SPAN = abs(CANONICAL_LANDMARKS["L3.d"][0] - CANONICAL_LANDMARKS["alula notch"][0])
 
 # Down-weight applied to landmarks with reliable=False (only used when
 # soft_reliability=True; otherwise unreliable points are hard-gated out).
@@ -98,6 +103,7 @@ def _load_landmarks_for_fit(path: Path, soft_reliability: bool) -> tuple[np.ndar
         props = feat.get("properties", {}) or {}
         classification = props.get("classification") or {}
         name = classification.get("name") or props.get("class")
+        name = _LEGACY_LANDMARK_NAMES.get(name, name)
         if not name or name not in CANONICAL_LANDMARKS:
             continue
         geom = feat.get("geometry") or {}

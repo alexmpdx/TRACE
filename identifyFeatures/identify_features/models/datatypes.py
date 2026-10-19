@@ -97,7 +97,7 @@ class Landmark:
 class WingAxis:
     """Wing-level proximal/distal reference axis.
 
-    Defined by two landmarks (conventionally alula notch → DTip). Provides
+    Defined by two landmarks (conventionally alula notch → L3.d). Provides
     a signed scalar PD coordinate for any point in the wing frame: 0 at the
     proximal anchor, 1 at the distal anchor, linear in between, extrapolating
     beyond when needed.
