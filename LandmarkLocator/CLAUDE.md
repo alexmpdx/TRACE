@@ -1,7 +1,7 @@
 # LandmarkLocator — Claude Code Project Instructions
 
 ## Project Purpose
-A deep learning sub-project within the mapThemVeins suite. Trains a heatmap-based landmark detection model to locate anatomical keypoints in *Drosophila* wing brightfield images — hinge landmarks (subcostal break, alula notch, L1/Rs junction, L4/L5 junction) and wing tip (L3 at distal edge). These landmarks define the hinge line and wing length, and anchor downstream vein identification in `identifyFeatures`.
+A deep learning sub-project within the mapThemVeins suite. Trains a heatmap-based landmark detection model to locate anatomical keypoints in *Drosophila* wing brightfield images — hinge landmarks (subcostal break, alula notch, L1-Rs, L4-L5), vein junctions, crossvein ends, and the distal ends of L2–L5. These landmarks define the hinge line and wing length, and anchor downstream vein identification in `identifyFeatures`.
 
 ## Relationship to other modules
 LandmarkLocator produces a trained model that `preprocessing` loads as Sub-stage 3, then passes the resulting landmarks GeoJSON to `HingeChopper` (Sub-stage 4) and `identifyFeatures` (the analysis stage in TRACE). LandmarkLocator imports nothing from sibling modules at runtime.
@@ -39,14 +39,28 @@ LandmarkLocator/
 └── requirements.txt
 ```
 
-## Key Landmarks (5 channels, canonical order)
-| Channel | Landmark | Description |
-|---------|----------|-------------|
-| 0 | subcostal_break | Where the subcosta vein ends on the anterior margin |
-| 1 | alula_notch | Indentation on the posterior margin at the hinge |
-| 2 | l1_rs_junction | Where L1 meets the fused L2/L3 (radial sector) |
-| 3 | l4_l5_junction | Where L4 and L5 diverge in the hinge region |
-| 4 | wing_tip | Where L3 meets the distal wing edge |
+## Landmarks and channel order
+The landmark set is not fixed in code: `discover_landmarks()` reads it from the annotations, and the checkpoint stores it as `heatmap.landmark_order` (one output channel per entry). Channel *i* is always `landmark_order[i]`; never re-sort it for a trained model. The deployed `trained_models/360_landmarks_1` model has 13:
+
+| Channel | Internal | GeoJSON | Description |
+|---------|----------|---------|-------------|
+| 0 | acv_a | ACV.a | ACV–L3 junction |
+| 1 | acv_p | ACV.p | ACV–L4 junction |
+| 2 | alula_notch | alula notch | Indentation on the posterior margin at the hinge |
+| 3 | l3_d | L3.d | Distal end of L3 at the wing margin |
+| 4 | l1_rs | L1-Rs | Where L1 meets the radial sector |
+| 5 | l2_d | L2.d | Distal end of L2 |
+| 6 | l2_l3 | L2-L3 | L2–L3–Rs junction |
+| 7 | l4_d | L4.d | Distal end of L4 |
+| 8 | l4_l5 | L4-L5 | Where L4 and L5 diverge in the hinge region |
+| 9 | l5_d | L5.d | Distal end of L5 |
+| 10 | pcv_a | PCV.a | PCV–L4 junction |
+| 11 | pcv_p | PCV.p | PCV–L5 junction |
+| 12 | subcostal_break | subcostal break | Where the subcosta ends on the anterior margin |
+
+`l3_d` sits at channel 3, out of alphabetical order, because that model was trained when the landmark was called `dtip`.
+
+**Legacy name.** `L3.d` / `l3_d` used to be `DTip` / `dtip`. Annotations, older landmark GeoJSONs, checkpoints and gate sidecars still use the old name and are not rewritten: `canonical_landmark_name()` in `landmark_locator/names.py` renames them on read (training, checkpoint load, gate configs). Write the new name everywhere.
 
 ## Annotation Format
 GeoJSON FeatureCollection with Point features. One `.geojson` file per image, in the directory the config's `data.annotation_dir` names.
@@ -54,14 +68,14 @@ GeoJSON FeatureCollection with Point features. One `.geojson` file per image, in
 {"type": "Feature", "geometry": {"type": "Point", "coordinates": [x, y]},
  "properties": {"classification": {"name": "subcostal break"}}}
 ```
-GeoJSON names → internal: `"subcostal break"` → `subcostal_break`, `"alula notch"` → `alula_notch`, `"L1-Rs"` → `l1_rs_junction`, `"L4-L5"` → `l4_l5_junction`, `"DTip"` → `wing_tip`.
+GeoJSON names → internal (`_normalize_name`): lower-case, with dots, dashes and spaces turned into underscores, after the legacy alias — `"subcostal break"` → `subcostal_break`, `"L1-Rs"` → `l1_rs`, `"L3.d"` (or legacy `"DTip"`) → `l3_d`.
 
-**Known anomaly**: `PknCG736-lacZ_engal4_BL12322_0007.tif.geojson` has a MultiPoint geometry for DTip — parser takes first coordinate.
+**Known anomalies** (the parser takes the first coordinate of a MultiPoint and skips features without a name): in `training_data/`, `PknCG736-lacZ_engal4_BL12322_0007.tif.geojson` stores the L3.d point (under the legacy name `DTip`) as a MultiPoint; in `trainingdata_new3/`, `-CTRL_PknRNAi_108870_0007.tif.geojson` has an unnamed MultiPoint feature, which is skipped.
 
 ## Model Details
 - **Encoder**: Pretrained ResNet18, features at 5 scales (stride 2/4/8/16/32)
 - **Decoder**: 4 DecoderBlocks (upsample 2× → concat skip → 2×conv+BN+ReLU), final upsample to input size
-- **Output**: (B, 5, 352, 512) — no activation, raw heatmaps
+- **Output**: (B, N, 352, 512), one channel per landmark — no activation, raw heatmaps
 - **Input**: 512×352 (aspect ratio ~1.45:1, divisible by 32), ImageNet-normalized RGB
 
 ## Training Details

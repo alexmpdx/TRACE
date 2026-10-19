@@ -7,12 +7,12 @@ Last updated: 2026-04-20 (Tier 2c graph-reach + chirality-aware AP axis)
 **Recent changes:**
 - `_detect_crossveins` (primary crossvein detector, Phase 4) is now chain-aware: unlabeled edges are first contracted through degree-2 pass-through nodes, then each chain's two outer endpoints are tested against the canonical crossvein pair (ACV: L3↔L4, PCV: L4↔L5). Fixes `20241205_en-PknRNAi_108870_0019` where the ACV is a 2-edge chain with an interior kink ~100 px from both L3 and L4 — neither single-edge candidate satisfied the endpoint-proximity test, and the chain fell through all three detectors to be mis-labeled EV1. Single-edge crossveins degrade gracefully to the previous behavior (chain of length 1). Neutral on the 30-specimen regression baseline.
 - L4-L5 junction gained a new Tier 2c (graph-reachability) between Tier 2 (single-landmark chain-line match) and Tier 3 (AP-orientation fallback). Fires when a soft distal landmark (L4.d / L5.d) is snapped reliably but the junction's immediate chain terminates at another branch point before reaching the landmark's node — a case where chain-line distance misses the landmark even though the landmark is clearly "downstream" of one neighbor. Default metric is pixel path length (Dijkstra over edge `length_px`) because hop count is fragile: L4 is often fragmented into many short edges by crossvein intersections, and an ectopic crossvein between L3-L4 near the ACV can create a short-hop detour. Pixel path length is robust to both failure modes. Configurable via `PipelineConfig.soft_landmark_reach_metric` ("path_length" | "hops").
-- `compute_wing_axis` now orients `WingAxis.ap_unit_vector` using an anterior reference landmark (`subcostal break`, fallback `L1-Rs`) so the stored AP vector always points posterior regardless of wing chirality. Previously the raw 90° rotation only landed on "posterior" for one chirality, so Tier 3 (AP-orientation fallback) inverted L4/L5 on the mirrored half of the dataset. Together with Tier 2c, this fixes `20241207_en_PknRNAi_108870_0006` — L4 now reaches DTip (4380 px), L5 is 3052 px, all 7 regions labeled correctly.
-- Endpoint landmark anchoring now rejects degree-1 leaf snaps when a skeleton edge passes at ≤ 50% of the leaf distance, falling through to edge insertion. Fixes BDSC31488Fx25752M_021126_0009 where DTip snapped to a costa-fragment leaf 33 px away while an L3/L4 anastomosis edge passed 6 px away, causing L3 to propagate along a 3.7 k px chain and produce a duplicate "1st basal" region. Neutral on the 25-specimen GT set (vein 0.593 / region 0.879 / 96.0% detection unchanged); BDSC 0009 now labels 7/7 regions correctly.
+- `compute_wing_axis` now orients `WingAxis.ap_unit_vector` using an anterior reference landmark (`subcostal break`, fallback `L1-Rs`) so the stored AP vector always points posterior regardless of wing chirality. Previously the raw 90° rotation only landed on "posterior" for one chirality, so Tier 3 (AP-orientation fallback) inverted L4/L5 on the mirrored half of the dataset. Together with Tier 2c, this fixes `20241207_en_PknRNAi_108870_0006` — L4 now reaches L3.d (4380 px), L5 is 3052 px, all 7 regions labeled correctly.
+- Endpoint landmark anchoring now rejects degree-1 leaf snaps when a skeleton edge passes at ≤ 50% of the leaf distance, falling through to edge insertion. Fixes BDSC31488Fx25752M_021126_0009 where L3.d snapped to a costa-fragment leaf 33 px away while an L3/L4 anastomosis edge passed 6 px away, causing L3 to propagate along a 3.7 k px chain and produce a duplicate "1st basal" region. Neutral on the 25-specimen GT set (vein 0.593 / region 0.879 / 96.0% detection unchanged); BDSC 0009 now labels 7/7 regions correctly.
 - Overlay redesign: intervein regions are now drawn as black-tinted fills with thick opaque colored outlines (instead of semi-transparent colored fills). Buffered vein tissue is no longer drawn by default — only skeleton centerlines — with a `show_vein_tissue` toggle exposed as `--show-vein-tissue` on the identify-features and TRACE CLIs and as a checkbox in the TRACE GUI. A vein color-key legend is drawn in the upper-left corner, scaled with image size.
 - L4-L5 junction now uses a 3-tier progressive fallback (simultaneous → single-landmark → AP-orientation) mirroring the L2-L3 pattern. Previously it had a single simultaneous-matching gate and would silently leave L4/L5 unlabeled when one soft landmark was orphaned, forcing Phase 2c to seed them in arbitrary order.
 - `_assign_chain_ids` now detects chain endpoints by within-chain touch count rather than graph degree. Chains bounded by two landmark-snapped nodes (graph degree 2 but chain-terminators) previously produced an empty endpoint list and fell back to `chain_edges[0][0]`, silently truncating the stitched polyline. This fixed a mis-label where L4.d's true chain looked ~2750 px from the landmark instead of ~4 px.
-- `junction_merge_vein_widths` default → 0.0 (step skipped); merging was collapsing distinct junctions and leaving crossed edges with no shared node (DTip under distance-map).
+- `junction_merge_vein_widths` default → 0.0 (step skipped); merging was collapsing distinct junctions and leaving crossed edges with no shared node (L3.d under distance-map).
 - `enable_small_fragment_removal` toggle added for skeleton steps 11 / 14; distance-map preset disables it.
 - Final skeleton step always keeps only the largest connected component — orphan fragments are unreachable from landmark anchors.
 
@@ -82,7 +82,7 @@ identifyFeatures/
       junction_resolver.py           # [DONE] Merge longitudinals through crossvein junctions
       costa_detector.py              # [DONE] Costa detection via margin band
       vein_tracer.py                 # [DONE] Trace veins + crossvein + ectopic labeling (Phases 0-5)
-      wing_axis.py                   # [DONE] Derive proximal/distal axis from alula notch → DTip
+      wing_axis.py                   # [DONE] Derive proximal/distal axis from alula notch → L3.d
       intervein_splitter.py          # [DONE] Split classifier-merged intervein polygons via h-maxima seed detection + watershed
       intervein_namer.py             # [DONE] Name intervein regions by adjacency (with PD tie-break)
       trajectory_completer.py        # [TODO] Extrapolate partial veins, split merged regions
@@ -150,7 +150,7 @@ Skeletonizes the vein mask using Hessian-based ridge extraction, then runs a 15-
 **File:** `models/landmark_anchor.py`
 
 - Junction landmarks (L1-Rs, L2-L3, L4-L5): prefer degree-3+ nodes within snap_radius
-- Endpoint landmarks (SC, DTip): prefer degree-1 nodes
+- Endpoint landmarks (SC, L3.d): prefer degree-1 nodes
 - Alula notch: margin reference only, skip graph modification
 - Fallback: insert new node by splitting nearest edge at projection point
 
@@ -169,10 +169,10 @@ Six phases, each building on previous results:
   - SC-AN hinge trim + subcostal break cut
   - ≥50% in-band threshold + proximal departure rejection at SC
 - **Phase 2:** Label edges at landmark positions
-  - L2-L3: simultaneous matching with L2.d and DTip soft landmarks
+  - L2-L3: simultaneous matching with L2.d and L3.d soft landmarks
   - L4-L5: simultaneous matching with L4.d and L5.d
   - L1-Rs: direction toward SC (< 60° = L1, else Rs)
-  - DTip → L3, SC → L1
+  - L3.d → L3, SC → L1
 - **Phase 2b:** Propagate labels through degree-2 nodes (with costa band guard)
 - **Phase 2c:** Extend longitudinals to distal landmark points
 - **Phase 2d:** Re-propagate after extension
@@ -213,7 +213,7 @@ For each intervein polygon from the detection GeoJSON (after the splitter has pr
 - Match the adjacent set against `topology.REGION_EXPECTED_VEINS`, keeping the most specific candidates
 - If multiple candidates tie (currently only discal vs 2nd posterior, which share `{L4, L5, PCV}`), defer the polygon to a second pass
 - **Proximal/distal tie resolver**: `_resolve_pd_ties()` groups deferred polygons by their tied set, looks it up in `topology.REGION_PD_PAIRS`, sorts members by `WingAxis.project(centroid)`, and assigns the proximal name to the smallest-PD polygon and the distal name to the largest-PD polygon
-- `WingAxis` is computed once per specimen by `models/wing_axis.py:compute_wing_axis()` from the anchored alula notch → DTip landmarks; if either landmark is missing the resolver degrades gracefully and deferred polygons fall through to `_check_merged()`
+- `WingAxis` is computed once per specimen by `models/wing_axis.py:compute_wing_axis()` from the anchored alula notch → L3.d landmarks; if either landmark is missing the resolver degrades gracefully and deferred polygons fall through to `_check_merged()`
 - `_detect_absorbed_merges()` runs a two-phase post-pass: Phase A splits duplicate-name polygons via forbidden-adjacency rules (e.g. L6-adjacent polygon renamed from "discal" to "3rd posterior"); Phase B falls back to legacy append-style merge naming (`"A + B"`) for anything still missing. `_absorb_ectopic_fragments()` then sweeps stray fragments into their best-matching neighbor
 - **N-way merge detection**: `_check_merged()` delegates to `_enumerate_merge_candidates()`, which brute-forces over all connected subsets of the region adjacency graph (derived once from `topology.VEIN_BOUNDARIES` into `_REGION_ADJACENCY` / `_REGION_EDGE_SEPARATOR`). A candidate is a connected subset whose merged expected vein set — the union of per-region expected veins minus the internal separators of the subset — is a subset of the polygon's detected veins. Scoring prefers max `len(merged_expected)` (specificity), then smallest subset size (avoid overclaiming), then AP-ordered region tuple for determinism. This handles 3+ region merges like `marginal + submarginal + 1st posterior` when both L2 and L3 are absent, which the old pair-only detector could not see. `PipelineConfig.max_merge_size` caps the search depth (default `None` = no cap)
 
@@ -273,7 +273,7 @@ Entry point defined in pyproject.toml: `identify-features = "identify_features.c
 
 - `views/geojson_export.py` — DONE: Export in GT_naming format
 - `views/overlay.py` — DONE: Render veins + regions color overlay (used by CLI `--overlay` and test scripts)
-- `views/csv_export.py` — DONE: Export measurements CSV. Single mode: long format (one row per feature). Batch mode: wide format (one row per specimen). Wing-level measurements: wing area, wing length (L1-Rs↔DTip), crossvein distance (ACV.p↔PCV.a), anterior/posterior compartment areas (split along L4 axis).
+- `views/csv_export.py` — DONE: Export measurements CSV. Single mode: long format (one row per feature). Batch mode: wide format (one row per specimen). Wing-level measurements: wing area, wing length (L1-Rs↔L3.d), crossvein distance (ACV.p↔PCV.a), anterior/posterior compartment areas (split along L4 axis).
 
 ### Tests — PARTIAL
 
@@ -359,7 +359,7 @@ Single source of truth for wing vein biology:
 | Constant | Content |
 |----------|---------|
 | `RELIABLE_LANDMARKS` | {subcostal break, alula notch, L1-Rs, L2-L3, L4-L5} |
-| `SOFT_LANDMARKS` | {DTip, L2.d, L4.d, L5.d} |
+| `SOFT_LANDMARKS` | {L3.d, L2.d, L4.d, L5.d} |
 | `UNRELIABLE_LANDMARKS` | {ACV.a, ACV.p, PCV.a, PCV.p} |
 | `JUNCTION_TOPOLOGY` | Which veins meet at each landmark junction |
 | `CROSSVEIN_CONNECTIONS` | ACV→(L3,L4), PCV→(L4,L5) |

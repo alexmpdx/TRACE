@@ -40,7 +40,7 @@ Install with `pip install -e measurementMaker` from the project root — pulls n
 
 ## Landmark name conventions
 
-Pairs reference landmarks by **raw GeoJSON `properties.classification.name`** strings — `"DTip"`, `"L1-Rs"`, `"ACV.a"`, `"alula notch"`, etc. — **not** the snake_case internal names that LandmarkLocator's `dataset.py` uses (`dtip`, `l1_rs`, `acv_a`, `alula_notch`). This matches how `identifyFeatures.views.csv_export` looks landmarks up (`landmarks.get("L1-Rs")`). `load_landmarks_from_geojson` returns the dict keyed by raw names.
+Pairs reference landmarks by **raw GeoJSON `properties.classification.name`** strings — `"L3.d"`, `"L1-Rs"`, `"ACV.a"`, `"alula notch"`, etc. — **not** the snake_case internal names that LandmarkLocator's `dataset.py` uses (`l3_d`, `l1_rs`, `acv_a`, `alula_notch`). This matches how `identifyFeatures.views.csv_export` looks landmarks up (`landmarks.get("L1-Rs")`). `load_landmarks_from_geojson` returns the dict keyed by raw names. The legacy name `"DTip"` (now `"L3.d"`) is renamed on read, in both landmark GeoJSONs and saved pairs (`landmark_names.canonical_landmark_name`).
 
 ## Edge cases handled
 

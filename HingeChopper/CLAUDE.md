@@ -27,12 +27,12 @@ Single file: `hinge_chopper.py`. Pipeline flow:
 1. `load_landmarks()` — parse GeoJSON → dict of name → (x, y)
 2. `build_hinge_line()` — ordered points: subcostal break → [L1-Rs] → [L4-L5] → alula notch
 3. `extend_to_image_edges()` — ray-cast endpoints to image boundary
-4. `make_proximal_mask()` — cross-product test with DTip to determine distal side; fill proximal side polygon via cv2.fillPoly
+4. `make_proximal_mask()` — cross-product test with a distal reference point (L3.d preferred, then L4.d, L2.d, L5.d, L2-L3) to determine distal side; fill proximal side polygon via cv2.fillPoly
 5. `chop_hinge()` — orchestrator: load image, apply mask, save
 
 ## Landmark Requirements
 
-Required: `DTip`, `subcostal break`, `alula notch`. Optional (improve line shape): `L1-Rs`, `L4-L5`.
+Required: `subcostal break`, `alula notch`, and at least one distal reference (`L3.d`, `L4.d`, `L2.d`, `L5.d` or `L2-L3`). Optional (improve line shape): `L1-Rs`, `L4-L5`. Legacy files that name `L3.d` as `DTip` are renamed on read in `load_landmarks()`.
 
 GeoJSON format: features with `properties.classification.name` and `geometry.coordinates` (Point type).
 

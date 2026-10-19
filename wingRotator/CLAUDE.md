@@ -45,7 +45,7 @@ Single file: `wing_rotator.py`. Pipeline flow inside `rotate_from_landmarks()`:
 
 ## Canonical template
 
-`CANONICAL_LANDMARKS` is hardcoded in `wing_rotator.py` — derived from one well-oriented wing, `-CTRL_PknRNAi_108870_0007`, whose files are now in `old_DO_NOT_USE/testdata/testwings/`, with alula notch translated to the origin and DTip placed on the +X axis. Only relative geometry matters because the Procrustes fit absorbs scale and translation. To refine, average positions over a handful of well-oriented training wings.
+`CANONICAL_LANDMARKS` is hardcoded in `wing_rotator.py` — derived from one well-oriented wing, `-CTRL_PknRNAi_108870_0007`, whose files are now in `old_DO_NOT_USE/testdata/testwings/`, with alula notch translated to the origin and L3.d placed on the +X axis. Only relative geometry matters because the Procrustes fit absorbs scale and translation. To refine, average positions over a handful of well-oriented training wings.
 
 ## Weight formula
 

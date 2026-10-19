@@ -16,7 +16,7 @@ MVC layout under `identify_features/`:
 
 ## Key Design Principle
 
-**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, DTip), rather than relying on spatial priors. Don't anchor on ACV.a, ACV.p, PCV.a, or PCV.p, because their detections are unreliable.
+**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, L3.d), rather than relying on spatial priors. Don't anchor on ACV.a, ACV.p, PCV.a, or PCV.p, because their detections are unreliable.
 
 ## Build and Run
 

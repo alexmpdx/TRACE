@@ -51,7 +51,7 @@ Given a pixel-classifier segmentation (vein/intervein GeoJSON polygons) and deep
 
 ### Key design principle
 
-**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, DTip), rather than relying on spatial priors.
+**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, L3.d), rather than relying on spatial priors.
 
 ### Performance on current test data
 
@@ -124,7 +124,7 @@ GeoJSON FeatureCollection with Point features. Each has `properties.classificati
 
 **13 landmarks total:**
 - 5 reliable junctions (required): `subcostal break`, `alula notch`, `L1-Rs`, `L2-L3`, `L4-L5`
-- 4 soft endpoints (helpful hints): `DTip`, `L2.d`, `L4.d`, `L5.d`
+- 4 soft endpoints (helpful hints): `L3.d`, `L2.d`, `L4.d`, `L5.d`
 - 4 unreliable crossvein markers (fallback only): `ACV.a`, `ACV.p`, `PCV.a`, `PCV.p`
 
 **Parser:** `identify_features/models/geojson_io.py:52` → returns `dict[str, Landmark]`
@@ -205,7 +205,7 @@ class InterveinRegion:
 ### CSV measurements include
 
 - Wing area (px, µm²)
-- Wing length: L1-Rs → DTip distance (px, µm)
+- Wing length: L1-Rs → L3.d distance (px, µm)
 - Crossvein distance: ACV.p → PCV.a (px, µm)
 - CV ratio: crossvein distance / wing length (dimensionless)
 - Anterior/posterior compartment areas (split along L4 axis)

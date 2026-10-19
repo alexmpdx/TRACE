@@ -136,7 +136,7 @@ Landmarks GeoJSON ──┘
 | L1 | Longitudinal | Short, between costal cell and marginal cell |
 | Rs | Radial sector | Short proximal stem connecting L1-Rs to L2-L3 junction |
 | L2 | Longitudinal | Anterior longitudinal, branches from L2-L3 junction |
-| L3 | Longitudinal | Central longitudinal, runs from L2-L3 toward wing tip (DTip) |
+| L3 | Longitudinal | Central longitudinal, runs from L2-L3 toward wing tip (L3.d) |
 | ACV | Crossvein | Anterior crossvein, connects L3 to L4 |
 | L4 | Longitudinal | Central-posterior longitudinal, from L4-L5 junction |
 | PCV | Crossvein | Posterior crossvein, connects L4 to L5 |
@@ -154,7 +154,7 @@ LandmarkLocator emits up to 13 landmarks per wing. Reliability is **per-landmark
 | L1-Rs | Junction (deg-3) | Where L1 meets Rs |
 | L2-L3 | Junction (deg-3) | Where Rs splits into L2 and L3 |
 | L4-L5 | Junction (deg-3) | Where L4 and L5 diverge |
-| DTip | Endpoint | Distal tip of L3 at the wing margin |
+| L3.d | Endpoint | Distal tip of L3 at the wing margin |
 | L2.d | Endpoint | Distal endpoint of L2 |
 | L4.d | Endpoint | Distal endpoint of L4 |
 | L5.d | Endpoint | Distal endpoint of L5 |
@@ -170,7 +170,7 @@ LandmarkLocator emits up to 13 landmarks per wing. Reliability is **per-landmark
 | L1 | subcostal break | L1-Rs |
 | Rs | L1-Rs | L2-L3 |
 | L2 | L2-L3 | L2.d |
-| L3 | L2-L3 | DTip |
+| L3 | L2-L3 | L3.d |
 | L4 | L4-L5 | L4.d |
 | L5 | L4-L5 | L5.d |
 
@@ -381,7 +381,7 @@ for each pair:
 **LineString snapping**: When transferring edges, the first/last coordinate of each LineString is replaced with the kept node's position. This prevents geometric discontinuities.
 
 **Parameters**:
-- `junction_merge_vein_widths = 0.0` — Merge radius as multiple of median vein width. Default `0.0` disables the step entirely; the tight merge collapses geometrically-distinct junctions and leaves crossed edges with no shared node (observed at the DTip under distance-map).
+- `junction_merge_vein_widths = 0.0` — Merge radius as multiple of median vein width. Default `0.0` disables the step entirely; the tight merge collapses geometrically-distinct junctions and leaves crossed edges with no shared node (observed at the L3.d under distance-map).
 
 ### 3.8 Gap bridging (first pass)
 
@@ -627,7 +627,7 @@ for each reliable landmark:
     if landmark is a JUNCTION type (L1-Rs, L2-L3, L4-L5):
         node = nearest node with degree >= 3 within snap_radius
         if only degree-1 found: reject (will fall through to edge insertion)
-    elif landmark is an ENDPOINT type (subcostal break, DTip):
+    elif landmark is an ENDPOINT type (subcostal break, L3.d):
         node = nearest node with degree == 1 within snap_radius
     elif landmark is "alula notch":
         skip (margin reference only, never anchored)
@@ -652,7 +652,7 @@ for each reliable landmark:
         otherwise leave the landmark unsnapped
 ```
 
-**Why different node-degree preferences by type?** Junction landmarks should snap to actual junctions (degree-3+ nodes) — snapping them to a degree-1 endpoint would be incorrect. Endpoint landmarks (SC, DTip) should snap to degree-1 nodes where the vein terminates.
+**Why different node-degree preferences by type?** Junction landmarks should snap to actual junctions (degree-3+ nodes) — snapping them to a degree-1 endpoint would be incorrect. Endpoint landmarks (SC, L3.d) should snap to degree-1 nodes where the vein terminates.
 
 **Edge insertion**: When no suitable node exists nearby, we split the nearest edge at the point closest to the landmark, creating a new node precisely where the landmark says the anchor should be. The split preserves all edge attributes and creates two new edges. The fallback is now capped at **4× median vein width** (was previously 4× snap_radius, which let a 294 px misanchor slip through on 20241211_…_0004's L4-L5 — the new cap rejects it and the landmark is left unsnapped).
 
@@ -793,11 +793,11 @@ For each contested edge, sort claimers by:
 
 **Why**: When Phase 1c can't trace a longitudinal (unreliable landmarks, no path between snapped nodes, or the endpoint-connectivity gate dropped it), this phase + the propagation / extension / connection chain that follows it picks up the slack — labeling whatever it can from landmark-adjacent edges and growing those labels outward.
 
-#### DTip → L3
+#### L3.d → L3
 ```
-edge at DTip node → label as "L3"
+edge at L3.d node → label as "L3"
 ```
-DTip is a degree-1 endpoint where L3 terminates at the wing tip. Its single edge is L3.
+L3.d is a degree-1 endpoint where L3 terminates at the wing tip. Its single edge is L3.
 
 #### Subcostal break → L1
 ```
@@ -812,23 +812,23 @@ This is the most complex labeling because three veins meet here.
 ```
 unlabeled_edges = edges at L2-L3 node not already labeled (e.g., not costa)
 
-if L2.d AND DTip landmarks both available:
+if L2.d AND L3.d landmarks both available:
     SIMULTANEOUS MATCHING:
     for each edge:
         dist_to_L2d = edge.LineString.distance(L2.d.point)
-        dist_to_DTip = edge.LineString.distance(DTip.point)
+        dist_to_L3d = edge.LineString.distance(L3.d.point)
     edge nearest to L2.d → "L2"
-    edge nearest to DTip → "L3"  (if not already labeled as L3 from DTip phase)
+    edge nearest to L3.d → "L3"  (if not already labeled as L3 from L3.d phase)
     remaining edge(s) → "Rs"
 
 elif only L2.d available:
     edge nearest to L2.d → "L2"
     remaining → "Rs"
 
-elif only DTip available:
-    direction = vector from L2-L3 node toward DTip
+elif only L3.d available:
+    direction = vector from L2-L3 node toward L3.d
     for each edge:
-        departure_angle = angle between edge departure and DTip direction
+        departure_angle = angle between edge departure and L3.d direction
     edge with smallest angle → "L3"
     remaining → "Rs"
 ```
@@ -908,7 +908,7 @@ perpendicular to the proximal-distal axis, pointing posterior. This handles
 flipped wings correctly: `compute_wing_axis` orients the AP vector using an
 anterior reference landmark (`subcostal break`, fallback `L1-Rs`) so the
 stored `ap_unit_vector` always points posterior regardless of wing
-chirality. Without this, the raw 90° rotation of the alula→DTip vector
+chirality. Without this, the raw 90° rotation of the alula→L3.d vector
 would only land on "posterior" for one chirality and Tier 3 would invert
 L4/L5 on the mirrored half of the dataset.
 
@@ -962,7 +962,7 @@ if label == "costa":
 
 **Algorithm**:
 ```
-for each (vein, landmark) pair: [(L2, L2.d), (L3, DTip), (L4, L4.d), (L5, L5.d)]:
+for each (vein, landmark) pair: [(L2, L2.d), (L3, L3.d), (L4, L4.d), (L5, L5.d)]:
     search_radius = median_vein_width * distal_landmark_search_vw
 
     # Check if vein already reaches landmark
@@ -1054,7 +1054,7 @@ for each unlabeled edge:
 best scoring candidate → label as "L6"
 ```
 
-**Why the axis projection**: The legacy check assumed the wing was upright in the image (posterior = +Y). When a specimen is rotated, that assumption breaks and L6 can be rejected on valid wings. The `WingAxis.ap_vector` is derived from the alula notch → DTip PD axis rotated 90°, so the posterior direction travels with the wing regardless of image orientation.
+**Why the axis projection**: The legacy check assumed the wing was upright in the image (posterior = +Y). When a specimen is rotated, that assumption breaks and L6 can be rejected on valid wings. The `WingAxis.ap_vector` is derived from the alula notch → L3.d PD axis rotated 90°, so the posterior direction travels with the wing regardless of image orientation.
 
 ### Phase 4: Detect crossveins (primary method)
 
@@ -1457,10 +1457,10 @@ The naming stage produces a `list[InterveinRegion]` with 7 entries (one per cano
 
 **Wing-level measurements**:
 - **Wing area**: `wing_outline.area` (union of all detection polygons)
-- **Wing length**: Euclidean distance between landmarks L1-Rs and DTip
+- **Wing length**: Euclidean distance between landmarks L1-Rs and L3.d
 - **Crossvein distance**: Euclidean distance between landmarks ACV.p and PCV.a
 - **CV ratio**: Crossvein distance divided by wing length (dimensionless)
-- **Anterior/posterior compartment areas**: Wing split along L4 vein axis. Method: minimum rotated bounding box around L4 centerline → anterior long edge (closer to L3) → distal (DTip) end shifted anteriorly by 0.5× median L4 vein width to align with tissue edge → extended to bisect wing outline. Halves labeled by proximity to L3 (anterior) vs L5 (posterior).
+- **Anterior/posterior compartment areas**: Wing split along L4 vein axis. Method: minimum rotated bounding box around L4 centerline → anterior long edge (closer to L3) → distal (L3.d) end shifted anteriorly by 0.5× median L4 vein width to align with tissue edge → extended to bisect wing outline. Halves labeled by proximity to L3 (anterior) vs L5 (posterior).
 
 ### 7.5 Overlay images
 
@@ -1470,7 +1470,7 @@ Three overlay PNGs generated per specimen (with `--overlay` flag):
 
 - **`{stem}_overlay.png`** (`render_overlay_to_file`): Intervein regions shown as black-tinted fills with thick opaque colored outlines; vein centerline strokes on top; region and ectopic-vein labels; vein color-key legend in the upper-left corner. Pass `show_vein_tissue=True` (CLI: `--show-vein-tissue`; TRACE GUI: "Fill buffered vein tissue in overlay") to additionally fill buffered vein tissue polygons — off by default so the skeleton is easier to read.
 - **`{stem}_ap_overlay.png`** (`render_ap_overlay_to_file`): Anterior/posterior compartment visualization. Blue tint = anterior, red/orange tint = posterior, with percentage labels. Clean view without construction geometry.
-- **`{stem}_cv_ratio_overlay.png`** (`render_cv_ratio_overlay_to_file`): Wing length (L1-Rs → DTip, orange) and crossvein distance (ACV.p → PCV.a, cobalt) measurement lines with labeled landmark dots. CV ratio displayed in upper-left corner.
+- **`{stem}_cv_ratio_overlay.png`** (`render_cv_ratio_overlay_to_file`): Wing length (L1-Rs → L3.d, orange) and crossvein distance (ACV.p → PCV.a, cobalt) measurement lines with labeled landmark dots. CV ratio displayed in upper-left corner.
 
 ---
 
