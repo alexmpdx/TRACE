@@ -34,7 +34,7 @@ These live alongside the pipeline modules and are imported by the TRACE GUI, **n
 
 - **scaleEstimator** — interactive landmark-distance → µm/px calculator, surfaced in `inline_panels.py` and the settings dialog.
 - **measurementMaker** — user-defined landmark-pair distance CSV columns. Has both a GUI editor and a fast post-CSV augmentation path called from `TRACE/pipeline.py`.
-- **liveSettings** — exports the `live_tune` package; `TRACE/settings_dialog.py` attaches its live-preview widgets via runtime `sys.path` injection (see `settings_dialog.py:343`).
+- **liveSettings** — exports the `live_tune` package; `TRACE/settings_dialog.py` attaches its live-preview widgets via runtime `sys.path` injection (the `attach_live_preview` import in `settings_dialog.py`).
 - **manualInspector/** — *spec doc only* (`landmark_inspector_spec.md`). The actual landmark/segmentation override inspector lives in `TRACE/landmark_inspector_dialog.py`.
 
 `resolutionAdjust` also has a few **post-hoc** uses inside TRACE (scaling overlay GeoJSON coords back to original resolution in `_render_segmentation_overlay()` and inverse-rescaling `WingResult` before export) — separate from its Sub-stage 1 role above.
@@ -92,5 +92,4 @@ python LandmarkLocator/landmark_locator/scripts/predict.py <folder> --batch \
 
 - `preprocessing/testinput_images/` — raw wing TIFFs
 - `preprocessing/testinput_DLmodels/` — landmark (.pt) and segmentation model checkpoints
-- `testdata/` — additional sample wing images
 - `identifyFeatures/geojsons/`, `identifyFeatures/GT_naming/` — detection GeoJSONs and ground-truth naming overlays

@@ -46,11 +46,11 @@ python make_overlays.py
 
 The CLI's `--batch` mode pairs each image with `<stem>_detections.geojson` (or `<stem>.geojson`) in the geojson dir. Outputs are split into `<output>/images/<stem>_main_wing.<ext>` and `<output>/geojsons/<stem>_main_wing.geojson`, with `wing_isolator_summary.json` at the top level.
 
-To regenerate detection GeoJSONs from images, call `modeltojson.process_folder(model_dir, image_dir, geojson_dir)` from `../modelTOjson` with a wing-vs-background segmentation model (e.g. `../workingModels/alextinynet_4x_*`).
+To regenerate detection GeoJSONs from images, call `modeltojson.process_folder(model_dir, image_dir, geojson_dir)` from `../modelTOjson` with a wing-vs-background segmentation model. The one TRACE uses is `../TRACE/models/wingIsolation/`, which is git-ignored, so it exists only on machines where the models have been fetched.
 
 ## Pipeline
 
-`wing_isolator.isolate_main_wing()` runs six stages:
+`pipeline.isolate_main_wing()` runs six stages:
 
 1. **Load polygons** — filter GeoJSON features by `properties.class` (default `"wing"`); falls back to all polygon features if nothing matches. MultiPolygon features are flattened.
 2. **Pick main polygon** — first polygon containing the image-center point; falls back to largest by area.

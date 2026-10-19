@@ -4,7 +4,7 @@
 A deep learning sub-project within the mapThemVeins suite. Trains a heatmap-based landmark detection model to locate anatomical keypoints in *Drosophila* wing brightfield images — hinge landmarks (subcostal break, alula notch, L1/Rs junction, L4/L5 junction) and wing tip (L3 at distal edge). These landmarks define the hinge line and wing length, and anchor downstream vein identification in `identifyFeatures`.
 
 ## Relationship to other modules
-LandmarkLocator produces a trained model that `preprocessing` loads as Stage 1, then passes the resulting landmarks GeoJSON to `HingeChopper` (Stage 2) and `identifyFeatures` (the analysis stage in TRACE). LandmarkLocator imports nothing from sibling modules at runtime.
+LandmarkLocator produces a trained model that `preprocessing` loads as Sub-stage 3, then passes the resulting landmarks GeoJSON to `HingeChopper` (Sub-stage 4) and `identifyFeatures` (the analysis stage in TRACE). LandmarkLocator imports nothing from sibling modules at runtime.
 
 ## Architecture
 Single-stage pipeline: full-wing heatmap regression (no canonicalization or cropping). ResNet18-encoder U-Net predicts one Gaussian heatmap per landmark directly on the resized input image.
@@ -30,8 +30,9 @@ LandmarkLocator/
 │       └── gui.py       # PyQt5 GUI
 ├── configs/
 │   └── default.yaml     # All hyperparameters
-├── training_data/       # GeoJSON Point annotations (24 files)
-├── training_data_pics/  # TIFF images (24 files, 5440×3648)
+├── trainingdata_new3/   # GeoJSON Point annotations (config default: data.annotation_dir)
+├── training_data/       # 24-file annotation set, not the config default
+├── training_data_pics/  # training images (.tif and .bmp)
 ├── pyproject.toml       # Package metadata & build config
 ├── setup.py             # Editable install shim for older pip
 ├── CLAUDE.md
@@ -48,7 +49,7 @@ LandmarkLocator/
 | 4 | wing_tip | Where L3 meets the distal wing edge |
 
 ## Annotation Format
-GeoJSON FeatureCollection with Point features. One `.geojson` file per image in `training_data/`.
+GeoJSON FeatureCollection with Point features. One `.geojson` file per image, in the directory the config's `data.annotation_dir` names.
 ```json
 {"type": "Feature", "geometry": {"type": "Point", "coordinates": [x, y]},
  "properties": {"classification": {"name": "subcostal break"}}}
@@ -74,9 +75,9 @@ GeoJSON names → internal: `"subcostal break"` → `subcostal_break`, `"alula n
 - **Device**: auto-detect MPS (Apple Silicon) > CUDA > CPU
 
 ## Data
-- 24 TIFF images (5440×3648, BGR uint8) in `training_data_pics/`
-- 24 GeoJSON annotations in `training_data/`
-- 3 genotype groups: CTRL (9), PknCG736 (10), en-PknRNAi (5)
+- Images in `training_data_pics/` (.tif and .bmp), loaded as BGR uint8
+- Annotations in the config's `data.annotation_dir` (default `trainingdata_new3/`)
+- CV folds are stratified by genotype
 - All coordinates in pixel space (origin top-left)
 
 ## Key Dependencies

@@ -10,13 +10,13 @@ Landmark-anchored Drosophila melanogaster wing vein identification tool. Given a
 
 MVC layout under `identify_features/`:
 - **models/**: Pure logic and data structures. `topology.py` is the single source of truth for wing vein biology (vein ordering, junction topology, region boundaries). `skeleton.py` provides 3 user-selectable skeletonization methods. `vein_tracer.py` is the core algorithm — traces veins outward from landmark-anchored junction nodes.
-- **controllers/**: `pipeline.py` orchestrates the 10-step pipeline.
+- **controllers/**: `pipeline.py` orchestrates the pipeline (Steps 1–6, with sub-steps 6.1–6.3).
 - **views/**: Output rendering (overlays, GeoJSON export, CSV).
 - **utils/**: Shared helpers for NetworkX graphs, Shapely geometry, image I/O.
 
 ## Key Design Principle
 
-**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, DTip), rather than relying on spatial priors. Do NOT use unreliable landmarks (ACV.a, ACV.p, PCV.a, PCV.p).
+**Landmarks are primary, not supplementary.** Vein identity flows outward from 6 reliable landmark junctions (subcostal break, alula notch, L1-Rs, L2-L3, L4-L5, DTip), rather than relying on spatial priors. Don't anchor on ACV.a, ACV.p, PCV.a, or PCV.p, because their detections are unreliable.
 
 ## Build and Run
 

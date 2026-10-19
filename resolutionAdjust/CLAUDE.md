@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-resolutionAdjust rescales wing images toward a per-model "training µm/px" target before any DL inference, and provides the inverse transforms that map geometry produced downstream back to the original pixel grid. It runs as **Stage -1** of `preprocessing` — ahead of Stage 0 (wing isolation), Stage 1 (landmarks), Stage 2 (hinge), Stage 3 (segmentation), and Stage 3.5 (rotation) — so every DL model sees pixels close to the resolution it was trained on.
+resolutionAdjust rescales wing images toward a per-model "training µm/px" target before any DL inference, and provides the inverse transforms that map geometry produced downstream back to the original pixel grid. It runs as **Sub-stage 1** of `preprocessing` — ahead of Sub-stage 2 (wing isolation), 3 (landmarks), 4 (hinge), 5 (segmentation), and 6 (rotation) — so every DL model sees pixels close to the resolution it was trained on.
 
 ## Running standalone
 
@@ -15,7 +15,7 @@ python resolutionAdjust/run_cli.py <image-or-folder> -o <out_dir> \
     --tolerance-low 0.85 --tolerance-high 1.15
 ```
 
-The CLI is for inspecting what Stage -1 would do — it does not run the inverse step.
+The CLI is for inspecting what Sub-stage 1 would do — it does not run the inverse step.
 
 ## Dependencies
 
@@ -41,7 +41,7 @@ When the input is inside the band, `scale_factor = 1.0`, no temp file is written
 
 ## Inverse round-trip semantics
 
-The rescale and the inverse are intentionally symmetric so the rest of the pipeline can stay ignorant of Stage -1:
+The rescale and the inverse are intentionally symmetric so the rest of the pipeline can stay ignorant of Sub-stage 1:
 
 1. `adjust_resolution` rewrites the image at `scale_factor × original_size` and stores the factor.
 2. Every DL stage and identifyFeatures run in **rescaled-pixel space**.
@@ -57,7 +57,7 @@ After step 3, downstream consumers (CSV export, GeoJSON export, overlay renderin
 
 ## Integration points (where to look in other modules)
 
-- **Trigger**: `preprocessing/pipeline.py` `process_single_image()` — Stage -1 runs between format coercion and Stage 0 (wing isolation). New params: `input_um_per_px`, `target_um_per_px`, `rescale_tolerance_low/high`. `PipelineResult.rescale_factor` and `PipelineResult.original_shape` carry the info downstream. The landmark batch prefetch in `process_folder` is disabled when Stage -1 is active (path-key mismatch between original and rescaled file).
+- **Trigger**: `preprocessing/pipeline.py` `process_single_image()` — Sub-stage 1 runs between format coercion and Sub-stage 2 (wing isolation). Params: `input_um_per_px`, `target_um_per_px`, `rescale_tolerance_low/high`. `PipelineResult.rescale_factor` and `PipelineResult.original_shape` carry the info downstream. The landmark batch prefetch in `process_folder` is disabled when Sub-stage 1 is active (path-key mismatch between original and rescaled file).
 - **Inverse**: `TRACE/pipeline.py` `_run()._analyze_one()` — calls `inverse_rescale_wing_result` after `identify_wing`, then `inverse_resize_image` on the overlay base. `_render_landmarks_overlay` and `_render_segmentation_overlay` take an `inverse_scale` arg that multiplies coordinates from their geojson before drawing.
 - **GUI**: `TRACE/settings_dialog.py` Models tab — per-model `Training µm/px` field + Auto-detect button (`_make_target_row`, `_autodetect_target_um_per_px`); "Resolution adjustment" group with the active-model radio (default = Wing features) and tolerance low/high spinboxes. Each tolerance spinbox has a live µm/px label updated by `_update_tolerance_um_labels`.
 - **Persistence**: QSettings keys under `models/{landmark,segmentation,wing_isolation}_target_um_per_px`, `models/active_rescale_target`, `resolution/tolerance_low|high`. Wing features defaults to **0.483 µm/px** on first launch (the resolution the bundled segmentation model was trained at); the default is only applied when the QSettings key has never been written, so a user's deliberate clear-to-blank is preserved.
@@ -65,7 +65,7 @@ After step 3, downstream consumers (CSV export, GeoJSON export, overlay renderin
 
 ## Skipped-stage protocol
 
-`adjust_resolution` is called from preprocessing only when `input_um_per_px > 0 AND target_um_per_px > 0`. When the active model has no target set, the target arg arrives as None and preprocessing skips Stage -1 entirely — `rescale_factor` stays at 1.0 and the inverse helpers all no-op. Failures inside `adjust_resolution` are soft: preprocessing logs a warning and falls through with the original image rather than aborting the run.
+`adjust_resolution` is called from preprocessing only when `input_um_per_px > 0 AND target_um_per_px > 0`. When the active model has no target set, the target arg arrives as None and preprocessing skips Sub-stage 1 entirely — `rescale_factor` stays at 1.0 and the inverse helpers all no-op. Failures inside `adjust_resolution` are soft: preprocessing logs a warning and falls through with the original image rather than aborting the run.
 
 ## Code style
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-HingeChopper is a standalone CLI tool that blacks out the hinge (proximal) region of Drosophila wing images. It uses landmark points from GeoJSON files to construct a hinge line, then masks the proximal side to black. Part of the broader mapThemVeins project; consumed by `preprocessing` as Stage 2.
+HingeChopper is a standalone CLI tool that blacks out the hinge (proximal) region of Drosophila wing images. It uses landmark points from GeoJSON files to construct a hinge line, then masks the proximal side to black. Part of the broader mapThemVeins project; consumed by `preprocessing` as Sub-stage 4.
 
 ## Running
 
@@ -38,6 +38,8 @@ GeoJSON format: features with `properties.classification.name` and `geometry.coo
 
 ## Test Data
 
-- `pics/` — wing images (.tif, .bmp), 30 files across 4 genotypes
-- `landmarks/` — corresponding `*_landmarks.geojson` files
-- Batch mode pairs them by matching stem (strip `_landmarks` suffix)
+No local fixtures. For a batch run, use the sibling identifyFeatures set:
+`../identifyFeatures/OGpics/` (30 wing images, .tif and .bmp) with
+`../identifyFeatures/LandmarkLocator_output/` (matching `*_landmarks.geojson`).
+Batch mode pairs them by stem; one landmarks file there has a trailing space
+in its name and will not pair.

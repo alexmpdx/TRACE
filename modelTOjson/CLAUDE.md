@@ -15,7 +15,7 @@ python app.py
 
 ## Architecture
 
-Single-file application (`app.py`) with these major sections:
+Two files. `modeltojson.py` is the library that `preprocessing` and `wingIsolator` import: model loading, `run_inference()`, `mask_to_geojson()`, and `process_folder()`. `app.py` is the PyQt5 GUI on top of it. Major sections:
 
 - **Model loading** — Three-backend system behind a `ModelWrapper` abstraction:
   - `TorchModelWrapper`: SMP architectures (unet, unet++, deeplabv3, fpn, etc.) rebuilt from `metadata.json`, or full `nn.Module` models loaded directly from `.pt`

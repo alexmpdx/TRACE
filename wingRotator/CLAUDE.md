@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-WingRotator rotates a Drosophila wing image (and its associated GeoJSONs) into a canonical right-side-up, distal-right orientation using a reliability-weighted Procrustes fit against a hardcoded landmark template. It's invoked as Stage 1.5 of `preprocessing` (between LandmarkLocator and HingeChopper) so every downstream stage operates on a normalized wing.
+WingRotator rotates a Drosophila wing image (and its associated GeoJSONs) into a canonical right-side-up, distal-right orientation using a reliability-weighted Procrustes fit against a hardcoded landmark template. It runs as Sub-stage 6 of `preprocessing`, the last step after segmentation, so every model sees the original orientation and identifyFeatures receives a consistently rotated image and GeoJSON set.
 
 **Rotation only by default — opt-in reflection.** The rotator defaults to rotation-only; left-vs-right wing chirality is preserved. Opposite-chirality inputs are detected and given an extra 180° rotation on top of the proper-rotation fit so anterior stays at the top of the image (the cost is that PD ends up distal-left instead of distal-right for those wings — a consistent AP split matters more for downstream stages than which way the wing points along the long axis).
 
-Pass `mirror_correct=True` (CLI: `--mirror-correct` / `--rotation-mirror-correct`; TRACE GUI: "Flip opposite-chirality wings to distal-right" checkbox) to instead apply a vertical reflection on top of the proper-rotation fit, so opposite-chirality wings end up distal-right AND anterior-up. This makes mixed left+right batches visually uniform, but biological chirality is flipped (a left wing is mirrored to look like a right wing).
+Pass `mirror_correct=True` (CLI: `--mirror-correct` / `--rotation-mirror-correct`; TRACE GUI: "Flip wing to canonical orientation" checkbox in `TRACE/inline_panels.py`) to instead apply a vertical reflection on top of the proper-rotation fit, so opposite-chirality wings end up distal-right AND anterior-up. This makes mixed left+right batches visually uniform, but biological chirality is flipped (a left wing is mirrored to look like a right wing).
 
 ## Running
 
@@ -45,7 +45,7 @@ Single file: `wing_rotator.py`. Pipeline flow inside `rotate_from_landmarks()`:
 
 ## Canonical template
 
-`CANONICAL_LANDMARKS` is hardcoded in `wing_rotator.py` — derived from one well-oriented wing in `testdata/testwings/-CTRL_PknRNAi_108870_0007*` with alula notch translated to the origin and DTip placed on the +X axis. Only relative geometry matters because the Procrustes fit absorbs scale and translation. To refine, average positions over a handful of well-oriented training wings.
+`CANONICAL_LANDMARKS` is hardcoded in `wing_rotator.py` — derived from one well-oriented wing, `-CTRL_PknRNAi_108870_0007`, whose files are now in `old_DO_NOT_USE/testdata/testwings/`, with alula notch translated to the origin and DTip placed on the +X axis. Only relative geometry matters because the Procrustes fit absorbs scale and translation. To refine, average positions over a handful of well-oriented training wings.
 
 ## Weight formula
 
@@ -69,25 +69,22 @@ In TRACE/preprocessing this flag is wired to the existing `--include-unreliable-
 `preprocessing.pipeline.run_rotation()` is the bridge. It:
 
 1. Calls `rotate_from_landmarks()` and gets back the rotated image path + result.
-2. Applies the same affine to the in-memory `landmarks: dict[name, (x, y)]` so the hinge stage sees rotated coordinates without reloading.
+2. Applies the same affine to the in-memory `landmarks: dict[name, (x, y)]` so downstream consumers get rotated coordinates without reloading.
 3. Returns `(rotated_image_path, rotated_landmarks_geojson_path, rotated_landmarks_dict, RotationResult)`.
 
-`process_single_image()` then rebinds `image_path`, recomputes `stem`/`ext`/`raster_ext`, and updates `PipelineResult.rotated_*` fields. Every downstream stage (hinge chop, segmentation) sees the rotated image and inherits a `_rotated` infix in its filenames.
-
-When Stage 0 (wing isolation) ran, the wing-isolation GeoJSON is passed in `extra_geojsons` so it stays aligned with the rotated image; `result.wing_geojson_path` is updated to the rotated version.
+`process_single_image()` rotates the un-masked image so overlays render on the full background. It passes the wing-isolation and segmentation GeoJSONs as `extra_geojsons`, repoints `PipelineResult` at their rotated copies, fills the `rotated_*` fields, and sets `processed_image_path` to the rotated image, which TRACE Stage 2 reads.
 
 ## Output naming
 
 - Image: `<stem>_rotated.<ext>` (e.g. `wing_rotated.tif`)
 - Landmarks GeoJSON: `<stem>_rotated_landmarks.geojson`
 - Extra GeoJSONs: `<extra_stem>_rotated.geojson`
-- Downstream artifacts inherit the rotated stem: `<stem>_rotated_chopped.<ext>`, `<stem>_rotated.geojson` (segmentation), etc.
 
 ## Toggle
 
 Default-on. Disable via:
 - `--no-rotation` on `preprocessing/run_cli.py` and `TRACE/run_cli.py`
-- The "Rotate to canonical orientation (Stage 1.5)" checkbox in TRACE Settings → Landmarks tab (persisted to QSettings)
+- The "Rotate wing" checkbox in `TRACE/inline_panels.py`
 - `do_rotation=False` to `process_folder()` / `process_single_image()` / `trace_folder()`
 
 ## Code style
