@@ -100,5 +100,12 @@ ome-types
 # on every HTTPS request because there's no reachable system trust store.
 certifi
 
+# --- Integrations ----------------------------------------------------------
+# In-GUI MCP server (Advanced Settings → Integrations, off by default) that
+# lets Claude Code / other MCP clients drive the TRACE window. Imported
+# lazily by TRACE/mcp_server.py the first time the toggle is switched on.
+# 2.x renamed FastMCP → MCPServer and moved to httpx2; pin below 3.
+mcp>=2,<3
+
 # --- Build tools (PyInstaller itself) --------------------------------------
 pyinstaller>=6.0

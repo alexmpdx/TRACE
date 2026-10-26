@@ -198,6 +198,43 @@ mapThemVeins/
 
 ---
 
+## Controlling TRACE from an agent (MCP)
+
+TRACE can expose its main window as a [Model Context Protocol](https://modelcontextprotocol.io)
+server so an MCP client — Claude Code, Claude Desktop, the MCP Inspector — can set the
+input/output folders, pick models and outputs, start / pause / resume / cancel a run, poll
+progress, read the log and find the results. Everything the client does shows up live in
+the GUI, exactly as if you had clicked it.
+
+It is **off by default**. To turn it on: **Advanced Settings → Integrations → Enable MCP
+server**, click OK, and the status line shows the URL (`http://127.0.0.1:8765/mcp` unless
+you change the port). The server listens on this computer only and has no authentication,
+so switch it off when you are not using it.
+
+Register it with Claude Code once (the Integrations tab has a *Copy Claude Code command*
+button for this):
+
+```bash
+claude mcp add --transport http trace http://127.0.0.1:8765/mcp
+```
+
+A checked-in `.mcp.json` at the repo root does the same for anyone opening this
+repository in Claude Code; it shows as disconnected whenever TRACE is not running with
+the toggle on, which is expected.
+
+Tools: `get_state`, `set_input_folder`, `set_output_folder`, `set_scale`, `set_gui_state`,
+`list_output_types`, `get_pipeline_config`, `update_pipeline_config`, `list_presets`,
+`apply_preset`, `list_images`, `set_skipped`, `start_run`, `pause_run`, `resume_run`,
+`cancel_run`, `get_run_status`, `wait_for_run`, `get_log`, `get_results`. If TRACE needs a
+human — a missing scale, the JPEG warning, a resume or cancel confirmation — the tool
+reply says `awaiting_user_prompt` and the dialog waits on screen for a click.
+
+Requires the `mcp` Python package (`pip install "mcp>=2,<3"`; bundled in the Windows
+installer). Without it the toggle reports *mcp package not installed* and nothing else
+changes.
+
+---
+
 ## Development
 
 ### Code style

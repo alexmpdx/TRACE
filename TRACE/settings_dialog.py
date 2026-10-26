@@ -250,6 +250,11 @@ _FIELD_TOOLTIPS: dict[str, str] = {
         "Abort the wing if any checked vein is missing (not traced). Leave all unchecked (default) "
         "to never abort for a missing vein."
     ),
+    "boundary_polygon_filter_enabled": (
+        "Reject wings whose wing-margin landmarks (subcostal break → L2.d → L3.d → L4.d → L5.d → "
+        "alula notch → L4-L5 → L1-Rs) form a self-intersecting polygon — i.e. at least one landmark "
+        "is grossly misplaced. No threshold; runs before the image is read."
+    ),
 }
 
 
@@ -331,6 +336,9 @@ class PipelineConfigDialog(QDialog):
         active_rescale_target: str = "segmentation",
         rescale_tolerance_low: float = 0.85,
         rescale_tolerance_high: float = 1.15,
+        mcp_server_enabled: bool = False,
+        mcp_server_port: int = 8765,
+        mcp_server_status: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle("Pipeline Settings")
@@ -391,6 +399,12 @@ class PipelineConfigDialog(QDialog):
         self._initial_active_rescale_target = active_rescale_target or "segmentation"
         self._initial_rescale_tolerance_low = rescale_tolerance_low
         self._initial_rescale_tolerance_high = rescale_tolerance_high
+        # Integrations tab — in-GUI MCP server (TRACE/mcp_server.py). App-level
+        # preference, not a PipelineConfig field; the host window owns the
+        # QSettings keys and start/stop, this dialog only edits the values.
+        self._initial_mcp_enabled = bool(mcp_server_enabled)
+        self._initial_mcp_port = int(mcp_server_port)
+        self._initial_mcp_status = mcp_server_status or ""
         self._build_ui()
         self._load_from_config(config)
         self._include_unreliable_landmarks_chk.setChecked(include_unreliable_landmarks)
@@ -567,6 +581,7 @@ class PipelineConfigDialog(QDialog):
         self._tabs.addTab(self._wrap_scrollable(self._build_wing_graph_tab()), "Wing Graph")
         self._tabs.addTab(self._wrap_scrollable(self._build_tracing_tab()), "Tracing")
         self._tabs.addTab(self._wrap_scrollable(self._build_intervein_tab()), "Intervein")
+        self._tabs.addTab(self._wrap_scrollable(self._build_integrations_tab()), "Integrations")
 
         # Rebuild the Landmarks tab whenever the landmark model path changes
         # so the gate panel re-reads gate_config.yaml from the new folder.
@@ -795,6 +810,12 @@ class PipelineConfigDialog(QDialog):
     # -----------------------------------------------------------------------
     def get_include_unreliable_landmarks(self) -> bool:
         return self._include_unreliable_landmarks_chk.isChecked()
+
+    def get_mcp_server_enabled(self) -> bool:
+        return self._mcp_enabled_chk.isChecked()
+
+    def get_mcp_server_port(self) -> int:
+        return int(self._mcp_port_spin.value())
 
     def get_gate_override(self) -> dict | None:
         """Confidence-gate override built from the Landmarks tab, or None if untouched."""
@@ -1445,6 +1466,54 @@ class PipelineConfigDialog(QDialog):
         layout.addStretch()
         return w
 
+    def _build_integrations_tab(self) -> QWidget:
+        """MCP server toggle (off by default) — lets an agent drive this window."""
+        from PyQt5.QtWidgets import QApplication
+
+        from TRACE.mcp_server import MAX_PORT, MIN_PORT, claude_code_add_command
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        gb = QGroupBox("MCP server (agent control)")
+        form = QFormLayout(gb)
+        self._mcp_enabled_chk = QCheckBox("Enable MCP server")
+        self._mcp_enabled_chk.setToolTip(
+            "Lets an MCP client such as Claude Code control this TRACE window — set folders, "
+            "pick outputs, start/pause/cancel runs and read results — over "
+            "http://127.0.0.1:<port>/mcp. Listens on this computer only. Off by default."
+        )
+        self._mcp_enabled_chk.setChecked(self._initial_mcp_enabled)
+        form.addRow(self._mcp_enabled_chk)
+
+        self._mcp_port_spin = QSpinBox()
+        self._mcp_port_spin.setRange(MIN_PORT, MAX_PORT)
+        self._mcp_port_spin.setValue(self._initial_mcp_port)
+        self._mcp_port_spin.setToolTip("Local TCP port the server listens on. Change it if another program uses it.")
+        form.addRow("Port:", self._mcp_port_spin)
+
+        self._mcp_status_label = QLabel(self._initial_mcp_status or "Not running")
+        self._mcp_status_label.setWordWrap(True)
+        self._mcp_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Status:", self._mcp_status_label)
+
+        copy_btn = QPushButton("Copy Claude Code command")
+        copy_btn.setToolTip("Copies the `claude mcp add …` one-liner for the port above to the clipboard.")
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(claude_code_add_command(self._mcp_port_spin.value()))
+        )
+        form.addRow(copy_btn)
+        layout.addWidget(gb)
+
+        note = QLabel(
+            "Changes apply when you click OK. While enabled, any program on this computer can drive "
+            "TRACE through the server; turn it off when you are not using it."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch()
+        return w
+
     def _build_quality_tab(self) -> QWidget:
         """Merged quality-gates editor: per-landmark confidence gates (rebuilt
         in place when the landmark model changes) + garbage-detector data-quality
@@ -1518,6 +1587,11 @@ class PipelineConfigDialog(QDialog):
         from identify_features.models.topology import ALL_CANONICAL_VEINS
 
         self._add_checkbox_set(form, "required_veins", "Require", list(ALL_CANONICAL_VEINS))
+        layout.addWidget(gb)
+
+        gb = QGroupBox("Boundary landmarks (polygon self-intersection)")
+        form = QFormLayout(gb)
+        self._add_bool(form, "boundary_polygon_filter_enabled", "Enable boundary-polygon filter")
         layout.addWidget(gb)
 
         layout.addStretch()
@@ -1728,6 +1802,11 @@ class PipelineConfigDialog(QDialog):
         # PipelineConfig fields are wiped.
         self._include_unreliable_landmarks_chk.setChecked(False)
         self._wing_expand_spin.setValue(0.05)
+        # MCP server is off by default; the port snaps back to the standard one.
+        from TRACE.mcp_server import DEFAULT_PORT as _MCP_DEFAULT_PORT
+
+        self._mcp_enabled_chk.setChecked(False)
+        self._mcp_port_spin.setValue(_MCP_DEFAULT_PORT)
         # Reset model paths to the bundled defaults at TRACE/models/* so
         # Restore Defaults gives the user a runnable configuration on first
         # touch. Missing default folders fall back to "" (empty), which

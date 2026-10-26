@@ -48,6 +48,10 @@ from TRACE.inline_panels import (
     _DependentRow,
     _pulse_text,
 )
+from TRACE.mcp_server import DEFAULT_PORT as MCP_DEFAULT_PORT
+from TRACE.mcp_server import QSETTINGS_ENABLED as MCP_QSETTINGS_ENABLED
+from TRACE.mcp_server import QSETTINGS_PORT as MCP_QSETTINGS_PORT
+from TRACE.mcp_server import McpService, clamp_port
 from TRACE.ood_check import format_report_line, preflight_batch
 from TRACE.output_tooltips import output_tooltip_html
 from TRACE.pipeline import (
@@ -932,6 +936,14 @@ class TraceWindow(QMainWindow):
         self._do_rotation = False
         self._rotation_mirror_correct = False
         self._gate_override: dict | None = None
+        # In-GUI MCP server (Advanced Settings → Integrations). Off by default;
+        # the service object is built lazily on first start so a missing
+        # `mcp` package can never break window construction. _last_progress
+        # caches the latest _on_progress args for the get_run_status tool.
+        self._mcp_server_enabled = False
+        self._mcp_server_port = MCP_DEFAULT_PORT
+        self._mcp_service: Optional[McpService] = None
+        self._last_progress: Optional[tuple] = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
         self._wing_isolation_model_path = _default_model_path("wing_isolation")
@@ -1056,6 +1068,10 @@ class TraceWindow(QMainWindow):
         # panel exposes an opt-out checkbox backed by the same setting.
         if self.settings.value("auto_update_check_enabled", True, type=bool):
             QTimer.singleShot(0, self._maybe_auto_check_updates)
+        # In-GUI MCP server: off by default; only started when the user
+        # enabled it in Advanced Settings → Integrations on a prior launch.
+        if self._mcp_server_enabled:
+            QTimer.singleShot(0, self._apply_mcp_setting)
         # Post-run restore prompt. Deferred to QTimer so the window is
         # visible before the dialog appears — otherwise the prompt
         # races the first paint and shows up against a blank background.
@@ -2578,6 +2594,9 @@ class TraceWindow(QMainWindow):
                 active_rescale_target=self._active_rescale_target,
                 rescale_tolerance_low=self._rescale_tolerance_low,
                 rescale_tolerance_high=self._rescale_tolerance_high,
+                mcp_server_enabled=self._mcp_server_enabled,
+                mcp_server_port=self._mcp_server_port,
+                mcp_server_status=self._mcp_status_text(),
             )
         except BaseException as exc:  # noqa: BLE001
             import traceback as _tb
@@ -2632,6 +2651,9 @@ class TraceWindow(QMainWindow):
         self._active_rescale_target = dlg.get_active_rescale_target()
         self._rescale_tolerance_low = dlg.get_rescale_tolerance_low()
         self._rescale_tolerance_high = dlg.get_rescale_tolerance_high()
+        self._mcp_server_enabled = dlg.get_mcp_server_enabled()
+        self._mcp_server_port = dlg.get_mcp_server_port()
+        self._apply_mcp_setting()
         # Dialog may have edited fields the inline General panel mirrors
         # (e.g. synthesize_missing_crossveins on the Tracing tab) — pull
         # current state into the panel widgets so they stay in sync.
@@ -2642,6 +2664,36 @@ class TraceWindow(QMainWindow):
             self.auto_detect_um_per_px_chk.blockSignals(True)
             self.auto_detect_um_per_px_chk.setChecked(bool(getattr(self.config, "auto_detect_um_per_px", False)))
             self.auto_detect_um_per_px_chk.blockSignals(False)
+
+    # -----------------------------------------------------------------------
+    # In-GUI MCP server (Advanced Settings → Integrations)
+    # -----------------------------------------------------------------------
+    def _apply_mcp_setting(self) -> None:
+        """Start / stop / re-port the MCP server to match the current preference.
+
+        Called on dialog OK and once at launch. Never raises: the service
+        reports failures (missing package, port in use) as status text that
+        the Integrations tab shows next time it is opened, and logs them.
+        """
+        if self._mcp_service is None:
+            if not self._mcp_server_enabled:
+                return
+            self._mcp_service = McpService(self)
+        status = self._mcp_service.apply(self._mcp_server_enabled, self._mcp_server_port)
+        if self._mcp_server_enabled:
+            self._log(f"MCP server: {status}")
+
+    def _stop_mcp_server(self) -> None:
+        if self._mcp_service is not None:
+            try:
+                self._mcp_service.stop()
+            except Exception:  # noqa: BLE001 — never block close on this
+                logging.getLogger(__name__).exception("mcp_server: stop failed")
+
+    def _mcp_status_text(self) -> str:
+        if self._mcp_service is None:
+            return "Not running"
+        return self._mcp_service.status_text
 
     def _on_settings_dialog_finished(self) -> None:
         """Drop the cached dialog reference so the next Advanced click
@@ -2695,6 +2747,10 @@ class TraceWindow(QMainWindow):
         self._gate_override = None
         self._wing_expand_fraction = 0.05
         self._wing_isolation_enabled = False
+        # MCP server back to off / default port — and actually stopped.
+        self._mcp_server_enabled = False
+        self._mcp_server_port = MCP_DEFAULT_PORT
+        self._stop_mcp_server()
         # Wipe-my-memories re-applies the bundled defaults (TRACE/models/*)
         # so a fresh user gets working model paths without having to browse.
         # The Settings dialog's Restore Defaults button does NOT touch these.
@@ -2809,6 +2865,8 @@ class TraceWindow(QMainWindow):
         s.setValue("landmark_size_scale", str(self._landmark_size_scale))
         s.setValue("show_compartment_labels", self._show_compartment_labels)
         s.setValue("include_unreliable_landmarks", self._include_unreliable_landmarks)
+        s.setValue(MCP_QSETTINGS_ENABLED, bool(self._mcp_server_enabled))
+        s.setValue(MCP_QSETTINGS_PORT, int(self._mcp_server_port))
         s.setValue("do_rotation", self._do_rotation)
         s.setValue("rotation_mirror_correct", self._rotation_mirror_correct)
         import json as _json
@@ -2983,6 +3041,8 @@ class TraceWindow(QMainWindow):
         saved_iul = s.value("include_unreliable_landmarks", None)
         if saved_iul is not None:
             self._include_unreliable_landmarks = saved_iul == "true" or saved_iul is True
+        self._mcp_server_enabled = bool(s.value(MCP_QSETTINGS_ENABLED, False, type=bool))
+        self._mcp_server_port = clamp_port(s.value(MCP_QSETTINGS_PORT, MCP_DEFAULT_PORT))
         saved_gate = s.value("gate_override_json", "")
         if saved_gate:
             try:
@@ -4133,7 +4193,8 @@ class TraceWindow(QMainWindow):
             target_um_per_px = self._segmentation_target_um_per_px
 
         # No-quality-gates rerun: build a deep copy of self.config with the
-        # four garbage-detector flags flipped off, just for this run. The
+        # garbage-detector flags (solidity, fragmentation, vein/intervein
+        # association, required veins, boundary polygon) flipped off, just for this run. The
         # original self.config is untouched, so _save_settings(...) below
         # (and the QSettings write on TRACE close) persists the user's saved
         # values — restarting TRACE doesn't inherit the temporarily-disabled
@@ -4146,7 +4207,9 @@ class TraceWindow(QMainWindow):
             run_config.solidity_filter_enabled = False
             run_config.fragmentation_filter_enabled = False
             run_config.vein_association_filter_enabled = False
+            run_config.intervein_association_filter_enabled = False
             run_config.required_veins = []
+            run_config.boundary_polygon_filter_enabled = False
         run_gate_override = pending_gate_override if pending_gate_override is not None else self._gate_override
 
         self.worker = TraceWorker(
@@ -5149,6 +5212,7 @@ class TraceWindow(QMainWindow):
         _refresh_progress, which is called both here and from a 250ms QTimer
         so the bar interpolates smoothly between completion events.
         """
+        self._last_progress = (idx, total, name, stage, detail)
         # First real progress event of this run — flip the progress bar
         # out of the indeterminate "Preparing…" busy animation started
         # in _run_pipeline and back into the (0, 100) percent-based mode
@@ -6216,6 +6280,9 @@ class TraceWindow(QMainWindow):
             self._flush_manifest_if_dirty()
         except Exception:  # noqa: BLE001
             pass
+        # Stop the MCP server thread (bounded join) so a connected client
+        # sees a clean disconnect rather than a vanished socket.
+        self._stop_mcp_server()
         super().closeEvent(event)
 
 

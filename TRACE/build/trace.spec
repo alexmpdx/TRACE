@@ -299,6 +299,19 @@ if sys.platform == "win32":
 # Belt-and-suspenders: explicit submodule lists for the ones that
 # matter most. collect_all should cover these but a duplicate entry is
 # cheaper than a missed one.
+# In-GUI MCP server (TRACE/mcp_server.py, Advanced Settings → Integrations).
+# `mcp` is imported lazily at toggle time, so static analysis never sees it;
+# uvicorn also loads its loop/protocol/lifespan implementations by string.
+hiddenimports += collect_submodules("mcp")
+hiddenimports += [
+    "uvicorn.logging",
+    "uvicorn.loops.auto",
+    "uvicorn.loops.asyncio",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.websockets.auto",
+    "uvicorn.lifespan.on",
+]
 hiddenimports += collect_submodules("napari")
 hiddenimports += collect_submodules("vispy")
 hiddenimports += collect_submodules("magicgui")
