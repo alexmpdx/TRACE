@@ -151,7 +151,8 @@ APPEARANCE_FIELDS = {
 #                                is already on the config, no re-read.
 #   - solidity_*, fragmentation_*, vein_association_*,
 #     intervein_association_*, required_veins,
-#     max_unassigned_vein_frac, max_unassigned_intervein_frac —
+#     max_unassigned_vein_frac, max_unassigned_intervein_frac,
+#     boundary_polygon_filter_enabled —
 #                                garbage-detector filters; they abort a
 #                                run at pipeline hooks but never change
 #                                any pixel or geometry the preview draws.
@@ -185,6 +186,10 @@ _INERT_FIELDS = {
     # tissue — same shape as the vein-association filter.
     "intervein_association_filter_enabled",
     "max_unassigned_intervein_frac",
+    # Boundary-polygon filter (added 2026-10-19 in
+    # identify_features/garbage_detector/filters/boundary_polygon.py). Aborts
+    # wings whose margin landmarks form a self-intersecting ring.
+    "boundary_polygon_filter_enabled",
 }
 
 

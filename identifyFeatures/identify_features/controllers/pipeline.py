@@ -161,11 +161,17 @@ def identify_wing(
     result.wing_outline = wing_outline
     result.landmarks = landmarks
 
-    # Garbage detection (earliest hook): abort wings whose outline is missing/degenerate
-    # or whose solidity is out of range. Runs before the image read so bad data short-
-    # circuits as early as possible. Raises GarbageRejection, caught by callers (CLI/TRACE).
+    # Garbage detection (earliest hook): abort wings whose margin landmarks form a
+    # self-intersecting polygon, whose outline is missing/degenerate, or whose solidity is
+    # out of range. Runs before the image read so bad data short-circuits as early as
+    # possible — and before the skip_vein_tracing early return below, so the landmark-only
+    # outputs are screened too. Raises GarbageRejection, caught by callers (CLI/TRACE).
     gd_ctx = FilterContext(
-        config=config, specimen_id=specimen_id, wing_outline=wing_outline, all_polys=all_polys
+        config=config,
+        specimen_id=specimen_id,
+        wing_outline=wing_outline,
+        all_polys=all_polys,
+        landmarks=landmarks,
     )
     run_stage_filters(FilterStage.WING_OUTLINE, gd_ctx)
     result.wing_solidity = gd_ctx.scratch.get("wing_solidity")

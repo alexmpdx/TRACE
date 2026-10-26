@@ -17,13 +17,17 @@ from identify_features.garbage_detector.base import (
     filter_label,
     run_stage_filters,
 )
+from identify_features.garbage_detector.filters.boundary_polygon import (
+    BOUNDARY_LANDMARK_ORDER,
+    boundary_polygon_crossings,
+)
 from identify_features.garbage_detector.filters.fragmentation import compute_secondary_fraction
+from identify_features.garbage_detector.filters.intervein_association import compute_unassigned_intervein_fraction
 from identify_features.garbage_detector.filters.solidity import (
     compute_solidity,
     precompute_solidities,
     resolve_solidity_range,
 )
-from identify_features.garbage_detector.filters.intervein_association import compute_unassigned_intervein_fraction
 from identify_features.garbage_detector.filters.vein_association import compute_unassigned_vein_fraction
 from identify_features.garbage_detector.filters.vein_presence import missing_required_veins, present_vein_ids
 from identify_features.garbage_detector.registry import REGISTRY, register_filter
@@ -46,6 +50,8 @@ __all__ = [
     "precompute_solidities",
     "resolve_solidity_range",
     "compute_secondary_fraction",
+    "BOUNDARY_LANDMARK_ORDER",
+    "boundary_polygon_crossings",
     "compute_unassigned_vein_fraction",
     "compute_unassigned_intervein_fraction",
     "missing_required_veins",

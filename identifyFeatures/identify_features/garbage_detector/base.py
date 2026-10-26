@@ -78,6 +78,7 @@ FILTER_LABELS: dict[str, str] = {
     "vein_association": "uncalled vein tissue",
     "intervein_association": "uncalled intervein tissue",
     "vein_presence": "missing veins",
+    "boundary_polygon": "crossed boundary landmarks",
 }
 
 

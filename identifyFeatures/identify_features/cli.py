@@ -45,6 +45,7 @@ def _garbage_settings_from_args(args) -> dict:
         "intervein_association_enabled": args.intervein_association_filter_enabled,
         "max_unassigned_intervein_frac": args.max_unassigned_intervein_frac,
         "required_veins": args.require_vein,
+        "boundary_polygon_enabled": args.boundary_polygon_filter_enabled,
     }
 
 
@@ -66,6 +67,7 @@ def _apply_garbage_settings(config, s: dict):
     if s["max_unassigned_intervein_frac"] is not None:
         config.max_unassigned_intervein_frac = float(s["max_unassigned_intervein_frac"])
     config.required_veins = list(s["required_veins"] or [])
+    config.boundary_polygon_filter_enabled = s["boundary_polygon_enabled"]
     return config
 
 
@@ -157,7 +159,9 @@ def _process_one(args_tuple):
                 )
                 if all_overlays:
                     render_ap_overlay_to_file(
-                        base_img, result, output_dir / f"{stem}_ap_overlay.png",
+                        base_img,
+                        result,
+                        output_dir / f"{stem}_ap_overlay.png",
                         show_compartment_labels=show_compartment_labels,
                     )
                     render_cv_ratio_overlay_to_file(
@@ -380,6 +384,13 @@ def main():
         help="Abort the wing if this canonical vein is missing (repeatable). Default: none required.",
     )
     parser.add_argument(
+        "--no-boundary-polygon-filter",
+        dest="boundary_polygon_filter_enabled",
+        action="store_false",
+        default=True,
+        help="Disable the boundary-polygon filter (does not abort wings whose margin landmarks form a self-intersecting ring)",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -457,7 +468,9 @@ def _run_single(args):
             if args.all_overlays:
                 ap_path = args.output_dir / f"{result.specimen_id}_ap_overlay.png"
                 if render_ap_overlay_to_file(
-                    base_img, result, ap_path,
+                    base_img,
+                    result,
+                    ap_path,
                     show_compartment_labels=args.show_compartment_labels,
                 ):
                     print(f"AP overlay: {ap_path}")

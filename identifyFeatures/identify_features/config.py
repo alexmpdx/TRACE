@@ -265,6 +265,14 @@ class PipelineConfig:
     # never abort for a missing vein. Valid ids: costa, L1, L2, L3, L4, L5, L6, ACV, PCV, Rs.
     required_veins: list[str] = field(default_factory=list)
 
+    # Boundary-polygon filter (WING_OUTLINE hook, before the image read). Joins the eight
+    # wing-margin landmarks (subcostal break → L2.d → L3.d → L4.d → L5.d → alula notch → L4-L5
+    # → L1-Rs) into a ring and aborts if any two edges cross — i.e. at least one landmark is
+    # grossly misplaced (on the hinge, on a neighbouring wing, stacked on another landmark).
+    # Parameter-free: invariant to handedness/rotation/scale. Validated at 0/117 false
+    # positives on good wings and 4/47 true positives on identifyFeatures/problemWings/.
+    boundary_polygon_filter_enabled: bool = True
+
     # -- Overlay opacity --
     # 0.0 = fully transparent (invisible), 1.0 = fully opaque. Defaults match
     # the historical hardcoded values: vein centerlines/tissue fully opaque,
