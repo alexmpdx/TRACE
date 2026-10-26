@@ -25,9 +25,27 @@ from identify_features.views.csv_export import export_csv, export_csv_batch
 from identify_features.views.geojson_export import export_geojson
 from identify_features.views.overlay import (
     render_ap_overlay_to_file,
+    render_boundary_polygon_overlay_to_file,
     render_cv_ratio_overlay_to_file,
     render_overlay_to_file,
 )
+
+
+def _render_boundary_polygon_from_files(lm_path: Path, img_path: Path, out_path: Path) -> bool:
+    """Boundary-polygon overlay straight from the landmarks GeoJSON + image.
+
+    Used after a ``GarbageRejection`` — there is no ``WingResult`` then, and the
+    self-intersecting ring is exactly what the user wants to see for those wings.
+    """
+    from identify_features.models.geojson_io import load_landmarks_geojson
+
+    base_img = imread_any(img_path)
+    if base_img is None:
+        return False
+    try:
+        return render_boundary_polygon_overlay_to_file(base_img, load_landmarks_geojson(lm_path), out_path)
+    except Exception:
+        return False
 
 
 def _garbage_settings_from_args(args) -> dict:
@@ -167,6 +185,9 @@ def _process_one(args_tuple):
                     render_cv_ratio_overlay_to_file(
                         base_img, result, output_dir / f"{stem}_cv_ratio_overlay.png", um_per_px=config.um_per_px
                     )
+                    render_boundary_polygon_overlay_to_file(
+                        base_img, result.landmarks, output_dir / f"{stem}_boundary_polygon_overlay.png"
+                    )
 
         n_veins = sum(1 for v in result.veins if v.centerline is not None)
         if skip_intervein_regions:
@@ -174,6 +195,8 @@ def _process_one(args_tuple):
         n_regions = len(result.intervein_regions)
         return stem, True, f"{stem}: {n_veins} veins, {n_regions}/7 regions", result
     except GarbageRejection as e:
+        if all_overlays and img_path is not None:
+            _render_boundary_polygon_from_files(lm_path, img_path, output_dir / f"{stem}_boundary_polygon_overlay.png")
         return stem, False, f"{stem}: ABORTED — {e}", None
     except Exception as e:
         return stem, False, f"{stem}: ERROR — {e}", None
@@ -233,7 +256,10 @@ def main():
     parser.add_argument(
         "--all-overlays",
         action="store_true",
-        help="Also render the AP-compartment and CV-ratio overlays (slow; off by default)",
+        help=(
+            "Also render the AP-compartment, CV-ratio and boundary-landmark-polygon overlays (off by default). "
+            "The boundary-polygon overlay is written even for wings a quality filter aborts."
+        ),
     )
     parser.add_argument(
         "--show-vein-tissue",
@@ -431,6 +457,12 @@ def _run_single(args):
         )
     except GarbageRejection as e:
         print(f"ABORTED — {e}")
+        if args.all_overlays and args.image is not None:
+            # Same specimen id identify_wing would have used.
+            specimen_id = args.detection.stem.replace("_detections", "")
+            bp_path = args.output_dir / f"{specimen_id}_boundary_polygon_overlay.png"
+            if _render_boundary_polygon_from_files(args.landmarks, args.image, bp_path):
+                print(f"Boundary polygon overlay: {bp_path}")
         sys.exit(2)
 
     out_path = args.output_dir / f"{result.specimen_id}_output.geojson"
@@ -478,6 +510,10 @@ def _run_single(args):
                 cv_path = args.output_dir / f"{result.specimen_id}_cv_ratio_overlay.png"
                 if render_cv_ratio_overlay_to_file(base_img, result, cv_path, um_per_px=config.um_per_px):
                     print(f"CV ratio overlay: {cv_path}")
+
+                bp_path = args.output_dir / f"{result.specimen_id}_boundary_polygon_overlay.png"
+                if render_boundary_polygon_overlay_to_file(base_img, result.landmarks, bp_path):
+                    print(f"Boundary polygon overlay: {bp_path}")
 
     n_veins = sum(1 for v in result.veins if v.centerline is not None)
     if config.skip_intervein_regions:

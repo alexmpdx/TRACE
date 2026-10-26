@@ -79,6 +79,11 @@ _INTERMEDIATE_TOOLTIPS: dict[str, str] = {
         "Stage 2 (hinge chop) writes the hinge-removed image — the input " "to landmark detection and segmentation."
     ),
     "landmarks_image": "Stage 2 writes a per-image landmark-overlay PNG.",
+    "boundary_polygon_overlay": (
+        "Per-image PNG of the wing-margin landmark ring the boundary-polygon quality filter tests: "
+        "green = simple, red = self-intersecting (wing aborted), amber = too few landmarks to test. "
+        "Drawn from the Stage-1 landmarks, so it is written for aborted wings too."
+    ),
     "landmarks_geojson": "Stage 2 writes per-image landmark predictions as GeoJSON points.",
     "segmentation_geojson": ("Stage 2 writes the vein/intervein semantic-segmentation polygons as GeoJSON."),
     "intervein_geojson": "Stage 3 (identifyFeatures) writes the named intervein-region polygons as GeoJSON.",

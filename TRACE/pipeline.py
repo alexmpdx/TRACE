@@ -43,6 +43,7 @@ OUTPUT_TYPES = OrderedDict(
         ("chopped_image", "Wing after hinge removal"),
         ("landmarks_overlay", "Landmark points overlay"),
         ("landmarks_geojson", "Landmark predictions GeoJSON"),
+        ("boundary_polygon_overlay", "Boundary landmark polygon overlay"),
         ("segmentation_overlay", "Vein/intervein segmentation overlay"),
         ("segmentation_geojson", "Vein/intervein segmentation GeoJSON"),
         ("geojson", "Named vein and/or intervein GeoJSON"),
@@ -66,6 +67,12 @@ OUTPUT_TOOLTIPS = {
     "landmarks_geojson": (
         "Save the raw per-image landmark predictions as GeoJSON points "
         "(post-rotation, so coordinates align with the final overlays)."
+    ),
+    "boundary_polygon_overlay": (
+        "Render the ring the boundary-polygon quality filter tests (subcostal break → L2.d → L3.d → "
+        "L4.d → L5.d → alula notch → L4-L5 → L1-Rs) on a PNG copy of the input image: green when the "
+        "ring is simple, red when it self-intersects (the wing is aborted), amber when too few "
+        "boundary landmarks were found to test. Written for aborted wings too."
     ),
     "segmentation_overlay": ("Render the raw vein/intervein semantic-segmentation classes on top of the image."),
     "segmentation_geojson": (
@@ -287,6 +294,7 @@ INTERMEDIATE_OUTPUTS = frozenset(
         "chopped_image",
         "landmarks_overlay",
         "landmarks_geojson",
+        "boundary_polygon_overlay",
         "segmentation_overlay",
         "segmentation_geojson",
         "geojson",
@@ -307,6 +315,9 @@ class TraceResult:
     wing_isolated_image_path: Optional[Path] = None
     landmarks_overlay_path: Optional[Path] = None
     landmarks_geojson_path: Optional[Path] = None
+    # Written even when Stage 2 aborted the wing (quality-gate rejection), since the
+    # self-intersecting ring is exactly what the user wants to look at in that case.
+    boundary_polygon_overlay_path: Optional[Path] = None
     segmentation_overlay_path: Optional[Path] = None
     segmentation_geojson_path: Optional[Path] = None
     error: Optional[str] = None
@@ -328,6 +339,7 @@ _OUTPUT_STAGE_REQUIREMENTS = {
     "chopped_image": (True, True, False),
     "landmarks_overlay": (True, False, False),
     "landmarks_geojson": (True, False, False),
+    "boundary_polygon_overlay": (True, False, False),  # drawn straight from the Stage-1 landmarks
     "segmentation_overlay": (True, True, True),
     "segmentation_geojson": (True, True, True),
     "geojson": (True, True, True),
@@ -685,6 +697,53 @@ def _render_landmarks_overlay(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     return bool(cv2.imwrite(str(out_path), rendered))
+
+
+def _render_boundary_polygon_overlay(
+    base_bgr,
+    landmarks_geojson_path: Path,
+    out_path: Path,
+    inverse_scale: float = 1.0,
+    landmark_size_scale: float = 1.0,
+    show_landmark_labels: bool = True,
+) -> bool:
+    """Render the boundary-landmark ring from a landmarks GeoJSON over the base image.
+
+    Reads the Stage-1 GeoJSON directly (not a ``WingResult``) so the overlay can be
+    produced for wings that ``identify_wing`` never returned — the quality-gate
+    rejections — and on the landmarks-only CSV fast path where ``identify_wing`` never
+    runs. The ring's colour is decided by recomputing the boundary-polygon test on the
+    loaded points, so it reflects the geometry even when the filter itself was disabled.
+
+    ``inverse_scale`` multiplies every coordinate before drawing (rescaled-pixel GeoJSON
+    over an original-resolution base), same contract as ``_render_landmarks_overlay``.
+    """
+    from identify_features.models.datatypes import Landmark as _Landmark
+    from identify_features.models.geojson_io import load_landmarks_geojson as _load_lm
+    from identify_features.views.overlay import render_boundary_polygon_overlay_to_file
+    from shapely.geometry import Point as _Point
+
+    try:
+        landmarks = _load_lm(Path(landmarks_geojson_path))
+    except Exception as exc:
+        logger.warning("boundary_polygon_overlay: cannot read %s: %s", landmarks_geojson_path, exc)
+        return False
+    if inverse_scale != 1.0:
+        landmarks = {
+            name: _Landmark(name=name, point=_Point(lm.x * inverse_scale, lm.y * inverse_scale), reliable=lm.reliable)
+            for name, lm in landmarks.items()
+        }
+    try:
+        return render_boundary_polygon_overlay_to_file(
+            base_bgr,
+            landmarks,
+            out_path,
+            landmark_size_scale=landmark_size_scale,
+            show_landmark_labels=show_landmark_labels,
+        )
+    except Exception:
+        logger.exception("boundary_polygon_overlay: render failed for %s", landmarks_geojson_path)
+        return False
 
 
 def build_cv_ratio_wing_result(
@@ -1328,6 +1387,46 @@ def _run(
             per_image_scale = getattr(preproc_result, "effective_um_per_px", None)
             if per_image_scale is None or per_image_scale <= 0:
                 per_image_scale = scale
+
+            def _load_overlay_base():
+                """Read the overlay base image in ORIGINAL-pixel space, or None.
+
+                Shared by the normal output block and the quality-gate rejection
+                handler (which still draws the boundary-polygon overlay). When Stage 1
+                rescaled, geometries are mapped back to original pixels, so the base
+                follows; rotation (Stage 6) stays baked in — only resolution is undone.
+                """
+                img_path = image_in_preproc if image_in_preproc.exists() else preproc_result.image_path
+                from TRACE.psd_loader import imread_any
+
+                img = imread_any(img_path)
+                if img is None:
+                    logger.warning("%s: could not read image for overlays, skipping PNG outputs", stem)
+                    return None
+                sf = getattr(preproc_result, "rescale_factor", 1.0)
+                if sf and sf != 1.0:
+                    from resolutionAdjust import inverse_resize_image
+
+                    img = inverse_resize_image(img, sf)
+                return img
+
+            def _write_boundary_polygon_overlay(base_img) -> Optional[Path]:
+                """Render ``<stem>_boundary_polygon_overlay.png`` from the Stage-1 landmarks."""
+                lm_gj = preproc_result.landmarks_geojson_path
+                if base_img is None or not lm_gj or not Path(lm_gj).exists():
+                    return None
+                sf = getattr(preproc_result, "rescale_factor", 1.0)
+                bp_path = output_dir / f"{stem}_boundary_polygon_overlay.png"
+                ok = _render_boundary_polygon_overlay(
+                    base_img,
+                    Path(lm_gj),
+                    bp_path,
+                    inverse_scale=(1.0 / sf) if sf and sf != 1.0 else 1.0,
+                    landmark_size_scale=landmark_size_scale,
+                    show_landmark_labels=show_landmark_labels,
+                )
+                return bp_path if ok else None
+
             try:
                 wing_result = None
                 if needs_analysis:
@@ -1383,26 +1482,12 @@ def _run(
                         "ap_overlay",
                         "cv_ratio_overlay",
                         "landmarks_overlay",
+                        "boundary_polygon_overlay",
                         "segmentation_overlay",
                     }
                     & outputs
                 )
-                base = None
-                if needs_base:
-                    img_path = image_in_preproc if image_in_preproc.exists() else preproc_result.image_path
-                    from TRACE.psd_loader import imread_any
-
-                    base = imread_any(img_path)
-                    if base is None:
-                        logger.warning("%s: could not read image for overlays, skipping PNG outputs", stem)
-                    elif rescale_factor and rescale_factor != 1.0:
-                        # Geometries above were mapped back to original-pixel space; the
-                        # overlay base needs to follow so coordinates land on the right
-                        # pixels. Rotation (Stage 6) stays baked in — only resolution
-                        # is undone, not orientation.
-                        from resolutionAdjust import inverse_resize_image
-
-                        base = inverse_resize_image(base, rescale_factor)
+                base = _load_overlay_base() if needs_base else None
 
                 want_vein = "vein_overlay" in outputs
                 want_intervein = "intervein_overlay" in outputs
@@ -1491,6 +1576,9 @@ def _run(
                             show_landmark_labels=show_landmark_labels,
                         ):
                             trace_result.landmarks_overlay_path = lm_ov_path
+
+                if "boundary_polygon_overlay" in outputs:
+                    trace_result.boundary_polygon_overlay_path = _write_boundary_polygon_overlay(base)
 
                 if "segmentation_overlay" in outputs and base is not None:
                     seg_gj = preproc_result.segmentation_geojson_path
@@ -1591,11 +1679,21 @@ def _run(
                 elapsed = time.time() - t0
                 stage = filter_label(e.verdict.filter_name)
                 logger.info("Analysis aborted for %s (%.1fs) [%s]: %s", stem, elapsed, stage, e)
-                stage2_slots[i] = TraceResult(
+                rejected = TraceResult(
                     image_path=preproc_result.image_path,
                     error=f"Aborted by quality gate ({stage}): {e}",
                     error_stage=stage,
                 )
+                # The boundary-polygon overlay is a diagnostic for exactly these wings, so
+                # it is written even though every other Stage-2 output is skipped. It only
+                # needs the Stage-1 landmarks + the image; never let a render problem mask
+                # the (expected) rejection.
+                if "boundary_polygon_overlay" in outputs:
+                    try:
+                        rejected.boundary_polygon_overlay_path = _write_boundary_polygon_overlay(_load_overlay_base())
+                    except Exception:
+                        logger.exception("%s: boundary-polygon overlay failed after quality-gate abort", stem)
+                stage2_slots[i] = rejected
             except Exception as e:
                 elapsed = time.time() - t0
                 logger.exception("Analysis failed for %s (%.1fs)", stem, elapsed)

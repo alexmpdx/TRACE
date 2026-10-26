@@ -115,6 +115,7 @@ All written into `<output_folder>` with a per-image stem prefix. Toggle each on/
 | --- | --- | --- |
 | Vein + intervein overlay | `<stem>_overlay.png` | Combined view. Per-vein/per-region colors + opacities are configurable. |
 | Landmarks overlay | `<stem>_landmarks_overlay.png` | Predicted landmarks drawn on the image. |
+| Boundary landmark polygon overlay | `<stem>_boundary_polygon_overlay.png` | The wing-margin landmark ring the boundary-polygon quality filter tests: green = simple, red = self-intersecting (wing aborted), amber = too few landmarks. Written for aborted wings too. |
 | Segmentation overlay | `<stem>_segmentation_overlay.png` | Raw vein/intervein semantic-segmentation classes. |
 | AP compartment overlay | `<stem>_ap_overlay.png` | Anterior/posterior split with percentage labels. |
 | CV ratio overlay | `<stem>_cv_ratio_overlay.png` | Anterior vs posterior crossvein position. |

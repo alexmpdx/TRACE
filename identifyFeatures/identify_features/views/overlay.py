@@ -570,3 +570,136 @@ def render_cv_ratio_overlay_to_file(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), img)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Boundary-landmark polygon overlay (garbage-detector diagnostic)
+# ---------------------------------------------------------------------------
+#
+# Draws the ring the ``boundary_polygon`` quality filter tests (subcostal break →
+# L2.d → L3.d → L4.d → L5.d → alula notch → L4-L5 → L1-Rs → back). The ring is
+# green when it is simple (filter passes), red when two edges cross (filter
+# rejects) and amber when fewer than four boundary landmarks are present (the
+# filter skips). On a crossing ring the offending edges are drawn thicker. The
+# renderer takes raw landmarks, not a WingResult, so it can run for wings the
+# filter has already aborted — those are the ones worth looking at.
+
+_BOUNDARY_OK_BGR = (60, 200, 0)  # green: ring is simple
+_BOUNDARY_FAIL_BGR = (0, 0, 255)  # red: ring self-intersects
+_BOUNDARY_UNDEFINED_BGR = (0, 190, 255)  # amber: too few landmarks to test
+
+
+def _boundary_polygon_status(landmarks, crossings):
+    """``(colour, status_text)`` for the ring. ``crossings`` is the filter's result
+    (``None`` = not testable, ``[]`` = simple, else the crossing edge pairs)."""
+    from identify_features.garbage_detector.filters.boundary_polygon import (
+        BOUNDARY_LANDMARK_ORDER,
+        MIN_BOUNDARY_VERTICES,
+    )
+
+    if crossings is None:
+        n_present = sum(1 for n in BOUNDARY_LANDMARK_ORDER if n in landmarks)
+        return (
+            _BOUNDARY_UNDEFINED_BGR,
+            f"boundary polygon: not checked ({n_present}/{len(BOUNDARY_LANDMARK_ORDER)} landmarks, "
+            f"need {MIN_BOUNDARY_VERTICES})",
+        )
+    if crossings:
+        return _BOUNDARY_FAIL_BGR, f"boundary polygon: SELF-INTERSECTING ({len(crossings)} crossing(s))"
+    return _BOUNDARY_OK_BGR, "boundary polygon: OK"
+
+
+def render_boundary_polygon_overlay(
+    base_image: np.ndarray,
+    landmarks: dict,
+    landmark_size_scale: float = 1.0,
+    show_landmark_labels: bool = True,
+    crossings: Optional[list[tuple[str, str]]] = None,
+    show_status_text: bool = True,
+) -> Optional[np.ndarray]:
+    """Render the wing-margin landmark ring over the image.
+
+    ``landmarks`` maps canonical landmark name → ``Landmark`` (anything with ``.x`` /
+    ``.y``). ``crossings`` is the ``boundary_polygon_crossings`` result when the caller
+    already has it; when ``None`` it is recomputed here, so the overlay stays correct on
+    paths where the filter itself never ran (e.g. the landmarks-only CSV fast path).
+
+    Returns a BGR image, or ``None`` when no boundary landmark is present at all.
+    """
+    from identify_features.garbage_detector.filters.boundary_polygon import (
+        boundary_polygon_crossings,
+        boundary_polygon_vertices,
+    )
+
+    verts = boundary_polygon_vertices(landmarks)
+    if not verts:
+        return None
+    # Recompute unless the caller handed us the filter's own verdict. An explicit
+    # ``[]`` (simple ring) must be honoured, so test for None rather than falsiness.
+    if crossings is None:
+        crossings = boundary_polygon_crossings(landmarks)
+    colour, status = _boundary_polygon_status(landmarks, crossings)
+
+    img = base_image.copy()
+    h, w = img.shape[:2]
+    thickness = max(2, int(round(min(h, w) / 450)))
+    pts = np.array([[int(round(x)), int(round(y))] for _n, (x, y) in verts], dtype=np.int32)
+
+    # Dark halo under the ring so it reads on both pale and dark backgrounds.
+    cv2.polylines(img, [pts.reshape(-1, 1, 2)], True, (0, 0, 0), thickness + max(2, thickness // 2), cv2.LINE_AA)
+    cv2.polylines(img, [pts.reshape(-1, 1, 2)], True, colour, thickness, cv2.LINE_AA)
+
+    # Emphasise the edges that cross. ``crossings`` names edges as "A→B"; map back
+    # to the vertex pair so a renamed landmark can never desynchronise the lookup.
+    if crossings:
+        index = {name: i for i, (name, _xy) in enumerate(verts)}
+        hot: set[tuple[int, int]] = set()
+        for pair in crossings:
+            for edge in pair:
+                a, _arrow, b = edge.partition("→")
+                if a in index and b in index:
+                    hot.add((index[a], index[b]))
+        for i, j in hot:
+            cv2.line(img, tuple(pts[i]), tuple(pts[j]), colour, thickness * 3, cv2.LINE_AA)
+
+    for name, (x, y) in verts:
+        _draw_labeled_point(
+            img,
+            int(round(x)),
+            int(round(y)),
+            name,
+            colour,
+            size_scale=landmark_size_scale,
+            show_label=show_landmark_labels,
+        )
+
+    if show_status_text:
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = max(0.7, min(h, w) / 1800.0)
+        font_thick = max(1, int(round(font_scale * 1.5)))
+        org = (int(30 * font_scale), int(60 * font_scale))
+        cv2.putText(img, status, org, font, font_scale, (255, 255, 255), font_thick * 3, cv2.LINE_AA)
+        cv2.putText(img, status, org, font, font_scale, colour, font_thick, cv2.LINE_AA)
+    return img
+
+
+def render_boundary_polygon_overlay_to_file(
+    base_image: np.ndarray,
+    landmarks: dict,
+    out_path: Path,
+    landmark_size_scale: float = 1.0,
+    show_landmark_labels: bool = True,
+    crossings: Optional[list[tuple[str, str]]] = None,
+) -> bool:
+    """Render the boundary-polygon overlay and write it as PNG. Returns True on success."""
+    img = render_boundary_polygon_overlay(
+        base_image,
+        landmarks,
+        landmark_size_scale=landmark_size_scale,
+        show_landmark_labels=show_landmark_labels,
+        crossings=crossings,
+    )
+    if img is None:
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    return bool(cv2.imwrite(str(out_path), img))

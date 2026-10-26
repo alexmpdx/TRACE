@@ -267,6 +267,11 @@ _INTERMEDIATE_TOOLTIPS: dict[str, str] = {
     ),
     "chopped_image": ("Keep the hinge-removed image produced by HingeChopper in the output folder."),
     "landmarks_overlay": ("Keep the landmark-points overlay PNG (rendered over the input image) in the output folder."),
+    "boundary_polygon_overlay": (
+        "Keep the boundary-landmark polygon PNG: the ring the Quality-tab boundary-polygon filter tests, "
+        "green when simple, red when self-intersecting (wing aborted), amber when too few landmarks to test. "
+        "Written for aborted wings too."
+    ),
     "segmentation_overlay": ("Keep the raw vein/intervein semantic-segmentation overlay PNG in the output folder."),
     "geojson": ("Keep the per-wing GeoJSON file (named veins + intervein regions) in the output folder."),
 }

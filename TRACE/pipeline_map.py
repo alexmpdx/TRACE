@@ -266,6 +266,7 @@ NODES: list[Node] = [
         [
             "{stem}_landmarks_overlay.png (rendered points)",
             "{stem}_landmarks.geojson (raw points, optional)",
+            "{stem}_boundary_polygon_overlay.png (margin ring, optional)",
         ],
         "data",
     ),
@@ -1496,9 +1497,7 @@ def render_html(layout: Layout, nodes_meta: dict[str, Node], output_path: Path) 
         pts_raw = _clip_polyline_to_node_rects(pts_raw, _rect_for(e.src), _rect_for(e.dst))
         pts = pts_raw * SCALE
         poly_pts = " ".join(f"{p[0]:.1f},{fy(float(p[1])):.1f}" for p in pts)
-        parts.append(
-            f'<g class="edge" data-src="{esc(e.src)}" data-dst="{esc(e.dst)}">'
-        )
+        parts.append(f'<g class="edge" data-src="{esc(e.src)}" data-dst="{esc(e.dst)}">')
         parts.append(f'  <polyline points="{poly_pts}"/>')
         # Arrowhead
         if len(pts) >= 2:
@@ -1559,9 +1558,7 @@ def render_html(layout: Layout, nodes_meta: dict[str, Node], output_path: Path) 
             f'text-anchor="middle">{esc(meta.title)}</text>'
         )
         if meta.substeps:
-            sub_first_baseline = (
-                title_baseline - (TITLE_FS - ASCENT_TITLE) - GAP_TITLE_SUB - ASCENT_SUB
-            )
+            sub_first_baseline = title_baseline - (TITLE_FS - ASCENT_TITLE) - GAP_TITLE_SUB - ASCENT_SUB
             for i, sub in enumerate(meta.substeps):
                 sub_baseline = sub_first_baseline - i * LINE_H_SUB
                 parts.append(

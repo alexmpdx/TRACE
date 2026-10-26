@@ -40,6 +40,7 @@ _OUTPUT_IMAGES: dict[str, str] = {
     "ap_overlay": "ap_overlay.png",
     "cv_ratio_overlay": "cv_ratio_overlay.png",
     "landmarks_overlay": "landmarks_overlay.png",
+    "boundary_polygon_overlay": "boundary_polygon_overlay.png",
     "segmentation_overlay": "segmentation_overlay.png",
     "chopped_image": "chopped.png",
     "wing_isolated_image": "isolated.png",
