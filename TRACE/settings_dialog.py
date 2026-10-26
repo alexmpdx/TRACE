@@ -212,8 +212,10 @@ _FIELD_TOOLTIPS: dict[str, str] = {
         "none of a real wing's slight alula/hinge concavity)."
     ),
     "solidity_mode": (
-        "fixed: use the min/max range above (primary). batch_mad: derive the range from the "
-        "batch as median ± k·robust-σ (opt-in; needs enough wings)."
+        "fixed: use the min/max range above (primary). batch_mad: derive the range from this "
+        "run's wings as median ± k·robust-σ (opt-in; needs enough wings). The batch range is "
+        "resolved at the END of the run — every wing is analysed first, then wings outside the "
+        "range are marked aborted and their outputs removed."
     ),
     "solidity_batch_k": (
         "batch_mad only: how many robust σ (median ± k·1.4826·MAD) from the batch median counts "
@@ -231,12 +233,40 @@ _FIELD_TOOLTIPS: dict[str, str] = {
         "Abort when a disconnected secondary region exceeds this fraction of the main wing area. "
         "Good wings carry ≤0.6% specks; real second objects are ≥1.5%. Default 0.01 (1%)."
     ),
+    "fragmentation_mode": (
+        "fixed: use the max fraction above. batch_mad: derive an upper limit from this run's "
+        "wings as median + k·robust-σ, resolved at the END of the run. Most good wings score "
+        "exactly 0 here, so the batch spread is often zero — in that case the fixed fraction "
+        "is used."
+    ),
+    "fragmentation_batch_k": (
+        "batch_mad only: how many robust σ (1.4826·MAD) above the batch median counts as an "
+        "outlier. Higher = more permissive. Default 5."
+    ),
+    "fragmentation_min_batch_size": (
+        "batch_mad only: minimum number of wings before the batch limit is trusted; below this "
+        "it falls back to the fixed max fraction."
+    ),
     "vein_association_filter_enabled": (
         "Reject wings where too much of the segmented vein tissue isn't covered by any vein the "
         "tracer identified — i.e. hallucinated vein tissue or failed tracing. Runs after tracing."
     ),
     "max_unassigned_vein_frac": (
         "Abort when this fraction of segmented vein area is not associated with any traced vein. " "Default 0.10 (10%)."
+    ),
+    "vein_association_mode": (
+        "fixed: use the max fraction above. batch_mad: derive an upper limit from this run's "
+        "wings as median + k·robust-σ. This metric only exists after tracing, so the limit is "
+        "resolved at the END of the run: every wing is analysed, then wings above it are "
+        "marked aborted and their outputs removed."
+    ),
+    "vein_association_batch_k": (
+        "batch_mad only: how many robust σ (1.4826·MAD) above the batch median counts as an "
+        "outlier. Higher = more permissive. Default 5."
+    ),
+    "vein_association_min_batch_size": (
+        "batch_mad only: minimum number of wings before the batch limit is trusted; below this "
+        "it falls back to the fixed max fraction."
     ),
     "intervein_association_filter_enabled": (
         "Reject wings where too much of the segmented intervein tissue isn't covered by any named "
@@ -245,6 +275,19 @@ _FIELD_TOOLTIPS: dict[str, str] = {
     "max_unassigned_intervein_frac": (
         "Abort when this fraction of segmented intervein area is not associated with any named region. "
         "Good wings run ~5–8% (named regions are inset from the wing edge), so the default is 0.15 (15%)."
+    ),
+    "intervein_association_mode": (
+        "fixed: use the max fraction above. batch_mad: derive an upper limit from this run's "
+        "wings as median + k·robust-σ, resolved at the END of the run (the metric only exists "
+        "after region naming). Wings above it are marked aborted and their outputs removed."
+    ),
+    "intervein_association_batch_k": (
+        "batch_mad only: how many robust σ (1.4826·MAD) above the batch median counts as an "
+        "outlier. Higher = more permissive. Default 5."
+    ),
+    "intervein_association_min_batch_size": (
+        "batch_mad only: minimum number of wings before the batch limit is trusted; below this "
+        "it falls back to the fixed max fraction."
     ),
     "required_veins": (
         "Abort the wing if any checked vein is missing (not traced). Leave all unchecked (default) "
@@ -1573,18 +1616,27 @@ class PipelineConfigDialog(QDialog):
         form = QFormLayout(gb)
         self._add_bool(form, "fragmentation_filter_enabled", "Enable fragmentation filter")
         self._add_float(form, "fragmentation_max_secondary_frac", "Max secondary-region fraction", 0.0, 1.0, 4, 0.005)
+        self._add_choice(form, "fragmentation_mode", "Threshold mode", ["fixed", "batch_mad"])
+        self._add_float(form, "fragmentation_batch_k", "batch_mad: k (× robust σ)", 0.0, 100.0, 1, 0.5)
+        self._add_int(form, "fragmentation_min_batch_size", "batch_mad: min batch size", 1, 100000)
         layout.addWidget(gb)
 
         gb = QGroupBox("Vein association (unexplained vein tissue)")
         form = QFormLayout(gb)
         self._add_bool(form, "vein_association_filter_enabled", "Enable vein-association filter")
         self._add_float(form, "max_unassigned_vein_frac", "Max unassigned vein fraction", 0.0, 1.0, 3, 0.01)
+        self._add_choice(form, "vein_association_mode", "Threshold mode", ["fixed", "batch_mad"])
+        self._add_float(form, "vein_association_batch_k", "batch_mad: k (× robust σ)", 0.0, 100.0, 1, 0.5)
+        self._add_int(form, "vein_association_min_batch_size", "batch_mad: min batch size", 1, 100000)
         layout.addWidget(gb)
 
         gb = QGroupBox("Intervein association (unexplained intervein tissue)")
         form = QFormLayout(gb)
         self._add_bool(form, "intervein_association_filter_enabled", "Enable intervein-association filter")
         self._add_float(form, "max_unassigned_intervein_frac", "Max unassigned intervein fraction", 0.0, 1.0, 3, 0.01)
+        self._add_choice(form, "intervein_association_mode", "Threshold mode", ["fixed", "batch_mad"])
+        self._add_float(form, "intervein_association_batch_k", "batch_mad: k (× robust σ)", 0.0, 100.0, 1, 0.5)
+        self._add_int(form, "intervein_association_min_batch_size", "batch_mad: min batch size", 1, 100000)
         layout.addWidget(gb)
 
         gb = QGroupBox("Required veins (abort if missing)")

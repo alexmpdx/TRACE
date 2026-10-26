@@ -131,6 +131,10 @@ class FilterContext:
     # Outbound scratch — filters write computed metrics here for the pipeline to reuse.
     scratch: dict[str, Any] = field(default_factory=dict)
 
+    def metrics(self) -> dict[str, float]:
+        """Numeric scratch entries (the per-wing metrics), for ``WingResult.qc_metrics``."""
+        return {k: float(v) for k, v in self.scratch.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
 
 @runtime_checkable
 class GarbageFilter(Protocol):

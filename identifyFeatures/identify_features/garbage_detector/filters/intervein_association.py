@@ -13,6 +13,9 @@ Metric (at the REGIONS hook, after region naming):
 i.e. the fraction of segmented intervein area not associated with any named region.
 Aborts when it exceeds ``max_unassigned_intervein_frac``. Skipped when intervein regions
 aren't computed at all (``skip_intervein_regions``), since there'd be nothing to compare.
+
+Threshold modes (``intervein_association_mode``): as for ``vein_association`` — ``batch_mad``
+is always deferred to the end of the batch (see ``garbage_detector/batch.py``).
 """
 
 from __future__ import annotations
@@ -20,6 +23,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from identify_features.garbage_detector.base import FilterContext, FilterStage, GarbageVerdict
+from identify_features.garbage_detector.batch import (
+    DEFERRED_METHOD,
+    INTERVEIN_ASSOCIATION_SPEC,
+    inline_threshold,
+    outside,
+)
 from identify_features.garbage_detector.registry import register_filter
 
 if TYPE_CHECKING:
@@ -70,17 +79,27 @@ class InterveinAssociationFilter:
             return GarbageVerdict.ok(self.name, self.stage, metric_name="unassigned_intervein_frac")
 
         ctx.scratch["unassigned_intervein_frac"] = frac
-        max_frac = ctx.config.max_unassigned_intervein_frac
 
-        if frac > max_frac:
+        thr = inline_threshold(INTERVEIN_ASSOCIATION_SPEC, ctx.config)
+        if thr is None:  # batch_mad: judged at the end of the batch
+            return GarbageVerdict.ok(
+                self.name,
+                self.stage,
+                metric_name="unassigned_intervein_frac",
+                metric_value=frac,
+                method=DEFERRED_METHOD,
+            )
+        lo, hi, method = thr
+
+        if outside(frac, lo, hi):
             return GarbageVerdict.reject(
                 self.name,
                 self.stage,
-                f"{frac:.1%} of segmented intervein tissue is not associated with any named region "
-                f"(> {max_frac:.1%}) — bad segmentation or failed region naming",
+                INTERVEIN_ASSOCIATION_SPEC.reason(frac, lo, hi, method),
                 metric_name="unassigned_intervein_frac",
                 metric_value=frac,
-                threshold=(0.0, max_frac),
+                threshold=(lo, hi),
+                method=method,
             )
 
         return GarbageVerdict.ok(
@@ -88,5 +107,6 @@ class InterveinAssociationFilter:
             self.stage,
             metric_name="unassigned_intervein_frac",
             metric_value=frac,
-            threshold=(0.0, max_frac),
+            threshold=(lo, hi),
+            method=method,
         )

@@ -228,6 +228,10 @@ class WingResult:
     landmarks: dict[str, Landmark] = field(default_factory=dict)
     wing_outline: Optional[Polygon] = None
     wing_solidity: Optional[float] = None  # outline.area / convex_hull.area (garbage-detector metric)
+    # Every numeric metric the garbage filters recorded for this wing, keyed by metric name
+    # (wing_solidity, secondary_component_frac, unassigned_vein_frac, ...). Batch-mode
+    # filters defer their verdict to the end of the batch and judge these values then.
+    qc_metrics: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     # µm/px for THIS specimen. Populated by TRACE when auto-detect-from-metadata
     # is on, so each row in a batch CSV can convert its pixel measurements to

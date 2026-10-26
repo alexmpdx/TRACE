@@ -15,6 +15,12 @@ i.e. the fraction of segmented vein area not associated with any identified vein
 when it exceeds ``max_unassigned_vein_frac``. The tissue buffer (~1 vein width) over-covers
 a genuinely-traced vein, so well-traced wings score near zero and only un-traced vein blobs
 contribute.
+
+Threshold modes (``vein_association_mode``, machinery in ``garbage_detector/batch.py``):
+``fixed`` uses ``max_unassigned_vein_frac``; ``batch_mad`` fences at ``median + k·1.4826·MAD``
+over the batch. The metric only exists after tracing, so batch mode is always *deferred*:
+the filter records the fraction and passes, and the orchestrator rejects out-of-fence wings
+once the whole batch has run.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from identify_features.garbage_detector.base import FilterContext, FilterStage, GarbageVerdict
+from identify_features.garbage_detector.batch import DEFERRED_METHOD, VEIN_ASSOCIATION_SPEC, inline_threshold, outside
 from identify_features.garbage_detector.registry import register_filter
 
 if TYPE_CHECKING:
@@ -69,17 +76,23 @@ class VeinAssociationFilter:
             return GarbageVerdict.ok(self.name, self.stage, metric_name="unassigned_vein_frac")
 
         ctx.scratch["unassigned_vein_frac"] = frac
-        max_frac = ctx.config.max_unassigned_vein_frac
 
-        if frac > max_frac:
+        thr = inline_threshold(VEIN_ASSOCIATION_SPEC, ctx.config)
+        if thr is None:  # batch_mad: judged at the end of the batch
+            return GarbageVerdict.ok(
+                self.name, self.stage, metric_name="unassigned_vein_frac", metric_value=frac, method=DEFERRED_METHOD
+            )
+        lo, hi, method = thr
+
+        if outside(frac, lo, hi):
             return GarbageVerdict.reject(
                 self.name,
                 self.stage,
-                f"{frac:.1%} of segmented vein tissue is not associated with any traced vein "
-                f"(> {max_frac:.1%}) — bad segmentation or failed tracing",
+                VEIN_ASSOCIATION_SPEC.reason(frac, lo, hi, method),
                 metric_name="unassigned_vein_frac",
                 metric_value=frac,
-                threshold=(0.0, max_frac),
+                threshold=(lo, hi),
+                method=method,
             )
 
         return GarbageVerdict.ok(
@@ -87,5 +100,6 @@ class VeinAssociationFilter:
             self.stage,
             metric_name="unassigned_vein_frac",
             metric_value=frac,
-            threshold=(0.0, max_frac),
+            threshold=(lo, hi),
+            method=method,
         )

@@ -10,6 +10,12 @@ This filter looks at the components *before* that drop and aborts when a seconda
 disconnected component is too large relative to the main wing. On real data the separation is
 wide: good wings carry at most ~0.6%-of-wing specks, whereas a partial second wing is several
 percent up to >10%.
+
+Threshold modes (``fragmentation_mode``, machinery in ``garbage_detector/batch.py``): ``fixed``
+uses ``fragmentation_max_secondary_frac``; ``batch_mad`` fences at ``median + k·1.4826·MAD``
+over the batch — inline when a pre-pass injected ``fragmentation_batch_range``, otherwise
+deferred to the end of the batch. Because most good wings score exactly 0.0 the batch MAD is
+often zero, in which case the fixed fraction is used.
 """
 
 from __future__ import annotations
@@ -17,12 +23,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Sequence
 
 from identify_features.garbage_detector.base import FilterContext, FilterStage, GarbageVerdict
+from identify_features.garbage_detector.batch import DEFERRED_METHOD, FRAGMENTATION_SPEC, inline_threshold, outside
 from identify_features.garbage_detector.registry import register_filter
 
 if TYPE_CHECKING:
-    from shapely.geometry import MultiPolygon, Polygon
-
     from identify_features.config import PipelineConfig
+    from shapely.geometry import MultiPolygon, Polygon
 
 _FILTER_NAME = "fragmentation"
 # Morphological-close radius — matches _compute_wing_outline's buffer so within-wing gaps
@@ -69,17 +75,23 @@ class FragmentationFilter:
 
         frac = compute_secondary_fraction(polys)
         ctx.scratch["secondary_component_frac"] = frac
-        max_frac = ctx.config.fragmentation_max_secondary_frac
 
-        if frac > max_frac:
+        thr = inline_threshold(FRAGMENTATION_SPEC, ctx.config)
+        if thr is None:  # batch_mad without a pre-pass: judged at the end of the batch
+            return GarbageVerdict.ok(
+                self.name, self.stage, metric_name="secondary_component_frac", metric_value=frac, method=DEFERRED_METHOD
+            )
+        lo, hi, method = thr
+
+        if outside(frac, lo, hi):
             return GarbageVerdict.reject(
                 self.name,
                 self.stage,
-                f"disconnected secondary region is {frac:.1%} of the wing "
-                f"(> {max_frac:.1%}) — likely a second wing/debris in frame",
+                FRAGMENTATION_SPEC.reason(frac, lo, hi, method),
                 metric_name="secondary_component_frac",
                 metric_value=frac,
-                threshold=(0.0, max_frac),
+                threshold=(lo, hi),
+                method=method,
             )
 
         return GarbageVerdict.ok(
@@ -87,5 +99,6 @@ class FragmentationFilter:
             self.stage,
             metric_name="secondary_component_frac",
             metric_value=frac,
-            threshold=(0.0, max_frac),
+            threshold=(lo, hi),
+            method=method,
         )

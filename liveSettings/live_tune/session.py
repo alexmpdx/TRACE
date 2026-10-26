@@ -176,6 +176,22 @@ _INERT_FIELDS = {
     # Fragmentation filter
     "fragmentation_filter_enabled",
     "fragmentation_max_secondary_frac",
+    # Per-filter batch-threshold knobs (added 2026-10-26 in
+    # identify_features/garbage_detector/batch.py): mode / k / min batch size /
+    # transient pre-resolved range for fragmentation, vein_association and
+    # intervein_association — same shape as the solidity quartet above.
+    "fragmentation_mode",
+    "fragmentation_batch_k",
+    "fragmentation_min_batch_size",
+    "fragmentation_batch_range",
+    "vein_association_mode",
+    "vein_association_batch_k",
+    "vein_association_min_batch_size",
+    "vein_association_batch_range",
+    "intervein_association_mode",
+    "intervein_association_batch_k",
+    "intervein_association_min_batch_size",
+    "intervein_association_batch_range",
     # Vein-association filter + required-veins list
     "vein_association_filter_enabled",
     "max_unassigned_vein_frac",

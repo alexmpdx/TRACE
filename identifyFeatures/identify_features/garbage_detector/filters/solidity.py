@@ -9,35 +9,40 @@ caught by a two-sided range.
 
 Runs at the earliest hook (``FilterStage.WING_OUTLINE``), right after the outline is built.
 
-Threshold modes (see ``resolve_solidity_range``):
+Threshold modes (shared machinery in ``garbage_detector/batch.py``):
 - ``fixed`` (default, primary): a transparent ``[solidity_min, solidity_max]`` range. Setting
   those two config fields *is* the user-defined-range path.
 - ``batch_mad`` (opt-in): robust ``median ± k·1.4826·MAD`` over the batch. Robust statistics
   are used because the garbage we're detecting would otherwise corrupt a mean/stdev fence;
   ``k`` is user-modifiable (``solidity_batch_k``). Falls back to the fixed range below
-  ``solidity_min_batch_size`` wings.
+  ``solidity_min_batch_size`` wings. Applied inline when a pre-pass injected
+  ``solidity_batch_range``, otherwise deferred to the end of the batch.
 """
 
 from __future__ import annotations
 
 import logging
-import statistics
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional, Sequence
 
 from identify_features.garbage_detector.base import FilterContext, FilterStage, GarbageVerdict
+from identify_features.garbage_detector.batch import (
+    DEFERRED_METHOD,
+    SOLIDITY_SPEC,
+    inline_threshold,
+    outside,
+    precompute_outline_metrics,
+    resolve_batch_threshold,
+)
 from identify_features.garbage_detector.registry import register_filter
 
 if TYPE_CHECKING:
-    from shapely.geometry import Polygon
-
     from identify_features.config import PipelineConfig
+    from shapely.geometry import Polygon
 
 logger = logging.getLogger(__name__)
 
 _FILTER_NAME = "solidity"
-# MAD -> standard-deviation scale factor for a normal distribution (1 / 0.6745).
-_MAD_TO_SIGMA = 1.4826
 
 
 def compute_solidity(outline: "Optional[Polygon]") -> Optional[float]:
@@ -59,42 +64,22 @@ def resolve_solidity_range(
 ) -> tuple[float, float, str]:
     """Resolve the ``(lo, hi, method)`` acceptance range for solidity.
 
-    ``batch_mad`` mode requires at least ``solidity_min_batch_size`` finite solidities;
-    otherwise (and in ``fixed`` mode) the configured fixed range is returned.
+    Thin wrapper over ``batch.resolve_batch_threshold`` kept for callers that predate the
+    shared batch machinery. ``batch_mad`` mode requires at least ``solidity_min_batch_size``
+    finite solidities and a non-zero MAD; otherwise (and in ``fixed`` mode) the configured
+    fixed range is returned.
     """
-    if getattr(config, "solidity_mode", "fixed") == "batch_mad" and batch_solidities is not None:
-        vals = [s for s in batch_solidities if s is not None and s == s]  # drop None/NaN
-        if len(vals) >= config.solidity_min_batch_size:
-            median = statistics.median(vals)
-            mad = statistics.median([abs(v - median) for v in vals])
-            robust_sigma = _MAD_TO_SIGMA * mad
-            k = config.solidity_batch_k
-            lo = median - k * robust_sigma
-            hi = median + k * robust_sigma
-            return lo, hi, f"batch MAD k={k:g} (n={len(vals)})"
-    return config.solidity_min, config.solidity_max, "fixed range"
+    return resolve_batch_threshold(SOLIDITY_SPEC, config, batch_solidities)
 
 
 def precompute_solidities(detection_geojsons: Iterable[Path]) -> list[float]:
     """Cheaply compute solidity for each detection GeoJSON (for ``batch_mad`` resolution).
 
-    Parses each file, builds the wing outline, and computes solidity. Files that fail to
-    parse or yield no usable outline are skipped. Used by the batch orchestrator to resolve
-    one global solidity range before the (expensive) full per-wing pass.
+    Wrapper over ``batch.precompute_outline_metrics`` (which also yields the fragmentation
+    metric from the same parse). Files that fail to parse or yield no usable outline are
+    skipped.
     """
-    from identify_features.models.geojson_io import _compute_wing_outline, load_detection_geojson
-
-    solidities: list[float] = []
-    for det in detection_geojsons:
-        try:
-            vein_polys, intervein_polys = load_detection_geojson(Path(det))
-            outline = _compute_wing_outline(vein_polys + intervein_polys)
-            sol = compute_solidity(outline)
-            if sol is not None:
-                solidities.append(sol)
-        except Exception:
-            logger.warning("precompute_solidities: failed to read %s", det, exc_info=True)
-    return solidities
+    return precompute_outline_metrics(detection_geojsons)[SOLIDITY_SPEC.metric_name]
 
 
 @register_filter
@@ -131,20 +116,20 @@ class SolidityFilter:
                 metric_name="wing_solidity",
             )
 
-        # Prefer a pre-resolved batch range (injected into config by the batch
-        # orchestrator); otherwise resolve from config alone (fixed / user range).
-        batch_range = getattr(ctx.config, "solidity_batch_range", None)
-        if batch_range is not None:
-            lo, hi = batch_range
-            method = f"batch MAD k={ctx.config.solidity_batch_k:g}"
-        else:
-            lo, hi, method = resolve_solidity_range(ctx.config)
+        # A pre-resolved batch range (injected by a pre-pass) or the fixed range applies
+        # inline; batch_mad without a pre-pass defers to the end of the batch.
+        thr = inline_threshold(SOLIDITY_SPEC, ctx.config)
+        if thr is None:
+            return GarbageVerdict.ok(
+                self.name, self.stage, metric_name="wing_solidity", metric_value=solidity, method=DEFERRED_METHOD
+            )
+        lo, hi, method = thr
 
-        if solidity < lo or solidity > hi:
+        if outside(solidity, lo, hi):
             return GarbageVerdict.reject(
                 self.name,
                 self.stage,
-                f"wing solidity {solidity:.3f} outside [{lo:.3f}, {hi:.3f}] ({method})",
+                SOLIDITY_SPEC.reason(solidity, lo, hi, method),
                 metric_name="wing_solidity",
                 metric_value=solidity,
                 threshold=(lo, hi),

@@ -175,6 +175,7 @@ def identify_wing(
     )
     run_stage_filters(FilterStage.WING_OUTLINE, gd_ctx)
     result.wing_solidity = gd_ctx.scratch.get("wing_solidity")
+    result.qc_metrics.update(gd_ctx.metrics())
 
     # Tier-2 fast path: outputs that only need wing outline + landmarks + wing_solidity
     # (wing_area / wing_shape / cv_ratio / custom landmark distances) skip Steps 2-6
@@ -217,6 +218,7 @@ def identify_wing(
     # Garbage detection (VEINS hook): abort if a user-required vein is missing.
     veins_ctx = FilterContext(config=config, specimen_id=specimen_id, veins=veins, wing_outline=wing_outline)
     run_stage_filters(FilterStage.VEINS, veins_ctx)
+    result.qc_metrics.update(veins_ctx.metrics())
 
     # Step 6: Intervein Labeling — three passes (see docs/pipeline_reference.md §6)
     # Execution order is tissue first so the splitter's barrier mask can reuse vein tissue geometry.
@@ -231,6 +233,7 @@ def identify_wing(
         config=config, specimen_id=specimen_id, vein_polys=vein_polys, veins=veins, wing_outline=wing_outline
     )
     run_stage_filters(FilterStage.TISSUE, tissue_ctx)
+    result.qc_metrics.update(tissue_ctx.metrics())
 
     if config.skip_intervein_regions:
         logger.info("Step 6.1/6.2 skipped (skip_intervein_regions=True)")
@@ -272,6 +275,7 @@ def identify_wing(
         wing_outline=wing_outline,
     )
     run_stage_filters(FilterStage.REGIONS, regions_ctx)
+    result.qc_metrics.update(regions_ctx.metrics())
 
     result.veins = veins
     result.intervein_regions = regions

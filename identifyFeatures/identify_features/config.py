@@ -225,8 +225,11 @@ class PipelineConfig:
     # batch_mad falls back to the fixed range below this many wings (too few to estimate a
     # robust distribution; matches the user's "< 25 wings → fixed range" rule).
     solidity_min_batch_size: int = 25
-    # Transient (NOT a user tunable): the batch orchestrator pre-resolves one solidity range
-    # for the whole batch and injects it here so per-wing workers don't each recompute it.
+    # Transient (NOT a user tunable): a batch orchestrator that can see every detection
+    # GeoJSON up front (the identify-features CLI) pre-resolves one solidity range for the
+    # whole batch and injects it here so the filter aborts inline. When it is None in
+    # batch_mad mode the filter defers: it records the solidity and the fence is applied
+    # after the batch (TRACE always works this way). See garbage_detector/batch.py.
     solidity_batch_range: tuple[float, float] | None = None
 
     # Fragmentation filter (also WING_OUTLINE hook). The wing outline keeps only the largest
@@ -237,6 +240,16 @@ class PipelineConfig:
     # ≥1.5%, so the 1% default separates them cleanly.
     fragmentation_filter_enabled: bool = True
     fragmentation_max_secondary_frac: float = 0.01
+    # Batch-threshold knobs — same contract as the solidity trio above. batch_mad derives
+    # an upper fence (median + k·1.4826·MAD over the batch's secondary fractions); the
+    # fence is applied at the END of the batch (deferred) by TRACE, or inline by the
+    # identify-features CLI pre-pass. Falls back to the fixed fraction below
+    # fragmentation_min_batch_size wings or when the batch MAD is zero (most wings score
+    # exactly 0.0, so this metric often falls back — see garbage_detector/batch.py).
+    fragmentation_mode: str = "fixed"
+    fragmentation_batch_k: float = 5.0
+    fragmentation_min_batch_size: int = 25
+    fragmentation_batch_range: tuple[float, float] | None = None  # transient, pre-pass only
 
     # Vein-association filter (TISSUE hook, after vein tracing + tissue assignment). Aborts
     # when too much of the segmented vein area is not covered by any traced vein's tissue
@@ -247,6 +260,13 @@ class PipelineConfig:
     # inside the pass zone while still catching the 12%+ failure mode.
     vein_association_filter_enabled: bool = True
     max_unassigned_vein_frac: float = 0.10
+    # Batch-threshold knobs (see fragmentation_mode). This metric only exists after vein
+    # tracing, so batch_mad is always deferred: the filter records the fraction, every wing
+    # runs, and out-of-fence wings are rejected post hoc by the batch orchestrator.
+    vein_association_mode: str = "fixed"
+    vein_association_batch_k: float = 5.0
+    vein_association_min_batch_size: int = 25
+    vein_association_batch_range: tuple[float, float] | None = None  # transient
 
     # Intervein-association filter (REGIONS hook, after region naming). The intervein mirror
     # of the vein-association filter: aborts when too much of the segmented intervein area is
@@ -259,6 +279,11 @@ class PipelineConfig:
     # headroom against false positives while still catching gross unexplained-intervein failures.
     intervein_association_filter_enabled: bool = True
     max_unassigned_intervein_frac: float = 0.15
+    # Batch-threshold knobs (see vein_association_mode) — always deferred.
+    intervein_association_mode: str = "fixed"
+    intervein_association_batch_k: float = 5.0
+    intervein_association_min_batch_size: int = 25
+    intervein_association_batch_range: tuple[float, float] | None = None  # transient
 
     # Vein-presence filter (VEINS hook). Abort a wing if any of these canonical veins is
     # missing (no traced centerline — i.e. ABSENT or never found). Empty list (default) =

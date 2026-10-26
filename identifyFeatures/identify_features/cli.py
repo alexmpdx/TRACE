@@ -18,7 +18,14 @@ from pathlib import Path
 import cv2
 from identify_features.config import PIPELINE_PRESETS, PipelineConfig, apply_preset
 from identify_features.controllers.pipeline import identify_wing
-from identify_features.garbage_detector import GarbageRejection, precompute_solidities, resolve_solidity_range
+from identify_features.garbage_detector import (
+    BATCH_METRICS,
+    GarbageRejection,
+    apply_deferred_batch_fences,
+    deferred_specs,
+    precompute_outline_metrics,
+    resolve_outline_batch_ranges,
+)
 from identify_features.models.topology import ALL_CANONICAL_VEINS
 from identify_features.utils.psd_loader import imread_any
 from identify_features.views.csv_export import export_csv, export_csv_batch
@@ -53,9 +60,14 @@ def _garbage_settings_from_args(args) -> dict:
     return {
         "solidity_enabled": args.solidity_filter_enabled,
         "solidity_range": args.solidity_range,
-        "solidity_mode": args.solidity_mode,
-        "solidity_batch_k": args.solidity_batch_k,
-        "solidity_batch_range": None,  # filled by the batch pre-pass in batch_mad mode
+        # Per-filter batch-threshold knobs (mode + k for every metric filter, keyed by the
+        # PipelineConfig field name) and the transient pre-resolved ranges, filled by the
+        # batch pre-pass for the outline metrics in batch_mad mode. See garbage_detector/batch.py.
+        "batch": {
+            **{spec.mode_field: getattr(args, spec.mode_field) for spec in BATCH_METRICS.values()},
+            **{spec.k_field: getattr(args, spec.k_field) for spec in BATCH_METRICS.values()},
+            **{spec.range_field: None for spec in BATCH_METRICS.values()},
+        },
         "fragmentation_enabled": args.fragmentation_filter_enabled,
         "fragmentation_max_frac": args.fragmentation_max_frac,
         "vein_association_enabled": args.vein_association_filter_enabled,
@@ -68,13 +80,12 @@ def _garbage_settings_from_args(args) -> dict:
 
 
 def _apply_garbage_settings(config, s: dict):
-    """Apply a garbage-settings dict (solidity + fragmentation) onto a PipelineConfig."""
+    """Apply a garbage-settings dict (every filter's knobs) onto a PipelineConfig."""
     config.solidity_filter_enabled = s["solidity_enabled"]
-    config.solidity_mode = s["solidity_mode"]
-    config.solidity_batch_k = s["solidity_batch_k"]
     if s["solidity_range"] is not None:
         config.solidity_min, config.solidity_max = float(s["solidity_range"][0]), float(s["solidity_range"][1])
-    config.solidity_batch_range = s["solidity_batch_range"]
+    for field_name, value in s["batch"].items():
+        setattr(config, field_name, value)
     config.fragmentation_filter_enabled = s["fragmentation_enabled"]
     if s["fragmentation_max_frac"] is not None:
         config.fragmentation_max_secondary_frac = float(s["fragmentation_max_frac"])
@@ -156,6 +167,10 @@ def _process_one(args_tuple):
 
         result = identify_wing(det_path, lm_path, img_path, config=config, specimen_id=stem)
 
+        # Outputs this worker wrote (minus the boundary-polygon overlay, which is kept for
+        # rejected wings too). A deferred batch-threshold rejection deletes them after the
+        # batch so a wing rejected post hoc leaves the same footprint as an inline abort.
+        written: list[Path] = [output_dir / f"{stem}_output.geojson"]
         export_geojson(
             result.veins, result.intervein_regions, output_dir / f"{stem}_output.geojson", um_per_px=config.um_per_px
         )
@@ -163,6 +178,7 @@ def _process_one(args_tuple):
         if overlay and img_path is not None:
             base_img = imread_any(img_path)
             if base_img is not None:
+                written.append(output_dir / f"{stem}_overlay.png")
                 render_overlay_to_file(
                     base_img,
                     result.veins,
@@ -176,6 +192,7 @@ def _process_one(args_tuple):
                     ectopic_label_font_scale=ectopic_label_font_scale,
                 )
                 if all_overlays:
+                    written += [output_dir / f"{stem}_ap_overlay.png", output_dir / f"{stem}_cv_ratio_overlay.png"]
                     render_ap_overlay_to_file(
                         base_img,
                         result,
@@ -191,15 +208,15 @@ def _process_one(args_tuple):
 
         n_veins = sum(1 for v in result.veins if v.centerline is not None)
         if skip_intervein_regions:
-            return stem, True, f"{stem}: {n_veins} veins (intervein regions skipped)", result
+            return stem, True, f"{stem}: {n_veins} veins (intervein regions skipped)", result, written
         n_regions = len(result.intervein_regions)
-        return stem, True, f"{stem}: {n_veins} veins, {n_regions}/7 regions", result
+        return stem, True, f"{stem}: {n_veins} veins, {n_regions}/7 regions", result, written
     except GarbageRejection as e:
         if all_overlays and img_path is not None:
             _render_boundary_polygon_from_files(lm_path, img_path, output_dir / f"{stem}_boundary_polygon_overlay.png")
-        return stem, False, f"{stem}: ABORTED — {e}", None
+        return stem, False, f"{stem}: ABORTED — {e}", None, []
     except Exception as e:
-        return stem, False, f"{stem}: ERROR — {e}", None
+        return stem, False, f"{stem}: ERROR — {e}", None, []
 
 
 def main():
@@ -374,6 +391,20 @@ def main():
         help="Abort when a disconnected secondary region exceeds FRAC of the wing area (default 0.01)",
     )
     parser.add_argument(
+        "--fragmentation-mode",
+        type=str,
+        default="fixed",
+        choices=("fixed", "batch_mad"),
+        help="Fragmentation threshold mode: 'fixed' fraction (default) or 'batch_mad' robust upper fence",
+    )
+    parser.add_argument(
+        "--fragmentation-batch-k",
+        type=float,
+        default=5.0,
+        metavar="K",
+        help="k for fragmentation batch_mad mode: abort beyond median + K·robust-sigma (default 5.0)",
+    )
+    parser.add_argument(
         "--no-vein-association-filter",
         dest="vein_association_filter_enabled",
         action="store_false",
@@ -385,7 +416,24 @@ def main():
         type=float,
         default=None,
         metavar="FRAC",
-        help="Abort when this fraction of segmented vein tissue isn't associated with a traced vein (default 0.08)",
+        help="Abort when this fraction of segmented vein tissue isn't associated with a traced vein (default 0.10)",
+    )
+    parser.add_argument(
+        "--vein-association-mode",
+        type=str,
+        default="fixed",
+        choices=("fixed", "batch_mad"),
+        help=(
+            "Vein-association threshold mode: 'fixed' fraction (default) or 'batch_mad' robust upper fence, "
+            "applied after the whole batch has run"
+        ),
+    )
+    parser.add_argument(
+        "--vein-association-batch-k",
+        type=float,
+        default=5.0,
+        metavar="K",
+        help="k for vein-association batch_mad mode: abort beyond median + K·robust-sigma (default 5.0)",
     )
     parser.add_argument(
         "--no-intervein-association-filter",
@@ -400,6 +448,23 @@ def main():
         default=None,
         metavar="FRAC",
         help="Abort when this fraction of segmented intervein tissue isn't associated with a named region (default 0.15)",
+    )
+    parser.add_argument(
+        "--intervein-association-mode",
+        type=str,
+        default="fixed",
+        choices=("fixed", "batch_mad"),
+        help=(
+            "Intervein-association threshold mode: 'fixed' fraction (default) or 'batch_mad' robust upper fence, "
+            "applied after the whole batch has run"
+        ),
+    )
+    parser.add_argument(
+        "--intervein-association-batch-k",
+        type=float,
+        default=5.0,
+        metavar="K",
+        help="k for intervein-association batch_mad mode: abort beyond median + K·robust-sigma (default 5.0)",
     )
     parser.add_argument(
         "--require-vein",
@@ -455,6 +520,11 @@ def _run_single(args):
             args.image,
             config=config,
         )
+        # A single wing can't form a batch: any batch_mad filter deferred its verdict, so
+        # settle it now (it resolves to the fixed range, exactly as fixed mode would).
+        deferred = apply_deferred_batch_fences(config, [(result.specimen_id, result)]).rejections
+        if result.specimen_id in deferred:
+            raise GarbageRejection(deferred[result.specimen_id])
     except GarbageRejection as e:
         print(f"ABORTED — {e}")
         if args.all_overlays and args.image is not None:
@@ -539,14 +609,27 @@ def _run_batch(args):
     print(f"Processing with {max_workers} workers...")
 
     gd_settings = _garbage_settings_from_args(args)
-    # Resolve one solidity range for the whole batch. batch_mad needs the full distribution
-    # up front, so do a cheap outline-only pre-pass; fixed mode skips it entirely.
-    if args.solidity_filter_enabled and args.solidity_mode == "batch_mad":
-        cfg = _apply_garbage_settings(PipelineConfig(), gd_settings)
-        sols = precompute_solidities(det for _stem, det, _lm, _img in specimens)
-        lo, hi, method = resolve_solidity_range(cfg, sols)
-        gd_settings["solidity_batch_range"] = (lo, hi)
-        print(f"Solidity {method}: accept [{lo:.4f}, {hi:.4f}] (from {len(sols)} outlines)")
+    # Batch thresholds, part 1 — the outline metrics (solidity, fragmentation) come straight
+    # from the detection GeoJSONs, so in batch_mad mode a cheap pre-pass resolves their
+    # fences up front and the filters abort inline. Fixed mode skips this entirely.
+    cfg = _apply_garbage_settings(PipelineConfig(), gd_settings)
+    cfg.skip_intervein_regions = args.skip_intervein_regions
+    wants_prepass = any(
+        spec.outline_metric and spec.batch_mode(cfg) and getattr(cfg, f"{spec.filter_name}_filter_enabled", False)
+        for spec in BATCH_METRICS.values()
+    )
+    if wants_prepass:
+        metrics = precompute_outline_metrics(det for _stem, det, _lm, _img in specimens)
+        for range_field, (lo, hi, method) in resolve_outline_batch_ranges(cfg, metrics).items():
+            gd_settings["batch"][range_field] = (lo, hi)
+            setattr(cfg, range_field, (lo, hi))
+            name = range_field.removesuffix("_batch_range")
+            print(f"{name}: {method} — accept [{lo:.4f}, {hi:.4f}]")
+    # Part 2 — the association metrics only exist after tracing, so their batch_mad fences
+    # are applied AFTER the batch (below) from the metrics each wing recorded.
+    deferred = deferred_specs(cfg)
+    if deferred:
+        print("Batch thresholds applied after the run: " + ", ".join(s.filter_name for s in deferred))
 
     t0 = time.time()
     work_items = [
@@ -582,10 +665,30 @@ def _run_batch(args):
     elapsed = time.time() - t0
     print(f"Completed in {elapsed:.0f}s ({elapsed / 60:.1f} min)\n")
 
+    # Batch thresholds, part 2: judge the deferred metrics now that every wing has run.
+    # Rejected wings are reported like an inline abort and their outputs removed.
+    completed = [(stem, wr) for stem, ok, _line, wr, _written in results if ok]
+    outcome = apply_deferred_batch_fences(cfg, completed)
+    for fence in outcome.fences:
+        print(f"Batch threshold — {fence.describe()}")
+    if outcome.rejections:
+        rejected_lines: dict[str, str] = {}
+        for stem, ok, _line, _wr, written in results:
+            verdict = outcome.rejections.get(stem) if ok else None
+            if verdict is None:
+                continue
+            rejected_lines[stem] = f"{stem}: ABORTED — {verdict.reason}"
+            for path in written:
+                Path(path).unlink(missing_ok=True)
+        results = [
+            (item[0], False, rejected_lines[item[0]], None, []) if item[0] in rejected_lines else item
+            for item in results
+        ]
+
     successes = 0
     aborted = 0
     csv_rows = []
-    for stem, ok, line, wing_result in results:
+    for stem, ok, line, wing_result, _written in results:
         print(line)
         if ok:
             successes += 1

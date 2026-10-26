@@ -982,6 +982,70 @@ def trace_folder(
             temp_dir_obj.cleanup()
 
 
+def _apply_deferred_quality_fences(
+    config,
+    wing_results: list[tuple[str, object]],
+    stage2_by_stem: dict[str, tuple[TraceResult, str]],
+    on_image_failed_analysis=None,
+) -> set[str]:
+    """Judge batch-mode garbage filters now that the whole run has completed.
+
+    Resolves every deferred fence (``garbage_detector.apply_deferred_batch_fences``) over
+    the completed wings, then for each rejected wing: deletes the Stage-2 outputs it
+    wrote (all but the boundary-polygon overlay, which is kept for rejected wings on the
+    inline path too), rewrites its ``TraceResult`` in place into the same shape an
+    inline ``GarbageRejection`` produces, and notifies the host so the GUI row flips to
+    failed and the manifest records the Stage-2 failure. Returns the rejected stems.
+    """
+    from identify_features.garbage_detector import apply_deferred_batch_fences, filter_label
+
+    outcome = apply_deferred_batch_fences(config, wing_results)
+    for fence in outcome.fences:
+        logger.info("Batch quality threshold — %s", fence.describe())
+    if not outcome.rejections:
+        return set()
+
+    _OUTPUT_PATH_FIELDS = (
+        "output_geojson_path",
+        "overlay_path",
+        "ap_overlay_path",
+        "cv_ratio_overlay_path",
+        "chopped_image_path",
+        "wing_isolated_image_path",
+        "landmarks_overlay_path",
+        "landmarks_geojson_path",
+        "segmentation_overlay_path",
+        "segmentation_geojson_path",
+    )
+    rejected: set[str] = set()
+    for stem, verdict in outcome.rejections.items():
+        entry = stage2_by_stem.get(stem)
+        if entry is None:
+            logger.warning("deferred quality fence rejected %s but no Stage-2 result is recorded for it", stem)
+            continue
+        trace_result, basename = entry
+        stage = filter_label(verdict.filter_name)
+        error_text = f"Aborted by quality gate ({stage}): {verdict.reason}"
+        logger.info("Analysis aborted for %s (batch threshold) [%s]: %s", stem, stage, verdict.reason)
+        for field_name in _OUTPUT_PATH_FIELDS:
+            path = getattr(trace_result, field_name, None)
+            if path is not None:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("%s: could not remove %s after batch rejection: %s", stem, path, exc)
+                setattr(trace_result, field_name, None)
+        trace_result.error = error_text
+        trace_result.error_stage = stage
+        rejected.add(stem)
+        if on_image_failed_analysis is not None:
+            try:
+                on_image_failed_analysis(basename, error_text)
+            except Exception:
+                logger.exception("image-failed callback raised for %s", basename)
+    return rejected
+
+
 def _run(
     input_dir: Path,
     output_dir: Path,
@@ -1079,10 +1143,18 @@ def _run(
     # end of _run sees the whole batch, not just the last chunk.
     results: list[TraceResult] = []
     batch_results: list[tuple[str, object]] = []
+    # stem -> (TraceResult, original basename) for every wing that completed Stage 2.
+    # Read by the deferred batch-threshold pass after the chunk loop (see
+    # _apply_deferred_quality_fences), which needs to flip a completed wing to
+    # rejected and tell the host which image row that is.
+    stage2_by_stem: dict[str, tuple[TraceResult, str]] = {}
     # specimen stem → path to its landmarks geojson, for post-CSV
     # user-distance augmentation. Written from within _analyze_one; read
     # by the CSV block after the chunk loop finishes.
     user_dist_landmark_paths: dict[str, Path] = {}
+    # (stem, WingResult) for every wing that completed Stage 2 — superset of batch_results
+    # (which only fills when a CSV is requested). Input to the deferred batch-threshold pass.
+    all_wing_results: list[tuple[str, object]] = []
     failed_preproc_lock = threading.Lock()
 
     def _signal_failed_preproc(image_basename: str, error_text: str) -> None:
@@ -1301,6 +1373,8 @@ def _run(
         total = len(successful_preproc)
         stage2_slots: list[Optional[TraceResult]] = [None] * total
         csv_slots: list[Optional[tuple[str, object]]] = [None] * total
+        # stem -> WingResult for this chunk (filled whether or not CSV is requested).
+        stage2_wing_results: dict[str, object] = {}
         # user_dist_landmark_paths is initialized ONCE before the chunk loop
         # so it accumulates across chunks. The CSV block (fires once after
         # all chunks) needs paths from every image, not just the last chunk.
@@ -1649,6 +1723,9 @@ def _run(
                         pass
 
                 stage2_slots[i] = trace_result
+                if wing_result is not None:
+                    stage2_by_stem[stem] = (trace_result, preproc_result.image_path.name)
+                    stage2_wing_results[stem] = wing_result
                 if "csv" in outputs:
                     if wing_result is not None:
                         csv_slots[i] = (stem, wing_result)
@@ -1756,6 +1833,9 @@ def _run(
                 results.append(tr)
 
         batch_results.extend(entry for entry in csv_slots if entry is not None)
+        # Every completed WingResult, whether or not a CSV was requested — the deferred
+        # batch-threshold pass judges all of them (an overlay-only run still rejects).
+        all_wing_results.extend(stage2_wing_results.items())
 
         # THE FIX: wipe intermediates so next chunk starts on a clean disk.
         # Bounds peak intermediate usage at CHUNK_SIZE × per-image (a few GB max),
@@ -1770,6 +1850,23 @@ def _run(
 
     if interrupted:
         raise InterruptedError("Cancelled by user")
+
+    # --- Deferred batch quality thresholds ---
+    # Garbage filters in batch_mad mode could not judge any wing until every wing's
+    # metric was known (TRACE's chunked Stage 1 → Stage 2 loop never holds the whole
+    # batch's GeoJSONs at once, and the association metrics only exist after tracing).
+    # They recorded their metric and passed; resolve the fences over the whole run now
+    # and flip out-of-fence wings to "aborted by quality gate", exactly as an inline
+    # rejection would have. On a paused or resumed run the fence is derived from the
+    # wings that completed in THIS slice only.
+    if all_wing_results:
+        rejected_stems = _apply_deferred_quality_fences(
+            config, all_wing_results, stage2_by_stem, on_image_failed_analysis
+        )
+        if rejected_stems:
+            batch_results = [entry for entry in batch_results if entry[0] not in rejected_stems]
+            for _stem in rejected_stems:
+                user_dist_landmark_paths.pop(_stem, None)
 
     # Pause is a clean stop — return whatever images finished without
     # raising. The caller (GUI worker) sees a normal return and knows to
