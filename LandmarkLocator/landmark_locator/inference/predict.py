@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import torch
 import yaml
+
 from landmark_locator.models.unet import LandmarkUNet
 from landmark_locator.names import canonical_landmark_name
 
@@ -25,6 +26,12 @@ DEFAULT_GATE_CONFIG = {
     # fail before a landmark is marked unreliable. 1 = current behavior (any
     # single failure rejects). Disabled gates (`enabled: false`) never count.
     "min_metric_failures_to_reject": 1,
+    # Batch-specific thresholds (see inference/batch_gate.py). "batch_mad" derives each
+    # landmark's thresholds from the batch being predicted (median ∓ k·1.4826·MAD per
+    # metric) instead of the fixed per_landmark values above; falls back to those below
+    # min_batch_size images or when the batch MAD is zero. Applied by orchestrators that
+    # can see the whole batch (preprocessing.process_folder, landmark-predict --batch).
+    "batch": {"mode": "fixed", "k": 5.0, "min_batch_size": 25},
 }
 
 # Precision each gate threshold is authored at. `calibrate_gate._build_yaml` rounds

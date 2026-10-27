@@ -234,6 +234,32 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--gate-batch-mode",
+        type=str,
+        default=None,
+        choices=("fixed", "batch_mad"),
+        help=(
+            "Landmark confidence-gate threshold mode. 'batch_mad' derives each landmark's peak / "
+            "sharpness / second-peak thresholds from this batch (median ∓ k·robust-sigma) instead of "
+            "the model's fixed sidecar values; needs --gate-batch-min-size images. Default: the gate "
+            "config's own setting (fixed unless the sidecar says otherwise)."
+        ),
+    )
+    parser.add_argument(
+        "--gate-batch-k",
+        type=float,
+        default=None,
+        metavar="K",
+        help="batch_mad: robust-sigma multiplier for the landmark gate fences (default 5.0).",
+    )
+    parser.add_argument(
+        "--gate-batch-min-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="batch_mad: minimum images before a landmark's batch threshold is trusted (default 25).",
+    )
+    parser.add_argument(
         "--gate-override-yaml",
         type=Path,
         default=None,
@@ -408,7 +434,6 @@ def main(argv=None):
 
     # Build PipelineConfig: load from file if given, then apply --scale override.
     from identify_features.config import PipelineConfig
-
     from TRACE.config_io import load_settings
 
     config_gate_override: dict | None = None
@@ -448,6 +473,19 @@ def main(argv=None):
             print(f"Error: failed to parse {args.gate_override_yaml}: {e}", file=sys.stderr)
             sys.exit(1)
         gate_override = gate_doc.get("confidence", gate_doc)
+    # --gate-batch-* flags layer on top of whatever override is in force.
+    _batch = {
+        k: v
+        for k, v in (
+            ("mode", args.gate_batch_mode),
+            ("k", args.gate_batch_k),
+            ("min_batch_size", args.gate_batch_min_size),
+        )
+        if v is not None
+    }
+    if _batch:
+        gate_override = dict(gate_override or {})
+        gate_override["batch"] = {**(gate_override.get("batch") or {}), **_batch}
 
     if not args.ignore_ood:
         from preprocessing.pipeline import discover_images

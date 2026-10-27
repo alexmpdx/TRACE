@@ -15,16 +15,11 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
+
 from landmark_locator.data.dataset import _normalize_name, canonical_landmark_name, discover_landmarks
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
-from landmark_locator.scripts.visualize import (
-    _ensure_colors,
-    draw_landmarks_on_image,
-    generate_landmark_colors,
-    load_ground_truth,
-)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -68,6 +63,13 @@ from PyQt5.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+)
+
+from landmark_locator.scripts.visualize import (
+    _ensure_colors,
+    draw_landmarks_on_image,
+    generate_landmark_colors,
+    load_ground_truth,
 )
 
 # ---------------------------------------------------------------------------
@@ -1214,6 +1216,57 @@ class GateConfigPanel(QWidget):
         min_fails_row.addStretch(1)
         root.addLayout(min_fails_row)
 
+        # Batch-specific thresholds (gate config `batch` block, see
+        # inference/batch_gate.py): derive every landmark's thresholds from the
+        # batch being predicted instead of the fixed values in the grid below.
+        batch_cfg = dict(self._cfg.get("batch") or {})
+        batch_row = QHBoxLayout()
+        batch_row.setContentsMargins(0, 0, 0, 0)
+        batch_lbl = QLabel("Threshold mode:")
+        self._batch_mode_combo = QComboBox()
+        self._batch_mode_combo.addItems(["fixed", "batch_mad"])
+        self._batch_mode_combo.setCurrentText(str(batch_cfg.get("mode", "fixed")))
+        self._batch_mode_combo.setToolTip(
+            "fixed: use the per-landmark thresholds in the grid below.\n\n"
+            "batch_mad: derive each landmark's peak / sharp / sp_ratio threshold from the "
+            "images in the run as median ∓ k·robust-σ (1.4826·MAD), so the gate adapts to "
+            "this batch's imaging conditions. Every image is measured with the gates off "
+            "first, then the batch thresholds are resolved and applied. Falls back to the "
+            "grid values for any landmark with fewer than the minimum batch size or a zero "
+            "batch spread. Disabled gates stay disabled. In TRACE the batch is one "
+            "processing chunk (up to 100 images); with wing isolation or rescaling on, "
+            "those steps run twice per image."
+        )
+        batch_k_lbl = QLabel("k")
+        self._batch_k_spin = QDoubleSpinBox()
+        self._batch_k_spin.setRange(0.0, 100.0)
+        self._batch_k_spin.setDecimals(1)
+        self._batch_k_spin.setSingleStep(0.5)
+        self._batch_k_spin.setValue(float(batch_cfg.get("k", 5.0)))
+        self._batch_k_spin.setToolTip(
+            "batch_mad only: how many robust σ from the batch median a landmark's metric may "
+            "sit before it fails. Higher = more permissive. Default 5."
+        )
+        batch_min_lbl = QLabel("min batch")
+        self._batch_min_spin = QSpinBox()
+        self._batch_min_spin.setRange(1, 100000)
+        self._batch_min_spin.setValue(int(batch_cfg.get("min_batch_size", 25)))
+        self._batch_min_spin.setToolTip(
+            "batch_mad only: minimum number of images carrying a landmark before its batch "
+            "threshold is trusted; below this the fixed grid value is used."
+        )
+        for w in (
+            batch_lbl,
+            self._batch_mode_combo,
+            batch_k_lbl,
+            self._batch_k_spin,
+            batch_min_lbl,
+            self._batch_min_spin,
+        ):
+            batch_row.addWidget(w)
+        batch_row.addStretch(1)
+        root.addLayout(batch_row)
+
         # Bulk-tier row: pick a tier and click Apply to set every landmark's
         # tier at once. Avoids hand-stepping each row's combobox when the user
         # wants a global sweep (e.g. "try the whole image at Permissive").
@@ -1527,6 +1580,11 @@ class GateConfigPanel(QWidget):
             "second_peak_suppression_radius_px": self._cfg.get("second_peak_suppression_radius_px", 30),
             "core_landmarks": sorted(core),
             "min_metric_failures_to_reject": int(self._min_fails_spin.value()),
+            "batch": {
+                "mode": str(self._batch_mode_combo.currentText()),
+                "k": float(self._batch_k_spin.value()),
+                "min_batch_size": int(self._batch_min_spin.value()),
+            },
         }
 
     def _on_export(self) -> None:
@@ -1666,6 +1724,11 @@ class GateConfigPanel(QWidget):
         )
         # min_metric_failures_to_reject defaults to 1 for files written before this field existed.
         self._min_fails_spin.setValue(int(override.get("min_metric_failures_to_reject", 1)))
+        # Batch-threshold block likewise defaults to fixed for older files.
+        batch_cfg = dict(override.get("batch") or {})
+        self._batch_mode_combo.setCurrentText(str(batch_cfg.get("mode", "fixed")))
+        self._batch_k_spin.setValue(float(batch_cfg.get("k", 5.0)))
+        self._batch_min_spin.setValue(int(batch_cfg.get("min_batch_size", 25)))
         for name, row in self._rows.items():
             if name in peak_pl or name in sharp_pl or name in spr_pl:
                 row["combo"].setCurrentText("Custom")
@@ -1730,6 +1793,7 @@ def read_gate_config(path: Path) -> tuple[dict, list[str]]:
         from a live `Predictor` instance instead.
     """
     import yaml
+
     from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, _deep_merge, canonicalize_gate_config
 
     p = Path(path).resolve()
@@ -2176,6 +2240,7 @@ class AugPreviewDialog(QDialog):
 
     def _on_generate(self) -> None:
         import albumentations as A
+
         from landmark_locator.data.augmentation import get_train_transform
         from landmark_locator.data.psd_loader import imread_any
 

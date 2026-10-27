@@ -88,6 +88,32 @@ def parse_args(argv=None):
         help="Search subdirectories of the input folder for images (default: top level only).",
     )
     parser.add_argument(
+        "--gate-batch-mode",
+        type=str,
+        default=None,
+        choices=("fixed", "batch_mad"),
+        help=(
+            "Landmark confidence-gate threshold mode. 'batch_mad' derives each landmark's peak / "
+            "sharpness / second-peak thresholds from this batch (median ∓ k·robust-sigma) instead of "
+            "the model's fixed sidecar values; needs --gate-batch-min-size images. Default: the gate "
+            "config's own setting (fixed unless the sidecar says otherwise)."
+        ),
+    )
+    parser.add_argument(
+        "--gate-batch-k",
+        type=float,
+        default=None,
+        metavar="K",
+        help="batch_mad: robust-sigma multiplier for the landmark gate fences (default 5.0).",
+    )
+    parser.add_argument(
+        "--gate-batch-min-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="batch_mad: minimum images before a landmark's batch threshold is trusted (default 25).",
+    )
+    parser.add_argument(
         "--include-unreliable-landmarks",
         action="store_true",
         help=(
@@ -183,6 +209,20 @@ def _progress(image_index, total, image_name, status):
     print(f"[{image_index + 1}/{total}] {image_name}: {status}")
 
 
+def _gate_batch_override(args) -> dict | None:
+    """Confidence-gate override carrying the --gate-batch-* flags, or None when unset."""
+    batch = {
+        k: v
+        for k, v in (
+            ("mode", args.gate_batch_mode),
+            ("k", args.gate_batch_k),
+            ("min_batch_size", args.gate_batch_min_size),
+        )
+        if v is not None
+    }
+    return {"batch": batch} if batch else None
+
+
 def main(argv=None):
     args = parse_args(argv)
     stages = _resolve_stages(args.stages)
@@ -206,9 +246,12 @@ def main(argv=None):
     print(f"Stages: {', '.join(stage_names)}")
     print()
 
+    gate_override = _gate_batch_override(args)
+
     results = process_folder(
         input_dir=args.input,
         output_dir=args.output,
+        gate_override=gate_override,
         landmark_checkpoint=args.landmark_model,
         segmentation_model_dir=args.segmentation_model,
         stages=stages,

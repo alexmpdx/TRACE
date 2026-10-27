@@ -1058,6 +1058,10 @@ def process_single_image(
                 if cached is None:
                     # Caller may have keyed by the original input before JPEG/PSD conversion.
                     cached = prefetched_landmarks.get(Path(str(image_path).replace(raster_ext, ext)))
+                if cached is None:
+                    # The batch-gate measuring pass keys by the ORIGINAL input path, which
+                    # Stage 1 (rescale) / Stage 2 (wing isolation) may have rebound since.
+                    cached = prefetched_landmarks.get(original_input_path)
             if cached is not None:
                 if cached.get("error") is not None:
                     raise cached["error"]
@@ -1224,6 +1228,173 @@ def process_single_image(
     return result
 
 
+def _batch_gate_measuring_pass(
+    images: list[Path],
+    *,
+    output_dir: Path,
+    landmark_checkpoint: Path,
+    predictor_cache: dict,
+    model_cache: dict,
+    device,
+    progress,
+    workers: int,
+    gate_override: Optional[dict],
+    wing_model_dir: Optional[Path],
+    wing_expand_fraction: float,
+    keep_intermediates: bool,
+    target_names: dict,
+    input_um_per_px: Optional[float],
+    target_um_per_px: Optional[float],
+    rescale_tolerance_low: float,
+    rescale_tolerance_high: float,
+    auto_detect_um_per_px: bool,
+    pause_event: Optional[threading.Event],
+) -> dict:
+    """Batch-gate pass 1 on the per-image path: Stages 1-3 only, gates off, no rotation.
+
+    Returns ``{original_path: {"landmarks", "metadata", "error": None}}`` for every image
+    whose landmarks were measured. Images with a manual landmark override are skipped
+    (their metadata carries no real metrics and Stage 3 short-circuits for them anyway);
+    images that error are left out so the normal loop reproduces the error itself.
+    """
+
+    def _one(i: int, img_path: Path):
+        if pause_event is not None and pause_event.is_set():
+            return img_path, None
+        if find_landmarks_override(img_path) is not None:
+            return img_path, None
+        try:
+            r = process_single_image(
+                image_path=img_path,
+                output_dir=output_dir,
+                landmark_checkpoint=landmark_checkpoint,
+                segmentation_model_dir=None,
+                stages=(True, False, False),
+                predictor_cache=predictor_cache,
+                model_cache=model_cache,
+                device=device,
+                progress_callback=(
+                    (
+                        lambda stage, detail: progress(
+                            i, len(images), img_path.name, f"batch gate pass 1 — {stage}: {detail}"
+                        )
+                    )
+                    if progress
+                    else None
+                ),
+                include_unreliable_landmarks=True,
+                wing_model_dir=wing_model_dir,
+                wing_expand_fraction=wing_expand_fraction,
+                keep_intermediates=keep_intermediates,
+                target_name=target_names.get(img_path),
+                do_rotation=False,
+                gate_override=gate_override,
+                input_um_per_px=input_um_per_px,
+                target_um_per_px=target_um_per_px,
+                rescale_tolerance_low=rescale_tolerance_low,
+                rescale_tolerance_high=rescale_tolerance_high,
+                auto_detect_um_per_px=auto_detect_um_per_px,
+            )
+        except Exception as exc:
+            if progress:
+                progress(i, len(images), img_path.name, f"batch gate pass 1 — skipped: {exc}")
+            return img_path, None
+        if r.error is not None or r.paused or r.landmarks is None:
+            return img_path, None
+        return img_path, {
+            "landmarks": r.landmarks,
+            "metadata": r.landmark_metadata or {},
+            "error": None,
+            # The gates-off GeoJSON this pass wrote; removed again if the batch gate
+            # aborts the image, so an aborted image leaves no landmarks file behind
+            # (as on the inline path, where the abort happens before the write).
+            "pass1_geojson": r.landmarks_geojson_path,
+        }
+
+    out: dict = {}
+    if workers <= 1:
+        for i, p in enumerate(images):
+            if pause_event is not None and pause_event.is_set():
+                break
+            path, entry = _one(i, p)
+            if entry is not None:
+                out[path] = entry
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="preproc-gate1") as executor:
+            for fut in as_completed([executor.submit(_one, i, p) for i, p in enumerate(images)]):
+                path, entry = fut.result()
+                if entry is not None:
+                    out[path] = entry
+    return out
+
+
+def _apply_batch_gate(
+    prefetched: dict,
+    base_gate_cfg: dict,
+    landmark_checkpoint: Path,
+    predictor_cache: dict,
+    *,
+    stage3_override: Optional[dict],
+    include_unreliable: bool,
+    progress,
+    n_images: int,
+) -> dict:
+    """Batch-gate pass 2: resolve the batch thresholds and re-gate every measured image.
+
+    Rewrites each ``prefetched`` entry in place into the shape a gated prediction would
+    have produced (unreliable non-core landmarks dropped unless ``include_unreliable``,
+    ``error`` set for failed core landmarks). Logs the resolved thresholds.
+    """
+    import logging as _logging
+
+    from landmark_locator.inference.batch_gate import (
+        collect_metrics,
+        describe_resolution,
+        metrics_from_metadata,
+        regate_shaped,
+        resolve_batch_gate_config,
+    )
+
+    log = _logging.getLogger(__name__)
+    predictor = _predictor_from_cache(landmark_checkpoint, predictor_cache, confidence_override=stage3_override)
+    name_map = dict(predictor.geojson_to_landmark or {})  # GeoJSON name -> internal name
+    measured = {p: e for p, e in prefetched.items() if e.get("error") is None and e.get("metadata")}
+    collected = collect_metrics(metrics_from_metadata(e["metadata"], name_map) for e in measured.values())
+    resolved, notes = resolve_batch_gate_config(base_gate_cfg, collected)
+    block = resolved.get("batch") or {}
+    log.info(
+        "Batch landmark gate: thresholds resolved from %d image(s) (k=%s, min batch %s)",
+        len(measured),
+        block.get("k"),
+        block.get("min_batch_size"),
+    )
+    for line in describe_resolution(resolved, notes):
+        log.info("Batch landmark gate: %s", line)
+    aborted = 0
+    for path, entry in measured.items():
+        landmarks, metadata, error = regate_shaped(
+            entry["landmarks"],
+            entry["metadata"],
+            resolved,
+            name_map=name_map,
+            include_unreliable=include_unreliable,
+        )
+        prefetched[path] = {"landmarks": landmarks, "metadata": metadata, "error": error}
+        if error is not None:
+            aborted += 1
+            stale = entry.get("pass1_geojson")
+            if stale is not None:
+                try:
+                    Path(stale).unlink(missing_ok=True)
+                except OSError:
+                    log.warning("batch landmark gate: could not remove %s", stale)
+    if progress:
+        progress(
+            0, n_images, "(batch)", f"landmarks: batch gate resolved — {aborted} of {len(measured)} image(s) abort"
+        )
+    return prefetched
+
+
 def process_folder(
     input_dir: Path,
     output_dir: Path,
@@ -1326,6 +1497,32 @@ def process_folder(
     _resolution_adjust_active = (
         input_um_per_px is not None and input_um_per_px > 0 and target_um_per_px is not None and target_um_per_px > 0
     )
+    # Batch-specific landmark gate (gate config `batch.mode == "batch_mad"`): the three
+    # confidence gates can't judge any image until every image's metrics are known, so
+    # Stage 3 becomes two passes — measure every image with the gates OFF, resolve the
+    # batch thresholds, re-gate the recorded metrics — and the per-image loop below picks
+    # the gated result up through `prefetched`. The batch is this process_folder call
+    # (one TRACE chunk). See landmark_locator/inference/batch_gate.py.
+    base_gate_cfg: Optional[dict] = None
+    batch_gate = False
+    if stages[0] and landmark_checkpoint is not None:
+        try:
+            from landmark_locator.inference.batch_gate import batch_gate_active, effective_gate_config
+
+            base_gate_cfg = effective_gate_config(landmark_checkpoint, gate_override)
+            batch_gate = batch_gate_active(base_gate_cfg)
+        except Exception:
+            import logging as _logging
+
+            _logging.getLogger(__name__).exception("batch landmark gate: could not read the gate config; using fixed")
+            batch_gate = False
+    stage3_override = gate_override
+    if batch_gate:
+        from landmark_locator.inference.batch_gate import gate_off_override
+        from landmark_locator.inference.predict import _deep_merge as _gate_merge
+
+        stage3_override = _gate_merge(dict(gate_override or {}), gate_off_override())
+
     prefetched: Optional[dict] = None
     if stages[0] and landmark_checkpoint is not None and wing_model_dir is None and not _resolution_adjust_active:
         if progress_callback:
@@ -1337,7 +1534,7 @@ def process_folder(
                 predictor_cache,
                 include_unreliable_landmarks=include_unreliable_landmarks,
                 batch_size=landmark_batch_size,
-                confidence_override=gate_override,
+                confidence_override=stage3_override,
                 pause_event=pause_event,
             )
         except Exception as e:
@@ -1345,6 +1542,43 @@ def process_folder(
             if progress_callback:
                 progress_callback(0, len(images), "(batch)", f"batch landmarks failed, falling back per-image: {e}")
             prefetched = None
+    elif batch_gate and stages[0] and landmark_checkpoint is not None:
+        # Wing isolation / rescale rebinds the image Stage 3 sees, so the measuring pass
+        # has to run those sub-stages too: Stage 3 only, per image, gates off. Pass 2 (the
+        # normal loop) repeats Stages 1-2 for the same images — the price of batch gating
+        # on this path — but its landmark forward pass is served from `prefetched`.
+        prefetched = _batch_gate_measuring_pass(
+            images,
+            output_dir=output_dir,
+            landmark_checkpoint=landmark_checkpoint,
+            predictor_cache=predictor_cache,
+            model_cache=model_cache,
+            device=device,
+            progress=progress_callback,
+            workers=max(1, int(max_workers)),
+            gate_override=stage3_override,
+            wing_model_dir=wing_model_dir,
+            wing_expand_fraction=wing_expand_fraction,
+            keep_intermediates=keep_intermediates,
+            target_names=target_names,
+            input_um_per_px=input_um_per_px,
+            target_um_per_px=target_um_per_px,
+            rescale_tolerance_low=rescale_tolerance_low,
+            rescale_tolerance_high=rescale_tolerance_high,
+            auto_detect_um_per_px=auto_detect_um_per_px,
+            pause_event=pause_event,
+        )
+    if batch_gate and prefetched:
+        prefetched = _apply_batch_gate(
+            prefetched,
+            base_gate_cfg,
+            landmark_checkpoint,
+            predictor_cache,
+            stage3_override=stage3_override,
+            include_unreliable=include_unreliable_landmarks,
+            progress=progress_callback,
+            n_images=len(images),
+        )
 
     # Pre-warm the modelTOjson model cache so parallel workers don't race on first init
     # (the lock inside _load_or_cache_modeltojson handles correctness; pre-warming

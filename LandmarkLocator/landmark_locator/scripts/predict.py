@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import yaml
+
 from landmark_locator.inference.predict import (
     DEFAULT_GATE_CONFIG,
     LandmarkPredictor,
@@ -140,6 +141,17 @@ def _build_override(args: argparse.Namespace, base_gate: dict) -> dict:
     core |= set(args.core_landmark or [])
     core -= set(args.no_core_landmark or [])
     override["core_landmarks"] = sorted(core)
+    batch = {
+        k: v
+        for k, v in (
+            ("mode", args.gate_batch_mode),
+            ("k", args.gate_batch_k),
+            ("min_batch_size", args.gate_batch_min_size),
+        )
+        if v is not None
+    }
+    if batch:
+        override["batch"] = {**(override.get("batch") or {}), **batch}
     return override
 
 
@@ -221,6 +233,32 @@ def main() -> None:
         "'permissive' clears the per-landmark entry so the global applies.",
     )
     parser.add_argument(
+        "--gate-batch-mode",
+        type=str,
+        default=None,
+        choices=("fixed", "batch_mad"),
+        help=(
+            "Landmark confidence-gate threshold mode. 'batch_mad' derives each landmark's peak / "
+            "sharpness / second-peak thresholds from this batch (median ∓ k·robust-sigma) instead of "
+            "the model's fixed sidecar values; needs --gate-batch-min-size images. Default: the gate "
+            "config's own setting (fixed unless the sidecar says otherwise)."
+        ),
+    )
+    parser.add_argument(
+        "--gate-batch-k",
+        type=float,
+        default=None,
+        metavar="K",
+        help="batch_mad: robust-sigma multiplier for the landmark gate fences (default 5.0).",
+    )
+    parser.add_argument(
+        "--gate-batch-min-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="batch_mad: minimum images before a landmark's batch threshold is trusted (default 25).",
+    )
+    parser.add_argument(
         "--print-gate",
         action="store_true",
         help="Print per-landmark gate result table to stdout for each image.",
@@ -297,6 +335,26 @@ def main() -> None:
     failed = 0
     done = 0
 
+    # Batch-specific gate thresholds (gate config `batch.mode == "batch_mad"`): predict
+    # every image with the gates off, resolve the fences from the whole set, then re-gate
+    # the recorded metrics. See landmark_locator/inference/batch_gate.py.
+    from landmark_locator.inference.batch_gate import (
+        batch_gate_active,
+        collect_metrics,
+        describe_resolution,
+        gate_off_override,
+        metrics_from_raw,
+        regate_raw,
+        resolve_batch_gate_config,
+    )
+
+    gate_cfg = predictor.gate_config
+    batch_gate = batch_gate_active(gate_cfg)
+    if batch_gate:
+        predictor.update_gate_config(gate_off_override())
+        print("Batch gate: measuring every image with the gates off; thresholds resolved afterwards")
+
+    predicted: list[tuple[Path, dict]] = []
     for chunk_start in range(0, total, batch_size):
         chunk = loaded[chunk_start : chunk_start + batch_size]
         chunk_paths = [p for p, _ in chunk]
@@ -306,23 +364,39 @@ def main() -> None:
             include_unreliable=args.include_unreliable,
             raise_on_core_fail=False,
         )
-        for img_path, result in zip(chunk_paths, batch_results):
-            done += 1
-            err = result.get("error")
-            if isinstance(err, LowConfidenceLandmarkError):
-                print(f"[{done}/{total}] {img_path.name}: ABORT (low-confidence core landmark) — {err}")
-                results[str(img_path)] = {"error": "low_confidence_core", "failures": err.failures}
-                failed += 1
-                continue
-            results[str(img_path)] = _shape_result(result)
-            if args.print_gate:
-                _print_gate(img_path, result, predictor.gate_config)
-            if args.batch:
-                gj = _result_to_geojson(result, internal_to_geojson)
-                out_path = args.output_dir / f"{img_path.stem}_landmarks.geojson"
-                out_path.write_text(json.dumps(gj))
-                print(f"[{done}/{total}] {img_path.name}: ok → {out_path.name}")
-            succeeded += 1
+        predicted.extend(zip(chunk_paths, batch_results))
+
+    if batch_gate:
+        collected = collect_metrics(metrics_from_raw(r) for _p, r in predicted if r.get("error") is None)
+        gate_cfg, notes = resolve_batch_gate_config(gate_cfg, collected)
+        for line in describe_resolution(gate_cfg, notes):
+            print(f"Batch gate: {line}")
+        predicted = [
+            (
+                (p, regate_raw(r, gate_cfg, predictor.landmark_order, include_unreliable=args.include_unreliable))
+                if r.get("error") is None
+                else (p, r)
+            )
+            for p, r in predicted
+        ]
+
+    for img_path, result in predicted:
+        done += 1
+        err = result.get("error")
+        if isinstance(err, LowConfidenceLandmarkError):
+            print(f"[{done}/{total}] {img_path.name}: ABORT (low-confidence core landmark) — {err}")
+            results[str(img_path)] = {"error": "low_confidence_core", "failures": err.failures}
+            failed += 1
+            continue
+        results[str(img_path)] = _shape_result(result)
+        if args.print_gate:
+            _print_gate(img_path, result, gate_cfg)
+        if args.batch:
+            gj = _result_to_geojson(result, internal_to_geojson)
+            out_path = args.output_dir / f"{img_path.stem}_landmarks.geojson"
+            out_path.write_text(json.dumps(gj))
+            print(f"[{done}/{total}] {img_path.name}: ok → {out_path.name}")
+        succeeded += 1
 
     if args.batch:
         print(f"\nDone: {succeeded} succeeded, {failed} failed out of {total}.")

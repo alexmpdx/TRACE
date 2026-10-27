@@ -49,6 +49,19 @@ def __getattr__(name: str):
             "auto_batch_size": auto_batch_size,
         }[name]
 
+    # Batch-specific gate thresholds
+    if name in (
+        "batch_gate_active",
+        "effective_gate_config",
+        "gate_off_override",
+        "resolve_batch_gate_config",
+        "regate_raw",
+        "regate_shaped",
+    ):
+        from landmark_locator.inference import batch_gate
+
+        return getattr(batch_gate, name)
+
     # Model
     if name == "LandmarkUNet":
         from landmark_locator.models.unet import LandmarkUNet
@@ -121,6 +134,12 @@ __all__ = [
     "predict_ensemble",
     "auto_batch_size",
     "LowConfidenceLandmarkError",
+    "batch_gate_active",
+    "effective_gate_config",
+    "gate_off_override",
+    "resolve_batch_gate_config",
+    "regate_raw",
+    "regate_shaped",
     "LandmarkUNet",
     "LandmarkDataset",
     "discover_landmarks",
