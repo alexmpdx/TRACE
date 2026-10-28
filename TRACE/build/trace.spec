@@ -211,6 +211,30 @@ for pkg in _COLLECT_ALL_PACKAGES:
     except Exception:
         pass
 
+# napari >= 0.9.2 moved its logos and fonts into a separate
+# `napari_resources` distribution, and napari/utils/logo.py imports it at
+# napari.settings import time, i.e. the first time a Viewer is built. Its
+# __init__ resolves `importlib.resources.files("napari_resources.resources.logos")`,
+# and `napari_resources/resources/` is a data-only directory with no
+# __init__.py (a PEP 420 namespace package). PyInstaller's static analysis
+# never sees that string, collect_submodules does not descend into
+# namespace directories, and the plain data-file collection leaves out the
+# `resources/logos/__init__.py` that makes the leaf importable. Result in
+# v0.2.33: TRACE crashed at startup with
+#     ModuleNotFoundError: No module named 'napari_resources.resources'
+# as soon as the custom-measurements cartoon built its napari viewer.
+#
+# Copy the whole package tree verbatim (include_py_files=True keeps the
+# nested __init__.py) so the on-disk layout under _internal/ mirrors
+# site-packages and Python's normal path finder resolves the namespace
+# package. Deliberately NOT in the silent try/except loop above: if the
+# package is missing at build time (napari downgraded below 0.9.2), fail
+# the build loudly rather than ship a launcher that cannot open.
+import napari_resources  # noqa: F401  build-time presence check
+datas += collect_data_files("napari_resources", include_py_files=True)
+datas += copy_metadata("napari_resources")
+hiddenimports += ["napari_resources"] + collect_submodules("napari_resources")
+
 # onnxruntime is imported lazily inside OnnxModelWrapper.__init__
 # (modelTOjson/modeltojson.py) so PyInstaller's static analysis misses
 # it. Without collect_all we also lose the native DLLs and the capi/

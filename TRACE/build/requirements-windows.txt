@@ -84,7 +84,13 @@ segmentation-models-pytorch
 
 # --- GUI -------------------------------------------------------------------
 PyQt5
-napari[pyqt5]
+# Pinned exactly. The venv cache keys on this file, so any edit to it
+# (v0.2.33 added `mcp`) re-resolves EVERY unpinned dependency to whatever
+# is newest that day. That jump took napari 0.9.0 -> 0.9.2, which split
+# its logos out into a new `napari_resources` package that the spec did
+# not bundle, and v0.2.33 crashed at startup. Bump this deliberately,
+# then re-check trace.spec for new data-only packages before tagging.
+napari[pyqt5]==0.9.2
 # imageio is a transitive dep of napari_builtins.io. Pin it explicitly so
 # the .dist-info that napari probes via importlib.metadata is definitely
 # present at build time.
