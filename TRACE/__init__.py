@@ -24,7 +24,11 @@ Usage::
 #   1. Bump __version__ here (full MAJOR.MINOR.PATCH form — no
 #      truncating trailing zeroes, e.g. "0.2.0" not "0.2").
 #   2. Push a matching tag: `git tag windows-v0.2.0 && git push origin
-#      windows-v0.2.0`.
+#      windows-v0.2.0`. CI publishes it as a GitHub PRE-release, which
+#      only users with Help-tab "Receive beta updates" ticked are offered.
+#   3. Once the beta has proven itself, run the "Promote beta release to
+#      stable" workflow (Actions tab) on that tag. /releases/latest then
+#      returns it and every user's updater picks it up.
 # A mismatch between the two fails the CI build fast, before producing
 # an installer whose Help-tab updater shows the user as "out of date"
 # forever.

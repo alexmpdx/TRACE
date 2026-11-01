@@ -201,3 +201,9 @@ jobs:
           # comparison link + auto-summarized merged PRs (if any) beneath
           # the body_path contents.
           generate_release_notes: true
+          # Every release ships to the beta channel first. The Help-tab
+          # updater only offers pre-releases to users who ticked
+          # "Receive beta updates"; /releases/latest (the stable channel)
+          # ignores them. Promote with the "Promote beta release to
+          # stable" workflow once it's proven.
+          prerelease: true

@@ -1,0 +1,38 @@
+name: Promote beta release to stable
+
+# Every windows-v* tag is published as a GitHub pre-release by
+# build-windows.yml, which only TRACE users with "Receive beta updates"
+# ticked are offered. Run this (Actions tab → "Promote beta release to
+# stable" → Run workflow) once a beta has proven itself: it flips the
+# pre-release flag off, after which /releases/latest returns it and
+# every user's Help-tab updater picks it up.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to promote (e.g. windows-v0.2.35)"
+        required: true
+        type: string
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Mark release as stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft \
+            | tee release.json
+          if [ "$(jq -r .isDraft release.json)" = "true" ]; then
+            echo "::error::$TAG is a draft — publish it first."; exit 1
+          fi
+          if [ "$(jq -r .isPrerelease release.json)" != "true" ]; then
+            echo "$TAG is already stable; nothing to do."; exit 0
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          echo "$TAG promoted to stable."

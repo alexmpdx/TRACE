@@ -1839,7 +1839,7 @@ def _version_is_newer(candidate: str, installed: str) -> bool:
 
 
 class _UpdateCheckThread(QThread):
-    """Runs the GitHub /releases/latest query off the GUI thread.
+    """Runs the GitHub release query off the GUI thread.
 
     The synchronous version of the update check froze the window for the
     duration of the HTTP round-trip — fine on a fast connection, bad on
@@ -1854,13 +1854,13 @@ class _UpdateCheckThread(QThread):
 
     result = pyqtSignal(dict)
 
-    def __init__(self, api_url: str, parent=None):
+    def __init__(self, *, include_beta: bool, parent=None):
         super().__init__(parent)
-        self._api_url = api_url
+        self._include_beta = include_beta
 
     def run(self):
         try:
-            payload = InlineHelpPanel._fetch_latest_release_info(self._api_url)
+            payload = InlineHelpPanel._fetch_latest_release_info(include_beta=self._include_beta)
             self.result.emit({"ok": True, **payload})
         except Exception as exc:  # noqa: BLE001
             # Caller decides whether to surface the error (manual click)
@@ -2079,7 +2079,8 @@ class InlineHelpPanel(QWidget):
             "Get the latest TRACE installer from the project's Releases page. "
             "Running the new installer upgrades your existing TRACE in place — "
             "no need to uninstall first. Your settings and downloaded models "
-            "are preserved."
+            "are preserved. New versions go to beta testers first; tick "
+            '"Receive beta updates" below to get them early.'
         )
         self._update_blurb.setWordWrap(True)
         layout.addWidget(self._update_blurb)
@@ -2137,6 +2138,22 @@ class InlineHelpPanel(QWidget):
         )
         layout.addWidget(self.chk_auto_check_updates)
 
+        # Beta channel opt-in. Default OFF. Every release ships first as a
+        # GitHub pre-release, which /releases/latest never returns, so only
+        # users who tick this see it; the maintainer promotes it to a full
+        # release (see .github/workflows/promote-release.yml) once it's
+        # proven, and then everyone gets it.
+        self.chk_beta_updates = QCheckBox("Receive beta updates")
+        self.chk_beta_updates.setToolTip(
+            "New TRACE versions are released to beta testers first and to everyone once they've "
+            "proven stable. Tick this to get them early. Beta versions may contain bugs — untick "
+            "to go back to stable releases only (you'll move to the next stable version once it "
+            "is newer than the beta you have installed)."
+        )
+        self.chk_beta_updates.setChecked(self._window.settings.value("beta_updates_enabled", False, type=bool))
+        self.chk_beta_updates.toggled.connect(self._on_beta_updates_toggled)
+        layout.addWidget(self.chk_beta_updates)
+
         # Populated by _check_for_updates when a newer release is found.
         self._latest_update_url: Optional[str] = None
         self._latest_update_size: Optional[int] = None
@@ -2183,6 +2200,9 @@ class InlineHelpPanel(QWidget):
     # -----------------------------------------------------------------------
     _RELEASES_PAGE_URL = "https://github.com/alexmpdx/TRACE/releases"
     _LATEST_RELEASE_API = "https://api.github.com/repos/alexmpdx/TRACE/releases/latest"
+    # Beta channel: /releases/latest skips pre-releases, so beta users list
+    # recent releases and take the newest version themselves.
+    _RELEASES_LIST_API = "https://api.github.com/repos/alexmpdx/TRACE/releases?per_page=30"
 
     def _apply_theme_styles(self, *_args) -> None:
         """Re-render every static label's HTML / stylesheet from the
@@ -2404,15 +2424,15 @@ class InlineHelpPanel(QWidget):
         dlg.exec()
 
     @staticmethod
-    def _fetch_latest_release_info(api_url: str) -> dict:
+    def _fetch_latest_release_info(*, include_beta: bool = False) -> dict:
         """Pure network + parse helper. No UI access. Raises on failure.
 
-        Returns a dict with keys: ``tag`` (raw GitHub tag, e.g.
-        ``windows-v0.2.0``), ``latest_version`` (the bare semver with
-        the ``windows-v`` / ``v`` prefix stripped, for direct comparison
-        with ``TRACE.__version__``), ``html_url`` (the release page),
-        ``asset_url`` (``TRACE-Setup.exe`` download URL, or None), and
-        ``asset_size`` (bytes, or None).
+        ``include_beta=False`` asks GitHub for ``/releases/latest``, which
+        never returns a pre-release. ``include_beta=True`` lists recent
+        releases and picks the highest version among the non-draft ones,
+        pre-releases included (see ``_pick_newest_release``).
+
+        Returns the dict described in ``_parse_release_payload``.
 
         Lives as a static method so the worker thread can call it
         without holding a reference to a UI instance.
@@ -2422,10 +2442,48 @@ class InlineHelpPanel(QWidget):
 
         from TRACE.fetch_assets import make_ssl_context
 
+        api_url = InlineHelpPanel._RELEASES_LIST_API if include_beta else InlineHelpPanel._LATEST_RELEASE_API
         req = urllib.request.Request(api_url, headers={"User-Agent": "TRACE-update-check"})
         with urllib.request.urlopen(req, timeout=10, context=make_ssl_context()) as resp:
             data = json.load(resp)
 
+        if include_beta:
+            data = InlineHelpPanel._pick_newest_release(data)
+        return InlineHelpPanel._parse_release_payload(data)
+
+    @staticmethod
+    def _pick_newest_release(releases: list) -> dict:
+        """Return the highest-versioned non-draft release from a list.
+
+        Picks by version, not by list order: GitHub sorts by creation date,
+        and an old tag re-published (or a hotfix to an older line) would
+        otherwise win. Tags whose version isn't plain dotted integers —
+        e.g. the ``v0.1.0-assets`` model-weights release — are skipped.
+        Returns ``{}`` when nothing qualifies, which the caller renders
+        as "no releases found".
+        """
+        best: dict = {}
+        best_version = ""
+        for release in releases or []:
+            if release.get("draft"):
+                continue
+            version = InlineHelpPanel._parse_release_payload(release)["latest_version"]
+            if _version_is_newer(version, best_version or "0"):
+                best, best_version = release, version
+        return best
+
+    @staticmethod
+    def _parse_release_payload(data: dict) -> dict:
+        """Pull the fields the updater needs out of one GitHub release object.
+
+        Returns a dict with keys: ``tag`` (raw GitHub tag, e.g.
+        ``windows-v0.2.0``), ``latest_version`` (the bare semver with
+        the ``windows-v`` / ``v`` prefix stripped, for direct comparison
+        with ``TRACE.__version__``), ``html_url`` (the release page),
+        ``asset_url`` (``TRACE-Setup.exe`` download URL, or None),
+        ``asset_size`` (bytes, or None), and ``prerelease`` (True for a
+        beta-channel release).
+        """
         latest_tag = str(data.get("tag_name") or "")
         latest_version = latest_tag
         for prefix in ("windows-v", "v"):
@@ -2450,6 +2508,7 @@ class InlineHelpPanel(QWidget):
             "html_url": str(data.get("html_url") or InlineHelpPanel._RELEASES_PAGE_URL),
             "asset_url": asset_url,
             "asset_size": asset_size,
+            "prerelease": bool(data.get("prerelease")),
         }
 
     def _check_for_updates(self, *, silent: bool = False) -> None:
@@ -2493,12 +2552,13 @@ class InlineHelpPanel(QWidget):
             if prior_running:
                 _slog(f"update_check: click ignored — previous check still running (silent={silent})")
                 return
-            _slog(f"update_check: starting (silent={silent}, api={self._LATEST_RELEASE_API})")
+            include_beta = self._window.settings.value("beta_updates_enabled", False, type=bool)
+            _slog(f"update_check: starting (silent={silent}, beta={include_beta})")
             if not silent:
                 self._update_status_label.setText(
                     f"<span style='color: {_ct().text_placeholder};'>Checking for updates…</span>"
                 )
-            self._update_thread = _UpdateCheckThread(self._LATEST_RELEASE_API, parent=self)
+            self._update_thread = _UpdateCheckThread(include_beta=include_beta, parent=self)
             self._update_thread.result.connect(lambda payload: self._apply_update_check_result(payload, silent=silent))
             self._update_thread.finished.connect(self._update_thread.deleteLater)
             # Clear the Python-side reference once the thread finishes,
@@ -2519,6 +2579,22 @@ class InlineHelpPanel(QWidget):
                     )
                 except Exception:
                     pass
+
+    def _on_beta_updates_toggled(self, on: bool) -> None:
+        """Persist the beta-channel opt-in and re-check against the new channel.
+
+        Turning beta OFF also drops any cached "update available" version:
+        it may name a beta that a stable-only user should no longer be
+        offered, and the re-check below re-badges if a stable update exists.
+        """
+        self._window.settings.setValue("beta_updates_enabled", bool(on))
+        if not on:
+            self.btn_install_update.setVisible(False)
+            self._latest_update_url = None
+            self._latest_update_size = None
+            self._latest_update_version = None
+            self._window.clear_update_available_indicator(clear_cache=True)
+        self._check_for_updates()
 
     def _clear_update_thread_ref(self) -> None:
         """Drop the Python reference to the finished _UpdateCheckThread.
@@ -2600,6 +2676,7 @@ class InlineHelpPanel(QWidget):
             return
 
         # Update available — stash for the Install Update button.
+        beta_tag = " (beta)" if payload.get("prerelease") else ""
         self._latest_update_url = payload["asset_url"]
         self._latest_update_size = payload["asset_size"]
         self._latest_update_version = latest_version
@@ -2612,7 +2689,7 @@ class InlineHelpPanel(QWidget):
             size_blurb = f" ({size_mb} MB)" if size_mb else ""
             self._update_status_label.setText(
                 f"<span style='color: {_ct().warning_text};'>Update available: "
-                f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
+                f"<b>{latest_version}</b>{beta_tag} (you have {installed_version}).</span><br>"
                 f"<span style='color: {_ct().text_muted};'>Click <b>Install update {latest_version}</b> "
                 f"to download{size_blurb} and launch the new installer.</span>"
             )
@@ -2620,7 +2697,7 @@ class InlineHelpPanel(QWidget):
             self.btn_install_update.setVisible(False)
             self._update_status_label.setText(
                 f"<span style='color: {_ct().warning_text};'>A different version is available: "
-                f"<b>{latest_version}</b> (you have {installed_version}).</span><br>"
+                f"<b>{latest_version}</b>{beta_tag} (you have {installed_version}).</span><br>"
                 f"<a href='{payload['html_url']}' style='color: {_ct().link};'>"
                 f"Open the release page and download TRACE-Setup.exe</a>"
             )
