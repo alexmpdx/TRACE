@@ -1765,9 +1765,10 @@ class InlineCustomDistancesPanel(QWidget):
 
         ``disable_gates``: when True, every confidence gate is turned off so the
         model's best-guess landmarks are returned even on a borderline wing
-        instead of raising ``LowConfidenceLandmarkError``. The landmark
-        inspector uses this — an image you open to hand-correct is exactly the
-        one likely to fail the gate, and you still need points to drag.
+        instead of raising ``LowConfidenceLandmarkError``. (The landmark
+        inspector used to rely on this; it now predicts through
+        ``TraceWindow.run_single_image_landmark_prediction`` with the gates on
+        and only the abort disabled, so its red/hidden points match a run.)
         """
         lm_path = (getattr(self._window, "_landmark_model_path", "") or "").strip()
         if not lm_path:

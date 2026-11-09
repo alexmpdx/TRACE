@@ -91,7 +91,15 @@ SEG_CLASS_INDEX = {"intervein": 2, "vein": 3}
 
 def _parse_landmarks_geojson(path: Path) -> dict:
     """Load a landmarks GeoJSON into ``{name: (x, y)}`` in ORIGINAL-image pixel
-    space (raw landmark names).
+    space (raw landmark names). Coordinates only; see
+    ``_parse_landmarks_geojson_meta`` for the gate verdicts.
+    """
+    return {name: entry["xy"] for name, entry in _parse_landmarks_geojson_meta(path).items()}
+
+
+def _parse_landmarks_geojson_meta(path: Path) -> dict:
+    """Load a landmarks GeoJSON into ``{name: {"xy": (x, y), "reliable": bool,
+    "gate_reason": str}}`` in ORIGINAL-image pixel space (raw landmark names).
 
     Tolerant of either Stage-3's full schema (confidence/sharpness/etc.) or the
     minimal override schema (just classification.name + coordinates).
@@ -127,8 +135,88 @@ def _parse_landmarks_geojson(path: Path) -> dict:
         name = cls.get("name") or props.get("name")
         if not name:
             continue
-        out[canonical_landmark_name(str(name))] = (float(coords[0]) * inv, float(coords[1]) * inv)
+        out[canonical_landmark_name(str(name))] = {
+            "xy": (float(coords[0]) * inv, float(coords[1]) * inv),
+            # Absent on the minimal override schema → trust the point.
+            "reliable": bool(props.get("reliable", True)),
+            "gate_reason": str(props.get("gate_reason") or ""),
+        }
     return out
+
+
+def _internal_landmark_name(name: str) -> str:
+    """GeoJSON landmark name → the snake_case internal form the gate config uses
+    (``"subcostal break"`` → ``subcostal_break``, ``"L3.d"`` → ``l3_d``). Mirrors
+    LandmarkLocator's dataset ``_normalize_name`` without importing torch."""
+    from landmark_locator.names import canonical_landmark_name
+
+    return re.sub(r"[\s.\-]+", "_", canonical_landmark_name(str(name)).strip()).lower()
+
+
+def _core_internal_from_config(gate_config: Optional[dict]) -> set:
+    """A gate config's core set as internal names."""
+    return {_internal_landmark_name(n) for n in ((gate_config or {}).get("core_landmarks") or [])}
+
+
+def _core_landmark_internal_names(window) -> set:
+    """The configured core set (internal names) — the model sidecar merged with the
+    window's gate override, exactly as a run resolves it. Empty when no model is
+    configured or the config cannot be read."""
+    try:
+        from landmark_locator.inference.batch_gate import effective_gate_config
+
+        lm_path = (getattr(window, "_landmark_model_path", "") or "").strip()
+        if not lm_path:
+            return set()
+        return _core_internal_from_config(effective_gate_config(Path(lm_path), getattr(window, "_gate_override", None)))
+    except Exception:
+        return set()
+
+
+def _run_resolved_gate_config(window, image_name: str) -> Optional[dict]:
+    """The gate config the last run applied to this image in batch_mad mode, if the
+    host records it (TraceWindow.resolved_gate_config_for); None otherwise."""
+    getter = getattr(window, "resolved_gate_config_for", None)
+    if not callable(getter):
+        return None
+    try:
+        cfg = getter(image_name)
+    except Exception:
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _partition_landmarks(meta: dict, *, include_unreliable: bool, core_internal: set, failed_names: set) -> tuple:
+    """Decide which predicted landmarks the inspector shows.
+
+    The rule is "show what TRACE sees at the point of failure". A landmark that
+    passed the gate is shown. One that failed is shown (in red) only when it is
+    the kind of failure a run would surface: it is in the core set (so it would
+    have aborted the image), the recorded failure for this image names it, or
+    the run keeps unreliable landmarks anyway (``include_unreliable``). A
+    non-core landmark the gate dropped is hidden — on a run it never reaches
+    the hinge chop, rotation or Stage 2, and showing it here both misleads
+    (an absent crossvein's ACV.a / ACV.p look "detected") and, if left in
+    place, would be saved into the manual override as a real point.
+
+    Returns ``(shown, unreliable_shown, hidden)``: ``shown`` is ``{name: (x, y)}``
+    in insertion order, ``unreliable_shown`` the names in ``shown`` that failed
+    the gate, ``hidden`` ``{name: gate_reason}`` for the dropped ones.
+    """
+    shown: dict = {}
+    unreliable_shown: set = set()
+    hidden: dict = {}
+    for name, entry in meta.items():
+        if entry.get("reliable", True):
+            shown[name] = entry["xy"]
+            continue
+        surfaced = include_unreliable or _internal_landmark_name(name) in core_internal or name in failed_names
+        if surfaced:
+            shown[name] = entry["xy"]
+            unreliable_shown.add(name)
+        else:
+            hidden[name] = entry.get("gate_reason") or "failed the confidence gate"
+    return shown, unreliable_shown, hidden
 
 
 def _parse_failed_gate_landmarks(message: str) -> set:
@@ -140,12 +228,23 @@ def _parse_failed_gate_landmarks(message: str) -> set:
     (see LandmarkLocator ``LowConfidenceLandmarkError``). We parse the ``<name>``
     tokens so those exact points can be colored red on the canvas.
 
+    The other shape that names a landmark is Stage 4's ``Missing required
+    landmark: <name>`` (optionally followed by the gate verdict in parentheses):
+    a non-core landmark the gate dropped and the hinge chop then needed. That
+    drop DID fail the image, so the point is surfaced (red) rather than hidden.
+
     Returns an empty set for any other message (quality-gate aborts, preprocessing
     or analysis failures) — those name no landmarks, so nothing is colored. Reasons
     join their sub-parts with ``; `` and never contain ``,`` or ``()``, so entries
     split cleanly on the ``name (reason)`` shape.
     """
-    if not message or "Core landmarks failed confidence gate" not in message:
+    if not message:
+        return set()
+    if "Missing required landmark:" in message:
+        _, _, tail = message.partition("Missing required landmark:")
+        name = tail.split("(", 1)[0].strip().rstrip(".")
+        return {name} if name else set()
+    if "Core landmarks failed confidence gate" not in message:
         return set()
     _, _, tail = message.partition(":")
     return {m.group(1).strip() for m in re.finditer(r"([^,]+?)\s*\(([^)]*)\)", tail) if m.group(1).strip()}
@@ -621,6 +720,13 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         # flags are wiped by disable_gates). Populated in _render on the GUI thread.
         self._failure_text: str = ""
         self._failed_names: set = set()  # landmark names (raw + display) that tripped the gate
+        # Gate verdicts from the landmarks file itself (see _partition_landmarks):
+        # names shown in red because they failed, and the non-core failures that
+        # were dropped from the canvas, with their reasons, for the side panel.
+        self._unreliable_names: set = set()
+        self._hidden_dropped: dict = {}
+        # Where this image's gate verdicts came from, for the side panel.
+        self._gate_note: str = ""
         self._last_saved_snapshot: Optional[tuple] = None
         # Point size defaults to an image-adaptive value on first render (None
         # here). A user drag on the slider pins an absolute size that then carries
@@ -782,15 +888,32 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
              (legacy loose location too) ← prior corrections
           2. <output_folder>/<stem>_landmarks.geojson       ← post-run output
           3. <image_dir>/<stem>_landmarks.geojson           ← Stage-3 sidecar
-          4. Generate via _generate_landmarks_for_image()    ← on-demand model
+          4. Generate via window.run_single_image_landmark_prediction()
+             ← the run's own Stage 1-3 chain, gates on, nothing aborts
+
+        Whatever the source, the points are then filtered the way a run would
+        see them (``_partition_landmarks``): gate-dropped non-core landmarks are
+        hidden unless the run keeps unreliable landmarks or they are the
+        recorded reason this image failed.
         """
         image_path = self._image_path
         window = self._window
-        # Read the Qt widget here (GUI thread); the worker must not touch it.
+        # Read Qt widgets / window state here (GUI thread); the worker must not.
         try:
             out_text = window.output_edit.text().strip()
         except Exception:
             out_text = ""
+        err_map = getattr(window, "_image_error_text", {}) or {}
+        failure_text = err_map.get(image_path.name, "")
+        failed_names = _parse_failed_gate_landmarks(failure_text)
+        include_unreliable = bool(getattr(window, "_include_unreliable_landmarks", False))
+        # In batch_mad gate mode a run judges by thresholds derived from its chunk;
+        # a lone prediction would fall back to the fixed values and disagree with
+        # the run, so re-gate with the config the run recorded for this image.
+        run_gate_cfg = _run_resolved_gate_config(window, image_path.name)
+        core_internal = (
+            _core_internal_from_config(run_gate_cfg) if run_gate_cfg else _core_landmark_internal_names(window)
+        )
 
         def work():
             import numpy as np
@@ -804,31 +927,45 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
                 (Path(out_text) / f"{stem}_landmarks.geojson") if out_text else None,
                 image_dir / f"{stem}_landmarks.geojson",
             ]
-            landmarks_dict = None
+            meta = None
+            generated = False
             for cand in candidates:
                 if cand is None or not cand.is_file():
                     continue
                 try:
-                    landmarks_dict = _parse_landmarks_geojson(cand)
+                    meta = _parse_landmarks_geojson_meta(cand)
                     break
                 except Exception:
                     continue
 
-            if not landmarks_dict:
-                panel = getattr(window, "inline_custom_distances_panel", None)
-                if panel is None:
-                    raise RuntimeError("Internal: landmark generation panel is unavailable.")
+            if not meta:
+                # No file: predict the way a run would (rescale + wing isolation +
+                # the user's gate thresholds) so the verdicts match the pipeline's.
+                # The core set is emptied so a failing core landmark is flagged
+                # rather than raised — this image likely has no landmarks file
+                # BECAUSE it failed the gate, and the user still needs the points.
+                tmp_dir = Path(tempfile.mkdtemp(prefix="trace_lm_inspect_"))
+                generated = True
                 try:
-                    # disable_gates: this image likely has no override BECAUSE its
-                    # landmarks failed the confidence gate — generate the model's
-                    # best guess anyway so the user has points to drag into place.
-                    generated = panel._generate_landmarks_for_image(image_path, disable_gates=True)
-                    landmarks_dict = _parse_landmarks_geojson(generated)
+                    result = window.run_single_image_landmark_prediction(image_path, tmp_dir, gate_config=run_gate_cfg)
+                    lm_file = getattr(result, "landmarks_geojson_path", None)
+                    if not lm_file or not Path(lm_file).is_file():
+                        raise RuntimeError(getattr(result, "error", None) or "the pipeline wrote no landmarks file")
+                    meta = _parse_landmarks_geojson_meta(Path(lm_file))
                 except Exception as exc:  # noqa: BLE001
                     raise RuntimeError(
-                        f"No landmarks file found and on-demand generation failed:\n\n{exc}\n\n"
+                        f"No landmarks file found and on-demand prediction failed:\n\n{exc}\n\n"
                         "Configure a landmark model in Settings → Models and try again."
                     )
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            landmarks_dict, unreliable_shown, hidden = _partition_landmarks(
+                meta,
+                include_unreliable=include_unreliable,
+                core_internal=core_internal,
+                failed_names=failed_names,
+            )
 
             image = imread_any(image_path)
             if image is None:
@@ -838,12 +975,31 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
                 image = np.ascontiguousarray(image[..., ::-1])
             elif image.ndim == 3 and image.shape[2] == 4:
                 image = np.ascontiguousarray(image[..., [2, 1, 0, 3]])
-            return {"image": image, "landmarks": landmarks_dict}
+            if not generated:
+                gate_note = ""
+            elif run_gate_cfg:
+                gate_note = "Predicted now, judged by the batch-derived gate thresholds this image's last run resolved."
+            else:
+                gate_note = "Predicted now, judged by the fixed gate thresholds."
+            return {
+                "image": image,
+                "landmarks": landmarks_dict,
+                "unreliable": unreliable_shown,
+                "hidden": hidden,
+                "failure_text": failure_text,
+                "failed_names": failed_names,
+                "gate_note": gate_note,
+            }
 
         self._begin_load(work)
 
     def _render_payload(self, payload: dict) -> None:
         self._predicted_positions = dict(payload["landmarks"])
+        self._failure_text = payload.get("failure_text", "")
+        self._failed_names = set(payload.get("failed_names", set()))
+        self._unreliable_names = set(payload.get("unreliable", set()))
+        self._hidden_dropped = dict(payload.get("hidden", {}))
+        self._gate_note = str(payload.get("gate_note", ""))
         self._render(payload["image"], payload["landmarks"])
         self._last_saved_snapshot = self._snapshot_current()
 
@@ -880,13 +1036,8 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         coords_yx = np.array([[y, x] for (x, y) in landmarks_dict.values()], dtype=float)
         if coords_yx.size == 0:
             coords_yx = np.empty((0, 2), dtype=float)
-        # Pull the already-extracted failure reason for THIS image off the GUI
-        # window (GUI thread — safe here). The regenerated GeoJSON's own gate
-        # flags are unusable (disable_gates wipes them), so this is the source of
-        # both the failure list and the red points.
-        err_map = getattr(self._window, "_image_error_text", {}) or {}
-        self._failure_text = err_map.get(self._image_path.name, "")
-        self._failed_names = _parse_failed_gate_landmarks(self._failure_text)
+        # Failure text / gate verdicts were resolved in load_or_generate and
+        # arrive through the payload (_render_payload), so nothing is re-derived here.
         # Scale the point size to the image, mirroring the landmark-overlay output
         # (visualize.py: radius = min(h, w) / 125). napari `size` is a diameter, so
         # double the overlay radius — points then look the same relative to the wing
@@ -900,8 +1051,8 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         point_size = int(self._point_size)
         # Per-point reliability lives in a feature column so it stays in lockstep
         # with the point data across add/delete, driving the failed-point color. A
-        # point is "failed" when its raw name or display label is in the parsed
-        # gate-failure set (match both so un-translated keys still land).
+        # point is "failed" when the landmarks file flagged it unreliable or its raw
+        # name / display label is in the parsed gate-failure set.
         reliable_flags = self._reliable_flags(raw_names, labels)
         self._points_layer = self._viewer.add_points(
             coords_yx,
@@ -944,9 +1095,10 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
             pass
 
     def _reliable_flags(self, raw_names, labels) -> list:
-        """Per-point reliability: False iff the point's raw name or display label
-        is in the parsed gate-failure set (match both so un-translated keys land)."""
-        failed = self._failed_names
+        """Per-point reliability: False iff the landmarks file flagged the point
+        unreliable, or its raw name / display label is in the parsed gate-failure
+        set (match both so un-translated keys land)."""
+        failed = self._failed_names | self._unreliable_names
         return [(n not in failed and lbl not in failed) for n, lbl in zip(raw_names, labels)]
 
     def _update_colors(self, _event=None) -> None:
@@ -1010,13 +1162,33 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         confidence gate, quality gate, no-wing, analysis crash, etc.). The message
         is HTML-escaped because gate reasons contain '<' (e.g. peak=0.12<0.20).
         """
+        from measurement_maker.landmark_names import landmark_display_name
+
         text = (self._failure_text or "").strip()
-        if not text:
-            self.lbl_failures.setText("<span style='color:#888'>No recorded failure for this image.</span>")
-            return
-        header = "<span style='color:#FF6B6B'>&#9888; This image failed:</span>"
-        body = html.escape(text).replace("\n", "<br>")
-        self.lbl_failures.setText(f"{header}<br>{body}")
+        parts = []
+        if text:
+            header = "<span style='color:#FF6B6B'>&#9888; This image failed:</span>"
+            body = html.escape(text).replace("\n", "<br>")
+            parts.append(f"{header}<br>{body}")
+        else:
+            parts.append("<span style='color:#888'>No recorded failure for this image.</span>")
+        if self._hidden_dropped:
+            # Non-core landmarks the gate dropped: a run never sees them, so they
+            # are not on the canvas. Say so, with the reasons, so a missing
+            # crossvein point reads as "dropped on purpose" and not "lost".
+            items = "<br>".join(
+                f"&nbsp;&nbsp;{html.escape(landmark_display_name(n))} — {html.escape(reason)}"
+                for n, reason in self._hidden_dropped.items()
+            )
+            parts.append(
+                "<span style='color:#888'>Dropped by the confidence gate and not shown (not core, so "
+                "they did not fail the image):</span><br>"
+                f"{items}<br>"
+                "<span style='color:#888'>Use “Add landmark” if the model was wrong to drop one.</span>"
+            )
+        if self._gate_note:
+            parts.append(f"<span style='color:#888'>{html.escape(self._gate_note)}</span>")
+        self.lbl_failures.setText("<br>".join(parts))
 
     def _set_points_mode(self, mode: str) -> None:
         if self._points_layer is None:
