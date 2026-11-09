@@ -663,6 +663,7 @@ class TraceWorker(QThread):
     image_completed = pyqtSignal(str)  # basename of an image whose Stage 2 succeeded
     image_failed_preproc = pyqtSignal(str, str)  # basename, error message (Stage 1)
     image_failed_analysis = pyqtSignal(str, str)  # basename, error message (Stage 2)
+    batch_gate_resolved = pyqtSignal(list, dict)  # basenames, gate config the batch landmark gate applied (per chunk)
     error = pyqtSignal(str)
 
     def __init__(self, kwargs):
@@ -711,6 +712,9 @@ class TraceWorker(QThread):
             self.kwargs["on_image_failed_preproc"] = lambda basename, err: self.image_failed_preproc.emit(basename, err)
             self.kwargs["on_image_failed_analysis"] = lambda basename, err: self.image_failed_analysis.emit(
                 basename, err
+            )
+            self.kwargs["on_batch_gate_resolved"] = lambda names, cfg: self.batch_gate_resolved.emit(
+                list(names), dict(cfg)
             )
             results = trace_folder(**self.kwargs)
             if self._pause.is_set():
@@ -861,6 +865,12 @@ class TraceWindow(QMainWindow):
         # this and appends a short one-liner after the filename when the
         # row is in the FAILED state.
         self._image_error_text: dict[str, str] = {}
+        # Per-basename landmark gate config the last run applied in batch_mad
+        # mode (one dict shared per chunk; empty in fixed mode). The landmark
+        # inspector re-gates with it so its red / hidden points match the run.
+        # Also persisted in the manifest (batch_gate_configs) for the
+        # restore-previous-run flow, which resolved_gate_config_for falls back to.
+        self._image_gate_config: dict[str, dict] = {}
         # Failed-images bookkeeping for the rerun buttons. _failure_category
         # holds basename → "gate"|"analysis"|"preproc_other" so
         # _refresh_rerun_buttons can decide whether to show the no-gate
@@ -1668,6 +1678,7 @@ class TraceWindow(QMainWindow):
             self._basename_to_row.clear()
             self._row_base_labels.clear()
             self._image_error_text.clear()
+            self._image_gate_config.clear()
             self._user_skip_set.clear()
             return
         folder = Path(folder_text)
@@ -1696,6 +1707,7 @@ class TraceWindow(QMainWindow):
             self._basename_to_row.clear()
             self._row_base_labels.clear()
             self._image_error_text.clear()
+            self._image_gate_config.clear()
             for idx, p in enumerate(self._image_paths):
                 # Show path relative to the input folder when recursing so subfolder
                 # context is visible; otherwise just the name.
@@ -2776,6 +2788,7 @@ class TraceWindow(QMainWindow):
         self._basename_to_row.clear()
         self._row_base_labels.clear()
         self._image_error_text.clear()
+        self._image_gate_config.clear()
         # User-skip set lives in QSettings under user_skip/<sha1>; the
         # settings.clear() at the top of this method already drops every
         # such key. Wipe the in-memory mirror to match.
@@ -3857,6 +3870,83 @@ class TraceWindow(QMainWindow):
             bucket["enabled"] = False
         return base
 
+    def _build_no_abort_gate_override(self) -> dict:
+        """Gate override with the user's thresholds intact but an EMPTY core set.
+
+        Every metric still judges every landmark (so ``reliable`` / ``gate_reason``
+        come out exactly as a run would compute them), but no failure aborts the
+        image — the landmark inspector needs the verdicts, not the abort.
+        """
+        import copy as _copy
+
+        base = _copy.deepcopy(self._gate_override) if self._gate_override else {}
+        base["core_landmarks"] = []
+        return base
+
+    def _single_image_preprocess_kwargs(self) -> dict:
+        """The Stage 1-2 settings (rescale + wing isolation) a batch run would use."""
+        wing_model_dir = None
+        if self._wing_isolation_enabled and str(self._wing_isolation_model_path or "").strip():
+            wing_model_dir = Path(self._wing_isolation_model_path)
+
+        if self._active_rescale_target == "landmark":
+            target_um_per_px = self._landmark_target_um_per_px
+        elif self._active_rescale_target == "wing_isolation":
+            target_um_per_px = self._wing_isolation_target_um_per_px
+        else:
+            target_um_per_px = self._segmentation_target_um_per_px
+
+        return dict(
+            landmark_checkpoint=Path(self._landmark_model_path) if self._landmark_model_path else None,
+            wing_model_dir=wing_model_dir,
+            wing_expand_fraction=self._wing_expand_fraction,
+            do_rotation=False,
+            input_um_per_px=self.config.um_per_px,
+            target_um_per_px=target_um_per_px,
+            rescale_tolerance_low=self._rescale_tolerance_low,
+            rescale_tolerance_high=self._rescale_tolerance_high,
+        )
+
+    def run_single_image_landmark_prediction(self, image_path, output_dir, *, gate_config=None):
+        """Predict ONE image's landmarks the way a run would, minus the abort.
+
+        The landmark inspector calls this when an image has no landmarks file
+        yet. It runs Stage 1-3 (rescale, wing isolation, landmarks) with the
+        current GUI settings and the user's gate thresholds, so the metrics are
+        the ones a run computes — predicting on the raw image instead gives
+        different numbers whenever wing isolation or rescaling is on. Two
+        deliberate differences from a run: the core set is emptied so a failing
+        core landmark is flagged instead of raising, and every landmark is kept
+        (``include_unreliable_landmarks=True``) so the inspector can decide what
+        to show from the per-landmark ``reliable`` flags. Rotation is off.
+
+        ``gate_config``: a full gate config to judge by instead of the user's
+        override — the inspector passes the config a batch_mad run resolved for
+        this image (see resolved_gate_config_for), so the verdicts use the run's
+        batch-derived fences rather than the fixed ones a lone image falls back to.
+        Its core set is emptied the same way.
+
+        Returns the preprocessing PipelineResult; ``landmarks_geojson_path`` holds
+        the gate metadata and the ``rescale_factor`` the inspector maps back by.
+        """
+        import copy as _copy
+
+        from preprocessing.pipeline import process_single_image
+
+        if gate_config is not None:
+            override = _copy.deepcopy(gate_config)
+            override["core_landmarks"] = []
+        else:
+            override = self._build_no_abort_gate_override()
+        return process_single_image(
+            image_path=Path(image_path),
+            output_dir=Path(output_dir),
+            stages=(True, False, False),
+            include_unreliable_landmarks=True,
+            gate_override=override,
+            **self._single_image_preprocess_kwargs(),
+        )
+
     def run_single_image_preprocessing_for_segmentation(self, image_path, output_dir, *, with_segmentation: bool):
         """Preprocess ONE image with the current GUI settings for the inspector.
 
@@ -3879,32 +3969,14 @@ class TraceWindow(QMainWindow):
         """
         from preprocessing.pipeline import process_single_image
 
-        wing_model_dir = None
-        if self._wing_isolation_enabled and str(self._wing_isolation_model_path or "").strip():
-            wing_model_dir = Path(self._wing_isolation_model_path)
-
-        if self._active_rescale_target == "landmark":
-            target_um_per_px = self._landmark_target_um_per_px
-        elif self._active_rescale_target == "wing_isolation":
-            target_um_per_px = self._wing_isolation_target_um_per_px
-        else:
-            target_um_per_px = self._segmentation_target_um_per_px
-
         return process_single_image(
             image_path=Path(image_path),
             output_dir=Path(output_dir),
-            landmark_checkpoint=Path(self._landmark_model_path) if self._landmark_model_path else None,
             segmentation_model_dir=Path(self._segmentation_model_path) if self._segmentation_model_path else None,
             stages=(True, True, bool(with_segmentation)),
             include_unreliable_landmarks=self._include_unreliable_landmarks,
-            wing_model_dir=wing_model_dir,
-            wing_expand_fraction=self._wing_expand_fraction,
-            do_rotation=False,
             gate_override=self._build_all_gates_disabled_override(),
-            input_um_per_px=self.config.um_per_px,
-            target_um_per_px=target_um_per_px,
-            rescale_tolerance_low=self._rescale_tolerance_low,
-            rescale_tolerance_high=self._rescale_tolerance_high,
+            **self._single_image_preprocess_kwargs(),
         )
 
     # -----------------------------------------------------------------------
@@ -4294,6 +4366,7 @@ class TraceWindow(QMainWindow):
         self.worker.image_completed.connect(self._on_image_completed)
         self.worker.image_failed_preproc.connect(self._on_image_failed_preproc)
         self.worker.image_failed_analysis.connect(self._on_image_failed_analysis)
+        self.worker.batch_gate_resolved.connect(self._on_batch_gate_resolved)
         self.worker.error.connect(self._on_error)
         # Lock per-row check toggles for the duration of the run — the
         # worker captured the skip set above, so mid-run toggles would
@@ -4634,6 +4707,29 @@ class TraceWindow(QMainWindow):
         if self._image_status.get(basename) == ImageStatus.FAILED:
             return
         self._update_image_status(basename, ImageStatus.SUCCEEDED)
+
+    def _on_batch_gate_resolved(self, basenames: list, gate_config: dict) -> None:
+        """One chunk's batch landmark gate resolved — remember the fences it applied.
+
+        Keyed per image for the inspector and appended to the manifest so a
+        restored session can still re-gate with the run's own thresholds.
+        """
+        for bn in basenames:
+            self._image_gate_config[str(bn)] = gate_config
+        if self._manifest is not None and self._run_folder is not None:
+            self._manifest.record_batch_gate([str(b) for b in basenames], gate_config)
+            self._manifest_dirty = True
+
+    def resolved_gate_config_for(self, basename: str) -> Optional[dict]:
+        """Gate config the last run applied to ``basename`` in batch_mad mode.
+
+        None in fixed mode, when no run covered the image, or when nothing is
+        loaded. Live state first, then the (possibly restored) manifest.
+        """
+        cfg = self._image_gate_config.get(basename)
+        if cfg is None and self._manifest is not None:
+            cfg = self._manifest.gate_config_for(basename)
+        return cfg
 
     def _on_image_failed_preproc(self, basename: str, error_text: str = "") -> None:
         """One image's Stage 1 errored — record it for resume bookkeeping.

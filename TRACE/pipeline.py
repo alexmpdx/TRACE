@@ -793,6 +793,24 @@ def build_cv_ratio_wing_result(
         return None
 
 
+def group_batch_gate_configs(preproc_results) -> list[tuple[list[str], dict]]:
+    """Group a chunk's preprocessing results by the batch gate config they share.
+
+    ``PipelineResult.gate_config_resolved`` is the same dict object for every
+    image a ``process_folder`` call gated together, and None in fixed mode, so
+    the grouping is by identity. Returns ``[(basenames, gate_config), ...]`` —
+    normally one entry per chunk, empty when the batch gate was off.
+    """
+    groups: dict[int, tuple[list[str], dict]] = {}
+    for r in preproc_results:
+        cfg = getattr(r, "gate_config_resolved", None)
+        if cfg is None:
+            continue
+        names, _ = groups.setdefault(id(cfg), ([], cfg))
+        names.append(Path(r.image_path).name)
+    return list(groups.values())
+
+
 def trace_folder(
     input_dir: Path,
     output_dir: Path,
@@ -826,6 +844,7 @@ def trace_folder(
     on_image_complete=None,
     on_image_failed_preproc=None,
     on_image_failed_analysis=None,
+    on_batch_gate_resolved=None,
     show_color_key: bool = True,
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
@@ -968,6 +987,7 @@ def trace_folder(
             on_image_complete=on_image_complete,
             on_image_failed_preproc=on_image_failed_preproc,
             on_image_failed_analysis=on_image_failed_analysis,
+            on_batch_gate_resolved=on_batch_gate_resolved,
             show_color_key=show_color_key,
             show_ectopic_labels=show_ectopic_labels,
             show_region_labels=show_region_labels,
@@ -1080,6 +1100,7 @@ def _run(
     on_image_complete=None,
     on_image_failed_preproc=None,
     on_image_failed_analysis=None,
+    on_batch_gate_resolved=None,
     show_color_key: bool = True,
     show_ectopic_labels: bool = True,
     show_region_labels: bool = True,
@@ -1278,6 +1299,17 @@ def _run(
             predictor_cache=landmark_predictor_cache,
             model_cache=dl_model_cache,
         )
+
+        # Batch landmark gate: hand the host the gate config this chunk actually
+        # applied (per_landmark thresholds derived from the chunk) with the
+        # images it covered, so the landmark inspector can re-gate with the same
+        # fences instead of the fixed values a single image falls back to.
+        if on_batch_gate_resolved is not None:
+            for _names, _cfg in group_batch_gate_configs(chunk_preproc):
+                try:
+                    on_batch_gate_resolved(_names, _cfg)
+                except Exception:
+                    logger.exception("on_batch_gate_resolved callback raised")
 
         successful_preproc: list[_PreprocResult] = []
         for r in chunk_preproc:

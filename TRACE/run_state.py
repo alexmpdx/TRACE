@@ -91,6 +91,30 @@ class RunManifest:
     # the image-list tooltips that show *why* each image failed. Empty for
     # any image whose error message wasn't captured (e.g. older manifests).
     failure_messages: dict[str, str] = field(default_factory=dict)
+    # Batch landmark gate (gate config ``batch.mode == "batch_mad"``): one entry
+    # per preprocessing chunk, ``{"images": [basenames], "gate_config": {...}}``,
+    # holding the gate config the run actually applied — sidecar + override with
+    # the thresholds derived from that chunk. Empty in fixed mode. The landmark
+    # inspector re-gates with these exact fences; a single-image prediction
+    # would otherwise fall back to the fixed thresholds and disagree with the run.
+    batch_gate_configs: list[dict] = field(default_factory=list)
+
+    def record_batch_gate(self, image_basenames: list[str], gate_config: dict) -> None:
+        """Remember the gate config one chunk's batch landmark gate applied."""
+        self.batch_gate_configs.append({"images": [str(b) for b in image_basenames], "gate_config": dict(gate_config)})
+        self.updated_at = _now_iso()
+
+    def gate_config_for(self, image_basename: str) -> Optional[dict]:
+        """The batch-resolved gate config applied to ``image_basename``, or None.
+
+        The most recent chunk that covered the image wins (a resumed run may
+        re-gate an image in a later chunk).
+        """
+        for entry in reversed(self.batch_gate_configs):
+            if image_basename in (entry.get("images") or []):
+                cfg = entry.get("gate_config")
+                return dict(cfg) if isinstance(cfg, dict) else None
+        return None
 
     def mark_completed(self, image_basename: str) -> None:
         """Record an image as Stage-2-done. Idempotent; updates the timestamp.
@@ -201,6 +225,12 @@ def load_manifest(output_dir: Path) -> Optional[RunManifest]:
         raw_failure_messages = data.get("failure_messages", {}) or {}
         if not isinstance(raw_failure_messages, dict):
             raw_failure_messages = {}
+        raw_batch_gates = data.get("batch_gate_configs", []) or []
+        batch_gate_configs = [
+            {"images": [str(b) for b in (e.get("images") or [])], "gate_config": dict(e["gate_config"])}
+            for e in raw_batch_gates
+            if isinstance(e, dict) and isinstance(e.get("gate_config"), dict)
+        ]
         return RunManifest(
             version=int(data.get("version", _MANIFEST_VERSION)),
             started_at=str(data.get("started_at", "")),
@@ -218,6 +248,8 @@ def load_manifest(output_dir: Path) -> Optional[RunManifest]:
             # defaulting to empty preserves backwards compatibility.
             analysis_failed_images=list(data.get("analysis_failed_images", []) or []),
             failure_messages={str(k): str(v) for k, v in raw_failure_messages.items()},
+            # Absent on manifests written before the batch gate existed.
+            batch_gate_configs=batch_gate_configs,
         )
     except (TypeError, ValueError) as exc:
         logger.warning("run_state: %s has bad fields: %s", path, exc)

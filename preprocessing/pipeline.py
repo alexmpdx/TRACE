@@ -796,6 +796,14 @@ class PipelineResult:
     # was passed in. TRACE reads it downstream to build a per-image identify
     # config so each wing's measurements convert through its OWN scale.
     effective_um_per_px: Optional[float] = None
+    # Landmark gate config actually applied to this image when the batch gate
+    # (gate config ``batch.mode == "batch_mad"``) was active: the sidecar +
+    # override with the thresholds resolved from this process_folder batch.
+    # None in fixed mode. Set on every result of the batch, failed ones
+    # included, so a host can re-gate an image later (TRACE's landmark
+    # inspector) with the exact fences the run used rather than the fixed ones
+    # a single-image prediction falls back to.
+    gate_config_resolved: Optional[dict] = None
     error: Optional[str] = None
     error_stage: Optional[str] = None
     stages_completed: list[str] = field(default_factory=list)
@@ -1415,7 +1423,7 @@ def _apply_batch_gate(
             name_map=name_map,
             include_unreliable=include_unreliable,
         )
-        prefetched[path] = {"landmarks": landmarks, "metadata": metadata, "error": error}
+        prefetched[path] = {"landmarks": landmarks, "metadata": metadata, "error": error, "gate_config": resolved}
         if error is not None:
             aborted += 1
             stale = entry.get("pass1_geojson")
@@ -1718,5 +1726,13 @@ def process_folder(
     # sequential loop's early-break already omits them; this normalizes
     # the parallel branch (which fills paused slots from _process_one).
     results = [r for r in results if r is not None and not r.paused]
+
+    # Batch gate: stamp every result (failed ones too) with the gate config the
+    # batch actually applied, so the caller can persist / re-gate with it.
+    if batch_gate and prefetched:
+        for r in results:
+            entry = prefetched.get(r.image_path)
+            if entry is not None and entry.get("gate_config") is not None:
+                r.gate_config_resolved = entry["gate_config"]
 
     return results
