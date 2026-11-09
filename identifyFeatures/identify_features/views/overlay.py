@@ -342,6 +342,25 @@ _ANT_COLOR_BGR = (150, 80, 0)  # warm blue tint
 _POST_COLOR_BGR = (0, 60, 180)  # warm red/orange tint
 
 
+def _fill_compartment(layer: np.ndarray, geom, color: tuple[int, int, int]) -> None:
+    """Fill a compartment geometry (Polygon or MultiPolygon, holes respected).
+
+    compute_ap_split can hand back a MultiPolygon when the straight A/P cut
+    leaves a compartment in several pieces (issue #32); every piece is
+    painted. Exterior + interior rings are passed together so cv2.fillPoly
+    leaves holes unpainted instead of flooding them.
+    """
+    if geom is None or geom.is_empty:
+        return
+    parts = list(geom.geoms) if hasattr(geom, "geoms") else [geom]
+    for part in parts:
+        if part.is_empty or not hasattr(part, "exterior"):
+            continue
+        rings = [np.array(part.exterior.coords, dtype=np.int32)]
+        rings.extend(np.array(ring.coords, dtype=np.int32) for ring in part.interiors)
+        cv2.fillPoly(layer, rings, color)
+
+
 def render_ap_overlay(
     base_image: np.ndarray,
     wing_result: Optional[WingResult],
@@ -366,12 +385,12 @@ def render_ap_overlay(
 
     # Anterior tint
     layer = img.copy()
-    cv2.fillPoly(layer, [np.array(anterior.exterior.coords, dtype=np.int32)], _ANT_COLOR_BGR)
+    _fill_compartment(layer, anterior, _ANT_COLOR_BGR)
     img = cv2.addWeighted(layer, 0.35, img, 0.65, 0)
 
     # Posterior tint
     layer = img.copy()
-    cv2.fillPoly(layer, [np.array(posterior.exterior.coords, dtype=np.int32)], _POST_COLOR_BGR)
+    _fill_compartment(layer, posterior, _POST_COLOR_BGR)
     img = cv2.addWeighted(layer, 0.35, img, 0.65, 0)
 
     # Percentage labels

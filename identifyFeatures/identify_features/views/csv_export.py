@@ -20,7 +20,7 @@ from identify_features.garbage_detector import compute_solidity
 from identify_features.models.datatypes import InterveinRegion, VeinIdentification
 from identify_features.models.topology import REGION_AP_ORDER, VEIN_AP_ORDER
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
-from shapely.ops import split
+from shapely.ops import split, unary_union
 
 if TYPE_CHECKING:
     from identify_features.models.datatypes import Landmark, WingResult
@@ -73,10 +73,12 @@ ALL_MEASUREMENT_GROUPS: frozenset[str] = frozenset(MEASUREMENT_GROUPS.keys())
 
 def compute_ap_split(
     wing_result: Optional[WingResult],
-) -> tuple[Optional[Polygon], Optional[Polygon]]:
+) -> tuple[Optional[Polygon | MultiPolygon], Optional[Polygon | MultiPolygon]]:
     """Split wing into anterior/posterior compartment polygons along L4 axis.
 
-    Returns (anterior_polygon, posterior_polygon) or (None, None).
+    Returns (anterior_geom, posterior_geom) or (None, None). Either side may
+    be a MultiPolygon when the straight cut leaves a compartment in several
+    pieces (e.g. a notch at the margin); the two always tile the outline.
     """
     if wing_result is None or wing_result.wing_outline is None:
         return None, None
@@ -170,14 +172,40 @@ def compute_ap_split(
     if len(polygons) < 2:
         return None, None
 
-    polygons.sort(key=lambda g: g.area, reverse=True)
-    half_a, half_b = polygons[0], polygons[1]
+    # Assign EVERY fragment to a side. A straight cut through a concave
+    # outline (alula lobe, a notch at the margin, a ragged hinge edge, a
+    # thin sliver clipped off a corner) routinely yields three or more
+    # pieces; keeping only the two largest silently dropped the rest, so
+    # anterior + posterior no longer summed to the wing (issue #32,
+    # "Not getting all of A/P area"). Side = sign of the cross product of
+    # the split direction with the fragment-centroid offset from the line;
+    # the anterior side is whichever one anterior_ref falls on.
+    def _side(pt: np.ndarray) -> float:
+        rel = pt - midpt
+        return float(direction[0] * rel[1] - direction[1] * rel[0])
 
-    ref_point = Point(anterior_ref.tolist())
-    if half_a.distance(ref_point) < half_b.distance(ref_point):
-        return half_a, half_b
-    else:
-        return half_b, half_a
+    anterior_sign = _side(anterior_ref)
+    if anterior_sign == 0.0:
+        # Degenerate: the anterior reference sits exactly on the cut. Fall
+        # back to the nearest-fragment rule for the sign only.
+        ref_point = Point(anterior_ref.tolist())
+        nearest = min(polygons, key=lambda g: g.distance(ref_point))
+        anterior_sign = _side(np.array(nearest.centroid.coords[0])) or 1.0
+
+    ant_parts: list[Polygon | MultiPolygon] = []
+    post_parts: list[Polygon | MultiPolygon] = []
+    for g in polygons:
+        side = _side(np.array(g.centroid.coords[0]))
+        (ant_parts if side * anterior_sign >= 0 else post_parts).append(g)
+
+    if not ant_parts or not post_parts:
+        return None, None
+
+    anterior = unary_union(ant_parts)
+    posterior = unary_union(post_parts)
+    if anterior.is_empty or posterior.is_empty:
+        return None, None
+    return anterior, posterior
 
 
 def _compute_ap_areas(
