@@ -508,6 +508,34 @@ def run_hinge_chop(image_path: Path, landmarks: dict, output_path: Path) -> Path
     return output_path
 
 
+_MISSING_LANDMARK_PREFIX = "Missing required landmark: "
+
+
+def explain_missing_landmark(message: str, landmark_metadata: Optional[dict]) -> str:
+    """Append the confidence-gate verdict to a downstream "Missing required landmark" error.
+
+    A landmark that fails the gate but is not in ``core_landmarks`` is dropped
+    silently (the gate only aborts the image for core landmarks), so the first
+    symptom the user sees is a later stage complaining the landmark is missing.
+    Stage 3's metadata still records every predicted landmark's gate result, so
+    when the missing one was gate-dropped, say so and quote the failing metrics
+    instead of leaving the user to guess why a landmark the model clearly knows
+    about never reached the hinge chop. Messages of any other shape, and
+    landmarks with no metadata entry (never predicted), are returned unchanged.
+    """
+    if not landmark_metadata or not message.startswith(_MISSING_LANDMARK_PREFIX):
+        return message
+    name = message[len(_MISSING_LANDMARK_PREFIX) :].strip()
+    meta = landmark_metadata.get(name)
+    if not meta or meta.get("reliable", True):
+        return message
+    reason = str(meta.get("gate_reason") or "").strip() or "failed the confidence gate"
+    return (
+        f"{message} (dropped by the confidence gate: {reason}; it is not in the core set, "
+        "so the gate did not abort the image)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 2: Wing isolation (optional)
 # ---------------------------------------------------------------------------
@@ -1120,7 +1148,15 @@ def process_single_image(
         if progress_callback:
             progress_callback("hinge", f"Chopping hinge for {image_path.name}")
         chopped_path = output_dir / f"{stem}_chopped{raster_ext}"
-        run_hinge_chop(image_path, landmarks, chopped_path)
+        try:
+            run_hinge_chop(image_path, landmarks, chopped_path)
+        except ValueError as exc:
+            # A gate-dropped (non-core) landmark surfaces here as "missing"; name the
+            # gate verdict so the user sees why rather than a bare absence.
+            explained = explain_missing_landmark(str(exc), landmark_metadata)
+            if explained == str(exc):
+                raise
+            raise ValueError(explained) from exc
         result.chopped_image_path = chopped_path
         result.stages_completed.append("hinge")
 
