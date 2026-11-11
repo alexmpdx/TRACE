@@ -57,17 +57,16 @@ _DEFAULT_ASSET_URL = "https://github.com/alexmpdx/TRACE/releases/download/v0.1.0
 _EXPECTED_SHA256 = "a80e5d5d276eac73edc628acf6eddef0a505598a1f47e274bb24f4180f542d2a"
 
 _TRACE_DIR = Path(__file__).resolve().parent
-# Inside a PyInstaller onedir bundle, __file__ resolves into a temp Python
-# package folder which is read-only and gets wiped between launches.
-# Persist models alongside the TRACE.exe instead (one level up from the
-# bundled TRACE package).
-if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    # sys.executable points at dist/TRACE/TRACE.exe; siblings include the
-    # bundled TRACE/ package folder. Keep models next to the exe so they
-    # survive across launches.
-    _MODELS_DIR = Path(sys.executable).resolve().parent / "TRACE" / "models"
-else:
-    _MODELS_DIR = _TRACE_DIR / "models"
+# Inside a PyInstaller bundle, __file__ resolves into the bundled package
+# folder, which is replaced on every update. Models persist next to
+# TRACE.exe on Windows and under ~/Library/Application Support/TRACE on
+# macOS — see TRACE/_paths.py.
+try:
+    from TRACE._paths import models_dir as _models_dir
+except ImportError:  # run as a plain script from inside TRACE/
+    from _paths import models_dir as _models_dir
+
+_MODELS_DIR = _models_dir()
 
 
 # Progress callback signature: (downloaded_bytes, total_bytes) -> bool.

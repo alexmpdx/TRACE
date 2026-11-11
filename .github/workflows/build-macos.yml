@@ -1,0 +1,151 @@
+name: Build macOS app
+
+# Triggers:
+#   - Manual: Actions tab → "Build macOS app" → Run workflow
+#     (the .dmg is uploaded as a 30-day workflow artifact).
+#   - Tag: the same windows-v* tag that releases the Windows installer.
+#     The tag name is historical — it is TRACE's one release tag, and the
+#     Help-tab updater parses it — so both platforms build from it and
+#     TRACE-macOS-arm64.dmg lands on the same GitHub Release as
+#     TRACE-Setup.exe.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "windows-v*"
+
+jobs:
+  build:
+    # Apple Silicon runner. Intel Macs are not supported: PyTorch stopped
+    # publishing x86_64 macOS wheels after 2.2.
+    runs-on: macos-15
+    timeout-minutes: 90
+    # `contents: write` lets the last step attach the .dmg to the Release.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Same dependency list as the Windows build (the file name is
+      # historical; nothing in it is Windows-only). Keyed on runner.arch
+      # as well as runner.os so an Intel cache can never be restored here.
+      - name: Cache venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: >-
+            venv-${{ runner.os }}-${{ runner.arch }}-py3.11-${{
+              hashFiles('TRACE/build/requirements-windows.txt',
+                        'identifyFeatures/pyproject.toml',
+                        'measurementMaker/pyproject.toml',
+                        'LandmarkLocator/pyproject.toml')
+            }}
+
+      - name: Create venv + install dependencies (cache miss)
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip wheel
+          .venv/bin/python -m pip install -r TRACE/build/requirements-windows.txt
+          .venv/bin/python -m pip install -e identifyFeatures
+          .venv/bin/python -m pip install -e measurementMaker
+          .venv/bin/python -m pip install -e LandmarkLocator
+
+      - name: Activate venv for downstream steps
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Read TRACE version from __init__.py
+        # Mirrors the Windows workflow: fail if the pushed tag and
+        # TRACE.__version__ disagree.
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(python -c "import re; print(re.search(r'__version__\s*=\s*[\x27\x22]([^\x27\x22]+)', open('TRACE/__init__.py').read()).group(1))")
+          echo "TRACE __version__ = $version"
+          echo "trace_version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/windows-v* ]]; then
+            tag_version="${GITHUB_REF#refs/tags/windows-v}"
+            if [[ "$tag_version" != "$version" ]]; then
+              echo "::error::Tag version ($tag_version) does not match TRACE.__version__ ($version)."
+              exit 1
+            fi
+          fi
+
+      - name: Run PyInstaller
+        run: pyinstaller TRACE/build/trace.spec --noconfirm
+
+      - name: Verify the app bundle
+        run: |
+          set -euo pipefail
+          test -x dist/TRACE.app/Contents/MacOS/TRACE
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/TRACE.app/Contents/Info.plist
+          # PyInstaller ad-hoc signs the bundle (arm64 binaries must carry
+          # a signature to run at all). Confirm it is intact.
+          codesign --verify --deep --strict dist/TRACE.app
+          # Smoke test: start the frozen binary and import the analysis
+          # stack through its CLI sentinel. Catches a module missing from
+          # the bundle here rather than on a user's machine.
+          dist/TRACE.app/Contents/MacOS/TRACE __identify_features_cli__ --help > /dev/null
+
+      - name: Build disk image
+        run: |
+          set -euo pipefail
+          mkdir dmg-staging
+          # ditto preserves the bundle's symlinks and signature; cp -R can
+          # flatten the Frameworks symlinks PyInstaller creates.
+          ditto dist/TRACE.app dmg-staging/TRACE.app
+          ln -s /Applications dmg-staging/Applications
+          # hdiutil intermittently fails with "Resource busy" on hosted
+          # runners while Spotlight indexes the staging folder; retry.
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname "TRACE ${{ steps.version.outputs.trace_version }}" \
+                -srcfolder dmg-staging -ov -format UDZO TRACE-macOS-arm64.dmg; then
+              break
+            fi
+            if [[ $attempt == 5 ]]; then exit 1; fi
+            sleep 10
+          done
+          ls -lh TRACE-macOS-arm64.dmg
+
+      - name: Upload disk image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TRACE-macOS-arm64
+          path: TRACE-macOS-arm64.dmg
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        # The Windows workflow owns the Release (title, notes, pre-release
+        # flag) and normally creates it. Wait for it rather than racing to
+        # create a second one, then add the .dmg. If it never appears (the
+        # Windows build failed), publish a beta release ourselves so the
+        # Mac build is not lost.
+        if: startsWith(github.ref, 'refs/tags/windows-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              break
+            fi
+            sleep 20
+          done
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            git log -1 --format=%b "$TAG" > RELEASE_NOTES.md
+            if ! [ -s RELEASE_NOTES.md ]; then
+              echo "_No release notes written on the tag commit._" > RELEASE_NOTES.md
+            fi
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+              --notes-file RELEASE_NOTES.md --prerelease --verify-tag
+          fi
+          gh release upload "$TAG" TRACE-macOS-arm64.dmg --repo "$GITHUB_REPOSITORY" --clobber

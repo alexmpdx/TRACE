@@ -1,7 +1,9 @@
-# PyInstaller spec for the TRACE Windows build.
+# PyInstaller spec for the TRACE desktop builds (Windows + macOS).
 #
 # Build with:  pyinstaller TRACE/build/trace.spec --noconfirm
-# Produces:    dist/TRACE/  (onedir bundle with TRACE.exe at its root)
+# Produces:    dist/TRACE/      (onedir bundle with TRACE.exe at its root)
+#              dist/TRACE.app   (macOS only — the same bundle wrapped as an
+#                                app; build-macos.yml packs it into a .dmg)
 #
 # Onedir (not onefile) because:
 #   - Faster startup (no per-launch extraction to a temp folder)
@@ -383,7 +385,8 @@ exe = EXE(
     # Programs, the Start Menu shortcut, the taskbar, and Explorer all show
     # the TRACE wireframe instead of the generic application icon. The same
     # .ico is also used by Inno Setup via SetupIconFile= in installer.iss.
-    icon=str(TRACE / "build" / "trace_icon.ico"),
+    # On macOS the icon belongs to the .app (BUNDLE below), not the binary.
+    icon=str(TRACE / "build" / "trace_icon.ico") if sys.platform == "win32" else None,
 )
 coll = COLLECT(
     exe,
@@ -395,3 +398,36 @@ coll = COLLECT(
     upx_exclude=[],
     name="TRACE",
 )
+
+# --- macOS .app bundle ----------------------------------------------------
+# Wraps the onedir output as dist/TRACE.app so it can be dragged into
+# /Applications and launched from Finder / the Dock. The app is read-only
+# at runtime: models and the startup log go to ~/Library (TRACE/_paths.py).
+if sys.platform == "darwin":
+    import re
+
+    _version = re.search(
+        r"__version__\s*=\s*['\"]([^'\"]+)",
+        (TRACE / "__init__.py").read_text(encoding="utf-8"),
+    ).group(1)
+    app = BUNDLE(
+        coll,
+        name="TRACE.app",
+        icon=str(TRACE / "build" / "trace_icon.icns"),
+        # Distinct from the QSettings domain (com.trace.WingAnalysisPipeline,
+        # derived from the Qt org/app names) so the two never collide.
+        bundle_identifier="io.github.alexmpdx.trace",
+        version=_version,
+        info_plist={
+            "CFBundleDisplayName": "TRACE",
+            "CFBundleShortVersionString": _version,
+            "CFBundleVersion": _version,
+            "NSHighResolutionCapable": True,
+            # Follow the system light/dark appearance instead of being
+            # pinned to light (PyInstaller's default for windowed apps).
+            "NSRequiresAquaSystemAppearance": False,
+            # torch 2.4 arm64 wheels target macOS 11+.
+            "LSMinimumSystemVersion": "11.0",
+            "LSApplicationCategoryType": "public.app-category.education",
+        },
+    )

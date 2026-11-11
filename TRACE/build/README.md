@@ -1,6 +1,7 @@
-# TRACE Windows build
+# TRACE desktop builds
 
-How the downloadable Windows installer (`TRACE-Setup.exe`) is produced.
+How the downloadable Windows installer (`TRACE-Setup.exe`) and the macOS disk image
+(`TRACE-macOS-arm64.dmg`) are produced. Windows first; macOS is [further down](#macos-build).
 
 ## Quick path: trigger a build, get an installer
 
@@ -28,9 +29,10 @@ attaching it to a release.
 | `requirements-windows.txt`    | Consolidated Python deps. CPU PyTorch (no CUDA).           |
 | `trace.spec`                  | PyInstaller spec — builds `dist/TRACE/` (onedir bundle).   |
 | `installer.iss`               | Inno Setup script — wraps `dist/TRACE/` into the .exe.     |
+| `trace_icon.icns`             | macOS app icon. Regenerate with `make_macos_icon.py`.      |
 | `README.md`                   | This file.                                                 |
 
-The corresponding CI workflow lives at `.github/workflows/build-windows.yml`.
+The CI workflows live at `.github/workflows/build-windows.yml` and `build-macos.yml`.
 
 ## Local build (on a Windows machine)
 
@@ -84,3 +86,61 @@ sub-module PyInstaller's static analysis missed. The fix pattern:
 
 Common culprits: dynamically-imported submodules of `scipy`, `sklearn`,
 `skimage`, `napari`. Each fix is a one-line addition to the spec.
+
+## macOS build
+
+The same `windows-v*` tag that releases the Windows installer also runs
+`.github/workflows/build-macos.yml` on an Apple Silicon runner. It builds
+`dist/TRACE.app` from the same `trace.spec` and the same requirements file, packs it
+into `TRACE-macOS-arm64.dmg`, and attaches that to the tag's GitHub Release next to
+`TRACE-Setup.exe`. Run the workflow by hand from the Actions tab to get the `.dmg` as
+a 30-day artifact without tagging.
+
+### Installing (what to tell users)
+
+1. Download `TRACE-macOS-arm64.dmg` from the Releases page, open it, and drag
+   **TRACE** onto **Applications**.
+2. The app is not notarized by Apple, so the first launch is blocked with "Apple could
+   not verify TRACE is free of malware". Click **Done**, open **System Settings →
+   Privacy & Security**, scroll to the message about TRACE, and click **Open Anyway**.
+   This is needed once. The Terminal equivalent is
+   `xattr -dr com.apple.quarantine /Applications/TRACE.app`.
+3. First launch downloads the 1.6 GB model bundle, as on Windows.
+
+### Where the Mac app keeps its files
+
+A `.app` must not be written into (it is signed, and it is replaced wholesale on
+update), so `TRACE/_paths.py` sends runtime files elsewhere:
+
+| What           | Location                                         |
+| -------------- | ------------------------------------------------ |
+| Model weights  | `~/Library/Application Support/TRACE/models/`    |
+| Startup log    | `~/Library/Logs/TRACE/trace_startup.log`         |
+| Settings       | `~/Library/Preferences/com.trace.WingAnalysisPipeline.plist` |
+
+Updating means dragging the new `TRACE.app` over the old one; models and settings
+survive. To uninstall completely, delete the app and those three paths.
+
+### Local build (on an Apple Silicon Mac)
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -r TRACE/build/requirements-windows.txt
+.venv/bin/pip install -e identifyFeatures -e measurementMaker -e LandmarkLocator
+.venv/bin/pyinstaller TRACE/build/trace.spec --noconfirm
+open dist/TRACE.app
+```
+
+A locally built app is never quarantined, so it opens without the Gatekeeper step.
+
+### Trade-offs in the macOS setup
+
+- **Apple Silicon only.** PyTorch stopped publishing Intel macOS wheels after 2.2, and
+  the Windows-tested pin is 2.4.1. Intel Macs can still run TRACE from source.
+- **Not notarized.** Removing the Gatekeeper step needs an Apple Developer ID
+  ($99/yr): sign with `codesign --options runtime`, submit with `xcrun notarytool`,
+  and staple the ticket, as extra steps before the disk image is built.
+- **No in-place updater.** The Help tab reports a new version and links to the release
+  page; the "Install update" button stays Windows-only.
+- **SVG input images need Cairo.** `cairosvg` loads the system Cairo library, which is
+  not bundled; reading `.svg` wings requires `brew install cairo`.

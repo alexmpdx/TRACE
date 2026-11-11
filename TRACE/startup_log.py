@@ -7,7 +7,8 @@ folder in dev mode) so we can ask the user to send the log file when
 something breaks.
 
 Log location:
-  - Frozen (PyInstaller):  <dir of TRACE.exe>/trace_startup.log
+  - Frozen, Windows:       <dir of TRACE.exe>/trace_startup.log
+  - Frozen, macOS:         ~/Library/Logs/TRACE/trace_startup.log
   - Dev:                   <TRACE source dir>/trace_startup.log
 
 The log is truncated on every launch so the file always reflects the
@@ -22,10 +23,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    _LOG_DIR = Path(sys.executable).resolve().parent
-else:
-    _LOG_DIR = Path(__file__).resolve().parent
+try:
+    from TRACE._paths import log_dir as _log_dir
+except ImportError:  # run as a plain script from inside TRACE/
+    from _paths import log_dir as _log_dir
+
+_LOG_DIR = _log_dir()
 
 LOG_PATH = _LOG_DIR / "trace_startup.log"
 

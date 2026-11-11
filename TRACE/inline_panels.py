@@ -1622,7 +1622,7 @@ class InlineCustomDistancesPanel(QWidget):
         # Catch + log so the GUI as a whole still opens and we get a
         # readable traceback in trace_startup.log.
         try:
-            from TRACE.startup_log import log, log_exception
+            from TRACE.startup_log import log, log_exception, log_path_str
 
             log("InlineCustomDistancesPanel: constructing LandmarkPickerWidget")
             self._picker = LandmarkPickerWidget(
@@ -1640,7 +1640,7 @@ class InlineCustomDistancesPanel(QWidget):
             err = QLabel(
                 f"Custom Measurements unavailable — failed to start the napari viewer:\n\n"
                 f"{type(exc).__name__}: {exc}\n\n"
-                "See trace_startup.log next to TRACE.exe for the full traceback."
+                f"The full traceback is in {log_path_str()}"
             )
             err.setWordWrap(True)
             err.setStyleSheet(f"color: {_ct().error_text}; padding: 12px;")
@@ -1817,6 +1817,15 @@ class InlineCustomDistancesPanel(QWidget):
 # ---------------------------------------------------------------------------
 # InlineHelpPanel
 # ---------------------------------------------------------------------------
+
+
+def _installer_asset_name() -> str:
+    """Release-asset filename a user on this platform should download.
+
+    Windows gets the Inno Setup installer (also what the in-place updater
+    fetches); macOS gets the disk image built by build-macos.yml.
+    """
+    return "TRACE-macOS-arm64.dmg" if sys.platform == "darwin" else "TRACE-Setup.exe"
 
 
 def _version_is_newer(candidate: str, installed: str) -> bool:
@@ -2117,7 +2126,7 @@ class InlineHelpPanel(QWidget):
         self.btn_open_releases = QPushButton("View all releases…")
         self.btn_open_releases.setToolTip(
             "Open the Releases page in your default browser. Download the "
-            "latest TRACE-Setup.exe from there and run it to upgrade."
+            f"latest {_installer_asset_name()} from there to upgrade."
         )
         self.btn_open_releases.clicked.connect(self._open_releases_page)
         update_row.addWidget(self.btn_open_releases)
@@ -2700,7 +2709,7 @@ class InlineHelpPanel(QWidget):
                 f"<span style='color: {_ct().warning_text};'>A different version is available: "
                 f"<b>{latest_version}</b>{beta_tag} (you have {installed_version}).</span><br>"
                 f"<a href='{payload['html_url']}' style='color: {_ct().link};'>"
-                f"Open the release page and download TRACE-Setup.exe</a>"
+                f"Open the release page and download {_installer_asset_name()}</a>"
             )
         self._window.show_update_available_indicator(latest_version)
         # Fresh-result paths get the centered notification dialog. The

@@ -156,10 +156,10 @@ class _PlaceholderSpinBox(QDoubleSpinBox):
 # TRACE.exe (this is where TRACE/fetch_assets.py puts the downloaded
 # weights). Mirror that resolution here so the Models tab picks them up
 # automatically on first launch instead of leaving the picker empty.
-if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    _DEFAULT_MODELS_DIR = Path(sys.executable).resolve().parent / "TRACE" / "models"
-else:
-    _DEFAULT_MODELS_DIR = Path(__file__).resolve().parent / "models"
+from TRACE._paths import models_dir as _models_dir  # noqa: E402
+from TRACE.startup_log import log_path_str as _log_path_str  # noqa: E402
+
+_DEFAULT_MODELS_DIR = _models_dir()
 _DEFAULT_MODEL_PATHS = {
     "landmark": _DEFAULT_MODELS_DIR / "landmarks",
     "segmentation": _DEFAULT_MODELS_DIR / "vein-intervein",
@@ -2624,7 +2624,7 @@ class TraceWindow(QMainWindow):
                 self,
                 "Settings dialog failed",
                 f"Could not open the settings dialog:\n\n{type(exc).__name__}: {exc}\n\n"
-                "The full traceback is in trace_startup.log (next to TRACE.exe).",
+                f"The full traceback is in {_log_path_str()}",
             )
             return
         # Window-modal flag stays False (the QDialog default) so show()

@@ -149,6 +149,8 @@ def _probe_cpu_features() -> None:
 
         log(f"probe: platform.processor() = {platform.processor()!r}")
         log(f"probe: platform.machine()   = {platform.machine()!r}")
+        if sys.platform != "win32":
+            return  # IsProcessorFeaturePresent is a Windows API
         # IsProcessorFeaturePresent flag constants from winnt.h.
         _PF = {
             "SSE2": 10,
@@ -179,8 +181,8 @@ def _probe_c10_direct_load() -> None:
     pull the real Windows error number out via GetLastError + format it
     via FormatMessageW.
     """
-    if not getattr(sys, "frozen", False):
-        return  # only meaningful in the bundled layout
+    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        return  # only meaningful in the bundled Windows layout
     try:
         import ctypes
         from ctypes import wintypes
@@ -266,6 +268,11 @@ def _probe_torch_environment() -> None:
         log(f"probe: torch import OK (version={getattr(torch, '__version__', '?')})")
     except BaseException as exc:  # noqa: BLE001
         log_exception("probe: torch import FAILED", exc)
+    if sys.platform != "win32":
+        # Everything below inspects DLLs and the VC++ runtime. On macOS the
+        # ctypes.WinDLL call at the end does not exist and took the whole
+        # launcher down with an AttributeError.
+        return
     # Inventory the torch/lib directory regardless of import success — even
     # if import fails for another reason, this tells us what's actually on
     # disk vs. what the error claims is missing.
@@ -565,10 +572,9 @@ def _migrate_gate_defaults_to_permissive() -> None:
     zip; this migration can then be removed.
     """
     try:
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            models_dir = Path(sys.executable).resolve().parent / "TRACE" / "models"
-        else:
-            models_dir = Path(__file__).resolve().parent / "models"
+        from TRACE._paths import models_dir as _models_dir
+
+        models_dir = _models_dir()
         gate_path = models_dir / "landmarks" / "gate_config.yaml"
         if not gate_path.is_file():
             return
