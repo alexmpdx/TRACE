@@ -13,18 +13,19 @@ Usage::
     )
 """
 
-# Bumped when shipping a new Windows installer. The Help-tab update
-# check compares this against the latest GitHub Release tag (strip the
-# "windows-v" prefix when comparing) to tell the user whether they're
-# behind.
+# Bumped when shipping a new release (Windows installer + Mac app). The
+# Help-tab update check compares this against the latest GitHub Release
+# tag (strip the "v" prefix when comparing) to tell the user whether
+# they're behind. Releases up to 0.2.37 were tagged "windows-vX.Y.Z";
+# the updater still strips that prefix too.
 #
 # Single source of truth: the CI workflow reads this string and passes
 # it to Inno Setup via /DMyAppVersion=…, AND verifies it matches the
 # pushed git tag's version segment. So the day-to-day ritual is:
 #   1. Bump __version__ here (full MAJOR.MINOR.PATCH form — no
 #      truncating trailing zeroes, e.g. "0.2.0" not "0.2").
-#   2. Push a matching tag: `git tag windows-v0.2.0 && git push origin
-#      windows-v0.2.0`. CI publishes it as a GitHub PRE-release, which
+#   2. Push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`.
+#      CI builds Windows + macOS and publishes a GitHub PRE-release, which
 #      only users with Help-tab "Receive beta updates" ticked are offered.
 #   3. Once the beta has proven itself, run the "Promote beta release to
 #      stable" workflow (Actions tab) on that tag. /releases/latest then

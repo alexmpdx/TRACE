@@ -61,3 +61,17 @@ def test_parse_release_payload_reports_prerelease_flag():
     assert parsed["prerelease"] is True
     assert parsed["asset_url"] == "https://x/windows-v0.2.35.exe"
     assert InlineHelpPanel._parse_release_payload({})["latest_version"] == ""
+
+
+def test_tag_prefix_change_windows_v_to_v():
+    # Releases up to 0.2.37 were tagged windows-vX.Y.Z; later ones vX.Y.Z.
+    # A mixed list must still pick by version, and both forms must parse.
+    releases = [
+        _release("windows-v0.2.37", prerelease=True),
+        _release("v0.2.38", prerelease=True),
+        _release("windows-v0.2.36"),
+        _release("v0.1.0-assets"),
+    ]
+    assert InlineHelpPanel._pick_newest_release(releases)["tag_name"] == "v0.2.38"
+    assert InlineHelpPanel._parse_release_payload(_release("v0.2.38"))["latest_version"] == "0.2.38"
+    assert InlineHelpPanel._parse_release_payload(_release("windows-v0.2.37"))["latest_version"] == "0.2.37"

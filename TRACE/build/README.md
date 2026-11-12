@@ -7,8 +7,8 @@ How the downloadable Windows installer (`TRACE-Setup.exe`) and the macOS disk im
 
 1. **Tag a release** locally (anywhere) and push it:
    ```bash
-   git tag windows-v0.1
-   git push origin windows-v0.1
+   git tag v0.2.38
+   git push origin v0.2.38
    ```
 2. GitHub Actions picks up the tag and runs `.github/workflows/build-windows.yml`
    on a `windows-latest` runner (~20–30 min cold).
@@ -89,7 +89,7 @@ Common culprits: dynamically-imported submodules of `scipy`, `sklearn`,
 
 ## macOS build
 
-The same `windows-v*` tag that releases the Windows installer also runs
+The same `vX.Y.Z` tag that releases the Windows installer also runs
 `.github/workflows/build-macos.yml` on an Apple Silicon runner. It builds
 `dist/TRACE.app` from the same `trace.spec` and the same requirements file, packs it
 into `TRACE-macOS-arm64.dmg`, and attaches that to the tag's GitHub Release next to

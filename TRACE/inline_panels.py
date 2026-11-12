@@ -2487,8 +2487,9 @@ class InlineHelpPanel(QWidget):
         """Pull the fields the updater needs out of one GitHub release object.
 
         Returns a dict with keys: ``tag`` (raw GitHub tag, e.g.
-        ``windows-v0.2.0``), ``latest_version`` (the bare semver with
-        the ``windows-v`` / ``v`` prefix stripped, for direct comparison
+        ``v0.2.0``, or ``windows-v0.2.0`` for releases up to 0.2.37),
+        ``latest_version`` (the bare semver with the ``windows-v`` / ``v``
+        prefix stripped, for direct comparison
         with ``TRACE.__version__``), ``html_url`` (the release page),
         ``asset_url`` (``TRACE-Setup.exe`` download URL, or None),
         ``asset_size`` (bytes, or None), and ``prerelease`` (True for a

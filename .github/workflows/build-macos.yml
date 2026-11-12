@@ -3,16 +3,14 @@ name: Build macOS app
 # Triggers:
 #   - Manual: Actions tab → "Build macOS app" → Run workflow
 #     (the .dmg is uploaded as a 30-day workflow artifact).
-#   - Tag: the same windows-v* tag that releases the Windows installer.
-#     The tag name is historical — it is TRACE's one release tag, and the
-#     Help-tab updater parses it — so both platforms build from it and
+#   - Tag: the same vX.Y.Z tag that releases the Windows installer, so
 #     TRACE-macOS-arm64.dmg lands on the same GitHub Release as
 #     TRACE-Setup.exe.
 on:
   workflow_dispatch:
   push:
     tags:
-      - "windows-v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 jobs:
   build:
@@ -71,8 +69,8 @@ jobs:
           version=$(python -c "import re; print(re.search(r'__version__\s*=\s*[\x27\x22]([^\x27\x22]+)', open('TRACE/__init__.py').read()).group(1))")
           echo "TRACE __version__ = $version"
           echo "trace_version=$version" >> "$GITHUB_OUTPUT"
-          if [[ "$GITHUB_REF" == refs/tags/windows-v* ]]; then
-            tag_version="${GITHUB_REF#refs/tags/windows-v}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag_version="${GITHUB_REF#refs/tags/v}"
             if [[ "$tag_version" != "$version" ]]; then
               echo "::error::Tag version ($tag_version) does not match TRACE.__version__ ($version)."
               exit 1
@@ -128,7 +126,7 @@ jobs:
         # create a second one, then add the .dmg. If it never appears (the
         # Windows build failed), publish a beta release ourselves so the
         # Mac build is not lost.
-        if: startsWith(github.ref, 'refs/tags/windows-v')
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
