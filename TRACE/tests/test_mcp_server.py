@@ -272,6 +272,15 @@ def test_build_server_registers_tools_and_call_tool(tmp_path, qapp):
     tools = asyncio.run(server.list_tools())
     names = {t.name for t in tools}
     assert {"get_state", "set_input_folder", "start_run", "wait_for_run", "get_results", "get_log"} <= names
+    assert {
+        "list_landmark_edits",
+        "start_landmark_training",
+        "get_landmark_training_status",
+        "wait_for_landmark_training",
+        "stop_landmark_training",
+        "use_trained_landmark_model",
+        "close_landmark_training",
+    } <= names
 
     # call_tool runs the sync handler on a worker thread → bridge → the Qt
     # thread. Qt event processing must stay on the thread that owns the

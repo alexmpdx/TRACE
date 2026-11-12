@@ -379,6 +379,11 @@ def _tool_start_run(window) -> dict:
         return {"started": False, "reason": "A run is paused; call resume_run (or cancel_run) instead."}
     if _dialog_open(window):
         return {"started": False, "reason": "Advanced Settings is open in the GUI; close it first."}
+    if _training_dialog(window) is not None:
+        return {
+            "started": False,
+            "reason": "The landmark-training dialog is open; call close_landmark_training first.",
+        }
     # Same entry the Run button uses (minus its "settings dialog still
     # open" confirm, which the check above replaces). Validation failures
     # inside show a modal QMessageBox — reported as awaiting_user_prompt.
@@ -420,6 +425,115 @@ def _tool_cancel_run(window) -> dict:
     # this normally returns awaiting_user_prompt until a human clicks.
     window._cancel_pipeline()
     return _tool_get_run_status(window)
+
+
+# ---------------------------------------------------------------------------
+# Landmark training (TRACE/landmark_training_dialog.py). The tools drive the
+# real dialog — opened window-modal without a nested event loop — so an agent's
+# training run is visible in the GUI and goes through the same code as a click.
+# ---------------------------------------------------------------------------
+def _training_dialog(window):
+    """The open landmark-training dialog, or None."""
+    return getattr(window, "_landmark_training_dialog", None)
+
+
+def _training_status(window) -> dict:
+    dlg = _training_dialog(window)
+    if dlg is None:
+        return {"dialog_open": False, "state": "idle"}
+    status = dlg.status()
+    status["dialog_open"] = True
+    status["log_tail"] = dlg.txt_log.toPlainText().splitlines()[-15:]
+    return status
+
+
+def _tool_list_landmark_edits(window, folders: Optional[list[str]] = None, recursive: Optional[bool] = None) -> dict:
+    from TRACE.landmark_training import find_override_samples
+
+    if folders is None:
+        folders = [window.input_edit.text().strip()] if window.input_edit.text().strip() else []
+    if recursive is None:
+        recursive = bool(window.recursive_chk.isChecked())
+    missing = [f for f in folders if not Path(f).is_dir()]
+    if missing:
+        raise GuiToolError(f"Not a folder: {', '.join(missing)}")
+    samples = find_override_samples([Path(f) for f in folders], recursive=recursive)
+    return {
+        "folders": list(folders),
+        "recursive": recursive,
+        "count": len(samples),
+        "images": [{"image": str(image), "override": str(override)} for override, image in samples],
+    }
+
+
+def _tool_start_landmark_training(
+    window,
+    folders: Optional[list[str]] = None,
+    recursive: Optional[bool] = None,
+    mode: Optional[str] = None,
+    name: Optional[str] = None,
+    save_dir: Optional[str] = None,
+    epochs: Optional[int] = None,
+    n_models: Optional[int] = None,
+) -> dict:
+    if _raw_run_state(window) != "idle":
+        raise GuiToolError("A run is in progress or paused; finish or cancel it before training.")
+    if folders is not None:
+        missing = [f for f in folders if not Path(f).is_dir()]
+        if missing:
+            raise GuiToolError(f"Not a folder: {', '.join(missing)}")
+    dlg = window._open_landmark_training_dialog(block=False)
+    if dlg is None:
+        raise GuiToolError("TRACE could not open the landmark-training dialog.")
+    if dlg.status()["state"] == "running":
+        raise GuiToolError("Training is already running; see get_landmark_training_status.")
+    try:
+        dlg.configure(
+            folders=folders,
+            recursive=recursive,
+            mode=mode,
+            name=name,
+            save_dir=save_dir,
+            epochs=epochs,
+            n_models=n_models,
+        )
+    except ValueError as exc:
+        raise GuiToolError(str(exc)) from None
+    # Checked here rather than left to the Start button, whose warning is a modal
+    # message box that would block this call until a human dismissed it.
+    problem = dlg.start_problem()
+    if problem is not None:
+        raise GuiToolError(f"{problem[0]}: {problem[1]}")
+    dlg._on_start()
+    status = _training_status(window)
+    status["started"] = status["state"] == "running"
+    return status
+
+
+def _tool_stop_landmark_training(window) -> dict:
+    dlg = _training_dialog(window)
+    if dlg is None or dlg.status()["state"] != "running":
+        raise GuiToolError("No landmark training is running.")
+    dlg._on_stop()
+    return _training_status(window)
+
+
+def _tool_use_trained_landmark_model(window) -> dict:
+    dlg = _training_dialog(window)
+    if dlg is None or dlg.status()["trained_model"] is None:
+        raise GuiToolError("There is no freshly trained model to switch to (train one first).")
+    dlg._on_use_model()
+    return {"landmark_model": str(window._landmark_model_path), "in_use": dlg.status()["in_use"]}
+
+
+def _tool_close_landmark_training(window) -> dict:
+    dlg = _training_dialog(window)
+    if dlg is None:
+        return {"closed": True, "note": "The dialog was not open."}
+    if dlg.status()["state"] == "running":
+        raise GuiToolError("Training is running; call stop_landmark_training and wait for it to stop first.")
+    dlg.reject()
+    return {"closed": _training_dialog(window) is None}
 
 
 def _tool_get_log(window, tail_lines: int = 200) -> dict:
@@ -625,7 +739,9 @@ def build_server(service: McpService):
             "Controls the running TRACE wing-analysis GUI. Typical flow: get_state → set_input_folder → "
             "set_output_folder → set_scale (or auto_detect) → set_gui_state for outputs/models → start_run → "
             "wait_for_run → get_results. Everything you do is visible live in the GUI; if a tool reports "
-            "awaiting_user_prompt, a dialog in TRACE needs a human click."
+            "awaiting_user_prompt, a dialog in TRACE needs a human click. To train a landmark model on the user's "
+            "manual landmark edits: list_landmark_edits → start_landmark_training → wait_for_landmark_training → "
+            "use_trained_landmark_model → close_landmark_training."
         ),
         version=__version__,
         log_level="WARNING",
@@ -750,6 +866,66 @@ def build_server(service: McpService):
                 status["timed_out"] = True
                 return status
             time.sleep(1.0)
+
+    @mcp.tool()
+    def list_landmark_edits(folders: Optional[list[str]] = None, recursive: Optional[bool] = None) -> dict[str, Any]:
+        """Images with a saved manual landmark edit (the training data for a user-trained landmark model) under
+        `folders`. Defaults to the current input folder and its 'include subfolders' setting."""
+        return guarded(_tool_list_landmark_edits, folders, recursive)
+
+    @mcp.tool()
+    def start_landmark_training(
+        folders: Optional[list[str]] = None,
+        recursive: Optional[bool] = None,
+        mode: Optional[str] = None,
+        name: Optional[str] = None,
+        save_dir: Optional[str] = None,
+        epochs: Optional[int] = None,
+        n_models: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Open the 'Train a landmark model' dialog, fill it in and click Start. Trains on the manually edited
+        images under `folders` (default: the input folder). mode: 'finetune' (default — improve the model TRACE
+        is using; a few dozen images suffice) or 'scratch'. n_models: ensemble size 1-5. epochs: max per model.
+        Returns immediately; training takes minutes to hours, so follow with wait_for_landmark_training. The
+        dialog stays open (and blocks the main window) until close_landmark_training."""
+        return guarded(_tool_start_landmark_training, folders, recursive, mode, name, save_dir, epochs, n_models)
+
+    @mcp.tool()
+    def get_landmark_training_status() -> dict[str, Any]:
+        """State of landmark training (idle/running/finished/stopped/failed), current model and epoch, held-out
+        error in px, the last log lines, and — once finished — the saved model folder and before/after error."""
+        return guarded(_training_status)
+
+    @mcp.tool()
+    def wait_for_landmark_training(timeout_s: float = 600) -> dict[str, Any]:
+        """Block until landmark training stops running or timeout_s elapses (max 3600). Returns
+        get_landmark_training_status plus timed_out."""
+        deadline = time.monotonic() + max(1.0, min(float(timeout_s), 3600.0))
+        while True:
+            status = guarded(_training_status)
+            if status["state"] != "running":
+                status["timed_out"] = False
+                return status
+            if time.monotonic() >= deadline:
+                status["timed_out"] = True
+                return status
+            time.sleep(1.0)
+
+    @mcp.tool()
+    def stop_landmark_training() -> dict[str, Any]:
+        """Stop the running landmark training; the unfinished model is discarded."""
+        return guarded(_tool_stop_landmark_training)
+
+    @mcp.tool()
+    def use_trained_landmark_model() -> dict[str, Any]:
+        """Make the model that just finished training TRACE's landmark model (the dialog's 'Use this model' button).
+        To switch to any other model folder, use set_gui_state with landmark_model_path."""
+        return guarded(_tool_use_trained_landmark_model)
+
+    @mcp.tool()
+    def close_landmark_training() -> dict[str, Any]:
+        """Close the landmark-training dialog so the main window is usable again. Refused while training runs."""
+        return guarded(_tool_close_landmark_training)
 
     @mcp.tool()
     def get_log(tail_lines: int = 200) -> dict[str, Any]:

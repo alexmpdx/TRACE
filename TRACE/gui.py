@@ -14,8 +14,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from identify_features.config import PipelineConfig
-from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -39,6 +37,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from identify_features.config import PipelineConfig
+from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json
 from TRACE.inline_panels import (
     InlineCustomDistancesPanel,
@@ -1830,18 +1831,36 @@ class TraceWindow(QMainWindow):
         dlg = LandmarkInspectorDialog(self, image_path, cohort=cohort)
         dlg.exec_()
 
-    def _open_landmark_training_dialog(self) -> None:
-        """Open the modal "train a landmark model on my manual edits" dialog."""
+    def _open_landmark_training_dialog(self, block: bool = True):
+        """Open the modal "train a landmark model on my manual edits" dialog.
+
+        Returns the dialog (the already-open one if there is one), or None when a run
+        is in progress. ``block=False`` shows it window-modal without a nested event
+        loop, for callers that must return to the event loop (the MCP tools).
+        """
+        existing = getattr(self, "_landmark_training_dialog", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return existing
         if self.worker is not None and self.worker.isRunning():
-            QMessageBox.information(
-                self,
-                "Run in progress",
-                "Wait for the current run to finish (or cancel it) before training a landmark model.",
-            )
-            return
+            if block:
+                QMessageBox.information(
+                    self,
+                    "Run in progress",
+                    "Wait for the current run to finish (or cancel it) before training a landmark model.",
+                )
+            return None
         from TRACE.landmark_training_dialog import LandmarkTrainingDialog
 
-        LandmarkTrainingDialog(self).exec_()
+        dlg = LandmarkTrainingDialog(self)
+        self._landmark_training_dialog = dlg
+        dlg.finished.connect(lambda _result: setattr(self, "_landmark_training_dialog", None))
+        if block:
+            dlg.exec_()
+        else:
+            dlg.open()
+        return dlg
 
     def use_landmark_model(self, model_dir) -> None:
         """Make `model_dir` (a folder of best_fold*.pt) the landmark model, effective immediately.
@@ -2335,6 +2354,7 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
+
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)

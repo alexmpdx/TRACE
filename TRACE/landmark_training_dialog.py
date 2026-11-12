@@ -42,6 +42,7 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+
 from TRACE.landmark_training import (
     default_model_name,
     find_override_samples,
@@ -153,6 +154,11 @@ class LandmarkTrainingDialog(QDialog):
         self._trained_model: Optional[Path] = None
         self._close_when_stopped = False
         self._started_at = 0.0
+        # Machine-readable mirror of what the widgets show, for `status()` (MCP tools).
+        self._state = "idle"  # idle | running | finished | stopped | failed
+        self._last_epoch: Optional[dict] = None
+        self._last_info: Optional[dict] = None
+        self._last_error: Optional[str] = None
 
         self.setWindowTitle("Train a landmark model")
         # No explicit minimum size: it would override the layout's own minimum and let
@@ -459,24 +465,100 @@ class LandmarkTrainingDialog(QDialog):
         ):
             w.setEnabled(enabled)
 
-    def _on_start(self) -> None:
+    def configure(
+        self,
+        *,
+        folders: Optional[list] = None,
+        recursive: Optional[bool] = None,
+        mode: Optional[str] = None,
+        name: Optional[str] = None,
+        save_dir: Optional[str] = None,
+        epochs: Optional[int] = None,
+        n_models: Optional[int] = None,
+    ) -> None:
+        """Set the dialog's inputs programmatically (same effect as editing the widgets).
+
+        `mode` is ``"finetune"`` or ``"scratch"``. Arguments left as None keep the
+        current value. Applied in widget order, so `epochs` overrides the default the
+        mode switch puts in.
+        """
+        if folders is not None:
+            self.folder_list.clear()
+            for folder in folders:
+                self.folder_list.addItem(str(folder))
+        if recursive is not None:
+            self.chk_recursive.setChecked(bool(recursive))
+        if mode is not None:
+            index = self.cmb_mode.findData(mode)
+            if index < 0:
+                raise ValueError(f"Unknown mode {mode!r}; use 'finetune' or 'scratch'.")
+            if not self.cmb_mode.model().item(index).isEnabled():
+                raise ValueError("TRACE has no landmark model selected to fine-tune from.")
+            self.cmb_mode.setCurrentIndex(index)
+        self._rescan()
+        if name is not None:
+            self.edit_name.setText(name)
+        if save_dir is not None:
+            self.edit_save_dir.setText(str(save_dir))
+        if epochs is not None:
+            self.spin_epochs.setValue(int(epochs))
+        if n_models is not None:
+            self.spin_folds.setValue(int(n_models))
+
+    def start_problem(self) -> Optional[tuple[str, str]]:
+        """Why training cannot start with the current inputs, as (title, message), or None."""
+        from landmark_locator.training.user_training import MIN_SAMPLES
+
+        if self._thread is not None:
+            return "Already training", "Training is already running."
+        if len(self._samples) < MIN_SAMPLES:
+            return (
+                "Not enough edited images",
+                f"Found {len(self._samples)} usable edited image(s); at least {MIN_SAMPLES} are needed.",
+            )
         name = sanitize_model_name(self.edit_name.text())
         if not name:
-            QMessageBox.warning(self, "Name needed", "Give the new model a name.")
+            return "Name needed", "Give the new model a name."
+        output_dir = Path(self.edit_save_dir.text().strip() or user_models_dir()) / name
+        if output_dir.exists() and any(output_dir.iterdir()):
+            return "Name already used", f"{output_dir} already exists and is not empty.\n\nChoose a different name."
+        if self._mode() == _MODE_FINETUNE and self._base_model_path() is None:
+            return "No model to improve", "TRACE has no landmark model selected to start from."
+        return None
+
+    def status(self) -> dict:
+        """What the dialog is doing, in a form a script can read."""
+        epoch = self._last_epoch or {}
+        return {
+            "state": self._state,
+            "mode": self._mode(),
+            "n_edited_images": len(self._samples),
+            "folders": [str(f) for f in self._folders()],
+            "model": epoch.get("fold", -1) + 1 if epoch else None,
+            "n_models": epoch.get("n_folds"),
+            "epoch": epoch.get("epoch", -1) + 1 if epoch else None,
+            "epochs": epoch.get("epochs"),
+            "held_out_error_px": epoch.get("mean_error"),
+            "elapsed_s": round(time.monotonic() - self._started_at, 1) if self._state == "running" else None,
+            "status_text": self.lbl_status.text(),
+            "error": self._last_error,
+            "trained_model": str(self._trained_model) if self._trained_model else None,
+            "baseline_error_px": (self._last_info or {}).get("baseline_pixel_error"),
+            "final_error_px": (self._last_info or {}).get("mean_pixel_error"),
+            "folds": (self._last_info or {}).get("folds"),
+            "in_use": bool(self._trained_model)
+            and str(self._trained_model) == str(getattr(self._window, "_landmark_model_path", "")),
+        }
+
+    def _on_start(self) -> None:
+        problem = self.start_problem()
+        if problem is not None:
+            QMessageBox.warning(self, *problem)
             return
+        name = sanitize_model_name(self.edit_name.text())
         save_dir = Path(self.edit_save_dir.text().strip() or user_models_dir())
         output_dir = save_dir / name
-        if output_dir.exists() and any(output_dir.iterdir()):
-            QMessageBox.warning(
-                self,
-                "Name already used",
-                f"{output_dir} already exists and is not empty.\n\nChoose a different name.",
-            )
-            return
         base = self._base_model_path() if self._mode() == _MODE_FINETUNE else None
-        if self._mode() == _MODE_FINETUNE and base is None:
-            QMessageBox.warning(self, "No model to improve", "TRACE has no landmark model selected to start from.")
-            return
         try:
             self._created_output_dir = not output_dir.exists()
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -489,6 +571,8 @@ class LandmarkTrainingDialog(QDialog):
 
         self._output_dir = output_dir
         self._trained_model = None
+        self._state = "running"
+        self._last_epoch = self._last_info = self._last_error = None
         self.btn_use.setEnabled(False)
         self.btn_use.setText("Use this model in TRACE")
         self.txt_log.clear()
@@ -516,6 +600,7 @@ class LandmarkTrainingDialog(QDialog):
             self._set_status("Stopping…")
 
     def _on_epoch(self, data: dict) -> None:
+        self._last_epoch = data
         total = data["n_folds"] * data["epochs"]
         done = data["fold"] * data["epochs"] + data["epoch"] + 1
         self.progress.setRange(0, total)
@@ -565,12 +650,15 @@ class LandmarkTrainingDialog(QDialog):
             f"Done in {minutes:.1f} min — trained on {info['n_images']} images. {verdict}<br>Saved to {output_dir}"
         )
         self._trained_model = output_dir
+        self._last_info = info
+        self._state = "finished"
         self.btn_use.setEnabled(True)
         self.btn_use.setDefault(True)
 
     def _on_cancelled(self) -> None:
         self._finish_run()
         self._discard_output()
+        self._state = "stopped"
         self._set_status("Training stopped. Nothing was saved.")
         if self._close_when_stopped:
             super().reject()
@@ -578,6 +666,8 @@ class LandmarkTrainingDialog(QDialog):
     def _on_failed(self, message: str) -> None:
         self._finish_run()
         self._discard_output()
+        self._state = "failed"
+        self._last_error = message
         self._set_status(f"Training failed: {message}")
         if self._close_when_stopped:
             super().reject()

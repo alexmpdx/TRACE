@@ -93,9 +93,9 @@ def test_dialog_trains_and_switches_model(tmp_path, monkeypatch):
     pytest.importorskip("albumentations")
     from PyQt5.QtCore import QEventLoop, QTimer
     from PyQt5.QtWidgets import QApplication, QCheckBox, QLineEdit, QWidget
-    from TRACE.landmark_training_dialog import LandmarkTrainingDialog
 
     from landmark_locator.training import user_training
+    from TRACE.landmark_training_dialog import LandmarkTrainingDialog
 
     cfg = json.loads(json.dumps(user_training.FALLBACK_CONFIG))
     cfg["input"] = {"width": 128, "height": 96}
@@ -153,3 +153,98 @@ def test_dialog_trains_and_switches_model(tmp_path, monkeypatch):
     assert window.used == out and not dlg.btn_use.isEnabled()
     dlg.reject()
     app.processEvents()
+
+
+def test_mcp_tools_drive_the_dialog(tmp_path, monkeypatch):
+    """The MCP tool bodies open the real dialog, train, report status, switch the model and close."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("albumentations")
+    from PyQt5.QtCore import QEventLoop, QTimer
+    from PyQt5.QtWidgets import QApplication, QCheckBox, QLineEdit, QWidget
+
+    from landmark_locator.training import user_training
+    from TRACE import mcp_server as ms
+    from TRACE.landmark_training_dialog import LandmarkTrainingDialog
+
+    cfg = json.loads(json.dumps(user_training.FALLBACK_CONFIG))
+    cfg["input"] = {"width": 128, "height": 96}
+    cfg["model"]["pretrained"] = False
+    cfg["training"]["batch_size"] = 2
+    monkeypatch.setattr(user_training, "_scratch_template", lambda: json.loads(json.dumps(cfg)))
+
+    images = tmp_path / "images"
+    for i in range(4):
+        _write_override(landmarks_override_path(_write_image(images / f"wing_{i}.png", seed=i)))
+
+    app = QApplication.instance() or QApplication([])
+
+    class _Window(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.worker = None
+            self._is_paused = False
+            self.input_edit = QLineEdit(str(images))
+            self.recursive_chk = QCheckBox()
+            self._landmark_model_path = ""
+            self.settings = None
+            self._landmark_training_dialog = None
+
+        def _open_landmark_training_dialog(self, block=True):
+            # Same contract as TraceWindow's: one dialog, remembered until it closes.
+            if self._landmark_training_dialog is None:
+                dlg = LandmarkTrainingDialog(self)
+                self._landmark_training_dialog = dlg
+                dlg.finished.connect(lambda _r: setattr(self, "_landmark_training_dialog", None))
+                dlg.open()
+            return self._landmark_training_dialog
+
+        def use_landmark_model(self, model_dir):
+            self._landmark_model_path = str(model_dir)
+
+    window = _Window()
+    assert ms._tool_list_landmark_edits(window)["count"] == 4
+    with pytest.raises(ms.GuiToolError):
+        ms._tool_list_landmark_edits(window, folders=[str(tmp_path / "nope")])
+    assert ms._training_status(window) == {"dialog_open": False, "state": "idle"}
+    with pytest.raises(ms.GuiToolError):
+        ms._tool_use_trained_landmark_model(window)
+
+    # Fine-tuning is refused without a current model, and the refusal is an error the
+    # agent can read rather than a message box that would hang the call.
+    with pytest.raises(ms.GuiToolError, match="no landmark model"):
+        ms._tool_start_landmark_training(window, mode="finetune")
+    with pytest.raises(ms.GuiToolError, match="Not enough"):
+        ms._tool_start_landmark_training(window, folders=[str(tmp_path)], mode="scratch")
+
+    started = ms._tool_start_landmark_training(
+        window,
+        folders=[str(images)],
+        mode="scratch",
+        name="mcp model",
+        save_dir=str(tmp_path / "models"),
+        epochs=1,
+        n_models=2,
+    )
+    assert started["started"] and started["state"] == "running" and started["n_edited_images"] == 4
+    assert ms._tool_start_run(window)["started"] is False  # no pipeline run while the dialog is open
+    with pytest.raises(ms.GuiToolError):
+        ms._tool_close_landmark_training(window)
+
+    loop = QEventLoop()
+    poll = QTimer()
+    poll.timeout.connect(lambda: ms._training_status(window)["state"] != "running" and loop.quit())
+    poll.start(50)
+    QTimer.singleShot(120_000, loop.quit)
+    loop.exec_()
+    poll.stop()
+
+    status = ms._training_status(window)
+    out = tmp_path / "models" / "mcp model"
+    assert status["state"] == "finished", status
+    assert status["trained_model"] == str(out) and status["final_error_px"] is not None and not status["in_use"]
+    assert len(status["folds"]) == 2 and status["log_tail"]
+
+    assert ms._tool_use_trained_landmark_model(window) == {"landmark_model": str(out), "in_use": True}
+    assert ms._tool_close_landmark_training(window) == {"closed": True}
+    app.processEvents()
+    assert window._landmark_training_dialog is None
