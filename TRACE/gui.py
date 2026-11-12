@@ -14,6 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from identify_features.config import PipelineConfig
+from preprocessing.pipeline import discover_images
 from PyQt5.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -37,9 +39,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from identify_features.config import PipelineConfig
-from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json
 from TRACE.inline_panels import (
     InlineCustomDistancesPanel,
@@ -1790,6 +1789,7 @@ class TraceWindow(QMainWindow):
             "Edit model predictions…" if n_selected <= 1 else f"Edit model predictions ({n_selected} selected)…"
         )
         act_inspect = menu.addAction(inspect_label)
+        act_train = menu.addAction("Train landmark model from manual edits…")
 
         chosen = menu.exec_(self.image_list.mapToGlobal(pos))
         if chosen is None:
@@ -1802,6 +1802,8 @@ class TraceWindow(QMainWindow):
             self._apply_skip(range(self.image_list.count()), skip=True)
         elif chosen is act_unskip_all:
             self._apply_skip(range(self.image_list.count()), skip=False)
+        elif chosen is act_train:
+            self._open_landmark_training_dialog()
         elif chosen is act_inspect:
             selected = self.image_list.selectedItems()
             target_item = self.image_list.itemAt(pos)
@@ -1827,6 +1829,33 @@ class TraceWindow(QMainWindow):
 
         dlg = LandmarkInspectorDialog(self, image_path, cohort=cohort)
         dlg.exec_()
+
+    def _open_landmark_training_dialog(self) -> None:
+        """Open the modal "train a landmark model on my manual edits" dialog."""
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Run in progress",
+                "Wait for the current run to finish (or cancel it) before training a landmark model.",
+            )
+            return
+        from TRACE.landmark_training_dialog import LandmarkTrainingDialog
+
+        LandmarkTrainingDialog(self).exec_()
+
+    def use_landmark_model(self, model_dir) -> None:
+        """Make `model_dir` (a folder of best_fold*.pt) the landmark model, effective immediately.
+
+        Persists the choice and mirrors it into an open Settings dialog so a later OK
+        there does not silently put the previous model back.
+        """
+        self._landmark_model_path = str(model_dir)
+        self._save_settings()
+        dlg = getattr(self, "_settings_dialog", None)
+        if dlg is not None and hasattr(dlg, "_lm_model_edit"):
+            dlg._lm_model_edit.setText(self._landmark_model_path)
+        self.inline_general_panel.refresh_from_state()
+        self._log(f"Landmark model set to {self._landmark_model_path}")
 
     def _apply_skip(self, rows, *, skip: bool) -> None:
         """Toggle multiple rows at once + persist + repaint glyphs."""
@@ -2306,7 +2335,6 @@ class TraceWindow(QMainWindow):
         run — bold message text, constrained width, right-aligned button row.
         """
         from PyQt5.QtGui import QFont
-
         from TRACE.calibrate_widget import CalibrateWidget
 
         dlg = QDialog(self)

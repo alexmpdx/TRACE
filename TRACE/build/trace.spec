@@ -70,6 +70,13 @@ hiddenimports = [
     "wingIsolator",
     "resolutionAdjust",
     "landmark_locator",
+    # In-app landmark training (TRACE/landmark_training_dialog.py) imports
+    # these lazily from a worker thread; pin them so the frozen app has the
+    # training loop and its augmentation dependency.
+    "landmark_locator.training.user_training",
+    "landmark_locator.training.train",
+    "landmark_locator.data.augmentation",
+    "albumentations",
     "preprocessing",
     # live_tune is reached via a runtime sys.path injection in
     # settings_dialog.py, so PyInstaller's static analysis can't see

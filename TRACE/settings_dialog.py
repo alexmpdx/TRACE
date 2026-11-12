@@ -22,6 +22,8 @@ from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
+from identify_features.config import PipelineConfig
+from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import (
     QButtonGroup,
@@ -38,6 +40,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -47,9 +50,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from identify_features.config import PipelineConfig
-from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 from TRACE.presets_loader import load_presets
 from TRACE.theme import current_theme as _ct
 
@@ -1025,8 +1025,17 @@ class PipelineConfigDialog(QDialog):
             "The folder also hosts the optional gate_config.yaml sidecar."
         )
         btn_lm_folder.clicked.connect(self._select_landmark_model_folder)
+        btn_lm_mine = QPushButton("Your models")
+        btn_lm_mine.setToolTip(
+            "Switch between the bundled landmark model and models you trained on your own "
+            "manual landmark edits, or train a new one."
+        )
+        self._lm_models_menu = QMenu(btn_lm_mine)
+        self._lm_models_menu.aboutToShow.connect(self._populate_landmark_models_menu)
+        btn_lm_mine.setMenu(self._lm_models_menu)
         lm_row.addWidget(self._lm_model_edit, stretch=1)
         lm_row.addWidget(btn_lm_folder)
+        lm_row.addWidget(btn_lm_mine)
         lm_layout.addLayout(lm_row)
         if self._calib_lm_path:
             self._lm_model_edit.setText(self._calib_lm_path)
@@ -1326,6 +1335,44 @@ class PipelineConfigDialog(QDialog):
             return
         self._lm_model_edit.setText(folder)
 
+    def _populate_landmark_models_menu(self) -> None:
+        """Fill the "Your models" menu: bundled default, user-trained models, train a new one."""
+        from TRACE._paths import models_dir
+        from TRACE.landmark_training import is_landmark_model_dir, list_user_models, user_models_dir
+        from TRACE.landmark_training_dialog import SAVE_DIR_SETTING
+
+        menu = self._lm_models_menu
+        menu.clear()
+        current = self._lm_model_edit.text().strip()
+
+        def _add(label: str, path) -> None:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(bool(current) and str(path) == current)
+            act.triggered.connect(lambda _checked=False, p=str(path): self._lm_model_edit.setText(p))
+
+        bundled = models_dir() / "landmarks"
+        if is_landmark_model_dir(bundled):
+            _add("Bundled model", bundled)
+            menu.addSeparator()
+
+        parents = [user_models_dir()]
+        host = self.parent()
+        settings = getattr(host, "settings", None)
+        saved = str(settings.value(SAVE_DIR_SETTING, "") or "") if settings is not None else ""
+        if saved:
+            parents.append(saved)
+        user_models = list_user_models(parents)
+        for model in user_models:
+            _add(model.name, model)
+        if not user_models:
+            menu.addAction("No trained models yet").setEnabled(False)
+
+        menu.addSeparator()
+        act_train = menu.addAction("Train a new model from your manual edits…")
+        act_train.setEnabled(host is not None and hasattr(host, "_open_landmark_training_dialog"))
+        act_train.triggered.connect(lambda _checked=False: host._open_landmark_training_dialog())
+
     def _select_segmentation_model_folder(self):
         from TRACE.gui import _open_native_picker_async
 
@@ -1517,7 +1564,6 @@ class PipelineConfigDialog(QDialog):
     def _build_integrations_tab(self) -> QWidget:
         """MCP server toggle (off by default) — lets an agent drive this window."""
         from PyQt5.QtWidgets import QApplication
-
         from TRACE.mcp_server import MAX_PORT, MIN_PORT, claude_code_add_command
 
         w = QWidget()

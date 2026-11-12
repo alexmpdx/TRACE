@@ -73,6 +73,70 @@ def create_cv_splits(annotation_dir: Path, n_folds: int = 5) -> list[tuple[list[
     return splits
 
 
+class TrainingCancelled(Exception):
+    """Raised inside `train_fold` when the caller's `should_stop` hook asks to abort."""
+
+
+def evaluate(
+    model: torch.nn.Module,
+    val_loader: DataLoader,
+    criterion: HeatmapMSELoss,
+    device: torch.device,
+    landmark_order: list[str],
+) -> tuple[float, float, dict[str, float]]:
+    """Score a model on a validation loader: (val_loss, mean_px_error, per-landmark px error).
+
+    Pixel errors are in original-image pixels and only count landmarks present in the
+    ground truth. `mean_px_error` is NaN when no ground-truth landmark is present at all.
+    """
+    model.eval()
+    val_loss = 0.0
+    n_images = 0
+    all_errors = []  # per-landmark pixel errors (only for landmarks present in GT)
+
+    with torch.no_grad():
+        for batch in val_loader:
+            images = batch["image"].to(device)
+            targets = batch["heatmaps"].to(device)
+            gt_landmarks = batch["landmarks"]  # (B, N, 2) at model resolution
+            presence = batch.get("presence")  # (B, N) or None
+            scale_x = batch["scale_x"]  # (B,)
+            scale_y = batch["scale_y"]  # (B,)
+
+            pred = model(images)
+            mask = presence.to(device) if presence is not None else None
+            loss = criterion(pred, targets, mask=mask)
+            val_loss += loss.item() * images.size(0)
+            n_images += images.size(0)
+
+            # Extract predicted landmarks and compute pixel errors (skip absent GT)
+            pred_np = pred.cpu().numpy()
+            presence_np = presence.numpy() if presence is not None else None
+            for b in range(pred_np.shape[0]):
+                pred_coords = extract_landmarks_from_heatmaps(pred_np[b])
+                gt_coords = gt_landmarks[b].numpy()
+                sx = scale_x[b].item()
+                sy = scale_y[b].item()
+
+                for i in range(len(landmark_order)):
+                    if presence_np is not None and presence_np[b, i] == 0:
+                        continue
+                    px, py = pred_coords[i]
+                    gx, gy = gt_coords[i]
+                    err = np.sqrt(((px - gx) * sx) ** 2 + ((py - gy) * sy) ** 2)
+                    all_errors.append((landmark_order[i], err))
+
+    val_loss /= max(n_images, 1)
+
+    landmark_errors = {}
+    for name in landmark_order:
+        errs = [e for n, e in all_errors if n == name]
+        landmark_errors[name] = float(np.mean(errs)) if errs else 0.0
+
+    mean_error = float(np.mean([e for _, e in all_errors])) if all_errors else float("nan")
+    return val_loss, mean_error, landmark_errors
+
+
 def train_fold(
     cfg: dict,
     fold: int,
@@ -84,16 +148,37 @@ def train_fold(
     checkpoint_name: Optional[str] = None,
     interactive: bool = True,
     display_name: Optional[str] = None,
+    samples: Optional[list[tuple[Path, Path]]] = None,
+    init_checkpoint: Optional[Path] = None,
+    should_stop: Optional[callable] = None,
 ) -> dict:
-    """Train one fold and return best validation metrics."""
+    """Train one fold and return best validation metrics.
+
+    Args beyond the classic CV path:
+        samples: explicit ``(geojson_path, image_path)`` pairs that `train_indices` /
+            `val_indices` index into, instead of scanning the config's data directories.
+        init_checkpoint: fine-tune from this checkpoint's weights instead of an
+            ImageNet-pretrained encoder. Its score on the validation set is measured
+            first (returned as ``baseline_pixel_error``) and its weights are written out
+            as the starting "best", so the saved checkpoint is never worse on the
+            validation images than the model it started from.
+        should_stop: polled every batch; when it returns True, `TrainingCancelled` is raised.
+    """
     label = f"{display_name}_Fold{fold}" if display_name else f"Fold{fold}"
-    project_root = Path(__file__).resolve().parent.parent.parent
-    annotation_dir = project_root / cfg["data"]["annotation_dir"]
-    image_dir = project_root / cfg["data"]["image_dir"]
+    if samples is not None:
+        annotation_dir = image_dir = None
+    else:
+        project_root = Path(__file__).resolve().parent.parent.parent
+        annotation_dir = project_root / cfg["data"]["annotation_dir"]
+        image_dir = project_root / cfg["data"]["image_dir"]
 
     # Create datasets
-    train_ds = LandmarkDataset(annotation_dir, image_dir, cfg, train_indices, train=True, interactive=interactive)
-    val_ds = LandmarkDataset(annotation_dir, image_dir, cfg, val_indices, train=False, interactive=interactive)
+    train_ds = LandmarkDataset(
+        annotation_dir, image_dir, cfg, train_indices, train=True, interactive=interactive, samples=samples
+    )
+    val_ds = LandmarkDataset(
+        annotation_dir, image_dir, cfg, val_indices, train=False, interactive=interactive, samples=samples
+    )
 
     train_loader = DataLoader(
         train_ds,
@@ -115,8 +200,13 @@ def train_fold(
     # Model
     model = LandmarkUNet(
         num_landmarks=cfg["heatmap"]["num_landmarks"],
-        pretrained=cfg["model"]["pretrained"],
-    ).to(device)
+        pretrained=cfg["model"]["pretrained"] and init_checkpoint is None,
+    )
+    if init_checkpoint is not None:
+        init_state = torch.load(init_checkpoint, map_location="cpu", weights_only=False)
+        model.load_state_dict(init_state["model_state_dict"])
+        print(f"  {label}: starting from {Path(init_checkpoint).name}")
+    model = model.to(device)
 
     # Freeze encoder initially
     freeze_epochs = cfg["training"]["encoder_freeze_epochs"]
@@ -149,6 +239,39 @@ def train_fold(
     # (typically `trained_models/<name>/`). No extra `checkpoints/` subfolder.
     checkpoint_dir = output_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_filename = checkpoint_name if checkpoint_name else f"best_fold{fold}.pt"
+    if not ckpt_filename.endswith(".pt"):
+        ckpt_filename += ".pt"
+
+    def _save_checkpoint(epoch: int, val_loss: float, mean_error: float) -> None:
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_loss": val_loss,
+                "mean_pixel_error": mean_error,
+                "config": cfg,
+            },
+            checkpoint_dir / ckpt_filename,
+        )
+
+    # Fine-tuning: the starting model is the bar to beat. Score it before touching
+    # the weights and keep it as the initial best (epoch -1).
+    baseline_error = None
+    if init_checkpoint is not None:
+        val_loss, mean_error, landmark_errors = evaluate(model, val_loader, criterion, device, landmark_order)
+        if np.isfinite(mean_error):
+            baseline_error = mean_error
+            best_val_error = mean_error
+            best_metrics = {
+                "epoch": -1,
+                "val_loss": val_loss,
+                "mean_pixel_error": mean_error,
+                "per_landmark_error": landmark_errors.copy(),
+            }
+            _save_checkpoint(-1, val_loss, mean_error)
+            print(f"  {label} before training: mean_px_error={mean_error:.1f}px")
 
     for epoch in range(train_cfg["epochs"]):
         # Unfreeze encoder after freeze period
@@ -171,6 +294,8 @@ def train_fold(
         model.train()
         train_loss = 0.0
         for batch in train_loader:
+            if should_stop is not None and should_stop():
+                raise TrainingCancelled(f"{label}: stopped at epoch {epoch}")
             images = batch["image"].to(device)
             targets = batch["heatmaps"].to(device)
             mask = batch.get("presence")
@@ -190,50 +315,7 @@ def train_fold(
         scheduler.step()
 
         # --- Validation phase ---
-        model.eval()
-        val_loss = 0.0
-        all_errors = []  # per-landmark pixel errors (only for landmarks present in GT)
-
-        with torch.no_grad():
-            for batch in val_loader:
-                images = batch["image"].to(device)
-                targets = batch["heatmaps"].to(device)
-                gt_landmarks = batch["landmarks"]  # (B, N, 2) at model resolution
-                presence = batch.get("presence")  # (B, N) or None
-                scale_x = batch["scale_x"]  # (B,)
-                scale_y = batch["scale_y"]  # (B,)
-
-                pred = model(images)
-                mask = presence.to(device) if presence is not None else None
-                loss = criterion(pred, targets, mask=mask)
-                val_loss += loss.item() * images.size(0)
-
-                # Extract predicted landmarks and compute pixel errors (skip absent GT)
-                pred_np = pred.cpu().numpy()
-                presence_np = presence.numpy() if presence is not None else None
-                for b in range(pred_np.shape[0]):
-                    pred_coords = extract_landmarks_from_heatmaps(pred_np[b])
-                    gt_coords = gt_landmarks[b].numpy()
-                    sx = scale_x[b].item()
-                    sy = scale_y[b].item()
-
-                    for i in range(len(landmark_order)):
-                        if presence_np is not None and presence_np[b, i] == 0:
-                            continue
-                        px, py = pred_coords[i]
-                        gx, gy = gt_coords[i]
-                        err = np.sqrt(((px - gx) * sx) ** 2 + ((py - gy) * sy) ** 2)
-                        all_errors.append((landmark_order[i], err))
-
-        val_loss /= len(val_ds)
-
-        # Compute per-landmark mean error
-        landmark_errors = {}
-        for name in landmark_order:
-            errs = [e for n, e in all_errors if n == name]
-            landmark_errors[name] = np.mean(errs) if errs else 0.0
-
-        mean_error = np.mean([e for _, e in all_errors])
+        val_loss, mean_error, landmark_errors = evaluate(model, val_loader, criterion, device, landmark_order)
 
         # Epoch callback for live monitoring
         if epoch_callback is not None:
@@ -259,26 +341,19 @@ def train_fold(
                 "mean_pixel_error": mean_error,
                 "per_landmark_error": landmark_errors.copy(),
             }
-            ckpt_filename = checkpoint_name if checkpoint_name else f"best_fold{fold}.pt"
-            if not ckpt_filename.endswith(".pt"):
-                ckpt_filename += ".pt"
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": val_loss,
-                    "mean_pixel_error": mean_error,
-                    "config": cfg,
-                },
-                checkpoint_dir / ckpt_filename,
-            )
+            _save_checkpoint(epoch, val_loss, mean_error)
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"  {label}: early stopping at epoch {epoch}")
                 break
 
+    if not best_metrics:
+        raise RuntimeError(
+            f"{label}: no checkpoint was saved — the validation images have no annotated landmarks "
+            "the model knows, so the error could never be measured."
+        )
+    best_metrics["baseline_pixel_error"] = baseline_error
     print(f"  {label} best: epoch={best_metrics['epoch']}, " f"mean_error={best_metrics['mean_pixel_error']:.1f}px")
     for name, err in best_metrics["per_landmark_error"].items():
         print(f"    {name}: {err:.1f}px")
