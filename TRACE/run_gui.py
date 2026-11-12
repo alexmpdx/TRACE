@@ -106,6 +106,19 @@ _ll_dir = str(Path(__file__).resolve().parent.parent / "LandmarkLocator")
 if _ll_dir not in sys.path:
     sys.path.insert(0, _ll_dir)
 
+# LandmarkLocator GUI dispatch sentinel — same idea as the CLI sentinel above.
+# "Open LandmarkLocator…" in the landmark-training dialog starts a second copy of
+# this launcher with the sentinel as argv[1], which runs the full LandmarkLocator
+# verification / training GUI in its own process (own QApplication, style and
+# event loop) instead of the TRACE window. A separate process is the only form
+# that also works frozen, where there is no python.exe to run the module with.
+if len(sys.argv) > 1 and sys.argv[1] == "__landmark_locator_gui__":
+    sys.argv = sys.argv[:1] + sys.argv[2:]
+    from landmark_locator.scripts.gui import main as _ll_gui_main
+
+    _ll_gui_main()
+    sys.exit(0)
+
 # --- Startup logging ------------------------------------------------------
 # Initialise the file logger as early as possible so anything that fails
 # below (imports, Qt setup, napari plugin load, etc.) leaves a trace.

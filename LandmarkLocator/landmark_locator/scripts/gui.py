@@ -20,6 +20,21 @@ from landmark_locator.data.dataset import _normalize_name, canonical_landmark_na
 
 # Project root (LandmarkLocator/) for locating configs and data
 _project_root = Path(__file__).resolve().parent.parent.parent
+
+
+def _models_root() -> Path:
+    """Folder trained models are written to and model pickers open at.
+
+    The repo's ``trained_models/`` in a checkout. Inside a frozen host application
+    (TRACE) the package sits in a read-only, replaced-on-update bundle, so use the
+    per-user folder TRACE's own landmark training saves to — models trained here
+    then show up in TRACE's "Your models" menu.
+    """
+    if getattr(sys, "frozen", False):
+        return Path.home() / "TRACE" / "landmark_models"
+    return _project_root / "trained_models"
+
+
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -697,7 +712,7 @@ class TrainingThread(QThread):
                 cfg = yaml.safe_load(f)
 
             # Each run goes into its own named subfolder so folds stay grouped.
-            run_dir = _project_root / "trained_models" / self._model_name
+            run_dir = _models_root() / self._model_name
             run_dir.mkdir(parents=True, exist_ok=True)
 
             device = get_device()
@@ -2716,7 +2731,7 @@ class LandmarkGUI(QMainWindow):
     # ---- Actions ----
     def _on_load_single_fold(self) -> None:
         """Load a single fold checkpoint via file picker (no ensembling)."""
-        start_dir = _project_root / "trained_models"
+        start_dir = _models_root()
         if not start_dir.exists():
             start_dir = _project_root
         path = _pick_file_native("Select Fold Checkpoint", str(start_dir), "PyTorch (*.pt *.pth)")
@@ -2728,7 +2743,7 @@ class LandmarkGUI(QMainWindow):
         """Load an ensemble from a folder of `best_fold*.pt` checkpoints via folder picker."""
         from landmark_locator.inference.predict import _find_fold_checkpoints
 
-        start_dir = _project_root / "trained_models"
+        start_dir = _models_root()
         if not start_dir.exists():
             start_dir = _project_root
         folder = _pick_folder_native("Select Ensemble Folder", str(start_dir))
@@ -3123,7 +3138,7 @@ class LandmarkGUI(QMainWindow):
         self.statusBar().showMessage(f"Training failed: {msg}")
         # Save the run log as a text file even on failure — the log is what diagnoses the failure.
         try:
-            run_dir = _project_root / "trained_models" / self._train_dialog._model_name
+            run_dir = _models_root() / self._train_dialog._model_name
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "training.log").write_text(self._train_dialog._log.toPlainText())
         except Exception:

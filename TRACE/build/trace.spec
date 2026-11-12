@@ -77,6 +77,10 @@ hiddenimports = [
     "landmark_locator.training.train",
     "landmark_locator.data.augmentation",
     "albumentations",
+    # Full LandmarkLocator GUI, started by run_gui.py's __landmark_locator_gui__
+    # sentinel ("Open LandmarkLocator…" in the training dialog).
+    "landmark_locator.scripts.gui",
+    "matplotlib.backends.backend_qt5agg",
     "preprocessing",
     # live_tune is reached via a runtime sys.path injection in
     # settings_dialog.py, so PyInstaller's static analysis can't see
@@ -110,6 +114,9 @@ datas = [
     (str(TRACE / "GUI_images"), "TRACE/GUI_images"),
     (str(TRACE / "presets"), "TRACE/presets"),
     (str(TRACE / "README.md"), "TRACE"),
+    # LandmarkLocator's GUI reads its training defaults from
+    # <package parent>/configs/default.yaml, which is the bundle root when frozen.
+    (str(ROOT / "LandmarkLocator" / "configs" / "default.yaml"), "configs"),
 ]
 # Initialized empty so the collect_all loop below can append to it before
 # the Analysis call. The Analysis() invocation receives this list directly.

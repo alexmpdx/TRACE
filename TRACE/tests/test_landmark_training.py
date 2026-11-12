@@ -87,15 +87,30 @@ def test_model_helpers(tmp_path):
     assert list_user_models([tmp_path, tmp_path, tmp_path / "missing"]) == [(tmp_path / "m1").resolve()]
 
 
+def test_landmark_locator_command_goes_through_the_launcher(monkeypatch):
+    """Checkout: interpreter + run_gui.py + sentinel. Frozen: the TRACE binary + sentinel."""
+    from TRACE import landmark_training as lt
+
+    cmd = lt.landmark_locator_command()
+    assert cmd[0] == sys.executable and cmd[-1] == lt.LANDMARK_LOCATOR_SENTINEL
+    launcher = Path(cmd[1])
+    assert launcher.name == "run_gui.py" and launcher.is_file()
+    # The launcher must actually handle the sentinel it is being handed.
+    assert f'sys.argv[1] == "{lt.LANDMARK_LOCATOR_SENTINEL}"' in launcher.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert lt.landmark_locator_command() == [sys.executable, lt.LANDMARK_LOCATOR_SENTINEL]
+
+
 def test_dialog_trains_and_switches_model(tmp_path, monkeypatch):
     """Scratch-train through the real dialog + thread on tiny images, then adopt the model."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("albumentations")
     from PyQt5.QtCore import QEventLoop, QTimer
     from PyQt5.QtWidgets import QApplication, QCheckBox, QLineEdit, QWidget
+    from TRACE.landmark_training_dialog import LandmarkTrainingDialog
 
     from landmark_locator.training import user_training
-    from TRACE.landmark_training_dialog import LandmarkTrainingDialog
 
     cfg = json.loads(json.dumps(user_training.FALLBACK_CONFIG))
     cfg["input"] = {"width": 128, "height": 96}
@@ -161,10 +176,10 @@ def test_mcp_tools_drive_the_dialog(tmp_path, monkeypatch):
     pytest.importorskip("albumentations")
     from PyQt5.QtCore import QEventLoop, QTimer
     from PyQt5.QtWidgets import QApplication, QCheckBox, QLineEdit, QWidget
-
-    from landmark_locator.training import user_training
     from TRACE import mcp_server as ms
     from TRACE.landmark_training_dialog import LandmarkTrainingDialog
+
+    from landmark_locator.training import user_training
 
     cfg = json.loads(json.dumps(user_training.FALLBACK_CONFIG))
     cfg["input"] = {"width": 128, "height": 96}

@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -42,7 +42,6 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
-
 from TRACE.landmark_training import (
     default_model_name,
     find_override_samples,
@@ -327,7 +326,15 @@ class LandmarkTrainingDialog(QDialog):
         self.btn_use.clicked.connect(self._on_use_model)
         self.btn_close = QPushButton("Close")
         self.btn_close.clicked.connect(self.reject)
+        self.btn_locator = QPushButton("Open LandmarkLocator…")
+        self.btn_locator.setToolTip(
+            "Open the full LandmarkLocator program in its own window: compare predictions with your "
+            "annotations, view heatmaps, tune quality-gate thresholds and augmentation, and run "
+            "cross-validated training with every setting exposed."
+        )
+        self.btn_locator.clicked.connect(self._on_open_landmark_locator)
         result_row.addWidget(self.btn_use)
+        result_row.addWidget(self.btn_locator)
         result_row.addStretch(1)
         result_row.addWidget(self.btn_close)
         layout.addLayout(result_row)
@@ -683,6 +690,41 @@ class LandmarkTrainingDialog(QDialog):
         self._set_status(
             f"TRACE now uses <b>{self._trained_model.name}</b> for landmarks. Switch back any time in "
             "Settings → Models → Your models."
+        )
+
+    # -- full LandmarkLocator GUI ---------------------------------------------------
+    def _on_open_landmark_locator(self) -> None:
+        """Start the standalone LandmarkLocator GUI as a separate process."""
+        import tempfile
+
+        from TRACE.landmark_training import launch_landmark_locator
+
+        stderr_path = Path(tempfile.gettempdir()) / "trace_landmark_locator_stderr.log"
+        try:
+            proc = launch_landmark_locator(stderr_path)
+        except OSError as exc:
+            QMessageBox.critical(self, "Could not open LandmarkLocator", str(exc))
+            return
+        self.btn_locator.setEnabled(False)
+        self.btn_locator.setText("Opening LandmarkLocator…")
+        # It takes a few seconds to import torch and show its window. If the process
+        # has already died by then, say why instead of leaving a button that did nothing.
+        QTimer.singleShot(6000, lambda: self._check_landmark_locator_started(proc, stderr_path))
+
+    def _check_landmark_locator_started(self, proc, stderr_path: Path) -> None:
+        self.btn_locator.setEnabled(True)
+        self.btn_locator.setText("Open LandmarkLocator…")
+        code = proc.poll()
+        if code in (None, 0):
+            return  # running (or the user already closed it normally)
+        try:
+            detail = "\n".join(stderr_path.read_text(errors="replace").strip().splitlines()[-12:])
+        except OSError:
+            detail = ""
+        QMessageBox.critical(
+            self,
+            "LandmarkLocator did not start",
+            f"LandmarkLocator exited with code {code}." + (f"\n\n{detail}" if detail else ""),
         )
 
     # -- closing ----------------------------------------------------------------

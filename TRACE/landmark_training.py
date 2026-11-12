@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
@@ -98,6 +100,40 @@ def find_override_samples(folders: Iterable[Path], recursive: bool = False) -> l
                     seen.add(key)
                     samples.append((override, image))
     return samples
+
+
+LANDMARK_LOCATOR_SENTINEL = "__landmark_locator_gui__"
+
+
+def landmark_locator_command() -> list[str]:
+    """Command that starts the full LandmarkLocator GUI in its own process.
+
+    Both forms go through ``TRACE/run_gui.py``'s sentinel dispatch: frozen,
+    ``sys.executable`` is the TRACE binary itself (there is no python to run a module
+    with); in a checkout it is the interpreter and the launcher script is passed to it.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, LANDMARK_LOCATOR_SENTINEL]
+    return [sys.executable, str(Path(__file__).resolve().parent / "run_gui.py"), LANDMARK_LOCATOR_SENTINEL]
+
+
+def launch_landmark_locator(stderr_path: Optional[Path] = None) -> subprocess.Popen:
+    """Start the LandmarkLocator GUI detached from TRACE; returns the process handle.
+
+    Its stderr goes to `stderr_path` (when given) so a start-up failure can be shown.
+    """
+    stderr = open(stderr_path, "wb") if stderr_path is not None else subprocess.DEVNULL
+    try:
+        return subprocess.Popen(
+            landmark_locator_command(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+            start_new_session=os.name != "nt",  # keeps running if TRACE is closed
+        )
+    finally:
+        if stderr_path is not None:
+            stderr.close()  # the child holds its own handle
 
 
 def is_landmark_model_dir(path: Path) -> bool:
