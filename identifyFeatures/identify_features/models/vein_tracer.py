@@ -22,6 +22,8 @@ from typing import Optional
 import cv2
 import networkx as nx
 import numpy as np
+from shapely.geometry import LineString, Point
+
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import (
     Landmark,
@@ -45,7 +47,6 @@ from identify_features.utils.graph_utils import (
     edge_departure_direction,
     edge_line_from_node,
 )
-from shapely.geometry import LineString, Point
 
 logger = logging.getLogger(__name__)
 
@@ -1769,10 +1770,11 @@ def _label_crossveins_via_chain_topology(
     Mirrors the sandbox's `_evaluate_chain` + `_select_crossvein` (see
     crossvein_sandbox.py).
     """
-    from identify_features.models.topology import CROSSVEIN_CONNECTIONS
     from shapely.geometry import MultiLineString
     from shapely.geometry import Point as _Pt
     from shapely.ops import nearest_points
+
+    from identify_features.models.topology import CROSSVEIN_CONNECTIONS
 
     # Stub-length cap for chain contraction (matches `_detect_crossveins`).
     if config.um_per_px is not None and config.um_per_px > 0:
@@ -2307,11 +2309,12 @@ def _extend_crossveins_along_corridor(
     rejects PCV continuation pieces whose Y is outside that slice but
     correctly between L4 and L5 locally.
     """
+    from shapely.geometry import MultiLineString
+    from shapely.geometry import Point as _Pt
+
     from identify_features.models.topology import CROSSVEIN_CONNECTIONS
     from identify_features.utils.geometry_utils import angle_between_vectors
     from identify_features.utils.graph_utils import edge_departure_direction
-    from shapely.geometry import MultiLineString
-    from shapely.geometry import Point as _Pt
 
     # Distance from candidate edge centroid to labeled crossvein centerline.
     # Primary: 4× median vein width. Fallback: 200 µm (anatomical scale —

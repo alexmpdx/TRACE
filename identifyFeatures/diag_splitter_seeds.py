@@ -5,6 +5,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from scipy.ndimage import distance_transform_edt
+from skimage.segmentation import watershed
+
 from identify_features.config import PipelineConfig
 from identify_features.models.geojson_io import (
     _compute_wing_outline,
@@ -16,8 +19,6 @@ from identify_features.models.skeleton import build_skeleton_graph
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
 from identify_features.utils.image_utils import rasterize_polygons
-from scipy.ndimage import distance_transform_edt
-from skimage.segmentation import watershed
 
 BASE = Path(__file__).parent
 stem = sys.argv[1] if len(sys.argv) > 1 else "-CTRL_PknRNAi_108870_0008"

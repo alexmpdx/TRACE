@@ -22,9 +22,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Mapping, Optional
 
+from shapely.geometry import LineString
+
 from identify_features.garbage_detector.base import FilterContext, FilterStage, GarbageVerdict
 from identify_features.garbage_detector.registry import register_filter
-from shapely.geometry import LineString
 
 if TYPE_CHECKING:
     from identify_features.config import PipelineConfig

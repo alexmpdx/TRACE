@@ -10,6 +10,7 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+
 from landmark_locator.data.dataset import _normalize_name
 from landmark_locator.inference.predict import LandmarkPredictor
 

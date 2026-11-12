@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import cv2
+
 from identify_features.config import PipelineConfig
 from identify_features.models.geojson_io import (
     _compute_wing_outline,

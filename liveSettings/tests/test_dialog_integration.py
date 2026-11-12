@@ -14,9 +14,21 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 ROOT = Path(__file__).resolve().parents[2]
-for sub in ("", "identifyFeatures", "HingeChopper", "modelTOjson", "preprocessing",
-            "measurementMaker", "wingIsolator", "resolutionAdjust", "scaleEstimator",
-            "wingRotator", "LandmarkLocator", "TRACE", "liveSettings"):
+for sub in (
+    "",
+    "identifyFeatures",
+    "HingeChopper",
+    "modelTOjson",
+    "preprocessing",
+    "measurementMaker",
+    "wingIsolator",
+    "resolutionAdjust",
+    "scaleEstimator",
+    "wingRotator",
+    "LandmarkLocator",
+    "TRACE",
+    "liveSettings",
+):
     p = str(ROOT / sub) if sub else str(ROOT)
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -45,6 +57,7 @@ def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
 
     from settings_dialog import PipelineConfigDialog
+
     from live_tune.dialog_integration import attach_live_preview
 
     dialog = PipelineConfigDialog(PipelineConfig())
@@ -75,10 +88,7 @@ def main() -> int:
 
     # Now flip a REAL dialog widget and confirm it drives a recompute.
     n0 = len(results)
-    name, (kind, widget, extra) = next(
-        (n, v) for n, v in dialog._widgets.items()
-        if n == "snap_radius_um"
-    )
+    name, (kind, widget, extra) = next((n, v) for n, v in dialog._widgets.items() if n == "snap_radius_um")
     widget.setValue(widget.value() + 5.0)  # emits valueChanged -> pane.on_config_changed
     ok = _pump(app, lambda: len(results) > n0)
     assert ok, "editing a real dialog widget did not trigger recompute"

@@ -241,6 +241,7 @@ def attach_live_preview(dialog) -> Optional[LivePreviewPane]:
         # Tell the pane the active tab's tier when the user switches tabs.
         tabs = getattr(dialog, "_tabs", None)
         if tabs is not None:
+
             def _on_tab(_idx, _tabs=tabs, _pane=pane):
                 title = _tabs.tabText(_idx).lower()
                 if "wing graph" in title:
@@ -249,6 +250,7 @@ def attach_live_preview(dialog) -> Optional[LivePreviewPane]:
                     _pane.set_active_tier("B")
                 elif "intervein" in title:
                     _pane.set_active_tier("C")
+
             tabs.currentChanged.connect(_on_tab)
 
         # Stop the worker thread when the dialog closes (wrap existing done()).

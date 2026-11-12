@@ -101,10 +101,7 @@ def pick_calibration_image(path: Path, recursive: bool = False) -> Path:
     # exactly what the caller forwarded (helped pin down the widget-
     # reparenting bug on the 2026-08-19 follow-up to issue #35 where
     # the raw path differed from the currently-selected input folder).
-    raise FileNotFoundError(
-        f"No supported images in folder: {p}\n"
-        f"(raw path from caller: {path!r})"
-    )
+    raise FileNotFoundError(f"No supported images in folder: {p}\n" f"(raw path from caller: {path!r})")
 
 
 def calibrate_for_trace(

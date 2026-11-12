@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
+from shapely.ops import split, unary_union
+
 from identify_features.garbage_detector import compute_solidity
 from identify_features.models.datatypes import InterveinRegion, VeinIdentification
 from identify_features.models.topology import REGION_AP_ORDER, VEIN_AP_ORDER
-from shapely.geometry import LineString, MultiPolygon, Point, Polygon
-from shapely.ops import split, unary_union
 
 if TYPE_CHECKING:
     from identify_features.models.datatypes import Landmark, WingResult

@@ -27,15 +27,16 @@ from pathlib import Path
 import cv2
 import networkx as nx
 import numpy as np
+from scipy import ndimage
+from shapely.geometry import LineString, MultiPolygon, Polygon
+from skimage.morphology import medial_axis, skeletonize
+
 from identify_features.models.datatypes import (
     PruneMethod,
     SkeletonGraph,
     SkeletonMethod,
 )
 from identify_features.utils.image_utils import rasterize_polygons
-from scipy import ndimage
-from shapely.geometry import LineString, MultiPolygon, Polygon
-from skimage.morphology import medial_axis, skeletonize
 
 logger = logging.getLogger(__name__)
 

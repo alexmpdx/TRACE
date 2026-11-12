@@ -15,9 +15,6 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional
 
-from measurement_maker.distance import load_landmarks_from_geojson
-from measurement_maker.landmark_names import LANDMARK_DISPLAY_NAMES, landmark_display_name
-from measurement_maker.types import LandmarkPair
 from PyQt5.QtCore import QSettings, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
@@ -33,6 +30,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from measurement_maker.distance import load_landmarks_from_geojson
+from measurement_maker.landmark_names import LANDMARK_DISPLAY_NAMES, landmark_display_name
+from measurement_maker.types import LandmarkPair
 
 logger = logging.getLogger(__name__)
 

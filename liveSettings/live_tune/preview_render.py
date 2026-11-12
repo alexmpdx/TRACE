@@ -19,6 +19,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+
 from identify_features.models.datatypes import Landmark
 from identify_features.views.overlay import render_overlay
 
@@ -97,8 +98,14 @@ def _draw_landmarks(
             cv2.line(img, raw, snapped, (180, 180, 180), thick, cv2.LINE_AA)
         cv2.circle(img, anchor, ring_r, (255, 255, 255), thick + 1, cv2.LINE_AA)
         cv2.putText(
-            img, name, (anchor[0] + ring_r + 2, anchor[1] + 6),
-            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thick, cv2.LINE_AA,
+            img,
+            name,
+            (anchor[0] + ring_r + 2, anchor[1] + 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (255, 255, 255),
+            thick,
+            cv2.LINE_AA,
         )
 
 

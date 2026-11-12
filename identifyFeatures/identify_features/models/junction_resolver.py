@@ -23,6 +23,7 @@ from collections import Counter
 from typing import Optional
 
 import networkx as nx
+
 from identify_features.config import PipelineConfig
 from identify_features.utils.geometry_utils import angle_between_vectors
 from identify_features.utils.graph_utils import edge_departure_direction

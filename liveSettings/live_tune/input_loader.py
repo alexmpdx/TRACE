@@ -75,8 +75,7 @@ class InputBundle:
     preview_scale: float = 1.0
 
 
-def _parse(detection_geojson: Path, landmarks_geojson: Path,
-           image_path: Optional[Path]) -> tuple:
+def _parse(detection_geojson: Path, landmarks_geojson: Path, image_path: Optional[Path]) -> tuple:
     """Run S1 (parse + outline + image read). Imports lazily."""
     from identify_features.models.geojson_io import (
         _compute_wing_outline,

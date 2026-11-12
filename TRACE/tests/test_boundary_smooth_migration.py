@@ -34,9 +34,9 @@ for _p in (
         sys.path.insert(0, str(_p))
 
 import pytest  # noqa: E402
+
 from identify_features.config import PipelineConfig  # noqa: E402
 from identify_features.models.datatypes import SkeletonMethod  # noqa: E402
-
 from TRACE.config_io import config_from_dict, config_to_dict  # noqa: E402
 from TRACE.presets_loader import _convert_enum_lists  # noqa: E402
 

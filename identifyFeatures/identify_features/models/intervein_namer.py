@@ -6,6 +6,9 @@ import logging
 from itertools import combinations
 from typing import Optional
 
+from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import unary_union
+
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import (
     InterveinRegion,
@@ -20,8 +23,6 @@ from identify_features.models.topology import (
     VEIN_BOUNDARIES,
     build_region_forbidden_veins,
 )
-from shapely.geometry import MultiPolygon, Polygon
-from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
 

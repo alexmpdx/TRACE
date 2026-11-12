@@ -22,8 +22,6 @@ from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any
 
-from identify_features.config import PipelineConfig
-from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import (
     QButtonGroup,
@@ -50,6 +48,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from identify_features.config import PipelineConfig
+from identify_features.models.datatypes import PruneMethod, SkeletonMethod
 from TRACE.presets_loader import load_presets
 from TRACE.theme import current_theme as _ct
 

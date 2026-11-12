@@ -15,9 +15,20 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-for _sub in ("", "identifyFeatures", "HingeChopper", "modelTOjson", "preprocessing",
-             "measurementMaker", "wingIsolator", "resolutionAdjust", "scaleEstimator",
-             "wingRotator", "LandmarkLocator", "liveSettings"):
+for _sub in (
+    "",
+    "identifyFeatures",
+    "HingeChopper",
+    "modelTOjson",
+    "preprocessing",
+    "measurementMaker",
+    "wingIsolator",
+    "resolutionAdjust",
+    "scaleEstimator",
+    "wingRotator",
+    "LandmarkLocator",
+    "liveSettings",
+):
     _p = str(ROOT / _sub) if _sub else str(ROOT)
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -32,12 +43,21 @@ def test_forwarded_kwargs_bind_to_real_signature():
     sig = inspect.signature(process_single_image)
     # Exactly the kwargs load_from_raw_image passes (names must match the API).
     kwargs = dict(
-        image_path="x", output_dir="y",
-        landmark_checkpoint=None, segmentation_model_dir=None,
-        stages=(True, True, True), predictor_cache={}, model_cache={},
-        input_um_per_px=2.0, device=None, progress_callback=None,
-        wing_model_dir=None, wing_expand_fraction=0.05,
-        do_rotation=False, rotation_mirror_correct=False, target_um_per_px=None,
+        image_path="x",
+        output_dir="y",
+        landmark_checkpoint=None,
+        segmentation_model_dir=None,
+        stages=(True, True, True),
+        predictor_cache={},
+        model_cache={},
+        input_um_per_px=2.0,
+        device=None,
+        progress_callback=None,
+        wing_model_dir=None,
+        wing_expand_fraction=0.05,
+        do_rotation=False,
+        rotation_mirror_correct=False,
+        target_um_per_px=None,
     )
     sig.bind(**kwargs)  # raises TypeError if any kwarg name is wrong
 
@@ -67,6 +87,7 @@ def test_preproc_kwargs_forwarded(monkeypatch, tmp_path):
         return r
 
     import preprocessing.pipeline as pp
+
     monkeypatch.setattr(pp, "process_single_image", _stub)
 
     bundle = il.load_from_raw_image(
@@ -102,11 +123,15 @@ def test_rescale_factor_adjusts_um_per_px(monkeypatch, tmp_path):
         return r
 
     import preprocessing.pipeline as pp
+
     monkeypatch.setattr(pp, "process_single_image", _stub)
 
     bundle = il.load_from_raw_image(
-        image_path=ROOT / "identifyFeatures" / "OGpics" / "0003.bmp", output_dir=tmp_path,
-        landmark_checkpoint=None, segmentation_model_dir=None, um_per_px=2.0,
+        image_path=ROOT / "identifyFeatures" / "OGpics" / "0003.bmp",
+        output_dir=tmp_path,
+        landmark_checkpoint=None,
+        segmentation_model_dir=None,
+        um_per_px=2.0,
     )
     assert bundle.um_per_px == pytest.approx(4.0)  # 2.0 / 0.5
 

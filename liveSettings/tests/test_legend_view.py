@@ -39,8 +39,9 @@ def _labels(stack):
 def _skeleton_key_colors_match_renderer():
     """Legend skeleton swatch RGBs must equal what render_skeleton draws."""
     import networkx as nx
-    from live_tune import preview_render as PR
     from shapely.geometry import LineString
+
+    from live_tune import preview_render as PR
 
     g = nx.Graph()
     g.add_node(1, x=10, y=10)

@@ -8,8 +8,9 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-from landmark_locator.names import LEGACY_LANDMARK_NAMES, canonical_landmark_name  # noqa: F401  (re-exported)
 from torch.utils.data import Dataset
+
+from landmark_locator.names import LEGACY_LANDMARK_NAMES, canonical_landmark_name  # noqa: F401  (re-exported)
 
 # ImageNet normalization stats
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -105,10 +106,16 @@ class LandmarkDataset(Dataset):
         indices: Optional[list[int]] = None,
         train: bool = True,
         interactive: bool = True,
+        samples: Optional[list[tuple[Path, Path]]] = None,
     ) -> None:
-        """Load annotation list and configure transforms."""
-        self.annotation_dir = Path(annotation_dir)
-        self.image_dir = Path(image_dir)
+        """Load annotation list and configure transforms.
+
+        ``samples`` is an explicit list of ``(geojson_path, image_path)`` pairs. When
+        given, the two directories are not scanned (and may be ``None``), so annotations
+        and images can live anywhere and be named independently of each other.
+        """
+        self.annotation_dir = Path(annotation_dir) if annotation_dir is not None else None
+        self.image_dir = Path(image_dir) if image_dir is not None else None
         self.cfg = cfg
         self.train = train
         self.input_h = cfg["input"]["height"]
@@ -119,41 +126,45 @@ class LandmarkDataset(Dataset):
         self.landmark_order: list[str] = cfg["heatmap"]["landmark_order"]
         self.geojson_to_landmark: dict[str, str] = cfg["heatmap"]["geojson_to_landmark"]
 
-        # Collect all geojson files, sorted for reproducibility
-        all_files = sorted(self.annotation_dir.glob("*.geojson"))
-        if not all_files:
-            raise FileNotFoundError(f"No .geojson files in {self.annotation_dir}")
-
-        # Verify matching images exist
         self.samples = []
         self.fuzzy_matches: list[tuple[str, str]] = []  # (geojson_name, image_name)
-        for geojson_path in all_files:
-            # filename: foo.tif.geojson → image: foo.tif
-            image_name = geojson_path.stem  # foo.tif
-            image_path = self.image_dir / image_name
-            if not image_path.exists():
-                # Try stripping whitespace from the stem (handles stray spaces)
-                image_path = self.image_dir / image_name.strip()
-            if not image_path.exists():
-                match = _find_similar_file(self.image_dir, image_name)
-                if match:
-                    if interactive:
-                        answer = (
-                            input(
-                                f"Image not found for '{geojson_path.name}'.\n" f"  Did you mean '{match.name}'? [Y/n] "
+        if samples is not None:
+            self.samples = [(Path(g), Path(i)) for g, i in samples]
+        else:
+            # Collect all geojson files, sorted for reproducibility
+            all_files = sorted(self.annotation_dir.glob("*.geojson"))
+            if not all_files:
+                raise FileNotFoundError(f"No .geojson files in {self.annotation_dir}")
+
+            # Verify matching images exist
+            for geojson_path in all_files:
+                # filename: foo.tif.geojson → image: foo.tif
+                image_name = geojson_path.stem  # foo.tif
+                image_path = self.image_dir / image_name
+                if not image_path.exists():
+                    # Try stripping whitespace from the stem (handles stray spaces)
+                    image_path = self.image_dir / image_name.strip()
+                if not image_path.exists():
+                    match = _find_similar_file(self.image_dir, image_name)
+                    if match:
+                        if interactive:
+                            answer = (
+                                input(
+                                    f"Image not found for '{geojson_path.name}'.\n"
+                                    f"  Did you mean '{match.name}'? [Y/n] "
+                                )
+                                .strip()
+                                .lower()
                             )
-                            .strip()
-                            .lower()
-                        )
-                        if answer not in ("", "y", "yes"):
-                            print(f"Skipping {geojson_path.name}")
-                            continue
-                    image_path = match
-                    self.fuzzy_matches.append((geojson_path.name, match.name))
-                else:
-                    print(f"Warning: skipping {geojson_path.name} — no matching image in {self.image_dir}")
-                    continue
-            self.samples.append((geojson_path, image_path))
+                            if answer not in ("", "y", "yes"):
+                                print(f"Skipping {geojson_path.name}")
+                                continue
+                        image_path = match
+                        self.fuzzy_matches.append((geojson_path.name, match.name))
+                    else:
+                        print(f"Warning: skipping {geojson_path.name} — no matching image in {self.image_dir}")
+                        continue
+                self.samples.append((geojson_path, image_path))
 
         # Subset by indices if provided (for CV splits)
         if indices is not None:

@@ -33,7 +33,6 @@ from identify_features.models import geojson_io  # noqa: E402
 from landmark_locator.names import LEGACY_LANDMARK_NAMES  # noqa: E402
 from measurement_maker import landmark_names  # noqa: E402
 from measurement_maker.distance import load_landmarks_from_geojson, resolve_landmark_key  # noqa: E402
-
 from preprocessing.pipeline import load_landmarks_override  # noqa: E402
 from TRACE.landmark_inspector_dialog import _parse_landmarks_geojson  # noqa: E402
 

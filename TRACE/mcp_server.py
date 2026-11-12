@@ -278,7 +278,6 @@ def _tool_set_gui_state(window, state: dict) -> dict:
 
 def _tool_list_output_types(window) -> dict:
     from identify_features.views.csv_export import MEASUREMENT_GROUPS
-
     from TRACE.pipeline import INTERMEDIATE_OUTPUTS, OUTPUT_TYPES
 
     return {

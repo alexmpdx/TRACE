@@ -24,7 +24,6 @@ from identify_features.models.datatypes import (
 from identify_features.models.topology import ALL_CANONICAL_VEINS
 from identify_features.models.vein_tracer import _assign_absent_and_partial
 
-
 # ----------------------------------------------------------------------------
 # Test helpers
 # ----------------------------------------------------------------------------
@@ -82,9 +81,7 @@ def test_empty_input_yields_all_canonical_veins_as_absent_placeholders() -> None
     as an explicit ABSENT row with centerline=None / length 0."""
     config = PipelineConfig()
     veins: list[VeinIdentification] = []
-    _assign_absent_and_partial(
-        veins, nx.Graph(), {}, {}, MEDIAN_VEIN_WIDTH_PX, config
-    )
+    _assign_absent_and_partial(veins, nx.Graph(), {}, {}, MEDIAN_VEIN_WIDTH_PX, config)
     by_id = {v.vein_id: v for v in veins}
     assert set(by_id) == set(ALL_CANONICAL_VEINS)
     for vid, v in by_id.items():

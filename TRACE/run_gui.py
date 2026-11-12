@@ -408,8 +408,13 @@ def _probe_onnxruntime_direct_load() -> None:
         err = kernel32.GetLastError()
         # FormatMessageW for human-readable text
         kernel32.FormatMessageW.argtypes = [
-            wintypes.DWORD, wintypes.LPCVOID, wintypes.DWORD,
-            wintypes.DWORD, wintypes.LPWSTR, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPCVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.LPVOID,
         ]
         buf = ctypes.create_unicode_buffer(1024)
         kernel32.FormatMessageW(0x1300, None, err, 0, buf, 1024, None)

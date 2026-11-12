@@ -40,9 +40,9 @@ def main() -> int:
     # The pane must be able to shrink well below its content's natural height
     # (without the scroll area, Qt clamps minimumSizeHint to ~750 and the
     # layout overflows when the dialog forces it shorter).
-    assert pane.minimumSizeHint().height() < 300, (
-        f"pane min height too tall: {pane.minimumSizeHint().height()} — would overflow when squeezed"
-    )
+    assert (
+        pane.minimumSizeHint().height() < 300
+    ), f"pane min height too tall: {pane.minimumSizeHint().height()} — would overflow when squeezed"
     print(f"[minheight] {pane.minimumSizeHint().height()}px — pane can shrink ok")
 
     # Force a short pane (as a short dialog would) and confirm it scrolls.

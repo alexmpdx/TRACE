@@ -4,3 +4,22 @@ line-length = 120
 [tool.isort]
 profile = "black"
 line_length = 120
+# The project's own packages. Listing them pins how imports are grouped, so isort
+# sorts the same way on every machine instead of guessing from the environment.
+known_first_party = [
+    "TRACE",
+    "preprocessing",
+    "identify_features",
+    "landmark_locator",
+    "hinge_chopper",
+    "hinge_psd_loader",
+    "modeltojson",
+    "wing_rotator",
+    "wingIsolator",
+    "wing_isolator",
+    "resolutionAdjust",
+    "resolution_adjust",
+    "live_tune",
+    "measurement_maker",
+    "scale_estimator",
+]

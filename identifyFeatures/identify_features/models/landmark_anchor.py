@@ -7,6 +7,7 @@ import math
 from typing import Optional
 
 import networkx as nx
+
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import Landmark, SkeletonGraph
 from identify_features.utils.graph_utils import nearest_node

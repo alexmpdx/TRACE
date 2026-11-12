@@ -206,8 +206,11 @@ class LivePreviewPane(QWidget):
         # of truth and preprocessing re-runs when its settings change.
         src = QGroupBox("Sample")
         sv = QVBoxLayout(src)
-        sv.addWidget(QLabel("Pick a raw wing image. Preprocessing runs on Load and "
-                            "re-runs when preprocessing settings change."))
+        sv.addWidget(
+            QLabel(
+                "Pick a raw wing image. Preprocessing runs on Load and " "re-runs when preprocessing settings change."
+            )
+        )
         self.ed_image = self._file_row(sv, "Image:", self._pick_image)
 
         load_row = QHBoxLayout()
@@ -274,14 +277,18 @@ class LivePreviewPane(QWidget):
         view_row.addWidget(QLabel("View:"))
         self.cmb_view = QComboBox()
         for _label, _val, _tip in (
-            ("Wing graph (skeleton)", VIEW_SKELETON,
-             "End of skeletonization: graph edges + nodes. No tracing — fastest; "
-             "Tracing/Intervein settings don't affect this view."),
-            ("Traced veins + landmarks", VIEW_TRACED,
-             "End of vein tracing: labeled vein centerlines + snapped landmarks. "
-             "No intervein regions."),
-            ("Final output", VIEW_FINAL,
-             "The full overlay: veins + intervein regions (regions via Refresh)."),
+            (
+                "Wing graph (skeleton)",
+                VIEW_SKELETON,
+                "End of skeletonization: graph edges + nodes. No tracing — fastest; "
+                "Tracing/Intervein settings don't affect this view.",
+            ),
+            (
+                "Traced veins + landmarks",
+                VIEW_TRACED,
+                "End of vein tracing: labeled vein centerlines + snapped landmarks. " "No intervein regions.",
+            ),
+            ("Final output", VIEW_FINAL, "The full overlay: veins + intervein regions (regions via Refresh)."),
         ):
             self.cmb_view.addItem(_label, _val)
             self.cmb_view.setItemData(self.cmb_view.count() - 1, _tip, Qt.ToolTipRole)
@@ -363,7 +370,7 @@ class LivePreviewPane(QWidget):
         )
         self._legend_vein = self._make_legend_box(self._vein_legend_entries())
         self._legend_skeleton = self._make_legend_box(self._skeleton_legend_entries())
-        self._legend_stack.addWidget(self._legend_vein)      # index 0
+        self._legend_stack.addWidget(self._legend_vein)  # index 0
         self._legend_stack.addWidget(self._legend_skeleton)  # index 1
         return self._legend_stack
 
@@ -405,8 +412,7 @@ class LivePreviewPane(QWidget):
             swatch = QLabel()
             swatch.setFixedSize(16, 16)
             swatch.setStyleSheet(
-                f"background-color: rgb({int(rgb[0])},{int(rgb[1])},{int(rgb[2])}); "
-                "border: 1px solid #888;"
+                f"background-color: rgb({int(rgb[0])},{int(rgb[1])},{int(rgb[2])}); " "border: 1px solid #888;"
             )
             row.addWidget(swatch)
             row.addWidget(QLabel(label_text))
@@ -442,9 +448,12 @@ class LivePreviewPane(QWidget):
 
     def _pick_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose wing image", self._default_image_dir,
+            self,
+            "Choose wing image",
+            self._default_image_dir,
             "Images (*.tif *.tiff *.png *.bmp *.jpg *.jpeg);;All files (*)",
-            options=self._FILE_DIALOG_OPTS)
+            options=self._FILE_DIALOG_OPTS,
+        )
         if path:
             self.ed_image.setText(path)
 
@@ -467,9 +476,11 @@ class LivePreviewPane(QWidget):
         seg_dir = self._model_paths.get("segmentation_model_dir")
         if not lm_ckpt or not seg_dir:
             QMessageBox.warning(
-                self, "Live preview",
+                self,
+                "Live preview",
                 "Landmark and segmentation models must be set in Settings "
-                "before the live preview can preprocess an image.")
+                "before the live preview can preprocess an image.",
+            )
             return None
         if self._tmp_dir is None:
             self._tmp_dir = tempfile.mkdtemp(prefix="trace_livetune_")

@@ -24,13 +24,14 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from identify_features.config import PipelineConfig
-from identify_features.models.datatypes import VeinIdentification
-from identify_features.utils.image_utils import rasterize_polygons
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 from shapely.geometry import MultiPolygon, Polygon
 from skimage.morphology import h_maxima
 from skimage.segmentation import find_boundaries, watershed
+
+from identify_features.config import PipelineConfig
+from identify_features.models.datatypes import VeinIdentification
+from identify_features.utils.image_utils import rasterize_polygons
 
 logger = logging.getLogger(__name__)
 

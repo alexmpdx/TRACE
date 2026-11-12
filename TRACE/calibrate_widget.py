@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 from TRACE.theme import current_theme as _ct
 
 

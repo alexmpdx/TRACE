@@ -7,8 +7,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from identify_features.utils.psd_loader import imread_any
 from shapely.geometry import MultiPolygon, Polygon
+
+from identify_features.utils.psd_loader import imread_any
 
 logger = logging.getLogger(__name__)
 

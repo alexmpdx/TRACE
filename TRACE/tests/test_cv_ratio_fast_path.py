@@ -108,7 +108,6 @@ def test_fast_path_agrees_with_normal_path(tmp_path):
     """
     from identify_features.models.datatypes import WingResult
     from identify_features.models.geojson_io import load_landmarks_geojson
-
     from resolutionAdjust import inverse_rescale_wing_result
 
     rescale_factor = 2.0704
@@ -133,6 +132,7 @@ def test_landmarks_land_on_canvas_when_rendered(tmp_path):
     changed to account for lines and dots rather than just the ratio readout.
     """
     import numpy as np
+
     from identify_features.views.overlay import render_cv_ratio_overlay
 
     rescale_factor = 3.5  # large enough that unmapped points leave the canvas entirely

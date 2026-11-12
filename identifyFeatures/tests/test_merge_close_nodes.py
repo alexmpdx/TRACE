@@ -17,6 +17,7 @@ what happens to the dropped node's edges, and the strict ``<`` boundary.
 from __future__ import annotations
 
 import networkx as nx
+
 from identify_features.models.skeleton import _merge_close_nodes
 
 

@@ -569,12 +569,12 @@ def run_wing_isolation(
         returned only when `keep_intermediate_geojson` is True; otherwise None.
     """
     import cv2
-    from modeltojson import mask_to_geojson, read_image, run_inference, save_geojson
     from shapely.geometry import MultiPolygon as _MultiPolygon
     from shapely.geometry import Polygon as _Polygon
     from shapely.geometry import mapping as _shapely_mapping
     from shapely.geometry import shape as _shape
 
+    from modeltojson import mask_to_geojson, read_image, run_inference, save_geojson
     from preprocessing.psd_loader import imwrite_ome_tiff
     from wingIsolator import isolate_in_memory
     from wingIsolator.pipeline import apply_mask_to_image, write_masked_image

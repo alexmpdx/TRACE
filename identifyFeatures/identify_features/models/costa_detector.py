@@ -16,12 +16,13 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from identify_features.config import PipelineConfig
-from identify_features.models.datatypes import Landmark, SkeletonGraph
-from identify_features.utils.image_utils import rasterize_polygons
 from scipy import ndimage
 from shapely.geometry import LineString, Polygon
 from shapely.ops import split
+
+from identify_features.config import PipelineConfig
+from identify_features.models.datatypes import Landmark, SkeletonGraph
+from identify_features.utils.image_utils import rasterize_polygons
 
 logger = logging.getLogger(__name__)
 

@@ -117,4 +117,5 @@ def test_skeleton_then_final_traces_once():
 
 if __name__ == "__main__":
     import pytest
+
     sys.exit(pytest.main([__file__, "-v", "-s"]))

@@ -63,7 +63,9 @@ def test_core_landmark_failure_raises_without_override():
     hm = _heatmaps_one_blunt_peak()
     with pytest.raises(P.LowConfidenceLandmarkError) as exc:
         P._assemble_gate_result(
-            hm, 1.0, 1.0,
+            hm,
+            1.0,
+            1.0,
             landmark_order=ORDER,
             gate_config=_gate_cfg(core=["l1_rs"]),  # l1_rs IS core → aborts
             include_unreliable=True,  # does NOT prevent the core abort
@@ -75,7 +77,9 @@ def test_empty_core_override_prevents_raise_and_keeps_landmark():
     hm = _heatmaps_one_blunt_peak()
     # The fix: core_landmarks emptied → no core failures → no raise.
     result = P._assemble_gate_result(
-        hm, 1.0, 1.0,
+        hm,
+        1.0,
+        1.0,
         landmark_order=ORDER,
         gate_config=_gate_cfg(core=[]),
         include_unreliable=True,
@@ -119,19 +123,24 @@ def test_input_loader_builds_override_only_when_unreliable(monkeypatch, tmp_path
         return _R()
 
     import preprocessing.pipeline as pp
+
     monkeypatch.setattr(pp, "process_single_image", _stub)
 
     il.load_from_raw_image(
-        image_path=real_img, output_dir=tmp_path,
-        landmark_checkpoint=None, segmentation_model_dir=None,
+        image_path=real_img,
+        output_dir=tmp_path,
+        landmark_checkpoint=None,
+        segmentation_model_dir=None,
         include_unreliable_landmarks=True,
     )
     assert captured["gate_override"] == {"core_landmarks": []}
 
     captured.clear()
     il.load_from_raw_image(
-        image_path=real_img, output_dir=tmp_path,
-        landmark_checkpoint=None, segmentation_model_dir=None,
+        image_path=real_img,
+        output_dir=tmp_path,
+        landmark_checkpoint=None,
+        segmentation_model_dir=None,
         include_unreliable_landmarks=False,
     )
     assert captured["gate_override"] is None

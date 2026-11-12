@@ -61,7 +61,9 @@ def main() -> int:
     # Load via the worker (GeoJSON loader, no DL models needed headlessly).
     pane._worker.request_load(
         lambda: load_from_geojsons(_DET, _LM, _IMG, um_per_px=2.0),
-        pane._preview_scale, cfg["v"], pane._appearance,
+        pane._preview_scale,
+        cfg["v"],
+        pane._appearance,
     )
     assert _pump(app, lambda: pane._loaded and results), "load failed"
     assert pane.btn_refresh.isEnabled(), "refresh should enable after load"
@@ -77,8 +79,7 @@ def main() -> int:
     # Inject a gate-failing landmark and re-evaluate → warning shows with reason.
     lms = pane._session._landmarks_raw
     a_name = next(iter(lms))
-    lms[a_name] = replace(lms[a_name], reliable=False, gate_reason="sharpness=1.28<1.30",
-                          point=Point(0, 0))
+    lms[a_name] = replace(lms[a_name], reliable=False, gate_reason="sharpness=1.28<1.30", point=Point(0, 0))
     pane._update_gate_warning()
     assert pane.gate_warning.text(), "warning text not set for failing landmark"
     assert pane.gate_warning.isVisibleTo(pane), "warning not shown for failing landmark"

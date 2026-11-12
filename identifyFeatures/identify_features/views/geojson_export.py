@@ -12,9 +12,10 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from shapely.geometry import MultiPolygon, Polygon, mapping
+
 from identify_features.models.datatypes import InterveinRegion, VeinIdentification
 from identify_features.models.topology import REGION_COLORS, VEIN_COLORS
-from shapely.geometry import MultiPolygon, Polygon, mapping
 
 
 def export_geojson(

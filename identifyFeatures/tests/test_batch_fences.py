@@ -12,6 +12,8 @@ import statistics
 from dataclasses import replace
 
 import pytest
+from shapely.geometry import Polygon, box
+
 from identify_features.config import PipelineConfig
 from identify_features.garbage_detector import (
     BATCH_METRICS,
@@ -40,7 +42,6 @@ from identify_features.garbage_detector.filters.intervein_association import Int
 from identify_features.garbage_detector.filters.solidity import SolidityFilter
 from identify_features.garbage_detector.filters.vein_association import VeinAssociationFilter
 from identify_features.models.datatypes import WingResult
-from shapely.geometry import Polygon, box
 
 # ---------------------------------------------------------------------------
 # helpers

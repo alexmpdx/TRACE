@@ -22,9 +22,10 @@ for _sub in ("", "identifyFeatures", "liveSettings"):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from shapely.geometry import LineString  # noqa: E402
+
 from identify_features.models.datatypes import VeinIdentification, VeinStatus, VeinType  # noqa: E402
 from identify_features.views.overlay import render_overlay  # noqa: E402
-from shapely.geometry import LineString  # noqa: E402
 
 
 def _one_vein():
@@ -84,9 +85,7 @@ def test_session_render_suppresses_key(monkeypatch):
     monkeypatch.setattr(S, "render_overlay", _fake_render)
 
     from identify_features.config import PipelineConfig
-    from live_tune.session import Appearance, LiveTuneSession
-
-    from live_tune.session import VIEW_FINAL
+    from live_tune.session import VIEW_FINAL, Appearance, LiveTuneSession
 
     sess = LiveTuneSession()
     sess._base_image = _img()
@@ -99,4 +98,5 @@ def test_session_render_suppresses_key(monkeypatch):
 
 if __name__ == "__main__":
     import pytest
+
     sys.exit(pytest.main([__file__, "-v"]))

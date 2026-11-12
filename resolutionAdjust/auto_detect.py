@@ -173,9 +173,7 @@ def autodetect_um_per_px_from_folder(folder: Path) -> tuple[Optional[float], int
         # Nothing at top level → recurse. Fast to fall through on folders
         # that DO have top-level TIFFs (rglob is skipped) and lets nested
         # batches average their metadata correctly.
-        candidates = sorted(
-            p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _TIFF_EXTS
-        )
+        candidates = sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _TIFF_EXTS)
     n_total = len(candidates)
 
     values: list[float] = []

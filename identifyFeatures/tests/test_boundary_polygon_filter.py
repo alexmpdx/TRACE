@@ -16,6 +16,8 @@ import math
 from pathlib import Path
 
 import pytest
+from shapely.geometry import Point
+
 from identify_features.config import PipelineConfig
 from identify_features.garbage_detector import (
     BOUNDARY_LANDMARK_ORDER,
@@ -28,7 +30,6 @@ from identify_features.garbage_detector import (
 )
 from identify_features.garbage_detector.filters.boundary_polygon import BoundaryPolygonFilter
 from identify_features.models.datatypes import Landmark
-from shapely.geometry import Point
 
 HERE = Path(__file__).resolve().parent
 IF_ROOT = HERE.parent  # identifyFeatures/

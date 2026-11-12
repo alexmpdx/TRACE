@@ -30,6 +30,8 @@ from typing import Optional
 _LRU_CAP = 16
 
 import numpy as np
+from shapely.geometry import MultiPolygon, Polygon
+
 from identify_features.config import PipelineConfig
 from identify_features.models.datatypes import (
     InterveinRegion,
@@ -50,7 +52,6 @@ from identify_features.models.skeleton import (
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
 from identify_features.views.overlay import render_overlay
-from shapely.geometry import MultiPolygon, Polygon
 
 from .preview_render import render_skeleton, render_traced
 

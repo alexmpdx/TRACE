@@ -26,12 +26,11 @@ from PyQt5.QtCore import (
     PYQT_VERSION_STR,
     QT_VERSION_STR,
     QBuffer,
+    Qt,
     QThread,
     QUrl,
-    Qt,
     pyqtSignal,
 )
-from TRACE.theme import current_theme as _ct
 from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -48,6 +47,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from TRACE.theme import current_theme as _ct
 
 _WORKER_URL = "https://trace-bug-reporter.alexmpdx.workers.dev"
 _MIN_DESCRIPTION_CHARS = 20
@@ -99,9 +100,7 @@ class _BugReportThread(QThread):
                     "User-Agent": "TRACE-bug-reporter",
                 },
             )
-            with urllib.request.urlopen(
-                req, timeout=_REQUEST_TIMEOUT_SEC, context=make_ssl_context()
-            ) as resp:
+            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_SEC, context=make_ssl_context()) as resp:
                 body = json.load(resp)
         except urllib.error.HTTPError as exc:
             # The Worker returns JSON error bodies with the user-facing message;
@@ -230,10 +229,7 @@ def _find_latest_run_folder(output_folder: Optional[Path]) -> Optional[Path]:
     if output_folder is None or not output_folder.is_dir():
         return None
     try:
-        candidates = [
-            p for p in output_folder.iterdir()
-            if p.is_dir() and p.name.startswith("run_")
-        ]
+        candidates = [p for p in output_folder.iterdir() if p.is_dir() and p.name.startswith("run_")]
     except OSError:
         return None
     if not candidates:
@@ -246,9 +242,9 @@ def _find_latest_run_folder(output_folder: Optional[Path]) -> Optional[Path]:
 # any captured screenshot. ``isVisible()`` is checked at capture time so
 # widgets on inactive tabs are naturally skipped.
 _REDACT_TARGETS: tuple = (
-    ("input_edit",),                 # left panel, always visible
-    ("output_edit",),                # left panel, always visible
-    ("log_text",),                   # inside Main tab
+    ("input_edit",),  # left panel, always visible
+    ("output_edit",),  # left panel, always visible
+    ("log_text",),  # inside Main tab
     # Custom Measurements tab: the sample-image / landmarks paths shown
     # by the embedded picker (measurementMaker/embedded_picker.py).
     ("inline_custom_distances_panel", "_picker", "_image_edit"),
@@ -387,9 +383,8 @@ def _gather_log_artifacts(window, include: set) -> dict:
     if "startup_log" in include:
         try:
             from TRACE.startup_log import LOG_PATH as _STARTUP_LOG
-            artifacts["startup_log"] = _read_capped(
-                _STARTUP_LOG, _MAX_ARTIFACT_CHARS["startup_log"]
-            )
+
+            artifacts["startup_log"] = _read_capped(_STARTUP_LOG, _MAX_ARTIFACT_CHARS["startup_log"])
         except Exception:
             pass
 
@@ -420,8 +415,7 @@ class ReportBugDialog(QDialog):
 
         self.txt_description = QPlainTextEdit()
         self.txt_description.setPlaceholderText(
-            "e.g. Pipeline crashed during Stage 2 on image 04. "
-            "I had hinge removal turned off."
+            "e.g. Pipeline crashed during Stage 2 on image 04. " "I had hinge removal turned off."
         )
         self.txt_description.setMinimumHeight(140)
         layout.addWidget(self.txt_description)
@@ -431,10 +425,7 @@ class ReportBugDialog(QDialog):
 
         self.chk_sysinfo = QCheckBox("System info (OS, TRACE / Python / Qt versions)")
         self.chk_sysinfo.setChecked(True)
-        self.chk_sysinfo.setToolTip(
-            "A small block with version info. No personal data — just "
-            "versions and OS name."
-        )
+        self.chk_sysinfo.setToolTip("A small block with version info. No personal data — just " "versions and OS name.")
         attach_layout.addWidget(self.chk_sysinfo)
 
         self.chk_run_log = QCheckBox("Run log (run.log from your most recent run)")
@@ -457,8 +448,7 @@ class ReportBugDialog(QDialog):
         self.chk_manifest = QCheckBox("Manifest (_run_state.json — completed / failed images)")
         self.chk_manifest.setChecked(True)
         self.chk_manifest.setToolTip(
-            "Which images completed and which failed (basenames only). "
-            "Small file. Home directory replaced with ~."
+            "Which images completed and which failed (basenames only). " "Small file. Home directory replaced with ~."
         )
         attach_layout.addWidget(self.chk_manifest)
 
@@ -556,14 +546,11 @@ class ReportBugDialog(QDialog):
 
         description = self.txt_description.toPlainText().strip()
         if len(description) < _MIN_DESCRIPTION_CHARS:
-            self._show_inline_error(
-                f"Please provide at least {_MIN_DESCRIPTION_CHARS} characters."
-            )
+            self._show_inline_error(f"Please provide at least {_MIN_DESCRIPTION_CHARS} characters.")
             return
         if len(description) > _MAX_DESCRIPTION_CHARS:
             self._show_inline_error(
-                f"Description is too long ({len(description)} chars; "
-                f"maximum {_MAX_DESCRIPTION_CHARS})."
+                f"Description is too long ({len(description)} chars; " f"maximum {_MAX_DESCRIPTION_CHARS})."
             )
             return
 
@@ -573,6 +560,7 @@ class ReportBugDialog(QDialog):
         }
         try:
             from TRACE import __version__ as trace_version
+
             payload["trace_version"] = trace_version
         except Exception:
             payload["trace_version"] = "unknown"
@@ -624,9 +612,7 @@ class ReportBugDialog(QDialog):
             confirm.setWindowTitle("Thanks!")
             confirm.setIcon(QMessageBox.Information)
             confirm.setText(f"Bug report submitted as issue #{num}.")
-            confirm.setInformativeText(
-                f"You can view it at:<br><a href='{url}'>{url}</a>"
-            )
+            confirm.setInformativeText(f"You can view it at:<br><a href='{url}'>{url}</a>")
             confirm.setTextFormat(Qt.RichText)
             view_btn = confirm.addButton("View on GitHub", QMessageBox.ActionRole)
             confirm.addButton(QMessageBox.Ok)

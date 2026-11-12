@@ -27,8 +27,9 @@ from identify_features.garbage_detector.batch import DEFERRED_METHOD, FRAGMENTAT
 from identify_features.garbage_detector.registry import register_filter
 
 if TYPE_CHECKING:
-    from identify_features.config import PipelineConfig
     from shapely.geometry import MultiPolygon, Polygon
+
+    from identify_features.config import PipelineConfig
 
 _FILTER_NAME = "fragmentation"
 # Morphological-close radius — matches _compute_wing_outline's buffer so within-wing gaps

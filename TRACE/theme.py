@@ -354,8 +354,10 @@ def os_is_dark() -> Optional[bool]:
         try:
             from TRACE.startup_log import log as _slog
         except Exception:
+
             def _slog(_msg: str) -> None:
                 return
+
         try:
             import winreg
         except Exception as exc:

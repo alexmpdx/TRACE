@@ -37,8 +37,9 @@ from identify_features.garbage_detector.batch import (
 from identify_features.garbage_detector.registry import register_filter
 
 if TYPE_CHECKING:
-    from identify_features.config import PipelineConfig
     from shapely.geometry import Polygon
+
+    from identify_features.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 

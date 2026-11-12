@@ -657,6 +657,7 @@ def _render_landmarks_overlay(
     More output options.
     """
     import cv2
+
     from landmark_locator.names import canonical_landmark_name
 
     try:
@@ -718,10 +719,11 @@ def _render_boundary_polygon_overlay(
     ``inverse_scale`` multiplies every coordinate before drawing (rescaled-pixel GeoJSON
     over an original-resolution base), same contract as ``_render_landmarks_overlay``.
     """
+    from shapely.geometry import Point as _Point
+
     from identify_features.models.datatypes import Landmark as _Landmark
     from identify_features.models.geojson_io import load_landmarks_geojson as _load_lm
     from identify_features.views.overlay import render_boundary_polygon_overlay_to_file
-    from shapely.geometry import Point as _Point
 
     try:
         landmarks = _load_lm(Path(landmarks_geojson_path))
@@ -1378,6 +1380,7 @@ def _run(
         )
 
         import cv2
+
         from identify_features.controllers.pipeline import identify_wing
         from identify_features.garbage_detector import GarbageRejection
         from identify_features.views.csv_export import export_csv_batch

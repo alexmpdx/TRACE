@@ -19,9 +19,10 @@ for _sub in ("", "identifyFeatures", "liveSettings"):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from shapely.geometry import LineString  # noqa: E402
+
 from identify_features.models.datatypes import VeinIdentification, VeinStatus, VeinType  # noqa: E402
 from identify_features.views.overlay import render_overlay  # noqa: E402
-from shapely.geometry import LineString  # noqa: E402
 
 
 def _img():
@@ -55,16 +56,14 @@ def test_ectopic_label_drawn_by_default():
 
 def test_ectopic_label_suppressed_when_flag_false():
     with_label = render_overlay(_img(), _ev_vein(), [], show_color_key=False)
-    without = render_overlay(_img(), _ev_vein(), [], show_color_key=False,
-                             show_ectopic_labels=False)
+    without = render_overlay(_img(), _ev_vein(), [], show_color_key=False, show_ectopic_labels=False)
     # The label region differs between drawn and suppressed.
     assert not np.array_equal(_label_region(with_label), _label_region(without))
 
 
 def test_ectopic_centerline_still_drawn_when_labels_off():
     base = _img()
-    without = render_overlay(base, _ev_vein(), [], show_color_key=False,
-                             show_ectopic_labels=False)
+    without = render_overlay(base, _ev_vein(), [], show_color_key=False, show_ectopic_labels=False)
     # The EV centerline (midpoint ~ (1000,1000)) is still stroked.
     assert not np.array_equal(without[1000, 1000], base[1000, 1000])
 
@@ -85,4 +84,5 @@ def test_traced_view_passes_flag_false(monkeypatch):
 
 if __name__ == "__main__":
     import pytest
+
     sys.exit(pytest.main([__file__, "-v"]))

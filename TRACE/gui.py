@@ -14,7 +14,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from identify_features.config import PipelineConfig
 from PyQt5.QtCore import QEvent, QObject, QPoint, QRect, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -39,6 +38,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from identify_features.config import PipelineConfig
 from preprocessing.pipeline import discover_images
 from TRACE.config_io import config_from_json, config_to_json
 from TRACE.inline_panels import (

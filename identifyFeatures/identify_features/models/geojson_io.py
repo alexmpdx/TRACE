@@ -7,8 +7,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from identify_features.models.datatypes import Landmark, ParsedInput
 from shapely.geometry import MultiPolygon, Point, Polygon, shape
+
+from identify_features.models.datatypes import Landmark, ParsedInput
 
 logger = logging.getLogger(__name__)
 

@@ -53,7 +53,9 @@ def _read_preference() -> IconPreference:
     """Read the saved icon preference from QSettings (defaults to SYSTEM)."""
     from PyQt5.QtCore import QSettings
 
-    raw = str(QSettings("TRACE", "WingAnalysisPipeline").value("app_icon/preference", IconPreference.SYSTEM.value) or "")
+    raw = str(
+        QSettings("TRACE", "WingAnalysisPipeline").value("app_icon/preference", IconPreference.SYSTEM.value) or ""
+    )
     try:
         return IconPreference(raw)
     except ValueError:

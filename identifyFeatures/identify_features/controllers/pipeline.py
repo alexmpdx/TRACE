@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
+from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.ops import unary_union
+
 from identify_features.config import PipelineConfig
 from identify_features.garbage_detector import FilterContext, FilterStage, run_stage_filters
 from identify_features.models.datatypes import VeinIdentification, WingResult
@@ -27,8 +30,6 @@ from identify_features.models.landmark_anchor import anchor_landmarks
 from identify_features.models.skeleton import build_skeleton_graph
 from identify_features.models.vein_tracer import trace_veins_from_landmarks
 from identify_features.models.wing_axis import compute_wing_axis
-from shapely.geometry import MultiPolygon, Point, Polygon
-from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
 

@@ -53,7 +53,9 @@ def main() -> int:
 
     pane._worker.request_load(
         lambda: load_from_geojsons(_DET, _LM, _IMG, um_per_px=2.0),
-        pane._preview_scale, cfg["v"], pane._appearance,
+        pane._preview_scale,
+        cfg["v"],
+        pane._appearance,
     )
     assert pump(lambda: pane._loaded and results), "sample did not load"
     assert pane._regions_stale, "regions should start stale"

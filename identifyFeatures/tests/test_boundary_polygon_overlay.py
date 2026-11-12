@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from shapely.geometry import Point
+
 from identify_features.models.datatypes import Landmark
 from identify_features.views.overlay import (
     _BOUNDARY_FAIL_BGR,
@@ -18,7 +20,6 @@ from identify_features.views.overlay import (
     render_boundary_polygon_overlay,
     render_boundary_polygon_overlay_to_file,
 )
-from shapely.geometry import Point
 
 # Clean teardrop (distal-left), scaled to a 1000 × 700 canvas.
 CLEAN_XY: dict[str, tuple[float, float]] = {

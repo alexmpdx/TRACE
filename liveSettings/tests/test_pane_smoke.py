@@ -98,6 +98,7 @@ def main() -> int:
     # View switch: select the skeleton view via the combo (index 0). The pane
     # must push the view to the worker and re-render without a trace.
     from live_tune.session import VIEW_SKELETON, VIEW_TRACED
+
     n3 = len(results)
     idx_skel = pane.cmb_view.findData(VIEW_SKELETON)
     pane.cmb_view.setCurrentIndex(idx_skel)

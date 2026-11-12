@@ -1014,6 +1014,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         """Build image + points layers from a preloaded (RGB) image array."""
         import napari
         import numpy as np
+
         from measurement_maker.landmark_names import landmark_display_name
 
         if self._viewer is None:
@@ -1203,6 +1204,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         if self._points_layer is None:
             return
         import numpy as np
+
         from measurement_maker.landmark_names import landmark_display_name
 
         raw_name = self.cmb_add_name.currentData()
@@ -1247,6 +1249,7 @@ class LandmarkEditorWidget(QWidget, _AsyncLoadMixin):
         if self._points_layer is None:
             return
         import numpy as np
+
         from measurement_maker.landmark_names import landmark_display_name
 
         raw_names = list(self._predicted_positions.keys())

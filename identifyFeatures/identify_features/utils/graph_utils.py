@@ -6,13 +6,14 @@ import math
 from typing import Optional
 
 import networkx as nx
+from shapely.geometry import LineString, Point
+
 from identify_features.utils.geometry_utils import (
     angle_between_vectors,
     direction_toward,
     line_direction,
     line_end_direction,
 )
-from shapely.geometry import LineString, Point
 
 
 def nearest_node(

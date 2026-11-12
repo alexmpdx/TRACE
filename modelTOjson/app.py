@@ -13,15 +13,6 @@ from pathlib import Path
 import geojson
 import numpy as np
 import torch
-from modeltojson import (
-    SUPPORTED_EXTENSIONS,
-    find_roi_for_image,
-    load_model,
-    mask_to_geojson,
-    read_image,
-    roi_mask_from_geojson,
-    run_inference,
-)
 from PyQt5.QtCore import QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPixmap
 from PyQt5.QtWidgets import (
@@ -43,6 +34,16 @@ from PyQt5.QtWidgets import (
     QStatusBar,
     QVBoxLayout,
     QWidget,
+)
+
+from modeltojson import (
+    SUPPORTED_EXTENSIONS,
+    find_roi_for_image,
+    load_model,
+    mask_to_geojson,
+    read_image,
+    roi_mask_from_geojson,
+    run_inference,
 )
 
 

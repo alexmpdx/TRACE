@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Optional
 
 import cv2
 import numpy as np
+
 from identify_features.models.datatypes import InterveinRegion, VeinIdentification
 from identify_features.models.topology import REGION_COLORS, VEIN_AP_ORDER, VEIN_COLORS
 from identify_features.views.csv_export import compute_ap_split

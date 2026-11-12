@@ -34,7 +34,6 @@ for _p in (
         sys.path.insert(0, str(_p))
 
 from identify_features.views.overlay import _BOUNDARY_FAIL_BGR, _BOUNDARY_OK_BGR  # noqa: E402
-
 from TRACE.pipeline import (  # noqa: E402
     _OUTPUT_STAGE_REQUIREMENTS,
     _STAGE2_ANALYSIS_OUTPUTS,
@@ -246,6 +245,7 @@ def test_landmarks_only_run_writes_green_overlay_with_rescale(wing_folder, tmp_p
     ring is still drawn, and rescaled-space landmarks are mapped back onto the
     original-resolution base."""
     import cv2
+
     import identify_features.controllers.pipeline as ifp
 
     input_dir, image, output_dir = wing_folder
