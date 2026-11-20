@@ -309,7 +309,7 @@ class LandmarkTrainingDialog(QDialog):
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         layout.addWidget(self.progress)
-        self.lbl_status = self._wrapped_label(2)
+        self.lbl_status = self._wrapped_label(3)
         layout.addWidget(self.lbl_status)
 
         self.txt_log = QPlainTextEdit()
@@ -653,8 +653,15 @@ class LandmarkTrainingDialog(QDialog):
                 f"Training did not beat the starting model on the held-out images ({before:.1f} px), so the "
                 "saved model is effectively the one you started from. More edited images would help."
             )
+        gate = info.get("gate") or {}
+        if "calibrated" in gate:
+            n_cal, n_all = len(gate["calibrated"]), len(info["landmark_order"])
+            gate_text = f" Quality-gate thresholds calibrated for {n_cal} of {n_all} landmarks."
+        else:
+            gate_text = " Quality-gate thresholds could not be calibrated (see the log)."
         self._set_status(
-            f"Done in {minutes:.1f} min — trained on {info['n_images']} images. {verdict}<br>Saved to {output_dir}"
+            f"Done in {minutes:.1f} min — trained on {info['n_images']} images. {verdict}{gate_text}"
+            f"<br>Saved to {output_dir}"
         )
         self._trained_model = output_dir
         self._last_info = info

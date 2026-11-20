@@ -15,8 +15,8 @@ Two modes:
   discovered from the annotations. Needs a few hundred images to be competitive.
 
 The output folder has the layout every loader in the suite expects: `best_fold<N>.pt`
-directly inside it, plus `gate_config.yaml` (copied from the base model, when it
-has one) and a `training_info.json` record of what went in.
+directly inside it, plus a `gate_config.yaml` calibrated for the new model (see
+`calibrate_gate_config`) and a `training_info.json` record of what went in.
 """
 
 from __future__ import annotations
@@ -73,6 +73,22 @@ SCRATCH_EPOCHS = 300
 MIN_SAMPLES = 2
 
 INFO_FILENAME = "training_info.json"
+
+# Gate calibration. Tier percentiles (peak, sharpness, second-peak ratio) match the
+# ones the bundled models' sidecars were calibrated with; the active gate is the
+# permissive tier, as it is there.
+GATE_TIERS: dict[str, tuple[float, float, float]] = {
+    "permissive": (0.5, 0.5, 99.5),
+    "standard": (5.0, 5.0, 95.0),
+    "strict": (15.0, 15.0, 85.0),
+}
+ACTIVE_GATE_TIER = "permissive"
+# A percentile of fewer correct held-out predictions than this is mostly noise (the
+# 0.5th percentile of 8 values is just their minimum), so such a landmark keeps the
+# base model's threshold instead — or the model-wide one when there is no base.
+MIN_CALIBRATION_SAMPLES = 20
+GATE_TOLERANCE_PX = 100.0
+_GATE_METRICS = ("peak", "sharpness", "second_peak_ratio")
 
 
 def _resolve_base_checkpoints(base_model: Path) -> list[Path]:
@@ -158,6 +174,172 @@ def summarize_samples(
             continue
         usable.append((Path(geojson_path), Path(image_path)))
     return {"usable": usable, "counts": counts, "ignored": ignored, "skipped": skipped, "display": display}
+
+
+def _gate_block(doc: Optional[dict]) -> dict:
+    """The gate block of a sidecar document (which may or may not wrap it in ``confidence:``)."""
+    from landmark_locator.inference.predict import canonicalize_gate_config
+
+    if not isinstance(doc, dict):
+        return {}
+    block = doc.get("confidence", doc)
+    return canonicalize_gate_config(block) if isinstance(block, dict) else {}
+
+
+def collect_held_out_metrics(
+    model_dir: Path,
+    fold_val_samples: list[list[tuple[Path, Path]]],
+    device: Optional[str] = None,
+    tolerance_px: Optional[float] = None,
+) -> dict[str, dict[str, list[float]]]:
+    """Gate metrics of each fold's checkpoint on the images that fold did not train on.
+
+    Returns ``{landmark: {"peak": [...], "sharpness": [...], "second_peak_ratio": [...]}}``
+    over predictions that landed within `tolerance_px` (original-image pixels, default
+    `GATE_TOLERANCE_PX`) of the
+    annotation — a wrong prediction says nothing about what a right one looks like.
+    """
+    from landmark_locator.inference.predict import LandmarkPredictor, _find_fold_checkpoints
+    from landmark_locator.scripts.calibrate_gate import _collect_metrics, _permissive_override
+
+    tolerance_px = GATE_TOLERANCE_PX if tolerance_px is None else tolerance_px
+    ckpts = _find_fold_checkpoints(Path(model_dir))
+    collected: dict[str, dict[str, list[float]]] = {}
+    for ckpt, val_samples in zip(ckpts, fold_val_samples):
+        predictor = LandmarkPredictor(ckpt, device=device, confidence_override=_permissive_override())
+        pairs = [(Path(image), Path(geojson)) for geojson, image in val_samples]
+        for name, metrics in _collect_metrics(predictor, pairs, tolerance_px).items():
+            slot = collected.setdefault(name, {m: [] for m in _GATE_METRICS})
+            for metric in _GATE_METRICS:
+                slot[metric].extend(metrics[metric])
+    return collected
+
+
+def build_gate_config(
+    collected: dict[str, dict[str, list[float]]],
+    landmark_order: list[str],
+    base_doc: Optional[dict] = None,
+    min_samples: Optional[int] = None,
+) -> tuple[dict, dict]:
+    """Turn held-out metrics into a sidecar document with the three tier presets.
+
+    A landmark with at least `min_samples` correct held-out predictions gets its own
+    percentile thresholds. One with fewer keeps the base model's value for that tier
+    (`base_doc`, the base sidecar) or, with no base, has no per-landmark entry and falls
+    under the model-wide threshold. Core landmarks, the suppression radius and any other
+    settings come from the base sidecar, restricted to landmarks this model has.
+
+    Returns ``(document, report)``; the report lists which landmarks were calibrated
+    (with their sample count) and which were inherited or left to the global value.
+    """
+    from landmark_locator.inference.predict import DEFAULT_GATE_CONFIG, GATE_METRIC_DECIMALS
+
+    min_samples = MIN_CALIBRATION_SAMPLES if min_samples is None else min_samples
+    base = _gate_block(base_doc)
+    base_tiers = base.get("tiers") if isinstance(base.get("tiers"), dict) else {}
+    counts = {name: len(collected.get(name, {}).get("peak", [])) for name in landmark_order}
+    calibrated = [name for name in landmark_order if counts[name] >= min_samples]
+
+    def _base_value(tier: str, metric: str, name: str) -> Optional[float]:
+        for block in (base_tiers.get(tier), base):
+            value = ((block or {}).get(metric) or {}).get("per_landmark", {}).get(name)
+            if value is not None:
+                return float(value)
+        return None
+
+    def _tier(tier: str) -> dict:
+        percentiles = dict(zip(_GATE_METRICS, GATE_TIERS[tier]))
+        out: dict = {}
+        for metric in _GATE_METRICS:
+            per_landmark: dict[str, float] = {}
+            for name in landmark_order:
+                if name in calibrated:
+                    value = float(np.percentile(collected[name][metric], percentiles[metric]))
+                else:
+                    value = _base_value(tier, metric, name)
+                if value is not None:
+                    per_landmark[name] = round(value, GATE_METRIC_DECIMALS[metric])
+            if per_landmark:
+                # The model-wide value is the loosest per-landmark one, as calibrate_gate does.
+                loosest = max if metric == "second_peak_ratio" else min
+                global_value = loosest(per_landmark.values())
+            else:
+                base_global = ((base_tiers.get(tier) or base).get(metric) or {}).get("global")
+                global_value = DEFAULT_GATE_CONFIG[metric]["global"] if base_global is None else float(base_global)
+            out[metric] = {"global": global_value, "per_landmark": per_landmark}
+        return out
+
+    known = set(landmark_order)
+    block: dict = dict(_tier(ACTIVE_GATE_TIER))
+    block["second_peak_suppression_radius_px"] = int(
+        base.get("second_peak_suppression_radius_px", DEFAULT_GATE_CONFIG["second_peak_suppression_radius_px"])
+    )
+    block["core_landmarks"] = sorted(n for n in (base.get("core_landmarks") or []) if n in known)
+    for key, value in base.items():  # e.g. batch mode, min_metric_failures_to_reject
+        if key not in block and key != "tiers" and key not in _GATE_METRICS:
+            block[key] = copy.deepcopy(value)
+    block["tiers"] = {tier: _tier(tier) for tier in GATE_TIERS}
+
+    inherited = [
+        n for n in landmark_order if n not in calibrated and _base_value(ACTIVE_GATE_TIER, "peak", n) is not None
+    ]
+    report = {
+        "min_samples": min_samples,
+        "calibrated": {name: counts[name] for name in calibrated},
+        "inherited_from_base": {name: counts[name] for name in inherited},
+        "global_only": {n: counts[n] for n in landmark_order if n not in calibrated and n not in inherited},
+    }
+    return {"confidence": block}, report
+
+
+def write_gate_config(model_dir: Path, document: dict, report: dict) -> Path:
+    """Write a calibrated sidecar next to the model's checkpoints, with a header saying where it came from."""
+    import yaml
+
+    from landmark_locator.inference.predict import SIDECAR_GATE_FILENAME
+
+    def _names(group: dict) -> str:
+        return ", ".join(f"{name} ({n})" for name, n in group.items()) or "none"
+
+    header = [
+        "# Quality-gate thresholds for this landmark model, written when it was trained.",
+        f"# Active gate = the {ACTIVE_GATE_TIER} tier; the tiers block holds all three presets.",
+        "# Thresholds are percentiles of what this model's correct predictions looked like on images",
+        f"# it did not train on. A landmark needs {report['min_samples']} such predictions to get its own;",
+        "# the number in brackets is how many it had.",
+        f"#   calibrated on this model: {_names(report['calibrated'])}",
+        f"#   kept from the base model: {_names(report['inherited_from_base'])}",
+        f"#   model-wide threshold only: {_names(report['global_only'])}",
+    ]
+    path = Path(model_dir) / SIDECAR_GATE_FILENAME
+    path.write_text("\n".join(header) + "\n" + yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def calibrate_gate_config(
+    model_dir: Path,
+    fold_val_samples: list[list[tuple[Path, Path]]],
+    landmark_order: list[str],
+    base_model: Optional[Path] = None,
+    device: Optional[str] = None,
+) -> dict:
+    """Calibrate and write `gate_config.yaml` for a freshly trained model; returns the report.
+
+    `fold_val_samples[i]` are the ``(geojson, image)`` pairs fold *i* held out.
+    """
+    import yaml
+
+    from landmark_locator.inference.predict import find_sidecar_gate_path
+
+    base_doc = None
+    if base_model is not None:
+        sidecar = find_sidecar_gate_path(base_model)
+        if sidecar is not None:
+            base_doc = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
+    collected = collect_held_out_metrics(model_dir, fold_val_samples, device=device)
+    document, report = build_gate_config(collected, landmark_order, base_doc)
+    write_gate_config(model_dir, document, report)
+    return report
 
 
 def make_splits(n_samples: int, n_folds: int, seed: int = 42) -> list[tuple[list[int], list[int]]]:
@@ -353,13 +535,36 @@ def train_from_samples(
             }
         )
 
-    # Gate thresholds were calibrated on the base model; a fine-tuned copy produces
-    # heatmaps of the same character, so it inherits them rather than falling back
-    # to the generic defaults.
-    if base_model is not None:
-        sidecar = find_sidecar_gate_path(base_model)
+    # Quality-gate thresholds for the new model, from each fold's predictions on the
+    # images it held out. Landmarks with too few of those keep the base model's values.
+    # A calibration failure must not cost the user a finished model: fall back to the
+    # base sidecar (the pre-calibration behaviour) and say so.
+    fold_val_samples = [[usable[i] for i in val_idx] for _, val_idx in splits]
+    for fold, val_samples in zip(fold_results, fold_val_samples):
+        fold["val_images"] = [str(image) for _, image in val_samples]
+        fold["val_annotations"] = [str(geojson) for geojson, _ in val_samples]
+    try:
+        gate_report = calibrate_gate_config(
+            output_dir, fold_val_samples, cfg["heatmap"]["landmark_order"], base_model, device=torch_device.type
+        )
+        print(
+            f"Quality-gate thresholds ({SIDECAR_GATE_FILENAME}): calibrated on this model for "
+            f"{len(gate_report['calibrated'])} of {len(cfg['heatmap']['landmark_order'])} landmarks"
+            + (
+                f"; {len(gate_report['inherited_from_base'])} kept from the base model"
+                if gate_report["inherited_from_base"]
+                else ""
+            )
+            + (f"; {len(gate_report['global_only'])} on the model-wide threshold" if gate_report["global_only"] else "")
+            + f" (needs {gate_report['min_samples']} correct held-out predictions per landmark)."
+        )
+    except Exception as exc:
+        gate_report = {"error": f"{type(exc).__name__}: {exc}"}
+        print(f"WARNING: could not calibrate quality-gate thresholds ({gate_report['error']}).")
+        sidecar = find_sidecar_gate_path(base_model) if base_model is not None else None
         if sidecar is not None:
             shutil.copyfile(sidecar, output_dir / SIDECAR_GATE_FILENAME)
+            print("Using the base model's thresholds instead.")
 
     best = [f["best_pixel_error"] for f in fold_results]
     baselines = [f["baseline_pixel_error"] for f in fold_results if f["baseline_pixel_error"] is not None]
@@ -375,6 +580,7 @@ def train_from_samples(
         "lr": cfg["training"]["optimizer"]["lr"],
         "mean_pixel_error": float(np.mean(best)),
         "baseline_pixel_error": float(np.mean(baselines)) if baselines else None,
+        "gate": gate_report,
         "folds": fold_results,
         "images": [str(img) for _, img in usable],
     }

@@ -74,6 +74,7 @@ hiddenimports = [
     # these lazily from a worker thread; pin them so the frozen app has the
     # training loop and its augmentation dependency.
     "landmark_locator.training.user_training",
+    "landmark_locator.scripts.calibrate_gate",  # gate calibration at the end of training
     "landmark_locator.training.train",
     "landmark_locator.data.augmentation",
     "albumentations",
