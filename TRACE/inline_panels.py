@@ -1828,6 +1828,21 @@ def _installer_asset_name() -> str:
     return "TRACE-macOS-arm64.dmg" if sys.platform == "darwin" else "TRACE-Setup.exe"
 
 
+def _install_action_phrase() -> str:
+    """What "Install update" does after the download, for UI text."""
+    return "install it (TRACE restarts itself)" if sys.platform == "darwin" else "launch the new installer"
+
+
+def _can_install_in_place() -> bool:
+    """True where the Help-tab updater can download and apply an update itself.
+
+    Frozen builds only: Windows runs the Inno Setup installer, macOS swaps
+    the .app bundle (``TRACE.mac_update``). Anywhere else the user gets a
+    link to the release page.
+    """
+    return bool(getattr(sys, "frozen", False)) and sys.platform in ("win32", "darwin")
+
+
 def _version_is_newer(candidate: str, installed: str) -> bool:
     """Return True iff ``candidate`` is strictly newer than ``installed``.
 
@@ -2115,9 +2130,9 @@ class InlineHelpPanel(QWidget):
         # making this button visible.
         self.btn_install_update = QPushButton("Install Update")
         self.btn_install_update.setToolTip(
-            "Download the latest TRACE installer and launch it. The new "
-            "installer upgrades over the current install — your settings "
-            "and downloaded models are preserved."
+            "Download the latest TRACE and install it over the current one "
+            "(TRACE closes to finish the update). Your settings and "
+            "downloaded models are preserved."
         )
         self.btn_install_update.setVisible(False)
         self.btn_install_update.clicked.connect(self._install_update)
@@ -2491,7 +2506,8 @@ class InlineHelpPanel(QWidget):
         ``latest_version`` (the bare semver with the ``windows-v`` / ``v``
         prefix stripped, for direct comparison
         with ``TRACE.__version__``), ``html_url`` (the release page),
-        ``asset_url`` (``TRACE-Setup.exe`` download URL, or None),
+        ``asset_url`` (download URL of this platform's installer — see
+        ``_installer_asset_name`` — or None if the release has none),
         ``asset_size`` (bytes, or None), and ``prerelease`` (True for a
         beta-channel release).
         """
@@ -2505,7 +2521,7 @@ class InlineHelpPanel(QWidget):
         asset_url: Optional[str] = None
         asset_size: Optional[int] = None
         for asset in data.get("assets") or []:
-            if asset.get("name") == "TRACE-Setup.exe":
+            if asset.get("name") == _installer_asset_name():
                 asset_url = asset.get("browser_download_url") or asset.get("url")
                 try:
                     asset_size = int(asset.get("size") or 0) or None
@@ -2692,7 +2708,7 @@ class InlineHelpPanel(QWidget):
         self._latest_update_size = payload["asset_size"]
         self._latest_update_version = latest_version
 
-        can_install_in_place = bool(payload["asset_url"]) and getattr(sys, "frozen", False) and sys.platform == "win32"
+        can_install_in_place = bool(payload["asset_url"]) and _can_install_in_place()
         if can_install_in_place:
             self.btn_install_update.setText(f"Install update {latest_version}")
             self.btn_install_update.setVisible(True)
@@ -2702,7 +2718,7 @@ class InlineHelpPanel(QWidget):
                 f"<span style='color: {_ct().warning_text};'>Update available: "
                 f"<b>{latest_version}</b>{beta_tag} (you have {installed_version}).</span><br>"
                 f"<span style='color: {_ct().text_muted};'>Click <b>Install update {latest_version}</b> "
-                f"to download{size_blurb} and launch the new installer.</span>"
+                f"to download{size_blurb} and {_install_action_phrase()}.</span>"
             )
         else:
             self.btn_install_update.setVisible(False)
@@ -2726,21 +2742,32 @@ class InlineHelpPanel(QWidget):
             self._install_update()
         else:
             # If the chain was requested but in-place install isn't
-            # available (non-Windows / non-frozen), clear the flag —
-            # the user gets the release-page link instead.
-            self._install_after_next_check = False
+            # available (not a frozen Windows / macOS build), clear the flag —
+            # the user gets the release page instead (they clicked
+            # "Update now", so don't leave the click looking like a no-op).
+            if self._install_after_next_check:
+                self._install_after_next_check = False
+                self._open_releases_page()
 
     def _install_update(self) -> None:
-        """Download the latest TRACE-Setup.exe and launch it.
+        """Download the latest installer for this platform and apply it.
 
-        Called from the Install Update button after _check_for_updates
-        has populated self._latest_update_url. Shows a QProgressDialog
-        for the download; on success, runs the installer in a detached
-        process and exits the current TRACE app so the installer can
-        overwrite the .exe.
+        Called from the Install Update button (and the "Update now"
+        notification) after _check_for_updates has populated
+        self._latest_update_url. Shows a QProgressDialog for the download.
+        Windows: runs TRACE-Setup.exe in a detached process and exits so
+        the installer can overwrite the .exe. macOS: swaps the .app bundle
+        for the one in the downloaded .dmg and relaunches
+        (``_finish_mac_update``).
         """
         url = self._latest_update_url
         version = self._latest_update_version or "?"
+        if not _can_install_in_place():
+            # Reachable from the "Update now" notification, which doesn't
+            # know whether this build can update itself (a source checkout
+            # can't). Never download an installer we can't run.
+            self._open_releases_page()
+            return
         if not url:
             self._update_status_label.setText(
                 f"<span style='color: {_ct().error_text};'>No installer URL — run Check for updates first.</span>"
@@ -2757,9 +2784,14 @@ class InlineHelpPanel(QWidget):
         # next open(dst, "wb") fails with [Errno 13] Permission denied.
         # mkstemp picks a guaranteed-fresh name; we close its fd straight
         # away so the subsequent open() owns the handle.
-        fd, _dst_str = tempfile.mkstemp(suffix="-TRACE-Setup.exe")
-        os.close(fd)
-        dst = Path(_dst_str)
+        if sys.platform == "darwin":
+            # Own folder + the real asset name: if the automatic swap fails
+            # the user is shown this disk image in Finder.
+            dst = Path(tempfile.mkdtemp(prefix="TRACE-update-")) / _installer_asset_name()
+        else:
+            fd, _dst_str = tempfile.mkstemp(suffix="-TRACE-Setup.exe")
+            os.close(fd)
+            dst = Path(_dst_str)
 
         dlg = QProgressDialog(
             f"Downloading TRACE {version}…",
@@ -2859,22 +2891,19 @@ class InlineHelpPanel(QWidget):
                 pass
             return
 
+        if sys.platform == "darwin":
+            self._finish_mac_update(dst, version)
+            return
+
         # Hand off to the installer and exit the current app so it can
         # overwrite TRACE.exe without a "file in use" error. The
         # installer (Inno Setup) handles the rest from here.
         try:
-            import os
             import subprocess
 
-            if sys.platform == "win32":
-                # DETACHED_PROCESS so the child isn't killed when we exit.
-                DETACHED_PROCESS = 0x00000008
-                subprocess.Popen([str(dst)], creationflags=DETACHED_PROCESS, close_fds=True)
-            else:
-                # Dev convenience — just open the file with the system
-                # default handler. (Not the expected path; the Install
-                # Update button is gated to sys.platform == 'win32'.)
-                os.startfile(str(dst))  # noqa: SIM117
+            # DETACHED_PROCESS so the child isn't killed when we exit.
+            DETACHED_PROCESS = 0x00000008
+            subprocess.Popen([str(dst)], creationflags=DETACHED_PROCESS, close_fds=True)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(
                 self,
@@ -2884,6 +2913,52 @@ class InlineHelpPanel(QWidget):
                 f"Run TRACE-Setup.exe manually from the location above.",
             )
             return
+
+        self._exit_for_update()
+
+    def _finish_mac_update(self, dmg: Path, version: str) -> None:
+        """macOS half of _install_update: replace TRACE.app from ``dmg``, relaunch.
+
+        The new bundle is copied next to the installed one while TRACE is
+        still open, so a failure (no permission, app not in a normal
+        folder, bad image) leaves the install untouched and falls back to
+        showing the disk image for a manual drag-to-Applications.
+        """
+        from TRACE import mac_update
+        from TRACE.startup_log import log as _slog
+
+        busy = QProgressDialog(f"Installing TRACE {version}…", "", 0, 0, self)
+        busy.setCancelButton(None)
+        busy.setWindowTitle("TRACE update")
+        busy.setWindowModality(Qt.WindowModal)
+        busy.setMinimumDuration(0)
+        busy.show()
+        QApplication.processEvents()
+        try:
+            app, staged = mac_update.stage_update(dmg, tick=QApplication.processEvents)
+            mac_update.launch_swap_helper(app, staged)
+        except Exception as e:  # noqa: BLE001
+            busy.close()
+            _slog(f"mac_update: could not self-update ({type(e).__name__}: {e})")
+            try:
+                mac_update.open_disk_image(dmg)
+            except Exception:  # noqa: BLE001
+                pass
+            QMessageBox.warning(
+                self,
+                "Finish the update manually",
+                f"TRACE {version} was downloaded, but TRACE couldn't replace itself automatically:\n\n{e}\n\n"
+                f"The downloaded disk image has been opened instead. Quit TRACE, then drag "
+                f"TRACE onto Applications (choose Replace) to finish updating.\n\n"
+                f"Disk image: {dmg}",
+            )
+            return
+        busy.close()
+        self._exit_for_update()
+
+    def _exit_for_update(self) -> None:
+        """Quit so the installer / swap helper can replace the running app."""
+        import os
 
         # Exit TRACE so the installer can replace files. Reported
         # 2026-08-19: on Windows, ``QApplication.quit()`` alone often
@@ -2895,7 +2970,8 @@ class InlineHelpPanel(QWidget):
         # adds additional finalizer steps that block. Since the whole
         # point of this exit is to release TRACE.exe so the installer
         # can overwrite it, we skip the graceful path entirely on the
-        # frozen Windows build and hard-exit with ``os._exit(0)``.
+        # frozen build (Windows and macOS — the Mac swap helper waits on
+        # this process's exit the same way) and hard-exit with ``os._exit(0)``.
         # Non-frozen dev runs keep the graceful path so autouse fixtures
         # and unit tests aren't nuked mid-teardown.
         #
@@ -2906,7 +2982,7 @@ class InlineHelpPanel(QWidget):
         #      minor UX regression.
         #   2. processEvents() gives Qt a tick to flush the close +
         #      any pending log-to-disk writes before we bail.
-        #   3. Hard-exit via os._exit(0) on frozen Windows; graceful
+        #   3. Hard-exit via os._exit(0) on a frozen build; graceful
         #      QApplication.quit() elsewhere.
         try:
             main_window = getattr(self, "_window", None)
@@ -2916,7 +2992,7 @@ class InlineHelpPanel(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
-        if getattr(sys, "frozen", False) and sys.platform == "win32":
+        if getattr(sys, "frozen", False):
             # Skip Python's cleanup entirely — atexit handlers, thread
             # joins, and PyInstaller's finalizer all get bypassed. On
             # Windows that's fine: the process just terminates and the

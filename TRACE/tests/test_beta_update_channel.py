@@ -28,7 +28,10 @@ def _release(tag, *, prerelease=False, draft=False):
         "prerelease": prerelease,
         "draft": draft,
         "html_url": f"https://github.com/alexmpdx/TRACE/releases/tag/{tag}",
-        "assets": [{"name": "TRACE-Setup.exe", "browser_download_url": f"https://x/{tag}.exe", "size": 123}],
+        "assets": [
+            {"name": "TRACE-Setup.exe", "browser_download_url": f"https://x/{tag}.exe", "size": 123},
+            {"name": "TRACE-macOS-arm64.dmg", "browser_download_url": f"https://x/{tag}.dmg", "size": 456},
+        ],
     }
 
 
@@ -59,7 +62,23 @@ def test_parse_release_payload_reports_prerelease_flag():
     parsed = InlineHelpPanel._parse_release_payload(_release("windows-v0.2.35", prerelease=True))
     assert parsed["latest_version"] == "0.2.35"
     assert parsed["prerelease"] is True
-    assert parsed["asset_url"] == "https://x/windows-v0.2.35.exe"
+    assert InlineHelpPanel._parse_release_payload({})["asset_url"] is None
+
+
+def test_parse_release_payload_picks_this_platforms_installer(monkeypatch):
+    # A Mac must never be handed TRACE-Setup.exe (it used to be, and then
+    # failed trying to launch it).
+    release = _release("v0.2.40")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    parsed = InlineHelpPanel._parse_release_payload(release)
+    assert (parsed["asset_url"], parsed["asset_size"]) == ("https://x/v0.2.40.dmg", 456)
+    monkeypatch.setattr(sys, "platform", "win32")
+    parsed = InlineHelpPanel._parse_release_payload(release)
+    assert (parsed["asset_url"], parsed["asset_size"]) == ("https://x/v0.2.40.exe", 123)
+    # A release with no build for this platform offers no in-place install.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    release["assets"] = release["assets"][:1]
+    assert InlineHelpPanel._parse_release_payload(release)["asset_url"] is None
     assert InlineHelpPanel._parse_release_payload({})["latest_version"] == ""
 
 

@@ -6141,6 +6141,7 @@ class TraceWindow(QMainWindow):
         # Read the active theme once at construction — the dialog is
         # short-lived (created, exec'd, deleted per launch fire) so it
         # doesn't need to re-style on theme change.
+        from TRACE.inline_panels import _install_action_phrase
         from TRACE.theme import current_theme as _ct
 
         _t = _ct()
@@ -6171,7 +6172,7 @@ class TraceWindow(QMainWindow):
 
         body = QLabel(
             f"TRACE <b>{latest_version}</b> is now available — you're running <b>{installed_version}</b>.<br><br>"
-            "Click <b>Update now</b> to download and launch the new installer. "
+            f"Click <b>Update now</b> to download it and {_install_action_phrase()}. "
             "Your settings and downloaded models are preserved."
         )
         body.setWordWrap(True)
